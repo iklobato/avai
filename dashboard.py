@@ -124,11 +124,16 @@ def _artifact_for(session: Session, judgment: Judgement) -> str:
     return " · ".join(parts)
 
 
-def _collect_row_counts(session: Session, run_id: str) -> list[dict]:
+def _collect_row_counts(session: Session, since: str) -> list[dict]:
+    """Rows added since the given timestamp — covers both snapshot rows
+    (one batch at the start of a run) and streaming rows (arriving
+    continuously between snapshot cycles)."""
     out = []
     for name, model in COLLECTOR_MODELS.items():
         n = session.execute(
-            select(func.count()).select_from(model).where(model.run_id == run_id)
+            select(func.count())
+            .select_from(model)
+            .where(model.collected_at >= since)
         ).scalar() or 0
         out.append({"name": name, "rows": n})
     out.sort(key=lambda x: x["rows"], reverse=True)
@@ -188,7 +193,7 @@ def dashboard():
         sysint: SystemIntegrityRow | None = None
         judged_this_run = 0
         if latest is not None:
-            row_counts = _collect_row_counts(session, latest.run_id)
+            row_counts = _collect_row_counts(session, latest.started_at)
             errors = session.execute(
                 select(CollectorErrorRow)
                 .where(CollectorErrorRow.run_id == latest.run_id)

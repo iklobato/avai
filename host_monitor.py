@@ -43,10 +43,12 @@ import json
 import logging
 import os
 import plistlib
+import signal
 import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 import uuid
@@ -676,6 +678,20 @@ class Judgement(Base):
     created_at:   Mapped[str]
 
 
+class StreamingSession(Base):
+    """One row per StreamingWorker lifetime. Rows produced by a streaming
+    collector reference this via ``run_id`` (same column as snapshot
+    rows reference ``collection_runs.run_id`` — both are UUIDs, the
+    foreign-key relationship is loose by design)."""
+    __tablename__ = "streaming_sessions"
+    run_id:      Mapped[str] = mapped_column(primary_key=True)
+    collector:   Mapped[str] = mapped_column(index=True)
+    hostname:    Mapped[str]
+    started_at:  Mapped[str]
+    finished_at: Mapped[Optional[str]]
+    row_count:   Mapped[int] = mapped_column(default=0)
+
+
 class _RowBase(Base):
     """Common columns for every collector table."""
     __abstract__ = True
@@ -878,7 +894,9 @@ class InstalledAppRow(_RowBase):
 # ============================================================================
 
 class Collector(ABC):
-    """One slice of host state. Subclasses point at a model and yield rows.
+    """Common base for any host-state collector. Subclass
+    :class:`SnapshotCollector` (pull, per-cycle) or
+    :class:`StreamingCollector` (push, long-lived) — not this directly.
 
     Free-form text used to steer the LLM judge is injected per-instance
     via ``judge_hints`` (sourced from the external prompts TOML file).
@@ -896,12 +914,38 @@ class Collector(ABC):
     def table(self) -> str:
         return self.model.__tablename__
 
+
+class SnapshotCollector(Collector):
+    """Pull model — the Runner calls :meth:`collect` once per cycle and
+    materializes the result as a batch insert."""
+
     @abstractmethod
     def collect(self) -> Iterable[dict]:
         """Yield row dicts for ``self.model``.
 
         ``run_id``, ``collected_at`` and ``content_hash`` are injected
         by the Runner — do not include them here.
+        """
+
+
+class StreamingCollector(Collector):
+    """Push model — the Runner starts :meth:`stream` once in a dedicated
+    worker thread; the iterator yields rows as events arrive and only
+    stops when ``stop_event`` is set or the stream ends.
+
+    Streaming sources are time-series events (not state), so the default
+    ``judge_enabled`` is ``False``; aggregate analysis is the right tool.
+    """
+
+    judge_enabled: ClassVar[bool] = False
+
+    @abstractmethod
+    def stream(self, stop_event: threading.Event) -> Iterable[dict]:
+        """Yield row dicts continuously until ``stop_event`` is set.
+
+        Implementations are responsible for terminating their underlying
+        data source (subprocess, socket, filesystem watcher) when the
+        event fires.
         """
 
 
@@ -1003,6 +1047,27 @@ class Sink:
             )
             session.commit()
 
+    # -- streaming sessions -------------------------------------------------
+
+    def start_streaming_session(self, collector: str, hostname: str) -> str:
+        run_id = str(uuid.uuid4())
+        with Session(self.engine) as session:
+            session.add(StreamingSession(
+                run_id=run_id, collector=collector, hostname=hostname,
+                started_at=utcnow(),
+            ))
+            session.commit()
+        return run_id
+
+    def end_streaming_session(self, run_id: str, row_count: int) -> None:
+        with Session(self.engine) as session:
+            session.execute(
+                update(StreamingSession)
+                .where(StreamingSession.run_id == run_id)
+                .values(finished_at=utcnow(), row_count=row_count)
+            )
+            session.commit()
+
 
 def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     cur = dbapi_conn.cursor()
@@ -1012,24 +1077,147 @@ def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     cur.close()
 
 
-class Runner:
-    """Drives collectors and the judge against a Sink."""
+# ============================================================================
+# Streaming worker — drives one StreamingCollector in its own thread
+# ============================================================================
 
-    def __init__(self, sink: Sink, collectors: list[Collector],
+class StreamingWorker:
+    """Long-lived execution policy for a :class:`StreamingCollector`.
+
+    Owns one OS thread, one ``StreamingSession`` row (its ``run_id``),
+    and a small write buffer. Buffered rows are flushed when the buffer
+    reaches ``batch_size`` *or* ``flush_interval_s`` has elapsed since
+    the last flush, whichever comes first. ``stop()`` signals the
+    collector to terminate its source and joins the thread.
+    """
+
+    def __init__(self, collector: StreamingCollector, sink: Sink,
+                 hostname: str,
+                 batch_size: int = 50,
+                 flush_interval_s: float = 5.0,
+                 join_timeout_s: float = 5.0):
+        self.collector = collector
+        self.sink = sink
+        self.hostname = hostname
+        self.batch_size = batch_size
+        self.flush_interval_s = flush_interval_s
+        self.join_timeout_s = join_timeout_s
+        self.stop_event = threading.Event()
+        self.thread: Optional[threading.Thread] = None
+        self.run_id: Optional[str] = None
+        self._rows_written = 0
+
+    def start(self) -> None:
+        if self.thread is not None and self.thread.is_alive():
+            return
+        self.stop_event.clear()
+        self.thread = threading.Thread(
+            target=self._run,
+            name=f"stream-{self.collector.name}",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread is not None:
+            self.thread.join(timeout=self.join_timeout_s)
+
+    def _flush(self, buffer: list[dict]) -> None:
+        if not buffer:
+            return
+        self.sink.write(self.collector.model, buffer)
+        self._rows_written += len(buffer)
+        buffer.clear()
+
+    def _run(self) -> None:
+        self.run_id = self.sink.start_streaming_session(
+            self.collector.name, self.hostname,
+        )
+        LOG.info("streaming collector=%s run_id=%s started",
+                 self.collector.name, self.run_id)
+        buffer: list[dict] = []
+        last_flush = time.monotonic()
+        try:
+            for row in self.collector.stream(self.stop_event):
+                row["run_id"] = self.run_id
+                row["collected_at"] = utcnow()
+                row["content_hash"] = content_hash(row, self.collector.judge_fields)
+                buffer.append(row)
+                now = time.monotonic()
+                if (len(buffer) >= self.batch_size
+                        or (buffer and now - last_flush >= self.flush_interval_s)):
+                    try:
+                        self._flush(buffer)
+                    except Exception:
+                        LOG.exception("streaming flush failed collector=%s",
+                                      self.collector.name)
+                    last_flush = now
+        except Exception:
+            LOG.exception("streaming collector=%s crashed",
+                          self.collector.name)
+        finally:
+            try:
+                self._flush(buffer)
+            except Exception:
+                LOG.exception("streaming final flush failed collector=%s",
+                              self.collector.name)
+            try:
+                self.sink.end_streaming_session(self.run_id, self._rows_written)
+            except Exception:
+                LOG.exception("end_streaming_session failed collector=%s",
+                              self.collector.name)
+            LOG.info("streaming collector=%s run_id=%s stopped rows=%d",
+                     self.collector.name, self.run_id, self._rows_written)
+
+
+class Runner:
+    """Drives snapshot collectors (per-cycle) and streaming collectors
+    (long-lived threads) against a Sink. Acts as a supervisor: starts
+    streaming workers at boot, runs the snapshot loop on the main
+    thread, and joins streaming workers on shutdown."""
+
+    def __init__(self, sink: Sink,
+                 snapshot_collectors: list[SnapshotCollector],
+                 streaming_collectors: list[StreamingCollector],
                  judge: Judge, lookback_min: int):
         self.sink = sink
-        self.collectors = collectors
+        self.snapshot_collectors = snapshot_collectors
+        self.streaming_collectors = streaming_collectors
         self.judge = judge
         self.lookback_min = lookback_min
+        self._streaming_workers: list[StreamingWorker] = []
+        self.shutdown_event = threading.Event()
+
+    def request_shutdown(self) -> None:
+        """Idempotent — safe to call from a signal handler."""
+        self.shutdown_event.set()
 
     def setup(self) -> None:
         self.sink.setup()
+
+    def start_streaming(self) -> None:
+        if not self.streaming_collectors:
+            return
+        hostname = socket.gethostname()
+        for c in self.streaming_collectors:
+            worker = StreamingWorker(c, self.sink, hostname)
+            worker.start()
+            self._streaming_workers.append(worker)
+        LOG.info("started %d streaming worker(s)", len(self._streaming_workers))
+
+    def stop_streaming(self) -> None:
+        for w in self._streaming_workers:
+            w.stop()
+        if self._streaming_workers:
+            LOG.info("stopped %d streaming worker(s)", len(self._streaming_workers))
+        self._streaming_workers.clear()
 
     def run_once(self) -> tuple[str, int, int]:
         run_id, started = self.sink.start_run(socket.gethostname(),
                                               self.lookback_min)
         ok = failed = 0
-        for c in self.collectors:
+        for c in self.snapshot_collectors:
             try:
                 self._run_collector(c, run_id, started)
                 ok += 1
@@ -1041,7 +1229,8 @@ class Runner:
         self.sink.end_run(ok, failed)
         return run_id, ok, failed
 
-    def _run_collector(self, c: Collector, run_id: str, started: str) -> None:
+    def _run_collector(self, c: SnapshotCollector, run_id: str,
+                       started: str) -> None:
         t0 = time.monotonic()
         rows = list(c.collect())
         for r in rows:
@@ -1063,7 +1252,7 @@ class Runner:
                  c.name, len(rows), collected_ms, judged)
 
     def run_forever(self, interval: int) -> None:
-        while True:
+        while not self.shutdown_event.is_set():
             t0 = time.monotonic()
             try:
                 run_id, ok, failed = self.run_once()
@@ -1073,7 +1262,10 @@ class Runner:
                 LOG.exception("run failed")
             sleep_for = max(0.0, interval - (time.monotonic() - t0))
             LOG.info("sleeping %.1fs", sleep_for)
-            time.sleep(sleep_for)
+            # Event-driven sleep: returns immediately when shutdown is
+            # requested, without depending on signal-interrupting time.sleep
+            # (which is unreliable when other threads exist).
+            self.shutdown_event.wait(timeout=sleep_for)
 
 
 # ============================================================================
@@ -1155,7 +1347,7 @@ class FirefoxExtensionReader(BrowserExtensionReader):
 # Concrete collectors
 # ============================================================================
 
-class ProcessCollector(Collector):
+class ProcessCollector(SnapshotCollector):
     name = "processes"
     model = ProcessRow
     judge_fields = ("name", "exe", "cmdline_json", "username")
@@ -1184,7 +1376,7 @@ class ProcessCollector(Collector):
             }
 
 
-class NetworkConnectionsCollector(Collector):
+class NetworkConnectionsCollector(SnapshotCollector):
     name = "network_connections"
     model = NetworkConnectionRow
     judge_enabled = False  # too high churn; aggregate behaviourally instead
@@ -1203,7 +1395,7 @@ class NetworkConnectionsCollector(Collector):
             }
 
 
-class ListeningPortsCollector(Collector):
+class ListeningPortsCollector(SnapshotCollector):
     name = "listening_ports"
     model = ListeningPortRow
     judge_fields = ("process_name", "family", "type", "laddr_ip", "laddr_port")
@@ -1228,7 +1420,7 @@ class ListeningPortsCollector(Collector):
             }
 
 
-class NetworkInterfacesCollector(Collector):
+class NetworkInterfacesCollector(SnapshotCollector):
     name = "network_interfaces"
     model = NetworkInterfaceRow
     judge_enabled = False  # counters need behavioural analysis
@@ -1260,7 +1452,7 @@ class NetworkInterfacesCollector(Collector):
             }
 
 
-class UsbDevicesCollector(Collector):
+class UsbDevicesCollector(SnapshotCollector):
     name = "usb_devices"
     model = UsbDeviceRow
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
@@ -1288,7 +1480,7 @@ class UsbDevicesCollector(Collector):
             yield from self._walk(item.get("_items"), loc)
 
 
-class BluetoothCollector(Collector):
+class BluetoothCollector(SnapshotCollector):
     name = "bluetooth_devices"
     model = BluetoothDeviceRow
     judge_fields = ("name", "address", "minor_type")
@@ -1317,7 +1509,7 @@ class BluetoothCollector(Collector):
                         }
 
 
-class WifiCollector(Collector):
+class WifiCollector(SnapshotCollector):
     name = "wifi_state"
     model = WifiStateRow
     judge_fields = ("ssid", "bssid", "security")
@@ -1339,7 +1531,7 @@ class WifiCollector(Collector):
                 }
 
 
-class LaunchItemsCollector(Collector):
+class LaunchItemsCollector(SnapshotCollector):
     name = "launch_items"
     model = LaunchItemRow
     judge_fields = ("scope", "label", "program", "program_arguments_json",
@@ -1388,7 +1580,7 @@ class LaunchItemsCollector(Collector):
         }
 
 
-class TccCollector(Collector):
+class TccCollector(SnapshotCollector):
     name = "tcc_permissions"
     model = TccPermissionRow
     judge_fields = ("scope", "service", "client", "auth_value")
@@ -1415,7 +1607,7 @@ class TccCollector(Collector):
             )
 
 
-class QuarantineCollector(Collector):
+class QuarantineCollector(SnapshotCollector):
     name = "quarantine_events"
     model = QuarantineEventRow
     judge_fields = ("agent_bundle_id", "agent_name", "origin_url", "data_url")
@@ -1439,7 +1631,7 @@ class QuarantineCollector(Collector):
             yield {self._COLUMN_MAP[k]: v for k, v in row.items()}
 
 
-class BrowserExtensionsCollector(Collector):
+class BrowserExtensionsCollector(SnapshotCollector):
     name = "browser_extensions"
     model = BrowserExtensionRow
     judge_fields = ("browser", "extension_id", "name",
@@ -1463,7 +1655,7 @@ class BrowserExtensionsCollector(Collector):
                 yield from reader.read(base, browser)
 
 
-class SystemIntegrityCollector(Collector):
+class SystemIntegrityCollector(SnapshotCollector):
     name = "system_integrity"
     model = SystemIntegrityRow
     judge_fields = (
@@ -1492,36 +1684,76 @@ class SystemIntegrityCollector(Collector):
         }
 
 
-class AuthEventsCollector(Collector):
+class AuthEventsCollector(StreamingCollector):
+    """Tails the macOS unified log forever via ``log stream``. Each
+    matching event is yielded as it arrives — no polling gaps."""
+
     name = "auth_events"
     model = AuthEventRow
-    judge_enabled = False  # per-event judging is too noisy; aggregate later
+    # judge_enabled is False by default for StreamingCollector
 
-    def __init__(self, lookback_min: int = DEFAULT_LOOKBACK_MIN,
-                 predicate: str = AUTH_LOG_PREDICATE,
+    def __init__(self, predicate: str = AUTH_LOG_PREDICATE,
                  judge_hints: str = ""):
         super().__init__(judge_hints=judge_hints)
-        self.lookback_min = lookback_min
         self.predicate = predicate
 
-    def collect(self):
-        cmd = ["log", "show", "--style", "ndjson",
-               "--last", f"{self.lookback_min}m",
-               "--info", "--predicate", self.predicate]
-        for e in run_ndjson(cmd, timeout=180):
-            yield {
-                "event_timestamp": e.get("timestamp"),
-                "process":         e.get("processImagePath"),
-                "subsystem":       e.get("subsystem"),
-                "category":        e.get("category"),
-                "event_type":      e.get("eventType"),
-                "event_message":   e.get("eventMessage"),
-                "pid":             e.get("processID"),
-                "raw_json":        json.dumps(e),
-            }
+    def stream(self, stop_event: threading.Event):
+        cmd = ["log", "stream", "--style", "ndjson", "--info",
+               "--predicate", self.predicate]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+
+        # Watchdog: when stop_event fires, terminate the subprocess,
+        # which closes stdout and ends the read loop below.
+        def _terminator():
+            stop_event.wait()
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+
+        threading.Thread(target=_terminator, daemon=True,
+                         name="log-stream-killer").start()
+
+        try:
+            for line in proc.stdout:
+                if stop_event.is_set():
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                yield {
+                    "event_timestamp": e.get("timestamp"),
+                    "process":         e.get("processImagePath"),
+                    "subsystem":       e.get("subsystem"),
+                    "category":        e.get("category"),
+                    "event_type":      e.get("eventType"),
+                    "event_message":   e.get("eventMessage"),
+                    "pid":             e.get("processID"),
+                    "raw_json":        json.dumps(e),
+                }
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
 
 
-class FileIntegrityCollector(Collector):
+class FileIntegrityCollector(SnapshotCollector):
     name = "file_integrity"
     model = FileIntegrityRow
     judge_fields = ("path", "sha256", "exists_flag")
@@ -1558,7 +1790,7 @@ class FileIntegrityCollector(Collector):
                 "mode": None, "uid": None, "gid": None, "exists_flag": 0}
 
 
-class InstalledAppsCollector(Collector):
+class InstalledAppsCollector(SnapshotCollector):
     name = "installed_apps"
     model = InstalledAppRow
     judge_fields = ("bundle_id", "name", "path")
@@ -1589,7 +1821,7 @@ class InstalledAppsCollector(Collector):
 # Composition + entry point
 # ============================================================================
 
-def build_collectors(prompts: Prompts, lookback_min: int) -> list[Collector]:
+def build_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
     h = prompts.hint_for
     return [
         ProcessCollector(judge_hints=h("processes")),
@@ -1604,10 +1836,15 @@ def build_collectors(prompts: Prompts, lookback_min: int) -> list[Collector]:
         QuarantineCollector(judge_hints=h("quarantine_events")),
         BrowserExtensionsCollector(judge_hints=h("browser_extensions")),
         SystemIntegrityCollector(judge_hints=h("system_integrity")),
-        AuthEventsCollector(lookback_min=lookback_min,
-                            judge_hints=h("auth_events")),
         FileIntegrityCollector(judge_hints=h("file_integrity")),
         InstalledAppsCollector(judge_hints=h("installed_apps")),
+    ]
+
+
+def build_streaming_collectors(prompts: Prompts) -> list[StreamingCollector]:
+    h = prompts.hint_for
+    return [
+        AuthEventsCollector(judge_hints=h("auth_events")),
     ]
 
 
@@ -1667,6 +1904,8 @@ def main() -> int:
     parser.add_argument("--prompts-file", default=str(DEFAULT_PROMPTS_PATH),
                         help=f"Path to prompts TOML "
                              f"(default: {DEFAULT_PROMPTS_PATH})")
+    parser.add_argument("--no-streaming", action="store_true",
+                        help="Disable streaming collectors (e.g. auth_events)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -1688,10 +1927,20 @@ def main() -> int:
     LOG.info("starting host_monitor db=%s interval=%ds lookback=%dm judge=%s",
              db_path, args.interval, args.lookback_min, type(judge).__name__)
 
-    engine = create_engine(f"sqlite:///{db_path}")
+    # check_same_thread=False allows the connection pool to hand
+    # connections to streaming-worker threads. SQLite serialises writes
+    # internally, and WAL mode lets readers proceed in parallel.
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
     try:
         sink = Sink(engine)
-        runner = Runner(sink, build_collectors(prompts, args.lookback_min),
+        snapshot_collectors = build_snapshot_collectors(prompts)
+        streaming_collectors = (
+            [] if args.no_streaming else build_streaming_collectors(prompts)
+        )
+        runner = Runner(sink, snapshot_collectors, streaming_collectors,
                         judge, args.lookback_min)
         runner.setup()
 
@@ -1701,10 +1950,19 @@ def main() -> int:
                      run_id, ok, failed)
             return 0
 
+        # Install signal handlers so SIGINT/SIGTERM cleanly stop both
+        # the snapshot loop and every streaming worker.
+        def _handle_signal(signum, _frame):
+            LOG.info("received signal %d; shutting down", signum)
+            runner.request_shutdown()
+        signal.signal(signal.SIGINT,  _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
+
+        runner.start_streaming()
         try:
             runner.run_forever(args.interval)
-        except KeyboardInterrupt:
-            LOG.info("interrupted; exiting")
+        finally:
+            runner.stop_streaming()
         return 0
     finally:
         engine.dispose()
