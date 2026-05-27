@@ -106,7 +106,7 @@ The `--profile linux` flag activates the `monitor` service, which:
 - bind-mounts `/proc`, `/sys`, `/etc`, `/var/log`, `/home` read-only;
 - writes to the same SQLite DB the dashboard reads.
 
-Collector coverage on Linux (Phases 1 + 2):
+Collector coverage on Linux (Phases 1 + 2 + 3):
 
 | Collector | Linux |
 |---|---|
@@ -116,8 +116,23 @@ Collector coverage on Linux (Phases 1 + 2):
 | installed_apps | ✓ (`dpkg-query -W` + `/usr/share/applications/*.desktop`) |
 | launch_items | ✓ (systemd unit / timer files + `/etc/crontab` + `/etc/cron.d` + `/var/spool/cron`) |
 | auth_events (streaming) | ✓ (`journalctl -f --output=json`, filtered to auth/authpriv + sshd / systemd-logind / sudo / su / polkitd) |
-| usb, bluetooth, wifi, system_integrity | ✗ (Phase 3: udev / D-Bus / iw / SELinux+AppArmor+ufw) |
+| usb_devices | ✓ (`/sys/bus/usb/devices` sysfs walk, reading vendor/product/serial/manufacturer attribute files) |
+| bluetooth_devices | ✓ (`/var/lib/bluetooth/<adapter>/<mac>/info` INI files via configparser) |
+| wifi_state | ✓ (sysfs `/sys/class/net/<iface>/wireless` + `iw dev <iface> link` for SSID/BSSID/freq) |
+| system_integrity | ✓ (LUKS dm-crypt mappings → FileVault-equivalent; SELinux+AppArmor → Gatekeeper-equivalent; ufw OR firewalld → firewall; sshd / x11vnc systemctl states) |
 | tcc_permissions, quarantine_events | ✗ (no Linux equivalents) |
+
+The mapping uses the existing `system_integrity` row schema — its
+macOS-named columns (`filevault_active`, `gatekeeper_assessments_enabled`,
+`remote_login_enabled`, etc.) keep their semantic intent on Linux:
+
+| macOS column | Linux semantic |
+|---|---|
+| `filevault_active` | any active dm-crypt mapping |
+| `firewall_global_state` | ufw OR firewalld running |
+| `gatekeeper_assessments_enabled` | SELinux Enforcing OR AppArmor enabled |
+| `remote_login_enabled` | `ssh.service` / `sshd.service` active |
+| `screen_sharing_enabled`, `remote_management_enabled` | `x11vnc` / `vncserver` / `xrdp` active |
 
 ### Dashboard hardening
 

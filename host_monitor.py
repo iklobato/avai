@@ -2545,6 +2545,321 @@ class LinuxAuthEventsCollector(StreamingCollector):
         }
 
 
+# ----------------------------------------------------------------------------
+# Phase 3: hardware + posture collectors for Linux
+# ----------------------------------------------------------------------------
+
+def _read_sysfs(path: Path, encoding: str = "utf-8") -> Optional[str]:
+    """Read a sysfs/procfs attribute file. Returns the stripped string or
+    None if unreadable. Doesn't raise on permission errors."""
+    try:
+        return path.read_text(encoding=encoding, errors="replace").strip()
+    except (OSError, UnicodeError):
+        return None
+
+
+class LinuxUsbDevicesCollector(SnapshotCollector):
+    """Linux equivalent of :class:`UsbDevicesCollector`.
+
+    Walks ``/sys/bus/usb/devices`` and reads attribute files (kernel
+    exposes the USB descriptors as plain-text files — no parsing
+    needed, just :func:`Path.read_text`). Interface sub-nodes (those
+    with a ``:`` in their name like ``1-1:1.0``) are skipped — we
+    only want device-level entries.
+    """
+    name = "usb_devices"
+    model = UsbDeviceRow
+    judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
+
+    _ATTRS = ("idVendor", "idProduct", "manufacturer", "product",
+              "serial", "speed", "bDeviceClass", "bDeviceProtocol",
+              "bMaxPower", "version", "busnum", "devnum")
+
+    def collect(self):
+        root = Path("/sys/bus/usb/devices")
+        if not root.is_dir():
+            return
+        try:
+            entries = sorted(root.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return
+        for dev in entries:
+            # USB device nodes are named like "1-1", "2-1.2", "usb1".
+            # Interfaces (which carry a colon) are sub-descriptors of
+            # devices — skip them.
+            if ":" in dev.name:
+                continue
+            if not dev.is_dir():
+                continue
+            attrs = {a: _read_sysfs(dev / a) for a in self._ATTRS}
+            attrs = {k: v for k, v in attrs.items() if v is not None}
+            if not attrs.get("idVendor") and not attrs.get("product"):
+                # Empty entry (e.g. root hubs without descriptors).
+                continue
+            yield {
+                "name":          attrs.get("product"),
+                "vendor_id":     attrs.get("idVendor"),
+                "product_id":    attrs.get("idProduct"),
+                "serial_number": attrs.get("serial"),
+                "manufacturer":  attrs.get("manufacturer"),
+                "location_id":   dev.name,
+                "speed":         attrs.get("speed"),
+                "raw_json":      json.dumps(attrs),
+            }
+
+
+class LinuxBluetoothCollector(SnapshotCollector):
+    """Linux equivalent of :class:`BluetoothCollector`.
+
+    Walks ``/var/lib/bluetooth/<adapter_mac>/<device_mac>/info`` — the
+    persistent state files BlueZ writes for every paired device. Each
+    file is an INI document parsed by :mod:`configparser`. Presence
+    in this directory means the device is paired; live connectivity
+    requires D-Bus (deferred to a future phase) so ``connected`` is
+    left as 0.
+
+    Requires read access to ``/var/lib/bluetooth`` which is normally
+    root-only — the monitor container runs as root.
+    """
+    name = "bluetooth_devices"
+    model = BluetoothDeviceRow
+    judge_fields = ("name", "address", "minor_type")
+
+    def collect(self):
+        root = Path("/var/lib/bluetooth")
+        if not root.is_dir():
+            return
+        try:
+            adapters = list(root.iterdir())
+        except PermissionError:
+            return
+        for adapter in adapters:
+            if not adapter.is_dir():
+                continue
+            try:
+                devices = list(adapter.iterdir())
+            except PermissionError:
+                continue
+            for dev in devices:
+                if not dev.is_dir():
+                    continue
+                info_file = dev / "info"
+                if not info_file.is_file():
+                    continue
+                cp = configparser.ConfigParser(
+                    interpolation=None, strict=False,
+                    inline_comment_prefixes=("#", ";"),
+                )
+                try:
+                    cp.read(info_file, encoding="utf-8")
+                except (configparser.Error, OSError):
+                    continue
+                general = dict(cp["General"]) if cp.has_section("General") else {}
+                # BlueZ stores the MAC with underscores; restore colons.
+                mac = dev.name.replace("_", ":")
+                full = {sec: dict(cp[sec]) for sec in cp.sections()}
+                yield {
+                    "name":       general.get("Alias") or general.get("Name"),
+                    "address":    mac,
+                    "connected":  0,
+                    "paired":     1,
+                    "minor_type": general.get("Class"),
+                    "raw_json":   json.dumps(full),
+                }
+
+
+class LinuxWifiCollector(SnapshotCollector):
+    """Linux equivalent of :class:`WifiCollector`.
+
+    Discovers wireless interfaces from sysfs (any net interface that
+    has a ``wireless/`` subdirectory in ``/sys/class/net``). For each,
+    asks ``iw dev <iface> link`` for the current connection details
+    (SSID, BSSID, freq) — parsed line-by-line using ``key: value``
+    structure, not regex. If ``iw`` isn't installed the interface is
+    still emitted with empty fields so the dashboard can see it
+    exists.
+    """
+    name = "wifi_state"
+    model = WifiStateRow
+    judge_fields = ("ssid", "bssid", "security")
+
+    def collect(self):
+        net = Path("/sys/class/net")
+        if not net.is_dir():
+            return
+        try:
+            ifaces = list(net.iterdir())
+        except OSError:
+            return
+        iw_available = shutil.which("iw") is not None
+        for iface_dir in ifaces:
+            if not (iface_dir / "wireless").is_dir():
+                continue
+            iface = iface_dir.name
+            link = self._iw_link(iface) if iw_available else {}
+            yield {
+                "interface": iface,
+                "ssid":      link.get("SSID"),
+                "bssid":     link.get("BSSID"),
+                "channel":   link.get("freq"),
+                "security":  link.get("type"),
+                "raw_json":  json.dumps(link),
+            }
+
+    @staticmethod
+    def _iw_link(iface: str) -> dict:
+        try:
+            r = subprocess.run(
+                ["iw", "dev", iface, "link"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return {}
+        if r.returncode != 0 or not r.stdout:
+            return {}
+        out: dict = {}
+        for raw in r.stdout.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("Connected to"):
+                tokens = line.split()
+                if len(tokens) >= 3:
+                    out["BSSID"] = tokens[2]
+                continue
+            if line.startswith("Not connected"):
+                out["connected"] = "no"
+                continue
+            key, sep, value = line.partition(":")
+            if sep:
+                out[key.strip()] = value.strip()
+        return out
+
+
+class LinuxSystemIntegrityCollector(SnapshotCollector):
+    """Linux equivalent of :class:`SystemIntegrityCollector`.
+
+    Maps Linux security posture into the existing ``system_integrity``
+    row, preserving the macOS-shaped column names so the dashboard
+    keeps rendering them:
+
+    - ``filevault_active``          → any active dm-crypt (LUKS) mapping.
+    - ``firewall_global_state``    → ``ufw`` OR ``firewalld`` active.
+    - ``firewall_stealth``         → reserved (no clean Linux analog).
+    - ``firewall_logging``         → reserved.
+    - ``gatekeeper_assessments_*`` → SELinux in *Enforcing* mode OR
+                                     AppArmor enabled.
+    - ``remote_login_enabled``     → ``ssh.service`` / ``sshd.service``
+                                     active.
+    - ``screen_sharing_enabled``   → ``x11vnc`` / ``vncserver`` active.
+    - ``remote_management_enabled``→ same as screen_sharing (no Linux
+                                     equivalent to Apple Remote Desktop).
+
+    Raw posture details (SELinux mode string, AppArmor enabled/loaded
+    profiles, ufw / firewalld active flags, dm-crypt count, sshd /
+    vnc systemd status) live in ``raw_json`` for the LLM judge.
+    """
+    name = "system_integrity"
+    model = SystemIntegrityRow
+    judge_fields = (
+        "filevault_active", "firewall_global_state",
+        "gatekeeper_assessments_enabled",
+        "remote_login_enabled", "screen_sharing_enabled",
+        "remote_management_enabled",
+    )
+
+    def collect(self):
+        selinux  = self._selinux_state()
+        apparmor = self._apparmor_state()
+        ufw      = self._ufw_active()
+        fwd      = self._service_active("firewalld")
+        sshd     = (self._service_active("ssh")
+                    or self._service_active("sshd"))
+        vnc      = (self._service_active("x11vnc")
+                    or self._service_active("vncserver")
+                    or self._service_active("xrdp"))
+        luks_n   = self._luks_count()
+
+        raw = {
+            "selinux":          selinux,
+            "apparmor":         apparmor,
+            "ufw_active":       ufw,
+            "firewalld_active": fwd,
+            "sshd_active":      sshd,
+            "vnc_active":       vnc,
+            "luks_mappings":    luks_n,
+        }
+
+        yield {
+            "filevault_active":               int(luks_n > 0),
+            "firewall_global_state":          int(ufw or fwd),
+            "firewall_stealth":               None,
+            "firewall_logging":               None,
+            "gatekeeper_assessments_enabled": int(
+                selinux == "Enforcing"
+                or apparmor.get("enabled") is True
+            ),
+            "remote_login_enabled":           int(sshd),
+            "screen_sharing_enabled":         int(vnc),
+            "remote_management_enabled":      int(vnc),
+            "raw_json":                       json.dumps(raw),
+        }
+
+    # ---- helpers ----------------------------------------------------
+
+    @staticmethod
+    def _selinux_state() -> Optional[str]:
+        """Returns 'Enforcing' / 'Permissive' / None (not present)."""
+        flag = _read_sysfs(Path("/sys/fs/selinux/enforce"))
+        if flag is None:
+            return None
+        return {"0": "Permissive", "1": "Enforcing"}.get(flag, "Unknown")
+
+    @staticmethod
+    def _apparmor_state() -> dict:
+        enabled = _read_sysfs(Path("/sys/module/apparmor/parameters/enabled"))
+        return {"enabled": enabled == "Y"} if enabled is not None else {"enabled": False}
+
+    @staticmethod
+    def _ufw_active() -> bool:
+        # /etc/ufw/ufw.conf is the canonical persistent state.
+        conf = _read_sysfs(Path("/etc/ufw/ufw.conf"))
+        if conf is None:
+            return False
+        for line in conf.splitlines():
+            if line.lstrip().startswith("ENABLED"):
+                key, _, value = line.partition("=")
+                if key.strip() == "ENABLED":
+                    return value.strip().strip('"').lower() == "yes"
+        return False
+
+    @staticmethod
+    def _service_active(unit: str) -> bool:
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", unit],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        return r.stdout.strip() == "active"
+
+    @staticmethod
+    def _luks_count() -> int:
+        if not shutil.which("dmsetup"):
+            return 0
+        try:
+            r = subprocess.run(
+                ["dmsetup", "ls", "--target", "crypt"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return 0
+        if r.returncode != 0 or "No devices found" in r.stdout:
+            return 0
+        return sum(1 for line in r.stdout.splitlines() if line.strip())
+
+
 # ============================================================================
 # Composition + entry point
 # ============================================================================
@@ -2570,22 +2885,25 @@ def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
 
 
 def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
-    """Linux snapshot collector set (Phases 1 + 2).
+    """Linux snapshot collector set — full parity with the macOS set
+    minus the two slices that have no Linux equivalent.
 
     Cross-platform via psutil: processes, network connections, listening
     ports, network interfaces.
 
-    Linux-specific paths reusing the same collector classes:
-    file_integrity (Linux WATCHED_FILES) and browser_extensions
-    (XDG / ~/.mozilla profiles).
+    Same collector classes, Linux paths: file_integrity (WATCHED_FILES_LINUX),
+    browser_extensions (BROWSER_PROFILES_LINUX).
 
     Linux-specific implementations:
-      - installed_apps via dpkg-query + XDG .desktop entries (Phase 1)
-      - launch_items via systemd unit files + cron entries (Phase 2)
+      Phase 1 — installed_apps (dpkg-query + XDG .desktop)
+      Phase 2 — launch_items (systemd unit files + cron entries)
+      Phase 3 — usb_devices (sysfs walk), bluetooth_devices
+                (/var/lib/bluetooth INI files), wifi_state (sysfs +
+                `iw dev link`), system_integrity (SELinux + AppArmor
+                + ufw / firewalld + sshd + vnc + LUKS).
 
-    Not yet ported (Phase 3): usb_devices, bluetooth_devices,
-    wifi_state, system_integrity (udev/D-Bus/iw/SELinux+AppArmor+ufw).
-    Dropped: tcc_permissions, quarantine_events (no Linux equivalents).
+    Dropped on Linux: tcc_permissions and quarantine_events (macOS-only
+    concepts with no Linux analog).
     """
     h = prompts.hint_for
     return [
@@ -2593,11 +2911,15 @@ def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         NetworkConnectionsCollector(judge_hints=h("network_connections")),
         ListeningPortsCollector(judge_hints=h("listening_ports")),
         NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
+        LinuxUsbDevicesCollector(judge_hints=h("usb_devices")),
+        LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),
+        LinuxWifiCollector(judge_hints=h("wifi_state")),
         LinuxLaunchItemsCollector(judge_hints=h("launch_items")),
         BrowserExtensionsCollector(
             judge_hints=h("browser_extensions"),
             profiles=BROWSER_PROFILES_LINUX,
         ),
+        LinuxSystemIntegrityCollector(judge_hints=h("system_integrity")),
         FileIntegrityCollector(
             judge_hints=h("file_integrity"),
             watched=WATCHED_FILES_LINUX,
