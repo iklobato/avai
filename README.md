@@ -82,7 +82,45 @@ That builds `avai-dashboard:latest`, bind-mounts the current directory
 to `/data` inside the container, exposes the dashboard on host port
 8765, and runs a healthcheck against `/api/notifications/new`.
 
-Hardening flags applied in `docker-compose.yml`:
+The default `docker compose up` runs **only the dashboard** — the
+monitor service is opt-in via the `linux` profile (next section).
+
+### Run BOTH services in Docker (Linux hosts only)
+
+On a Linux host (bare metal, KVM, or a real Linux server — *not*
+macOS Docker Desktop), bring up both the monitor and the dashboard:
+
+```sh
+# from a real Linux host, with credentials in the environment
+export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # or ANTHROPIC_API_KEY
+docker compose --profile linux up -d --build
+```
+
+The `--profile linux` flag activates the `monitor` service, which:
+
+- runs as root (needed for `psutil.net_connections` cross-process socket
+  visibility);
+- shares the host's PID and network namespaces (`pid: host`,
+  `network_mode: host`) so it observes host processes/sockets;
+- adds `SYS_PTRACE`, `NET_ADMIN`, `NET_RAW` capabilities;
+- bind-mounts `/proc`, `/sys`, `/etc`, `/var/log`, `/home` read-only;
+- writes to the same SQLite DB the dashboard reads.
+
+Collector coverage on Linux (Phase 1):
+
+| Collector | Linux |
+|---|---|
+| processes, network_connections, listening_ports, network_interfaces | ✓ (psutil) |
+| file_integrity | ✓ (Linux paths: `/etc/{passwd,shadow,sudoers,crontab}`, `~/.bashrc`, SSH config, …) |
+| browser_extensions | ✓ (XDG paths: `~/.config/google-chrome`, `~/.mozilla/firefox`, …) |
+| installed_apps | ✓ (`dpkg-query -W` + `/usr/share/applications/*.desktop`) |
+| launch_items, auth_events | ✗ (Phase 2: systemd units + `journalctl -f`) |
+| usb, bluetooth, wifi, system_integrity | ✗ (Phase 3: udev / D-Bus / iw / SELinux+AppArmor+ufw) |
+| tcc_permissions, quarantine_events | ✗ (no Linux equivalents) |
+
+### Dashboard hardening
+
+Flags applied in `docker-compose.yml` for the dashboard service:
 
 - `read_only: true` — root filesystem mounted read-only (with `/tmp`
   as tmpfs for Flask's session cache).

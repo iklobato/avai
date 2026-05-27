@@ -92,6 +92,11 @@ LOG = logging.getLogger("host_monitor")
 # Defaults
 # ============================================================================
 
+import platform as _platform
+
+IS_MACOS = _platform.system() == "Darwin"
+IS_LINUX = _platform.system() == "Linux"
+
 _SCRIPT_DIR = Path(__file__).resolve().parent
 
 DEFAULT_DB_PATH = _SCRIPT_DIR / "host_monitor.db"
@@ -189,6 +194,33 @@ BROWSER_PROFILES: dict[Browser, list[str]] = {
     Browser.VIVALDI:     ["~/Library/Application Support/Vivaldi"],
     Browser.FIREFOX:     ["~/Library/Application Support/Firefox"],
 }
+
+# Linux equivalents — XDG paths under ~/.config + ~/.mozilla. Same
+# browser_extensions logic; only the search roots change.
+BROWSER_PROFILES_LINUX: dict[Browser, list[str]] = {
+    Browser.CHROME:   ["~/.config/google-chrome"],
+    Browser.CHROMIUM: ["~/.config/chromium"],
+    Browser.BRAVE:    ["~/.config/BraveSoftware/Brave-Browser"],
+    Browser.EDGE:     ["~/.config/microsoft-edge"],
+    Browser.VIVALDI:  ["~/.config/vivaldi"],
+    Browser.FIREFOX:  ["~/.mozilla/firefox"],
+}
+
+WATCHED_FILES_LINUX = [
+    "~/.ssh/authorized_keys", "~/.ssh/known_hosts", "~/.ssh/config",
+    "~/.ssh/id_rsa.pub", "~/.ssh/id_ed25519.pub",
+    "~/.bashrc", "~/.bash_profile", "~/.profile",
+    "~/.zshrc", "~/.zprofile", "~/.zshenv",
+    "~/.gitconfig", "~/.aws/credentials", "~/.aws/config",
+    "/etc/hosts", "/etc/resolv.conf", "/etc/sudoers",
+    "/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow",
+    "/etc/crontab",
+    "/etc/pam.d/sudo", "/etc/pam.d/login", "/etc/pam.d/su",
+    "/etc/ssh/sshd_config",
+    "/etc/ld.so.preload",
+    "/root/.ssh/authorized_keys",
+    "/root/.bashrc",
+]
 
 TCC_SOURCES: list[tuple[TccScope, str]] = [
     (TccScope.USER,   "~/Library/Application Support/com.apple.TCC/TCC.db"),
@@ -1872,13 +1904,17 @@ class BrowserExtensionsCollector(SnapshotCollector):
     def __init__(self,
                  readers: Optional[dict[Browser, BrowserExtensionReader]] = None,
                  default_reader: Optional[BrowserExtensionReader] = None,
-                 judge_hints: str = ""):
+                 judge_hints: str = "",
+                 profiles: Optional[dict[Browser, list[str]]] = None):
         super().__init__(judge_hints=judge_hints)
         self.readers = readers or {Browser.FIREFOX: FirefoxExtensionReader()}
         self.default_reader = default_reader or ChromiumExtensionReader()
+        # Per-platform search roots — caller supplies BROWSER_PROFILES
+        # or BROWSER_PROFILES_LINUX. Defaults to the macOS layout.
+        self.profiles = profiles or BROWSER_PROFILES
 
     def collect(self):
-        for browser, profiles in BROWSER_PROFILES.items():
+        for browser, profiles in self.profiles.items():
             reader = self.readers.get(browser, self.default_reader)
             for base_str in profiles:
                 base = expand(base_str)
@@ -2049,11 +2085,117 @@ class InstalledAppsCollector(SnapshotCollector):
                 }
 
 
+class LinuxInstalledAppsCollector(SnapshotCollector):
+    """Linux equivalent of :class:`InstalledAppsCollector`. Sources:
+
+    - ``dpkg -l`` (Debian / Ubuntu / derivatives): installed binary
+      packages. Each yields one row tagged ``source='dpkg'``.
+    - ``/usr/share/applications/*.desktop`` (XDG, universal): GUI app
+      menu entries. Each yields one row tagged ``source='desktop'``.
+
+    The ``bundle_id`` column holds the package name (dpkg) or the
+    ``.desktop`` filename's stem (XDG), so the judge dedupes via a
+    stable identifier in either case.
+    """
+    name = "installed_apps"
+    model = InstalledAppRow
+    judge_fields = ("bundle_id", "name", "path")
+
+    _DPKG_FIELDS = ("Status", "Package", "Version", "Architecture",
+                    "Description")
+
+    def collect(self):
+        yield from self._dpkg_rows()
+        yield from self._desktop_rows()
+
+    def _dpkg_rows(self):
+        if not shutil.which("dpkg-query"):
+            return
+        # Tab-separated fixed-field output: no parsing of dpkg -l's
+        # column-aligned text. dpkg-query -W -f gives us structured
+        # output with a chosen delimiter.
+        fmt = "${db:Status-Status}\t${Package}\t${Version}\t" \
+              "${Architecture}\t${binary:Summary}\n"
+        try:
+            r = subprocess.run(
+                ["dpkg-query", "-W", "-f", fmt],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return
+        if r.returncode != 0:
+            return
+        for line in r.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 5:
+                continue
+            status, name, version, arch, summary = parts[0], parts[1], parts[2], parts[3], parts[4]
+            if status != "installed":
+                continue
+            yield {
+                "path":      f"dpkg:{name}",
+                "bundle_id": name,
+                "name":      name,
+                "version":   version,
+                "raw_json":  json.dumps({
+                    "source": "dpkg",
+                    "status": status,
+                    "architecture": arch,
+                    "summary": summary,
+                }),
+            }
+
+    def _desktop_rows(self):
+        # XDG desktop entries are simple INI files, but Python's
+        # configparser handles them. We extract the [Desktop Entry]
+        # section's Name, Exec, Comment, Categories.
+        import configparser
+        roots = [
+            Path("/usr/share/applications"),
+            Path("/usr/local/share/applications"),
+            expand("~/.local/share/applications"),
+            Path("/var/lib/flatpak/exports/share/applications"),
+            expand("~/.local/share/flatpak/exports/share/applications"),
+        ]
+        for root in roots:
+            if not root.is_dir():
+                continue
+            try:
+                entries = list(root.glob("*.desktop"))
+            except PermissionError:
+                continue
+            for entry in entries:
+                cp = configparser.ConfigParser(
+                    interpolation=None, strict=False,
+                )
+                try:
+                    cp.read(entry, encoding="utf-8")
+                except (configparser.Error, OSError):
+                    continue
+                if "Desktop Entry" not in cp:
+                    continue
+                sec = cp["Desktop Entry"]
+                yield {
+                    "path":      str(entry),
+                    "bundle_id": entry.stem,
+                    "name":      sec.get("Name"),
+                    "version":   sec.get("Version"),
+                    "raw_json":  json.dumps({
+                        "source":     "desktop",
+                        "exec":       sec.get("Exec"),
+                        "comment":    sec.get("Comment"),
+                        "categories": sec.get("Categories"),
+                        "type":       sec.get("Type"),
+                        "no_display": sec.get("NoDisplay") == "true",
+                    }),
+                }
+
+
 # ============================================================================
 # Composition + entry point
 # ============================================================================
 
-def build_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
+def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
     h = prompts.hint_for
     return [
         ProcessCollector(judge_hints=h("processes")),
@@ -2073,8 +2215,54 @@ def build_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
     ]
 
 
+def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
+    """Phase-1 Linux collector set.
+
+    Cross-platform via psutil: processes, network connections, listening
+    ports, network interfaces.
+
+    Linux-specific paths reusing the same collector classes:
+    file_integrity (Linux WATCHED_FILES) and browser_extensions (XDG /
+    ~/.mozilla profiles).
+
+    Linux-specific implementation: installed_apps via dpkg-query +
+    XDG .desktop entries.
+
+    Not yet ported (Phase 2/3): launch_items (systemd), auth_events
+    streaming (journalctl), usb/bluetooth/wifi (udev/D-Bus/iw),
+    system_integrity (SELinux/AppArmor/ufw). Dropped: tcc_permissions
+    and quarantine_events (no Linux equivalents).
+    """
+    h = prompts.hint_for
+    return [
+        ProcessCollector(judge_hints=h("processes")),
+        NetworkConnectionsCollector(judge_hints=h("network_connections")),
+        ListeningPortsCollector(judge_hints=h("listening_ports")),
+        NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
+        BrowserExtensionsCollector(
+            judge_hints=h("browser_extensions"),
+            profiles=BROWSER_PROFILES_LINUX,
+        ),
+        FileIntegrityCollector(
+            judge_hints=h("file_integrity"),
+            watched=WATCHED_FILES_LINUX,
+        ),
+        LinuxInstalledAppsCollector(judge_hints=h("installed_apps")),
+    ]
+
+
+def build_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
+    if IS_LINUX:
+        return _build_linux_snapshot_collectors(prompts)
+    return _build_macos_snapshot_collectors(prompts)
+
+
 def build_streaming_collectors(prompts: Prompts) -> list[StreamingCollector]:
     h = prompts.hint_for
+    if IS_LINUX:
+        # Phase 2 work: journalctl-based AuthEventsCollector. For Phase
+        # 1, no streaming collectors on Linux.
+        return []
     return [
         AuthEventsCollector(judge_hints=h("auth_events")),
     ]

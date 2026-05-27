@@ -21,17 +21,20 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Runtime deps for the dashboard. host_monitor.py is imported (for its
-# SQLAlchemy ORM models) so psutil and sqlalchemy need to be present,
-# but litellm / anthropic are guarded by try/except at import time and
-# aren't needed by the dashboard path.
+# Runtime deps shared by both the dashboard and the (Linux) monitor.
+# litellm + anthropic are required for the LLM judge; the dashboard
+# never invokes them but their imports in host_monitor.py are guarded
+# by try/except so the dashboard service costs nothing extra.
 RUN pip install \
         flask==3.0.* \
         sqlalchemy==2.0.* \
-        psutil==5.9.*
+        psutil==5.9.* \
+        "litellm>=1.0" \
+        "anthropic>=0.30"
 
-# Source layout: only what the dashboard needs at runtime.
-COPY host_monitor.py dashboard.py ./
+# Source layout. host_monitor_prompts.toml lives next to host_monitor.py
+# because the monitor's Prompts.load() looks alongside the script.
+COPY host_monitor.py dashboard.py host_monitor_prompts.toml ./
 COPY templates ./templates
 
 # Run as a non-root user; the dashboard does no privileged work.

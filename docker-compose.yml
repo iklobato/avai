@@ -1,36 +1,107 @@
-# avai — Docker Compose for the dashboard service.
+# avai — Docker Compose for the full stack (Linux deployment).
 #
-# What runs here: the read-only Flask + HTMX dashboard.
-# What does NOT run here: host_monitor.py (the collector). The monitor
-# uses macOS-native userland tools (system_profiler, log stream,
-# launchctl, TCC.db, native psutil) and the container can't reach
-# those — Docker Desktop's container sees the Linux VM, not your Mac.
-# Run the monitor on the host directly; the dashboard container
-# tails the resulting SQLite file via a bind mount.
+# Two services share one image (avai-dashboard:latest) and one
+# named volume (avai_data) holding the SQLite database.
+#
+#   monitor    — runs host_monitor.py to collect telemetry. Linux only.
+#                Needs pid=host + network=host + /proc, /sys mounts to
+#                observe the host (rather than its own container) for
+#                processes and sockets. Runs as root.
+#
+#   dashboard  — runs dashboard.py to serve the read-only Flask UI on
+#                :8765. Runs as a non-root user with all caps dropped.
+#
+# IMPORTANT — macOS users: the `monitor` service will technically
+# start but will only see the Docker Desktop Linux VM, not your Mac.
+# On macOS, run host_monitor.py natively (see README); only the
+# dashboard service is useful in Docker. On a Linux host (bare metal
+# or VM), both services work as intended.
+
+x-image: &image
+  image: avai-dashboard:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+# Both services bind-mount the project directory to /data. The monitor
+# writes host_monitor.db; the dashboard reads it. SQLite's WAL mode
+# coordinates the two through the .db-shm file. On macOS, the native
+# host_monitor.py writes to ./host_monitor.db and the dashboard
+# container picks it up via this same mount.
 
 services:
+
+  monitor:
+    <<: *image
+    container_name: avai-monitor
+    # The monitor service is opted in via `docker compose --profile linux up`.
+    # Without it, `docker compose up` runs only the dashboard — that's
+    # the right default on macOS (where the monitor must run natively
+    # on the host) and the safe default everywhere else.
+    profiles: ["linux"]
+    # The host monitor needs root for psutil.net_connections (cross-
+    # process socket visibility) and to read /proc/<pid>/* for other
+    # processes. It also needs to read the host's filesystem, not its
+    # own container's, hence the bind mounts below.
+    user: "0:0"
+    # See the host's process table + network namespace.
+    pid: host
+    network_mode: host
+    # CLI-passed token gets read from the host environment via
+    # `docker compose --env-file`, .env file, or environment variables
+    # exported in the calling shell.
+    environment:
+      - CLAUDE_CODE_OAUTH_TOKEN
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+    volumes:
+      - ./:/data
+      # Read-only host mounts so the monitor can observe (not modify)
+      # the host. /proc and /sys are how psutil and the Linux-specific
+      # collectors actually see processes / sockets / hardware.
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc:/host/etc:ro
+      - /var/log:/host/var/log:ro
+      - /home:/host/home:ro
+    # Tell psutil to look at the host's /proc instead of the
+    # container's. (psutil honours PROCFS_PATH for Linux.)
+    # Note: this hint is best-effort; many collectors still rely on
+    # pid=host to see the right /proc directly.
+    # PROCFS_PATH=/host/proc is set above? — we'd add it under
+    # environment if needed. Leaving default for now since pid=host
+    # already exposes the host's /proc as the container's /proc.
+    cap_add:
+      # Permits psutil to query other processes' sockets/files.
+      - SYS_PTRACE
+      # Some collectors (USB / wireless in Phase 2/3) need NET_ADMIN.
+      - NET_ADMIN
+      - NET_RAW
+    restart: unless-stopped
+    command: >
+      python host_monitor.py
+        --db /data/host_monitor.db
+        --interval 300
+        --lookback-min 6
+        --max-db-mb 1024
+        --judge-max-per-collector 60
+    healthcheck:
+      test: ["CMD", "test", "-f", "/data/host_monitor.db"]
+      interval: 60s
+      timeout: 4s
+      start_period: 20s
+      retries: 3
+
   dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: avai-dashboard:latest
+    <<: *image
     container_name: avai-dashboard
+    # Note: no depends_on here. The dashboard is useful even without
+    # the monitor service running — on macOS the monitor runs natively
+    # on the host, and the dashboard just bind-mounts the same DB.
     ports:
       - "8765:8765"
     volumes:
-      # Bind-mount the project directory so the container can read the
-      # SQLite database (host_monitor.db + .db-wal + .db-shm).
-      #
-      # SQLite in WAL mode coordinates readers and writers via the
-      # .db-shm shared-memory file; even a read-only consumer needs the
-      # filesystem to be writable so SQLite can open the SHM. The
-      # dashboard process itself never issues UPDATE/INSERT/DELETE —
-      # all the safety lives in the application, not the mount.
       - ./:/data
-    restart: unless-stopped
-    # Nothing the dashboard does needs elevated capabilities; the host
-    # monitor (which DOES need root for psutil.net_connections and FDA
-    # for TCC.db) is intentionally not containerised here.
     cap_drop:
       - ALL
     security_opt:
@@ -38,3 +109,11 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/notifications/new?since=2099-01-01', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 4s
+      start_period: 5s
+      retries: 3
