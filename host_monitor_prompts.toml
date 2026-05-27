@@ -1,0 +1,123 @@
+# host_monitor_prompts.toml
+#
+# All LLM prompts used by host_monitor.py live here.
+# Edit this file (not the script) to tune model behaviour.
+#
+# Substitutions use string.Template ($var / ${var}) syntax so the prompt
+# text can contain literal curly braces (used for the JSON example).
+#
+# - $verdicts   — populated from the Verdict enum at load time.
+# - $categories — populated from the ThreatCategory enum at load time.
+# - $collector  — collector name (filled per LLM call).
+# - $hints      — collector-specific guidance (filled per LLM call).
+# - $entries    — JSON-encoded batch of entries (filled per LLM call).
+
+
+[judge]
+
+system = """\
+You are a security analyst classifying macOS host telemetry.
+
+For each input entry, return a judgment with fields:
+  index      — same integer index from input
+  verdict    — one of: $verdicts
+  category   — one of: $categories
+  confidence — float in [0, 1]
+  reasoning  — one sentence, <=120 chars
+
+Verdicts:
+  benign      = expected on a developer Mac.
+  suspicious  = anomaly worth review; not necessarily malicious.
+  malicious   = likely active threat.
+  unknown     = insufficient information.
+
+Use MITRE-ATT&CK-aligned categories. Use `none` when the entry is
+not a threat indicator.
+
+Output ONLY a JSON object of the form {"judgments": [...]} — no markdown
+fences, no commentary.
+"""
+
+user_template = """\
+Source: $collector
+Hints for this source: $hints
+
+Entries to judge:
+$entries
+"""
+
+
+[collector_hints]
+
+processes = """\
+Flag: unsigned binaries; processes from /tmp, /var/tmp, ~/Downloads, \
+~/Library/Caches; missing exe path; command lines with curl|sh, wget|sh, \
+base64 -d, eval; root-owned processes with unusual names; common LOLBin \
+abuse (osascript spawning shells, etc.).\
+"""
+
+listening_ports = """\
+Flag: ports bound to 0.0.0.0 (vs 127.0.0.1) from non-server processes; \
+shells / interpreters listening; high ports owned by unsigned binaries; \
+remote-access services (SSH, VNC, ARD) bound publicly.\
+"""
+
+usb_devices = """\
+Flag: unknown HID (keyboard/mouse) devices that could inject keystrokes \
+(BadUSB / Rubber Ducky); unknown mass-storage; devices with vendor IDs \
+known for attack tools; hubs presenting HID.\
+"""
+
+bluetooth_devices = """\
+Flag: unknown paired devices (potential keyloggers or covert HID); \
+devices with generic / spoofed names; mismatched minor types.\
+"""
+
+wifi_state = """\
+Flag: open or WEP networks; SSIDs known for honeypots (free-wifi, default \
+AP names); BSSID changes for the same SSID; weak security modes.\
+"""
+
+launch_items = """\
+Persistence is the primary risk. Flag: programs in /tmp, /Users/Shared, \
+/private/var/tmp, ~/Library/Caches; arguments invoking curl, wget, bash -c, \
+sh -c, base64 -d, osascript -e; RunAtLoad+KeepAlive (always-on persistence); \
+root-running labels with non-Apple bundle IDs.\
+"""
+
+tcc_permissions = """\
+TCC controls camera / mic / screen capture / accessibility / FDA. Flag \
+any grant of kTCCServiceScreenCapture, kTCCServiceListenEvent, \
+kTCCServiceAccessibility, or kTCCServiceSystemPolicyAllFiles to a client \
+that is not a well-known mainstream app.\
+"""
+
+quarantine_events = """\
+Each row is a downloaded file. Flag origin URLs that are known-malicious / \
+typosquatting / IP-only / unusual TLDs / file-sharing services delivering \
+executables (.dmg, .pkg, .zip containing .app or scripts).\
+"""
+
+browser_extensions = """\
+Flag: extensions with <all_urls> or http://*/* host permissions; \
+permissions including webRequest+webRequestBlocking, cookies, history, \
+tabs, debugger, downloads, nativeMessaging; obscure names; vendor-orphaned \
+extensions.\
+"""
+
+system_integrity = """\
+Baseline: FileVault on, firewall on, Gatekeeper on, SSH/Screen Sharing/ARD \
+off on a developer Mac. Any deviation is suspicious.\
+"""
+
+file_integrity = """\
+Watched files are credentials / shell init / SSH config / sudoers / \
+/etc/hosts. A new hash for a file the user did not knowingly edit is \
+suspicious. A missing file that previously existed is suspicious.\
+"""
+
+installed_apps = """\
+Flag: apps outside /Applications and ~/Applications (unusual install \
+location); bundle IDs that don't match the app name; bundle IDs that \
+impersonate Apple / well-known vendors.\
+"""
