@@ -69,8 +69,8 @@ except ImportError:
 
 try:
     from sqlalchemy import (
-        Engine, MetaData, Table, create_engine, event, exists, inspect,
-        select, text, update,
+        Engine, MetaData, Table, asc, create_engine, delete, event, exists,
+        func, inspect, select, text, update,
     )
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
     from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
@@ -1059,6 +1059,143 @@ class Sink:
             )
             session.commit()
 
+    def database_size_bytes(self) -> int:
+        """Total on-disk bytes including the SQLite WAL/SHM sidecars."""
+        url = str(self.engine.url)
+        prefix = "sqlite:///"
+        if not url.startswith(prefix):
+            return 0
+        base = Path(url[len(prefix):])
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            p = Path(str(base) + suffix)
+            if p.exists():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+        return total
+
+    def database_live_bytes(self) -> int:
+        """Estimate post-VACUUM database size from SQLite pragmas. Deletes
+        only mark pages free; until VACUUM runs, the file size doesn't
+        shrink. This estimate decreases immediately as we delete rows,
+        so the prune loop has a meaningful stop condition."""
+        with self.engine.connect() as conn:
+            conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+            page_count = conn.execute(text("PRAGMA page_count")).scalar() or 0
+            page_size  = conn.execute(text("PRAGMA page_size")).scalar() or 0
+            freelist   = conn.execute(text("PRAGMA freelist_count")).scalar() or 0
+        return max(0, (page_count - freelist) * page_size)
+
+    def prune_to_size(self, max_bytes: int) -> dict:
+        """Delete oldest completed runs (and their child rows) plus the
+        ``auth_events`` rows older than the oldest remaining run, until
+        the database fits under ``max_bytes``. Always preserves at
+        least one completed run so the dashboard stays useful.
+
+        Returns ``{runs_pruned, events_pruned, bytes_before, bytes_after}``.
+        """
+        if max_bytes <= 0:
+            return {"runs_pruned": 0, "events_pruned": 0,
+                    "bytes_before": 0, "bytes_after": 0}
+
+        bytes_before = self.database_size_bytes()
+        if bytes_before <= max_bytes:
+            return {"runs_pruned": 0, "events_pruned": 0,
+                    "bytes_before": bytes_before,
+                    "bytes_after": bytes_before}
+
+        # All collector-row tables EXCEPT auth_events. Streaming events
+        # aren't tied to a CollectionRun.run_id, so we trim them by
+        # collected_at instead of by run_id.
+        snapshot_models = [m for m in _RowBase.__subclasses__()
+                           if m is not AuthEventRow]
+
+        runs_pruned = 0
+        events_pruned = 0
+
+        with Session(self.engine) as session:
+            # Use the post-VACUUM estimate (page_count - freelist) inside
+            # the loop. SQLite deletes only mark pages free; the actual
+            # file size doesn't shrink until VACUUM runs. database_live_bytes
+            # decreases immediately after each delete, so the loop has a
+            # meaningful stop condition.
+            while self.database_live_bytes() > max_bytes:
+                # Safety: never delete the only completed run on file.
+                completed = session.execute(
+                    select(func.count()).select_from(CollectionRun)
+                    .where(CollectionRun.finished_at.is_not(None))
+                ).scalar() or 0
+                if completed <= 1:
+                    LOG.warning("prune_to_size: only %d completed run(s) "
+                                "left; cannot shrink further", completed)
+                    break
+
+                oldest = session.execute(
+                    select(CollectionRun)
+                    .where(CollectionRun.finished_at.is_not(None))
+                    .order_by(asc(CollectionRun.started_at))
+                    .limit(1)
+                ).scalar_one_or_none()
+                if oldest is None:
+                    break
+
+                for model in snapshot_models:
+                    session.execute(
+                        delete(model).where(model.run_id == oldest.run_id)
+                    )
+                session.execute(
+                    delete(CollectorErrorRow)
+                    .where(CollectorErrorRow.run_id == oldest.run_id)
+                )
+                session.execute(
+                    delete(CollectionRun)
+                    .where(CollectionRun.run_id == oldest.run_id)
+                )
+                runs_pruned += 1
+
+                # Trim streaming events older than the new earliest run.
+                new_earliest = session.execute(
+                    select(CollectionRun.started_at)
+                    .where(CollectionRun.finished_at.is_not(None))
+                    .order_by(asc(CollectionRun.started_at))
+                    .limit(1)
+                ).scalar()
+                if new_earliest:
+                    result = session.execute(
+                        delete(AuthEventRow)
+                        .where(AuthEventRow.collected_at < new_earliest)
+                    )
+                    events_pruned += result.rowcount or 0
+                    session.execute(
+                        delete(StreamingSession)
+                        .where(StreamingSession.finished_at < new_earliest)
+                    )
+
+                session.commit()
+
+        # Always VACUUM when entering this function (file size was over
+        # the cap). VACUUM cannot run inside a transaction, so use
+        # AUTOCOMMIT isolation. Checkpoint the WAL before and after so
+        # VACUUM sees committed pages and the final on-disk file
+        # accurately reflects the post-prune state.
+        try:
+            with self.engine.connect() as conn:
+                conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+                conn.execute(text("VACUUM"))
+                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+        except Exception:
+            LOG.exception("VACUUM failed; space not yet reclaimed")
+
+        return {
+            "runs_pruned":  runs_pruned,
+            "events_pruned": events_pruned,
+            "bytes_before": bytes_before,
+            "bytes_after":  self.database_size_bytes(),
+        }
+
     def touch_judgments(self, collector: str,
                         content_hashes: list[str], at: str) -> None:
         """Update ``last_seen_at`` for every judgment whose ``content_hash``
@@ -1236,12 +1373,14 @@ class Runner:
     def __init__(self, sink: Sink,
                  snapshot_collectors: list[SnapshotCollector],
                  streaming_collectors: list[StreamingCollector],
-                 judge: Judge, lookback_min: int):
+                 judge: Judge, lookback_min: int,
+                 max_db_bytes: int = 0):
         self.sink = sink
         self.snapshot_collectors = snapshot_collectors
         self.streaming_collectors = streaming_collectors
         self.judge = judge
         self.lookback_min = lookback_min
+        self.max_db_bytes = max_db_bytes  # 0 = unlimited
         self._streaming_workers: list[StreamingWorker] = []
         self.shutdown_event = threading.Event()
 
@@ -1283,6 +1422,21 @@ class Runner:
                 LOG.warning("collector=%s status=failed error=%s message=%s",
                             c.name, type(exc).__name__, str(exc)[:200])
         self.sink.end_run(ok, failed)
+
+        # Rotation: keep the DB under the configured size cap by pruning
+        # oldest completed runs and their child rows.
+        if self.max_db_bytes:
+            stats = self.sink.prune_to_size(self.max_db_bytes)
+            if stats["runs_pruned"] or stats["events_pruned"]:
+                LOG.info(
+                    "db_rotation: pruned runs=%d auth_events=%d  "
+                    "%.1fMB → %.1fMB (cap %.0fMB)",
+                    stats["runs_pruned"], stats["events_pruned"],
+                    stats["bytes_before"] / (1024 * 1024),
+                    stats["bytes_after"]  / (1024 * 1024),
+                    self.max_db_bytes / (1024 * 1024),
+                )
+
         return run_id, ok, failed
 
     def _run_collector(self, c: SnapshotCollector, run_id: str,
@@ -1651,8 +1805,9 @@ class TccCollector(SnapshotCollector):
                 "auth_reason", "last_modified"]
 
     def collect(self):
-        errors: list[str] = []
         produced = False
+        denied_scopes: list[str] = []
+        other_errors: list[str] = []
         for scope, path_str in TCC_SOURCES:
             path = expand(path_str)
             if not path.exists():
@@ -1662,12 +1817,26 @@ class TccCollector(SnapshotCollector):
                     produced = True
                     yield {"scope": str(scope), **row}
             except Exception as e:
-                errors.append(f"{scope.value}: {e}")
-        if errors and not produced:
+                # Use the underlying DBAPI error when SQLAlchemy wraps
+                # one; the wrapped str() carries the verbose
+                # "(Background on this error at: …)" footer that's
+                # useless to a dashboard user.
+                orig = getattr(e, "orig", e)
+                msg = str(orig)
+                if "authorization denied" in msg.lower():
+                    denied_scopes.append(scope.value)
+                else:
+                    other_errors.append(f"{scope.value}: {msg}")
+        if produced:
+            return
+        if denied_scopes:
             raise PermissionError(
-                "TCC.db unreadable (grant Full Disk Access): "
-                + "; ".join(errors)
+                "TCC.db read denied for " + ", ".join(denied_scopes)
+                + " — grant Full Disk Access to the running terminal/agent "
+                "in System Settings → Privacy & Security → Full Disk Access."
             )
+        if other_errors:
+            raise PermissionError("TCC.db unreadable: " + "; ".join(other_errors))
 
 
 class QuarantineCollector(SnapshotCollector):
@@ -1969,6 +2138,13 @@ def main() -> int:
                              f"(default: {DEFAULT_PROMPTS_PATH})")
     parser.add_argument("--no-streaming", action="store_true",
                         help="Disable streaming collectors (e.g. auth_events)")
+    parser.add_argument("--max-db-mb", type=int, default=1024,
+                        help="Approximate database-size cap in megabytes. "
+                             "After each cycle, oldest completed runs and "
+                             "the auth_events older than the new earliest "
+                             "run are deleted until the DB fits under the "
+                             "cap, then VACUUM reclaims the space. Pass 0 "
+                             "to disable rotation. Default: 1024 (1 GB).")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -2004,7 +2180,8 @@ def main() -> int:
             [] if args.no_streaming else build_streaming_collectors(prompts)
         )
         runner = Runner(sink, snapshot_collectors, streaming_collectors,
-                        judge, args.lookback_min)
+                        judge, args.lookback_min,
+                        max_db_bytes=max(0, args.max_db_mb) * 1024 * 1024)
         runner.setup()
 
         if args.once:

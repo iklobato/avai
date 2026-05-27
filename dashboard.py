@@ -387,6 +387,42 @@ def system_integrity(session: Session, run_id: str):
     ).scalar_one_or_none()
 
 
+def new_alerts(session: Session, since: str | None,
+               limit: int = 50) -> list[dict]:
+    """Return malicious / suspicious judgements created after ``since``,
+    newest first. Drives the browser-side toast + beep alert. Each
+    item carries enough context to render a self-contained card
+    (verdict, collector, category, reasoning, remediation, artifact)
+    without requiring a follow-up request.
+
+    Note: this returns *judgements*, not snapshot rows. A judgement is
+    created exactly once per unique content_hash. So the same artifact
+    won't alert twice across runs (the dedupe is intrinsic).
+    """
+    stmt = select(Judgement).where(
+        Judgement.verdict.in_(("malicious", "suspicious"))
+    )
+    if since:
+        stmt = stmt.where(Judgement.created_at > since)
+    stmt = stmt.order_by(desc(Judgement.created_at)).limit(limit)
+
+    items = []
+    for j in session.execute(stmt).scalars():
+        _, artifact = _row_and_artifact(session, j)
+        items.append({
+            "content_hash": j.content_hash,
+            "collector":    j.collector,
+            "verdict":      j.verdict,
+            "category":     j.category or "none",
+            "confidence":   j.confidence or 0.0,
+            "reasoning":    j.reasoning or "",
+            "remediation":  j.remediation or "",
+            "created_at":   j.created_at,
+            "artifact":     artifact,
+        })
+    return items
+
+
 def verdict_timeseries(session: Session, hours: int = 12) -> dict:
     """Return verdict counts grouped per-hour bucket over the last N hours.
     Returns: {"labels": [...iso hours...], "datasets": {verdict: [counts...]}}
@@ -534,6 +570,23 @@ def fragment_runs():
 def api_chart_verdicts():
     with _session() as s:
         return jsonify(verdict_timeseries(s, hours=12))
+
+
+@app.route("/api/notifications/new")
+def api_notifications_new():
+    """Return malicious/suspicious judgements created after ``?since``.
+    The client supplies its last-seen timestamp (persisted in
+    localStorage). The response also includes ``now`` so the client can
+    advance its cursor even when there are no new items, avoiding
+    re-alerting on the same gap if the timestamp ever changed."""
+    since = request.args.get("since", "")
+    with _session() as s:
+        items = new_alerts(s, since=since or None)
+    return jsonify({
+        "since": since,
+        "items": items,
+        "now":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
 
 
 # ============================================================================
