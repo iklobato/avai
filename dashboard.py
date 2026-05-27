@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, current_app, jsonify, render_template, request
-from sqlalchemy import create_engine, desc, func, select
+from sqlalchemy import asc, case, create_engine, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 # Reuse models from host_monitor.py — single source of schema truth.
@@ -93,11 +93,34 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
 
 SEVERITY_ORDER = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3}
 VERDICTS = ("malicious", "suspicious", "unknown", "benign")
+PER_PAGE_OPTIONS = (10, 25, 50, 100)
+DEFAULT_PER_PAGE = 25
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "host_monitor.db"
 
 app = Flask(__name__)
 app.config["DB_PATH"] = str(DEFAULT_DB_PATH)
+
+
+def _relative_time(iso_string: str) -> str:
+    """Short relative-time string like '5m ago' for an ISO timestamp."""
+    if not iso_string:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_string)
+    except (ValueError, TypeError):
+        return str(iso_string)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    seconds = int((datetime.now(timezone.utc) - dt).total_seconds())
+    if seconds < 0:    return "just now"
+    if seconds < 60:   return f"{seconds}s ago"
+    if seconds < 3600: return f"{seconds // 60}m ago"
+    if seconds < 86400: return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+app.add_template_filter(_relative_time, "relative_time")
 
 
 def _engine():
@@ -164,18 +187,93 @@ def _artifact_for(session: Session, j: Judgement) -> str:
     return " · ".join(parts)
 
 
-def findings(session: Session, verdict_filter: str | None = None,
-             limit: int = 200) -> list[dict]:
+_SEVERITY_CASE = case(
+    {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3},
+    value=Judgement.verdict,
+    else_=99,
+)
+
+_SORT_FIELDS = {
+    "severity":   _SEVERITY_CASE,
+    "verdict":    Judgement.verdict,
+    "collector":  Judgement.collector,
+    "category":   Judgement.category,
+    "confidence": Judgement.confidence,
+    "judged":     Judgement.created_at,
+}
+
+
+def collector_options(session: Session) -> list[str]:
+    rows = session.execute(
+        select(Judgement.collector).distinct().order_by(Judgement.collector)
+    ).all()
+    return [r[0] for r in rows if r[0]]
+
+
+def category_options(session: Session) -> list[str]:
+    rows = session.execute(
+        select(Judgement.category)
+        .where(Judgement.category.is_not(None))
+        .distinct()
+        .order_by(Judgement.category)
+    ).all()
+    return [r[0] for r in rows if r[0]]
+
+
+def findings(session: Session, *,
+             verdict: str = "",
+             collector: str = "",
+             category: str = "",
+             search: str = "",
+             sort: str = "severity",
+             order: str = "desc",
+             page: int = 1,
+             per_page: int = DEFAULT_PER_PAGE) -> dict:
+    """Paginated, filterable, sortable findings query.
+
+    Returns ``{items, total, page, per_page, total_pages}``.
+    """
     stmt = select(Judgement)
-    if verdict_filter and verdict_filter in VERDICTS:
-        stmt = stmt.where(Judgement.verdict == verdict_filter)
+
+    if verdict and verdict in VERDICTS:
+        stmt = stmt.where(Judgement.verdict == verdict)
     else:
         stmt = stmt.where(Judgement.verdict != "benign")
-    stmt = stmt.order_by(desc(Judgement.created_at)).limit(limit)
+    if collector:
+        stmt = stmt.where(Judgement.collector == collector)
+    if category:
+        stmt = stmt.where(Judgement.category == category)
+    if search:
+        like = f"%{search.lower()}%"
+        stmt = stmt.where(or_(
+            func.lower(Judgement.reasoning).like(like),
+            func.lower(Judgement.remediation).like(like),
+            func.lower(Judgement.collector).like(like),
+            func.lower(Judgement.category).like(like),
+        ))
+
+    total = session.execute(
+        select(func.count()).select_from(stmt.subquery())
+    ).scalar() or 0
+
+    sort_col = _SORT_FIELDS.get(sort, _SEVERITY_CASE)
+    if sort == "severity":
+        # severity ascending + confidence descending is the natural pairing
+        stmt = stmt.order_by(_SEVERITY_CASE.asc(),
+                             Judgement.confidence.desc(),
+                             Judgement.created_at.desc())
+    else:
+        direction = asc if order == "asc" else desc
+        stmt = stmt.order_by(direction(sort_col), Judgement.created_at.desc())
+
+    per_page = max(1, min(per_page, 200))
+    page = max(1, page)
+    stmt = stmt.offset((page - 1) * per_page).limit(per_page)
+
     raw = session.execute(stmt).scalars().all()
-    out = []
+    items = []
     for j in raw:
-        out.append({
+        items.append({
             "verdict":     j.verdict,
             "collector":   j.collector,
             "category":    j.category or "none",
@@ -185,11 +283,14 @@ def findings(session: Session, verdict_filter: str | None = None,
             "created_at":  j.created_at,
             "artifact":    _artifact_for(session, j),
         })
-    out.sort(key=lambda f: (
-        SEVERITY_ORDER.get(f["verdict"], 99),
-        -f["confidence"],
-    ))
-    return out
+
+    return {
+        "items":       items,
+        "total":       total,
+        "page":        page,
+        "per_page":    per_page,
+        "total_pages": max(1, (total + per_page - 1) // per_page),
+    }
 
 
 def row_counts(session: Session, since: str) -> list[dict]:
@@ -298,14 +399,46 @@ def fragment_errors():
         )
 
 
+def _int_arg(name: str, default: int) -> int:
+    raw = request.args.get(name, "")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 @app.route("/fragments/findings")
 def fragment_findings():
-    verdict = request.args.get("verdict", "")
+    verdict   = request.args.get("verdict", "")
+    collector = request.args.get("collector", "")
+    category  = request.args.get("category", "")
+    search    = request.args.get("q", "")
+    sort      = request.args.get("sort", "severity")
+    order     = request.args.get("order", "desc")
+    page      = _int_arg("page", 1)
+    per_page  = _int_arg("per_page", DEFAULT_PER_PAGE)
+
     with _session() as s:
+        result = findings(s, verdict=verdict, collector=collector,
+                          category=category, search=search,
+                          sort=sort, order=order,
+                          page=page, per_page=per_page)
         return render_template(
             "partials/_findings.html",
-            findings=findings(s, verdict_filter=verdict or None),
+            findings=result["items"],
+            total=result["total"],
+            page=result["page"],
+            per_page=result["per_page"],
+            total_pages=result["total_pages"],
             verdict_filter=verdict,
+            collector_filter=collector,
+            category_filter=category,
+            q=search,
+            sort=sort,
+            order=order,
+            collector_options=collector_options(s),
+            category_options=category_options(s),
+            per_page_options=PER_PAGE_OPTIONS,
         )
 
 

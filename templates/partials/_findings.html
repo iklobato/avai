@@ -1,43 +1,228 @@
 {% from "partials/_macros.html" import verdict_pill %}
 
-{% if findings %}
-  <div class="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
-    <table class="w-full text-sm">
-      <thead class="bg-slate-800/40 text-slate-500 uppercase tracking-wider text-[10px]">
-        <tr>
-          <th class="text-left  font-semibold px-3 py-2 w-24">verdict</th>
-          <th class="text-left  font-semibold px-3 py-2">collector</th>
-          <th class="text-left  font-semibold px-3 py-2">category</th>
-          <th class="text-right font-semibold px-3 py-2 w-16">conf</th>
-          <th class="text-left  font-semibold px-3 py-2">artifact</th>
-          <th class="text-left  font-semibold px-3 py-2">reasoning / fix</th>
-        </tr>
-      </thead>
-      <tbody class="divide-y divide-slate-800/80">
-        {% for f in findings %}
-          <tr class="hover:bg-slate-800/30 transition-colors">
-            <td class="px-3 py-2.5 align-top">{{ verdict_pill(f.verdict) }}</td>
-            <td class="px-3 py-2.5 align-top text-slate-300 font-mono text-xs">{{ f.collector }}</td>
-            <td class="px-3 py-2.5 align-top text-slate-400 text-xs">{{ f.category }}</td>
-            <td class="px-3 py-2.5 align-top text-right font-mono text-slate-300 tabular-nums text-xs">{{ "%.2f"|format(f.confidence) }}</td>
-            <td class="px-3 py-2.5 align-top font-mono text-slate-300 text-xs max-w-[20rem] truncate" title="{{ f.artifact }}">{{ f.artifact }}</td>
-            <td class="px-3 py-2.5 align-top">
-              <div class="text-slate-200">{{ f.reasoning }}</div>
-              {% if f.remediation %}
-                <div class="mt-1.5 pt-1.5 border-t border-dashed border-slate-700/60 text-xs text-slate-300 leading-relaxed">
-                  <span class="inline-block mr-2 px-1.5 py-0.5 rounded bg-sky-900/40 text-sky-300 text-[9px] font-semibold uppercase tracking-wider align-middle">
-                    fix
-                  </span>{{ f.remediation }}
-                </div>
-              {% endif %}
-            </td>
+{# ----- shared HTMX attrs for any interaction targeting #findings ----- #}
+{% set hx_common = 'hx-get="/fragments/findings" hx-target="#findings" hx-swap="innerHTML" hx-include="#findings-filters"' %}
+
+{#
+  Confidence bar color tracks the verdict so the bar reinforces severity
+  at a glance (red for malicious, amber for suspicious, etc.).
+#}
+{% set conf_color = {
+  'malicious':  'bg-red-500',
+  'suspicious': 'bg-amber-500',
+  'unknown':    'bg-slate-500',
+  'benign':     'bg-emerald-500',
+} %}
+
+{#
+  Sort-header macro: clicking toggles asc/desc on the same column,
+  always resets to page 1. Active column shows a small arrow.
+#}
+{% macro sort_th(col, label, extra='') %}
+  {% set next_order = 'desc' if (sort == col and order == 'asc') else ('asc' if sort == col else 'desc') %}
+  <th class="px-3 py-2 text-left font-semibold {{ extra }}">
+    <button type="button"
+            class="inline-flex items-center gap-1 hover:text-slate-200 transition-colors"
+            hx-get="/fragments/findings"
+            hx-target="#findings"
+            hx-include="#findings-filters"
+            hx-vals='{"sort": "{{ col }}", "order": "{{ next_order }}", "page": 1}'>
+      {{ label }}
+      {% if sort == col %}
+        <span class="text-sky-400">{% if order == 'asc' %}↑{% else %}↓{% endif %}</span>
+      {% else %}
+        <span class="text-slate-700">↕</span>
+      {% endif %}
+    </button>
+  </th>
+{% endmacro %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+
+  {# =========================== filter bar =========================== #}
+  <form id="findings-filters"
+        class="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+
+    {# state mirrored as hidden inputs so hx-include carries it everywhere #}
+    <input type="hidden" name="sort"  value="{{ sort }}">
+    <input type="hidden" name="order" value="{{ order }}">
+    <input type="hidden" name="page"  value="{{ page }}">
+
+    <input type="search"
+           name="q"
+           value="{{ q }}"
+           placeholder="search reasoning / fix / collector…"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-64 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/findings"
+           hx-target="#findings"
+           hx-include="#findings-filters"
+           hx-trigger="keyup changed delay:300ms, search"
+           hx-vals='{"page": 1}'>
+
+    <select name="verdict"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/findings"
+            hx-target="#findings"
+            hx-include="#findings-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value=""           {% if not verdict_filter %}selected{% endif %}>all non-benign</option>
+      <option value="malicious"  {% if verdict_filter == 'malicious'  %}selected{% endif %}>malicious</option>
+      <option value="suspicious" {% if verdict_filter == 'suspicious' %}selected{% endif %}>suspicious</option>
+      <option value="unknown"    {% if verdict_filter == 'unknown'    %}selected{% endif %}>unknown</option>
+      <option value="benign"     {% if verdict_filter == 'benign'     %}selected{% endif %}>benign (all)</option>
+    </select>
+
+    <select name="collector"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/findings"
+            hx-target="#findings"
+            hx-include="#findings-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value="">all collectors</option>
+      {% for c in collector_options %}
+        <option value="{{ c }}" {% if c == collector_filter %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="category"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/findings"
+            hx-target="#findings"
+            hx-include="#findings-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value="">all categories</option>
+      {% for c in category_options %}
+        <option value="{{ c }}" {% if c == category_filter %}selected{% endif %}>{{ c }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="per_page"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/findings"
+            hx-target="#findings"
+            hx-include="#findings-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      {% for n in per_page_options %}
+        <option value="{{ n }}" {% if n == per_page %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+
+    <div class="ml-auto text-slate-500 font-mono tabular-nums">
+      {% if total %}
+        {{ (page - 1) * per_page + 1 }}–{{ (page - 1) * per_page + findings|length }} of {{ total }}
+      {% else %}
+        0 findings
+      {% endif %}
+    </div>
+  </form>
+
+  {# =========================== table =========================== #}
+  {% if findings %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-800/40 text-slate-500 uppercase tracking-wider text-[10px]">
+          <tr>
+            {{ sort_th('severity',   'verdict',  'w-24') }}
+            {{ sort_th('collector',  'collector') }}
+            {{ sort_th('category',   'category') }}
+            {{ sort_th('confidence', 'conf',     'w-40') }}
+            <th class="px-3 py-2 text-left font-semibold">artifact</th>
+            {{ sort_th('judged',     'judged',   'text-right w-24') }}
+            <th class="px-3 py-2 w-10"></th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-{% else %}
-  <div class="bg-slate-900 border border-slate-800 rounded-lg p-10 text-center text-slate-500 italic">
-    no judgments yet — either the judge hasn't run, or nothing matches the filter
-  </div>
-{% endif %}
+        </thead>
+        <tbody class="divide-y divide-slate-800/80">
+          {% for f in findings %}
+            {% set idx = loop.index %}
+            {% set detail_id = "finding-detail-" ~ idx %}
+            <tr class="js-finding-row cursor-pointer hover:bg-slate-800/40 group transition-colors"
+                data-detail-id="{{ detail_id }}">
+              <td class="px-3 py-2 align-top">{{ verdict_pill(f.verdict) }}</td>
+              <td class="px-3 py-2 align-top text-slate-300 font-mono text-xs">{{ f.collector }}</td>
+              <td class="px-3 py-2 align-top text-slate-400 text-xs">{{ f.category }}</td>
+              <td class="px-3 py-2 align-top">
+                <div class="flex items-center gap-2">
+                  <div class="w-20 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                    <div class="h-full {{ conf_color.get(f.verdict, 'bg-slate-500') }}"
+                         style="width: {{ (f.confidence * 100) | round(0, 'floor') }}%"></div>
+                  </div>
+                  <span class="font-mono tabular-nums text-xs text-slate-300">
+                    {{ "%.2f"|format(f.confidence) }}
+                  </span>
+                </div>
+              </td>
+              <td class="px-3 py-2 align-top font-mono text-slate-300 text-xs max-w-[32rem] truncate"
+                  title="{{ f.artifact }}">{{ f.artifact or '—' }}</td>
+              <td class="px-3 py-2 align-top text-right text-slate-500 text-xs font-mono whitespace-nowrap"
+                  title="{{ f.created_at }}">{{ f.created_at | relative_time }}</td>
+              <td class="px-3 py-2 align-top text-center">
+                <span class="js-toggle-arrow text-slate-500 group-hover:text-sky-400 transition-colors text-lg leading-none">▸</span>
+              </td>
+            </tr>
+            <tr id="{{ detail_id }}" class="hidden bg-slate-950/60">
+              <td colspan="7" class="px-6 py-4">
+                <div class="pl-4 border-l-2 border-sky-700/70 space-y-3 max-w-5xl">
+                  <div>
+                    <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">reasoning</div>
+                    <div class="text-slate-200 leading-relaxed">{{ f.reasoning or '—' }}</div>
+                  </div>
+                  {% if f.remediation %}
+                    <div>
+                      <div class="text-[10px] uppercase tracking-widest text-sky-400 mb-1">remediation</div>
+                      <div class="text-slate-100 leading-relaxed">{{ f.remediation }}</div>
+                    </div>
+                  {% endif %}
+                  <div class="text-xs text-slate-500 font-mono pt-1 border-t border-slate-800/60">
+                    artifact: <span class="text-slate-400">{{ f.artifact or '—' }}</span>
+                    &nbsp;·&nbsp;
+                    judged: <span class="text-slate-400">{{ f.created_at }}</span>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {# =========================== pagination =========================== #}
+    <div class="px-4 py-3 border-t border-slate-800 flex items-center justify-between text-xs">
+      <button type="button"
+              class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              {% if page <= 1 %}disabled{% endif %}
+              hx-get="/fragments/findings"
+              hx-target="#findings"
+              hx-include="#findings-filters"
+              hx-vals='{"page": {{ page - 1 }}}'>
+        ← prev
+      </button>
+
+      <div class="flex items-center gap-2 text-slate-400">
+        <span>page</span>
+        <span class="font-mono tabular-nums text-slate-200">{{ page }}</span>
+        <span>of</span>
+        <span class="font-mono tabular-nums">{{ total_pages }}</span>
+      </div>
+
+      <button type="button"
+              class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              {% if page >= total_pages %}disabled{% endif %}
+              hx-get="/fragments/findings"
+              hx-target="#findings"
+              hx-include="#findings-filters"
+              hx-vals='{"page": {{ page + 1 }}}'>
+        next →
+      </button>
+    </div>
+  {% else %}
+    <div class="p-10 text-center text-slate-500 italic">
+      no findings match the current filters
+    </div>
+  {% endif %}
+</div>

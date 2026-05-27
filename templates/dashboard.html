@@ -80,31 +80,19 @@
       </div>
     </section>
 
-    {# ---------- findings ---------- #}
+    {# ---------- findings (smart table — filters + sort + pagination in partial) ---------- #}
     <section>
-      <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+      <div class="flex items-center justify-between mb-3">
         <h2 class="text-[10px] uppercase tracking-widest text-slate-500">findings</h2>
-        <div class="flex items-center gap-2 text-xs text-slate-400">
-          <label for="verdict-filter">verdict:</label>
-          <select id="verdict-filter" name="verdict"
-                  class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-slate-500"
-                  hx-get="/fragments/findings"
-                  hx-target="#findings"
-                  hx-trigger="change"
-                  hx-include="this">
-            <option value="">all non-benign</option>
-            <option value="malicious">malicious</option>
-            <option value="suspicious">suspicious</option>
-            <option value="unknown">unknown</option>
-            <option value="benign">benign (all)</option>
-          </select>
-        </div>
       </div>
       <div id="findings"
            hx-get="/fragments/findings"
-           hx-trigger="load, every 20s"
-           hx-include="#verdict-filter"
-           hx-swap="innerHTML"></div>
+           hx-trigger="load"
+           hx-swap="innerHTML">
+        <div class="bg-slate-900 border border-slate-800 rounded-lg p-6 text-slate-500 italic">
+          loading findings…
+        </div>
+      </div>
     </section>
 
     {# ---------- activity: row counts + recent runs ---------- #}
@@ -203,6 +191,24 @@
     }
     refreshChart();
     setInterval(refreshChart, 30000);
+
+    // ---- Finding row expand/collapse (event delegation so it survives HTMX swaps) ----
+    document.body.addEventListener('click', (e) => {
+      const row = e.target.closest('.js-finding-row');
+      if (!row) return;
+      // Ignore clicks on inner interactive elements (filter/sort/pager controls).
+      if (e.target.closest('button, a, input, select, label')) return;
+      const id = row.dataset.detailId;
+      const detail = document.getElementById(id);
+      if (!detail) return;
+      detail.classList.toggle('hidden');
+      const arrow = row.querySelector('.js-toggle-arrow');
+      if (arrow) {
+        const open = !detail.classList.contains('hidden');
+        arrow.textContent = open ? '▾' : '▸';
+        arrow.classList.toggle('text-sky-400', open);
+      }
+    });
   </script>
 </body>
 </html>
