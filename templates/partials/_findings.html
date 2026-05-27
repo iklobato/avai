@@ -159,7 +159,7 @@
             {% set idx = loop.index %}
             {% set detail_id = "finding-detail-" ~ idx %}
             {% set resolved = f.status == 'resolved' %}
-            <tr class="js-finding-row cursor-pointer hover:bg-slate-800/40 group transition-colors {% if resolved %}opacity-60{% endif %}"
+            <tr class="js-expandable-row cursor-pointer hover:bg-slate-800/40 group transition-colors {% if resolved %}opacity-60{% endif %}"
                 data-detail-id="{{ detail_id }}">
               <td class="px-3 py-2 align-top">{{ verdict_pill(f.verdict) }}</td>
               <td class="px-3 py-2 align-top">

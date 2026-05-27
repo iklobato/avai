@@ -6,18 +6,34 @@
     <table class="w-full text-xs">
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
-          <th class="text-left font-semibold pb-2">collector</th>
-          <th class="text-left font-semibold pb-2">error</th>
-          <th class="text-left font-semibold pb-2">message</th>
+          <th class="text-left  font-semibold pb-2">collector</th>
+          <th class="text-left  font-semibold pb-2">error</th>
+          <th class="text-right font-semibold pb-2 w-12"></th>
         </tr>
       </thead>
       <tbody class="divide-y divide-slate-800/80">
         {% for e in errors %}
-          <tr>
-            <td class="py-1.5 text-slate-300">{{ e.collector }}</td>
-            <td class="py-1.5 text-red-400 font-mono">{{ e.error_class }}</td>
-            <td class="py-1.5 text-slate-400 truncate max-w-[16rem]" title="{{ e.message }}">
-              {{ (e.message or '')[:140] }}
+          {% set detail_id = "error-detail-" ~ loop.index %}
+          <tr class="js-expandable-row cursor-pointer hover:bg-slate-800/40 group transition-colors"
+              data-detail-id="{{ detail_id }}">
+            <td class="py-2 text-slate-300">{{ e.collector }}</td>
+            <td class="py-2 text-red-400 font-mono">{{ e.error_class }}</td>
+            <td class="py-2 text-center">
+              <span class="js-toggle-arrow text-slate-500 group-hover:text-sky-400 transition-colors text-lg leading-none">▸</span>
+            </td>
+          </tr>
+          <tr id="{{ detail_id }}" class="hidden bg-slate-950/60">
+            <td colspan="3" class="py-3">
+              <div class="pl-3 border-l-2 border-red-700/70 space-y-2">
+                <div>
+                  <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">message</div>
+                  <pre class="whitespace-pre-wrap font-mono text-xs text-slate-200 bg-slate-950/60 border border-slate-800 rounded p-2 max-h-64 overflow-auto">{{ e.message or '—' }}</pre>
+                </div>
+                <div class="text-[11px] text-slate-500 font-mono leading-relaxed pt-1 border-t border-slate-800/60">
+                  occurred_at: <span class="text-slate-400">{{ e.occurred_at }} ({{ e.occurred_at | relative_time }})</span><br>
+                  run_id: <span class="text-slate-400">{{ e.run_id[:12] }}…</span>
+                </div>
+              </div>
             </td>
           </tr>
         {% endfor %}

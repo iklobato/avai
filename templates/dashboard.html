@@ -190,9 +190,12 @@
     refreshChart();
     setInterval(refreshChart, 30000);
 
-    // ---- Finding row expand/collapse (event delegation so it survives HTMX swaps) ----
+    // ---- Generic expandable-row toggle ----
+    // Any element with class `.js-expandable-row` and a `data-detail-id`
+    // attribute will toggle the matching #<id> detail row on click.
+    // Event delegation on body so it survives HTMX swaps.
     document.body.addEventListener('click', (e) => {
-      const row = e.target.closest('.js-finding-row');
+      const row = e.target.closest('.js-expandable-row');
       if (!row) return;
       // Ignore clicks on inner interactive elements (filter/sort/pager controls).
       if (e.target.closest('button, a, input, select, label')) return;
