@@ -106,7 +106,7 @@ The `--profile linux` flag activates the `monitor` service, which:
 - bind-mounts `/proc`, `/sys`, `/etc`, `/var/log`, `/home` read-only;
 - writes to the same SQLite DB the dashboard reads.
 
-Collector coverage on Linux (Phase 1):
+Collector coverage on Linux (Phases 1 + 2):
 
 | Collector | Linux |
 |---|---|
@@ -114,7 +114,8 @@ Collector coverage on Linux (Phase 1):
 | file_integrity | ✓ (Linux paths: `/etc/{passwd,shadow,sudoers,crontab}`, `~/.bashrc`, SSH config, …) |
 | browser_extensions | ✓ (XDG paths: `~/.config/google-chrome`, `~/.mozilla/firefox`, …) |
 | installed_apps | ✓ (`dpkg-query -W` + `/usr/share/applications/*.desktop`) |
-| launch_items, auth_events | ✗ (Phase 2: systemd units + `journalctl -f`) |
+| launch_items | ✓ (systemd unit / timer files + `/etc/crontab` + `/etc/cron.d` + `/var/spool/cron`) |
+| auth_events (streaming) | ✓ (`journalctl -f --output=json`, filtered to auth/authpriv + sshd / systemd-logind / sudo / su / polkitd) |
 | usb, bluetooth, wifi, system_integrity | ✗ (Phase 3: udev / D-Bus / iw / SELinux+AppArmor+ufw) |
 | tcc_permissions, quarantine_events | ✗ (no Linux equivalents) |
 

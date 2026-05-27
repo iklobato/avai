@@ -38,11 +38,14 @@ recommended) litellm + a provider API key (``ANTHROPIC_API_KEY``).
 from __future__ import annotations
 
 import argparse
+import configparser
 import hashlib
 import json
 import logging
 import os
 import plistlib
+import shlex
+import shutil
 import signal
 import socket
 import sqlite3
@@ -2146,10 +2149,9 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
             }
 
     def _desktop_rows(self):
-        # XDG desktop entries are simple INI files, but Python's
-        # configparser handles them. We extract the [Desktop Entry]
-        # section's Name, Exec, Comment, Categories.
-        import configparser
+        # XDG desktop entries are simple INI files; configparser
+        # handles them. We extract [Desktop Entry] Name / Exec /
+        # Comment / Categories.
         roots = [
             Path("/usr/share/applications"),
             Path("/usr/local/share/applications"),
@@ -2191,6 +2193,358 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
                 }
 
 
+class LinuxLaunchItemsCollector(SnapshotCollector):
+    """Linux equivalent of :class:`LaunchItemsCollector`.
+
+    Sources, all parsed structurally (no regex):
+
+    - **systemd unit files** in (in this precedence order, first wins
+      for duplicate names) ``/etc/systemd/system``,
+      ``/run/systemd/system``, ``/lib/systemd/system``,
+      ``/usr/lib/systemd/system``, ``~/.config/systemd/user``. Both
+      ``.service`` and ``.timer`` units are read. INI format parsed
+      via :mod:`configparser`. The ``[Unit] / [Service] / [Install] /
+      [Timer]`` sections are captured verbatim in ``raw_json``;
+      key fields land in the existing ``launch_items`` columns.
+
+    - **cron entries** from ``/etc/crontab``, drop-in files in
+      ``/etc/cron.d/*``, and per-user crontabs in ``/var/spool/cron``
+      and ``/var/spool/cron/crontabs`` (root-readable). System-wide
+      crontabs carry a user column (field 6); user crontabs don't.
+
+    The ``scope`` column distinguishes sources:
+    ``system_service`` / ``user_service`` / ``system_timer`` /
+    ``user_timer`` / ``system_crontab`` / ``system_crontab_d`` /
+    ``user_crontab``.
+    """
+    name = "launch_items"
+    model = LaunchItemRow
+    judge_fields = ("scope", "label", "program", "program_arguments_json",
+                    "user_name", "run_at_load", "keep_alive")
+
+    # (scope, directory, glob). Directories searched in this order;
+    # later occurrences of the same unit filename are ignored (systemd
+    # itself layers these dirs with /etc winning over /lib).
+    _UNIT_DIRS = [
+        ("system_service", "/etc/systemd/system",       "*.service"),
+        ("system_service", "/run/systemd/system",       "*.service"),
+        ("system_service", "/lib/systemd/system",       "*.service"),
+        ("system_service", "/usr/lib/systemd/system",   "*.service"),
+        ("user_service",   "~/.config/systemd/user",    "*.service"),
+        ("system_timer",   "/etc/systemd/system",       "*.timer"),
+        ("system_timer",   "/lib/systemd/system",       "*.timer"),
+        ("system_timer",   "/usr/lib/systemd/system",   "*.timer"),
+        ("user_timer",     "~/.config/systemd/user",    "*.timer"),
+    ]
+
+    _CRON_FILE     = ("system_crontab", Path("/etc/crontab"))
+    _CRON_DROP_INS = [
+        ("system_crontab_d", Path("/etc/cron.d")),
+    ]
+    _USER_CRONS    = [
+        ("user_crontab", Path("/var/spool/cron")),
+        ("user_crontab", Path("/var/spool/cron/crontabs")),
+    ]
+
+    _ALWAYS_RESTART = {"always", "on-failure", "on-success",
+                       "on-abnormal", "on-abort", "on-watchdog"}
+
+    def collect(self):
+        # systemd units
+        seen_units: set[str] = set()
+        for scope, dir_str, pattern in self._UNIT_DIRS:
+            d = expand(dir_str)
+            if not d.is_dir():
+                continue
+            try:
+                paths = list(d.glob(pattern))
+            except PermissionError:
+                continue
+            for path in paths:
+                if path.name in seen_units:
+                    continue
+                seen_units.add(path.name)
+                row = self._unit_row(scope, path)
+                if row is not None:
+                    yield row
+
+        # /etc/crontab — single file, has-user-column form
+        scope, p = self._CRON_FILE
+        if p.is_file():
+            yield from self._cron_rows(scope, p, has_user_col=True)
+
+        # /etc/cron.d/* — drop-in files, has-user-column form
+        for scope, d in self._CRON_DROP_INS:
+            if not d.is_dir():
+                continue
+            try:
+                files = list(d.iterdir())
+            except PermissionError:
+                continue
+            for f in files:
+                if not f.is_file() or f.name.startswith("."):
+                    continue
+                yield from self._cron_rows(scope, f, has_user_col=True)
+
+        # /var/spool/cron* — per-user crontabs (no user column inside).
+        # The filename IS the username.
+        for scope, d in self._USER_CRONS:
+            if not d.is_dir():
+                continue
+            try:
+                files = list(d.iterdir())
+            except PermissionError:
+                continue
+            for f in files:
+                if not f.is_file() or f.name.startswith("."):
+                    continue
+                yield from self._cron_rows(scope, f, has_user_col=False,
+                                           default_user=f.name)
+
+    @staticmethod
+    def _unit_row(scope: str, path: Path):
+        cp = configparser.ConfigParser(
+            interpolation=None, strict=False,
+            inline_comment_prefixes=("#", ";"),
+            comment_prefixes=("#", ";"),
+        )
+        try:
+            cp.read(path, encoding="utf-8")
+        except (configparser.Error, OSError):
+            return None
+        unit_sec    = dict(cp["Unit"])    if cp.has_section("Unit")    else {}
+        service_sec = dict(cp["Service"]) if cp.has_section("Service") else {}
+        install_sec = dict(cp["Install"]) if cp.has_section("Install") else {}
+        timer_sec   = dict(cp["Timer"])   if cp.has_section("Timer")   else {}
+
+        exec_start  = service_sec.get("ExecStart") or ""
+        on_calendar = timer_sec.get("OnCalendar")
+
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = None
+
+        try:
+            args = shlex.split(exec_start) if exec_start else []
+        except ValueError:
+            args = [exec_start]
+
+        return {
+            "scope":                        scope,
+            "path":                         str(path),
+            "label":                        path.stem,
+            "program":                      exec_start or on_calendar,
+            "program_arguments_json":       json.dumps(args),
+            "run_at_load":                  int(bool(install_sec.get("WantedBy"))),
+            "keep_alive":                   int(
+                service_sec.get("Restart", "no").strip()
+                in LinuxLaunchItemsCollector._ALWAYS_RESTART
+            ),
+            "start_interval":               None,
+            "start_calendar_interval_json": json.dumps(on_calendar)
+                                            if on_calendar else None,
+            "user_name":                    service_sec.get("User"),
+            "group_name":                   service_sec.get("Group"),
+            "sha256":                       sha256_file(path),
+            "mtime":                        mtime,
+            "raw_json":                     json.dumps({
+                "unit":    unit_sec,
+                "service": service_sec,
+                "install": install_sec,
+                "timer":   timer_sec,
+            }),
+        }
+
+    @staticmethod
+    def _cron_rows(scope: str, path: Path, has_user_col: bool,
+                   default_user: Optional[str] = None):
+        """Yield one row per executable crontab line.
+
+        crontab(5) format:
+          - 5 schedule fields + [user] + command  (system: /etc/crontab,
+            /etc/cron.d)
+          - 5 schedule fields + command           (user crontabs)
+          - or a @keyword (e.g. ``@reboot``) replacing the schedule.
+        Lines starting with ``#`` and blank lines are skipped.
+        Environment-assignment lines (``KEY=value``) are also skipped —
+        they're not jobs.
+        """
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except (OSError, UnicodeError):
+            return
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = None
+        digest = sha256_file(path)
+
+        for lineno, raw in enumerate(text.splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            # KEY=VALUE assignments aren't jobs.
+            if "=" in line.split(None, 1)[0]:
+                continue
+
+            if line.startswith("@"):
+                tokens = line.split(None, 2 if has_user_col else 1)
+                need = 3 if has_user_col else 2
+                if len(tokens) < need:
+                    continue
+                schedule = tokens[0]
+                user     = tokens[1] if has_user_col else default_user
+                command  = tokens[-1]
+            else:
+                # 5 schedule fields + optional user + command (which may
+                # contain whitespace — preserve via maxsplit).
+                need = 7 if has_user_col else 6
+                tokens = line.split(None, need - 1)
+                if len(tokens) < need:
+                    continue
+                schedule = " ".join(tokens[:5])
+                user     = tokens[5] if has_user_col else default_user
+                command  = tokens[-1]
+
+            try:
+                args = shlex.split(command)
+            except ValueError:
+                args = [command]
+
+            yield {
+                "scope":                        scope,
+                "path":                         f"{path}:{lineno}",
+                "label":                        f"cron:{path.name}:{lineno}",
+                "program":                      command,
+                "program_arguments_json":       json.dumps(args),
+                "run_at_load":                  int(schedule == "@reboot"),
+                "keep_alive":                   0,
+                "start_interval":               None,
+                "start_calendar_interval_json": json.dumps({"schedule": schedule}),
+                "user_name":                    user,
+                "group_name":                   None,
+                "sha256":                       digest,
+                "mtime":                        mtime,
+                "raw_json":                     json.dumps({
+                    "source":   "cron",
+                    "schedule": schedule,
+                    "user":     user,
+                    "command":  command,
+                    "line":     lineno,
+                }),
+            }
+
+
+class LinuxAuthEventsCollector(StreamingCollector):
+    """Linux equivalent of :class:`AuthEventsCollector` — tails
+    ``journalctl -f --output=json`` filtered to security-relevant
+    sources (auth+authpriv syslog facilities, sshd, systemd-logind,
+    sudo, su, polkitd). Yields rows in the same shape as the macOS
+    streaming collector so the dashboard treats them identically.
+
+    The OR semantics across different journalctl matchers require
+    inserting ``+`` between AND-groups; same-field matchers within a
+    group OR by default.
+    """
+    name = "auth_events"
+    model = AuthEventRow
+
+    _MATCH_GROUPS = [
+        ["SYSLOG_FACILITY=4", "SYSLOG_FACILITY=10"],  # auth + authpriv
+        ["_SYSTEMD_UNIT=sshd.service"],
+        ["_SYSTEMD_UNIT=systemd-logind.service"],
+        ["_COMM=sudo"],
+        ["_COMM=su"],
+        ["_COMM=polkitd"],
+        ["_COMM=login"],
+    ]
+
+    def __init__(self, judge_hints: str = "", priority: str = "info"):
+        super().__init__(judge_hints=judge_hints)
+        self.priority = priority
+
+    def _cmd(self) -> list[str]:
+        cmd = ["journalctl", "-f", "--output=json", "--no-pager",
+               f"--priority={self.priority}"]
+        for i, group in enumerate(self._MATCH_GROUPS):
+            if i > 0:
+                cmd.append("+")
+            cmd.extend(group)
+        return cmd
+
+    def stream(self, stop_event: threading.Event):
+        proc = subprocess.Popen(
+            self._cmd(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+
+        def _terminator():
+            stop_event.wait()
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+        threading.Thread(target=_terminator, daemon=True,
+                         name="journalctl-killer").start()
+
+        try:
+            for line in proc.stdout:
+                if stop_event.is_set():
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                yield self._row_from_journal_event(e)
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+    @staticmethod
+    def _row_from_journal_event(e: dict) -> dict:
+        # journalctl --output=json gives __REALTIME_TIMESTAMP in
+        # microseconds since the epoch (as a string).
+        ts_us = e.get("__REALTIME_TIMESTAMP")
+        ts = None
+        if ts_us:
+            try:
+                ts = datetime.fromtimestamp(
+                    int(ts_us) / 1_000_000, tz=timezone.utc
+                ).isoformat(timespec="seconds")
+            except (TypeError, ValueError):
+                pass
+
+        try:
+            pid = int(e["_PID"]) if e.get("_PID") else None
+        except (TypeError, ValueError):
+            pid = None
+
+        return {
+            "event_timestamp": ts,
+            "process":         e.get("_EXE") or e.get("_COMM"),
+            "subsystem":       e.get("_SYSTEMD_UNIT") or "syslog",
+            "category":        str(e.get("SYSLOG_FACILITY") or ""),
+            "event_type":      f"priority={e.get('PRIORITY', '?')}",
+            "event_message":   e.get("MESSAGE"),
+            "pid":             pid,
+            "raw_json":        json.dumps(e),
+        }
+
+
 # ============================================================================
 # Composition + entry point
 # ============================================================================
@@ -2216,22 +2570,22 @@ def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
 
 
 def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
-    """Phase-1 Linux collector set.
+    """Linux snapshot collector set (Phases 1 + 2).
 
     Cross-platform via psutil: processes, network connections, listening
     ports, network interfaces.
 
     Linux-specific paths reusing the same collector classes:
-    file_integrity (Linux WATCHED_FILES) and browser_extensions (XDG /
-    ~/.mozilla profiles).
+    file_integrity (Linux WATCHED_FILES) and browser_extensions
+    (XDG / ~/.mozilla profiles).
 
-    Linux-specific implementation: installed_apps via dpkg-query +
-    XDG .desktop entries.
+    Linux-specific implementations:
+      - installed_apps via dpkg-query + XDG .desktop entries (Phase 1)
+      - launch_items via systemd unit files + cron entries (Phase 2)
 
-    Not yet ported (Phase 2/3): launch_items (systemd), auth_events
-    streaming (journalctl), usb/bluetooth/wifi (udev/D-Bus/iw),
-    system_integrity (SELinux/AppArmor/ufw). Dropped: tcc_permissions
-    and quarantine_events (no Linux equivalents).
+    Not yet ported (Phase 3): usb_devices, bluetooth_devices,
+    wifi_state, system_integrity (udev/D-Bus/iw/SELinux+AppArmor+ufw).
+    Dropped: tcc_permissions, quarantine_events (no Linux equivalents).
     """
     h = prompts.hint_for
     return [
@@ -2239,6 +2593,7 @@ def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         NetworkConnectionsCollector(judge_hints=h("network_connections")),
         ListeningPortsCollector(judge_hints=h("listening_ports")),
         NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
+        LinuxLaunchItemsCollector(judge_hints=h("launch_items")),
         BrowserExtensionsCollector(
             judge_hints=h("browser_extensions"),
             profiles=BROWSER_PROFILES_LINUX,
@@ -2260,9 +2615,9 @@ def build_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
 def build_streaming_collectors(prompts: Prompts) -> list[StreamingCollector]:
     h = prompts.hint_for
     if IS_LINUX:
-        # Phase 2 work: journalctl-based AuthEventsCollector. For Phase
-        # 1, no streaming collectors on Linux.
-        return []
+        return [
+            LinuxAuthEventsCollector(judge_hints=h("auth_events")),
+        ]
     return [
         AuthEventsCollector(judge_hints=h("auth_events")),
     ]
