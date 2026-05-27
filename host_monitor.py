@@ -400,17 +400,20 @@ class NullJudge(Judge):
 
 
 class CompletionClient(ABC):
-    """Strategy for issuing an LLM chat completion. Returns the raw
-    response text — JSON parsing happens in the caller."""
+    """Strategy for issuing an LLM chat completion that returns
+    structured output matching a JSON schema. Returns a dict — no
+    text-level JSON parsing happens in the caller."""
 
     @abstractmethod
-    def complete(self, *, model: str, system: str, user: str,
-                 max_tokens: int, temperature: float) -> str: ...
+    def complete_structured(self, *, model: str, system: str, user: str,
+                            max_tokens: int, temperature: float,
+                            schema: dict, schema_name: str) -> dict: ...
 
 
 class LitellmClient(CompletionClient):
     """Multi-provider completion via litellm. Uses ANTHROPIC_API_KEY /
-    OPENAI_API_KEY / ... from the environment per litellm conventions."""
+    OPENAI_API_KEY / ... from the environment per litellm conventions.
+    Forces JSON output via ``response_format``."""
 
     def __init__(self):
         if not HAS_LITELLM:
@@ -418,7 +421,8 @@ class LitellmClient(CompletionClient):
                 "litellm is required for LitellmClient — pip install litellm"
             )
 
-    def complete(self, *, model, system, user, max_tokens, temperature):
+    def complete_structured(self, *, model, system, user, max_tokens,
+                            temperature, schema, schema_name):
         response = litellm.completion(
             model=model,
             messages=[
@@ -429,7 +433,7 @@ class LitellmClient(CompletionClient):
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        return response.choices[0].message.content
+        return json.loads(response.choices[0].message.content)
 
 
 class AnthropicOAuthClient(CompletionClient):
@@ -440,8 +444,9 @@ class AnthropicOAuthClient(CompletionClient):
     is incompatible with OAuth tokens.
 
     The Claude Code OAuth scope requires the system prompt to start with
-    the Claude Code identity line; otherwise the API returns an empty
-    response. We prepend it transparently.
+    the Claude Code identity line. Structured output is obtained via
+    ``tool_use`` (not free-text JSON) so we never have to strip markdown
+    fences or parse arbitrary text.
     """
 
     OAUTH_BETA_HEADER = "oauth-2025-04-20"
@@ -462,19 +467,33 @@ class AnthropicOAuthClient(CompletionClient):
             default_headers={"anthropic-beta": self.OAUTH_BETA_HEADER},
         )
 
-    def complete(self, *, model, system, user, max_tokens, temperature):
+    def complete_structured(self, *, model, system, user, max_tokens,
+                            temperature, schema, schema_name):
         # Strip litellm-style provider prefix if present.
         if "/" in model:
             model = model.split("/", 1)[1]
         full_system = f"{self.SYSTEM_PROMPT_PREFIX}\n\n{system}"
+        tool = {
+            "name": schema_name,
+            "description": f"Submit results matching the {schema_name} schema.",
+            "input_schema": schema,
+        }
         response = self._client.messages.create(
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
             system=full_system,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": schema_name},
             messages=[{"role": "user", "content": user}],
         )
-        return response.content[0].text if response.content else ""
+        for block in response.content:
+            if block.type == "tool_use" and block.name == schema_name:
+                return dict(block.input)
+        raise RuntimeError(
+            f"OAuth response had no tool_use block (stop_reason="
+            f"{response.stop_reason})"
+        )
 
 
 def build_completion_client() -> CompletionClient:
@@ -493,7 +512,41 @@ def build_completion_client() -> CompletionClient:
 class LlmJudge(Judge):
     """Threat judge backed by an LLM. Auth strategy is decided by
     ``build_completion_client()`` (OAuth → Anthropic SDK; API key →
-    litellm). Prompts are injected via the ``Prompts`` object."""
+    litellm). Prompts are injected via the ``Prompts`` object.
+
+    Structured output is enforced via the client's
+    ``complete_structured`` — JSON-mode for litellm, tool_use for OAuth.
+    Either way the caller receives a dict directly.
+    """
+
+    SCHEMA_NAME = "submit_judgments"
+
+    @classmethod
+    def _judgment_schema(cls) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "judgments": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index":      {"type": "integer"},
+                            "verdict":    {"type": "string",
+                                           "enum": [str(v) for v in Verdict]},
+                            "category":   {"type": "string",
+                                           "enum": [str(c) for c in ThreatCategory]},
+                            "confidence": {"type": "number",
+                                           "minimum": 0, "maximum": 1},
+                            "reasoning":  {"type": "string"},
+                        },
+                        "required": ["index", "verdict", "category",
+                                     "confidence", "reasoning"],
+                    },
+                },
+            },
+            "required": ["judgments"],
+        }
 
     def __init__(self, prompts: Prompts,
                  model: str = DEFAULT_JUDGE_MODEL,
@@ -510,6 +563,7 @@ class LlmJudge(Judge):
         self.max_tokens = max_tokens
         self._user_template = Template(prompts.user_template)
         self._client = client or build_completion_client()
+        self._schema = self._judgment_schema()
 
     @property
     def auth_mode(self) -> str:
@@ -548,14 +602,15 @@ class LlmJudge(Judge):
             hints=hints,
             entries=json.dumps(payload, ensure_ascii=False),
         )
-        content = self._client.complete(
+        parsed = self._client.complete_structured(
             model=self.model,
             system=self.prompts.system,
             user=user,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
+            schema=self._schema,
+            schema_name=self.SCHEMA_NAME,
         )
-        parsed = json.loads(content)
         return list(self._parse(parsed, batch, collector, now))
 
     def _parse(self, parsed, batch, collector, now):
