@@ -61,6 +61,18 @@
            hx-trigger="keyup changed delay:300ms, search"
            hx-vals='{"page": 1}'>
 
+    <select name="status"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/findings"
+            hx-target="#findings"
+            hx-include="#findings-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value="active"   {% if status_filter == 'active'   or not status_filter %}selected{% endif %}>active (still present)</option>
+      <option value="resolved" {% if status_filter == 'resolved' %}selected{% endif %}>resolved (gone)</option>
+      <option value="all"      {% if status_filter == 'all'      %}selected{% endif %}>active + resolved</option>
+    </select>
+
     <select name="verdict"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/findings"
@@ -116,6 +128,10 @@
     <div class="ml-auto text-slate-500 font-mono tabular-nums">
       {% if total %}
         {{ (page - 1) * per_page + 1 }}–{{ (page - 1) * per_page + findings|length }} of {{ total }}
+        {% if status_filter == 'resolved' %} resolved
+        {% elif status_filter == 'all' %} (active + resolved)
+        {% else %} active
+        {% endif %}
       {% else %}
         0 findings
       {% endif %}
@@ -129,6 +145,7 @@
         <thead class="bg-slate-800/40 text-slate-500 uppercase tracking-wider text-[10px]">
           <tr>
             {{ sort_th('severity',   'verdict',  'w-24') }}
+            <th class="px-3 py-2 text-left font-semibold w-20">status</th>
             {{ sort_th('collector',  'collector') }}
             {{ sort_th('category',   'category') }}
             {{ sort_th('confidence', 'conf',     'w-40') }}
@@ -141,9 +158,21 @@
           {% for f in findings %}
             {% set idx = loop.index %}
             {% set detail_id = "finding-detail-" ~ idx %}
-            <tr class="js-finding-row cursor-pointer hover:bg-slate-800/40 group transition-colors"
+            {% set resolved = f.status == 'resolved' %}
+            <tr class="js-finding-row cursor-pointer hover:bg-slate-800/40 group transition-colors {% if resolved %}opacity-60{% endif %}"
                 data-detail-id="{{ detail_id }}">
               <td class="px-3 py-2 align-top">{{ verdict_pill(f.verdict) }}</td>
+              <td class="px-3 py-2 align-top">
+                {% if resolved %}
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-sky-900/60 bg-sky-900/30 text-sky-300 text-[10px] font-semibold uppercase tracking-wider">
+                    <span class="text-sky-400">✓</span> resolved
+                  </span>
+                {% else %}
+                  <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-emerald-900/60 bg-emerald-900/30 text-emerald-300 text-[10px] font-semibold uppercase tracking-wider">
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> active
+                  </span>
+                {% endif %}
+              </td>
               <td class="px-3 py-2 align-top text-slate-300 font-mono text-xs">{{ f.collector }}</td>
               <td class="px-3 py-2 align-top text-slate-400 text-xs">{{ f.category }}</td>
               <td class="px-3 py-2 align-top">
@@ -166,22 +195,28 @@
               </td>
             </tr>
             <tr id="{{ detail_id }}" class="hidden bg-slate-950/60">
-              <td colspan="7" class="px-6 py-4">
-                <div class="pl-4 border-l-2 border-sky-700/70 space-y-3 max-w-5xl">
+              <td colspan="8" class="px-6 py-4">
+                <div class="pl-4 border-l-2 {% if resolved %}border-sky-700/70{% else %}border-emerald-700/70{% endif %} space-y-3 max-w-5xl">
                   <div>
                     <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">reasoning</div>
                     <div class="text-slate-200 leading-relaxed">{{ f.reasoning or '—' }}</div>
                   </div>
                   {% if f.remediation %}
                     <div>
-                      <div class="text-[10px] uppercase tracking-widest text-sky-400 mb-1">remediation</div>
+                      <div class="text-[10px] uppercase tracking-widest text-sky-400 mb-1">
+                        remediation{% if resolved %} (already addressed){% endif %}
+                      </div>
                       <div class="text-slate-100 leading-relaxed">{{ f.remediation }}</div>
                     </div>
                   {% endif %}
-                  <div class="text-xs text-slate-500 font-mono pt-1 border-t border-slate-800/60">
-                    artifact: <span class="text-slate-400">{{ f.artifact or '—' }}</span>
-                    &nbsp;·&nbsp;
-                    judged: <span class="text-slate-400">{{ f.created_at }}</span>
+                  <div class="text-xs text-slate-500 font-mono pt-1 border-t border-slate-800/60 leading-relaxed">
+                    artifact: <span class="text-slate-400">{{ f.artifact or '—' }}</span><br>
+                    judged: <span class="text-slate-400">{{ f.created_at }}</span><br>
+                    {% if f.last_seen_at %}
+                      last seen: <span class="text-slate-400">{{ f.last_seen_at }} ({{ f.last_seen_at | relative_time }})</span>
+                    {% else %}
+                      last seen: <span class="text-slate-600 italic">never observed since judgement was first recorded</span>
+                    {% endif %}
                   </div>
                 </div>
               </td>

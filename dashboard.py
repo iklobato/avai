@@ -225,14 +225,24 @@ def findings(session: Session, *,
              collector: str = "",
              category: str = "",
              search: str = "",
+             status: str = "active",
              sort: str = "severity",
              order: str = "desc",
              page: int = 1,
              per_page: int = DEFAULT_PER_PAGE) -> dict:
     """Paginated, filterable, sortable findings query.
 
-    Returns ``{items, total, page, per_page, total_pages}``.
+    ``status`` is one of ``active`` / ``resolved`` / ``all``. A
+    judgment is *active* if its ``last_seen_at`` matches the latest
+    snapshot run's ``started_at``; otherwise (including NULL) it is
+    *resolved* — the underlying artifact has gone away.
+
+    Returns ``{items, total, page, per_page, total_pages,
+                latest_started_at}``.
     """
+    latest = latest_run(session)
+    latest_started = latest.started_at if latest else None
+
     stmt = select(Judgement)
 
     if verdict and verdict in VERDICTS:
@@ -251,6 +261,15 @@ def findings(session: Session, *,
             func.lower(Judgement.collector).like(like),
             func.lower(Judgement.category).like(like),
         ))
+
+    if latest_started and status == "active":
+        stmt = stmt.where(Judgement.last_seen_at >= latest_started)
+    elif latest_started and status == "resolved":
+        stmt = stmt.where(or_(
+            Judgement.last_seen_at < latest_started,
+            Judgement.last_seen_at.is_(None),
+        ))
+    # status == "all" or no latest_run yet → no extra filter
 
     total = session.execute(
         select(func.count()).select_from(stmt.subquery())
@@ -273,23 +292,28 @@ def findings(session: Session, *,
     raw = session.execute(stmt).scalars().all()
     items = []
     for j in raw:
+        is_active = bool(latest_started and j.last_seen_at
+                         and j.last_seen_at >= latest_started)
         items.append({
-            "verdict":     j.verdict,
-            "collector":   j.collector,
-            "category":    j.category or "none",
-            "confidence":  j.confidence or 0.0,
-            "reasoning":   j.reasoning or "",
-            "remediation": j.remediation or "",
-            "created_at":  j.created_at,
-            "artifact":    _artifact_for(session, j),
+            "verdict":      j.verdict,
+            "collector":    j.collector,
+            "category":     j.category or "none",
+            "confidence":   j.confidence or 0.0,
+            "reasoning":    j.reasoning or "",
+            "remediation":  j.remediation or "",
+            "created_at":   j.created_at,
+            "last_seen_at": j.last_seen_at,
+            "status":       "active" if is_active else "resolved",
+            "artifact":     _artifact_for(session, j),
         })
 
     return {
-        "items":       items,
-        "total":       total,
-        "page":        page,
-        "per_page":    per_page,
-        "total_pages": max(1, (total + per_page - 1) // per_page),
+        "items":             items,
+        "total":             total,
+        "page":              page,
+        "per_page":          per_page,
+        "total_pages":       max(1, (total + per_page - 1) // per_page),
+        "latest_started_at": latest_started,
     }
 
 
@@ -413,6 +437,7 @@ def fragment_findings():
     collector = request.args.get("collector", "")
     category  = request.args.get("category", "")
     search    = request.args.get("q", "")
+    status    = request.args.get("status", "active")
     sort      = request.args.get("sort", "severity")
     order     = request.args.get("order", "desc")
     page      = _int_arg("page", 1)
@@ -421,6 +446,7 @@ def fragment_findings():
     with _session() as s:
         result = findings(s, verdict=verdict, collector=collector,
                           category=category, search=search,
+                          status=status,
                           sort=sort, order=order,
                           page=page, per_page=per_page)
         return render_template(
@@ -433,6 +459,7 @@ def fragment_findings():
             verdict_filter=verdict,
             collector_filter=collector,
             category_filter=category,
+            status_filter=status,
             q=search,
             sort=sort,
             order=order,

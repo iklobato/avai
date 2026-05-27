@@ -681,6 +681,11 @@ class Judgement(Base):
     remediation:  Mapped[Optional[str]]
     model:        Mapped[str]
     created_at:   Mapped[str]
+    # Most recent snapshot run timestamp at which this content_hash was
+    # observed. Compared to the latest run's started_at to derive whether
+    # the underlying artifact is still present ("active") or has gone
+    # away ("resolved"). NULL until the next snapshot cycle touches it.
+    last_seen_at: Mapped[Optional[str]] = mapped_column(index=True)
 
 
 class StreamingSession(Base):
@@ -1054,6 +1059,25 @@ class Sink:
             )
             session.commit()
 
+    def touch_judgments(self, collector: str,
+                        content_hashes: list[str], at: str) -> None:
+        """Update ``last_seen_at`` for every judgment whose ``content_hash``
+        was observed in the current snapshot cycle. Used to derive
+        "active vs resolved" status without storing transitions
+        explicitly: a judgment whose ``last_seen_at`` matches the latest
+        run started_at is still present on the host; anything older
+        (including NULL) means the underlying artifact has gone away."""
+        if not content_hashes:
+            return
+        with Session(self.engine) as session:
+            session.execute(
+                update(Judgement)
+                .where(Judgement.collector == collector)
+                .where(Judgement.content_hash.in_(content_hashes))
+                .values(last_seen_at=at)
+            )
+            session.commit()
+
     # -- streaming sessions -------------------------------------------------
 
     def start_streaming_session(self, collector: str, hostname: str) -> str:
@@ -1279,6 +1303,13 @@ class Runner:
                 judgments = self.judge.judge(c.name, c.judge_hints, unjudged)
                 self.sink.write_judgments(judgments)
                 judged = len(judgments)
+            # Mark every judgment whose hash was observed this cycle as
+            # "still present". The dashboard derives active/resolved
+            # status by comparing last_seen_at to the latest run.
+            observed = [r["content_hash"] for r in rows
+                        if r.get("content_hash")]
+            if observed:
+                self.sink.touch_judgments(c.name, observed, started)
 
         LOG.info("collector=%s rows=%d duration_ms=%d judged=%d",
                  c.name, len(rows), collected_ms, judged)
