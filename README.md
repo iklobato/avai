@@ -134,6 +134,64 @@ macOS-named columns (`filevault_active`, `gatekeeper_assessments_enabled`,
 | `remote_login_enabled` | `ssh.service` / `sshd.service` active |
 | `screen_sharing_enabled`, `remote_management_enabled` | `x11vnc` / `vncserver` / `xrdp` active |
 
+### Container permissions reference
+
+The monitor container needs to read the host's filesystem and call
+host-level CLI tools (`systemctl`, `journalctl`, `dpkg-query`,
+`dmsetup`, `iw`). Two coordinated mechanisms make that work:
+
+1. **`HOST_PREFIX` env var** — collectors translate every absolute
+   host path they read through a `host_path()` helper. With
+   `HOST_PREFIX=/host`, `/etc/passwd` becomes `/host/etc/passwd`;
+   `~/.config/google-chrome` expands to one entry per user home
+   discovered under `/host/home/*`.
+
+2. **Native-path mounts for CLI tools** — `systemctl` (D-Bus to
+   `/run/systemd/private`) and `dmsetup` (ioctl on
+   `/dev/mapper/control`) hardcode their lookup paths. Those get
+   bind-mounted at the same path inside the container, not under
+   `/host`.
+
+Bind-mount matrix:
+
+| Mount | Used by | Path inside container |
+|---|---|---|
+| `/sys` | `LinuxUsbDevicesCollector`, `LinuxWifiCollector`, `LinuxSystemIntegrityCollector` (SELinux + AppArmor) | `/host/sys` |
+| `/etc` | `LinuxLaunchItemsCollector` (systemd unit overrides + cron), `LinuxSystemIntegrityCollector` (ufw.conf), `FileIntegrityCollector` (passwd / shadow / sudoers / ssh config) | `/host/etc` |
+| `/var/lib/bluetooth` | `LinuxBluetoothCollector` | `/host/var/lib/bluetooth` |
+| `/var/lib/dpkg` | `LinuxInstalledAppsCollector` (`dpkg-query --admindir`) | `/host/var/lib/dpkg` |
+| `/usr/share/applications` + `/usr/local/share/applications` + `/var/lib/flatpak/exports/share/applications` | `LinuxInstalledAppsCollector` (.desktop entries) | `/host/usr/...` |
+| `/lib/systemd`, `/usr/lib/systemd` | `LinuxLaunchItemsCollector` (vendor unit files) | `/host/lib/systemd`, `/host/usr/lib/systemd` |
+| `/var/log/journal`, `/run/log/journal` | `LinuxAuthEventsCollector` (`journalctl --directory`) | `/host/var/log/journal` etc. |
+| `/var/spool/cron` | `LinuxLaunchItemsCollector` (per-user crontabs) | `/host/var/spool/cron` |
+| `/home`, `/root` | `BrowserExtensionsCollector`, `FileIntegrityCollector` (`~/.ssh`, `~/.bashrc`, browser profiles) | `/host/home`, `/host/root` |
+| `/run/systemd` | `systemctl` (CLI from `LinuxSystemIntegrityCollector`) | `/run/systemd` (native path) |
+| `/run/dbus` | `systemctl` D-Bus connection | `/run/dbus` (native path) |
+| `/etc/machine-id` | `journalctl` (needs matching machine ID) | `/etc/machine-id` (native path) |
+| `/dev/mapper` | `dmsetup` ioctl | `/dev/mapper` (native path) |
+
+Linux capabilities added (root in a container has a *limited* default
+cap set — Docker drops several at start):
+
+| Capability | Why |
+|---|---|
+| `SYS_PTRACE` | `psutil.net_connections()` cross-process socket visibility, `/proc/<pid>` reads for other processes |
+| `NET_ADMIN` | `iw dev <iface> link` netlink (NL80211); some sysfs read permissions |
+| `NET_RAW` | Auxiliary network introspection |
+| `DAC_READ_SEARCH` | Read files owned by other users (e.g. `/etc/shadow`, root-only `/var/lib/bluetooth`) without depending on Linux DAC override behaviour for the root user inside a container |
+
+Namespaces shared with host:
+
+| Namespace | Setting | Why |
+|---|---|---|
+| PID | `pid: host` | `psutil` sees host processes, `/proc/<pid>` reads the host's view |
+| Network | `network_mode: host` | `psutil.net_connections`, `iw dev` (NL80211), `journalctl` host log access |
+
+Mounts deliberately *not* added (kept inside the container's own
+namespace): IPC namespace, UTS namespace, user namespace,
+`/var/run/docker.sock`. The monitor doesn't need to call back into
+Docker or share IPC with the host.
+
 ### Dashboard hardening
 
 Flags applied in `docker-compose.yml` for the dashboard service:

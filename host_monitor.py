@@ -261,6 +261,69 @@ def expand(p: str) -> Path:
     return Path(os.path.expanduser(p))
 
 
+# ---------------------------------------------------------------------------
+# Host-path translation for container deployments.
+#
+# When the monitor runs in a Linux container that bind-mounts the host
+# filesystem under /host (set via HOST_PREFIX=/host), absolute host
+# paths a collector reads need to be translated:
+#
+#   "/etc/systemd/system" → "/host/etc/systemd/system"
+#   "/sys/bus/usb/devices" → "/host/sys/bus/usb/devices"
+#   "~/.config/google-chrome" → ["/host/home/alice/.config/google-chrome",
+#                                "/host/home/bob/.config/google-chrome",
+#                                "/host/root/.config/google-chrome"]
+#
+# Native (non-containerised) execution keeps HOST_PREFIX empty and the
+# helpers are passthroughs.
+# ---------------------------------------------------------------------------
+
+HOST_PREFIX = os.environ.get("HOST_PREFIX", "").rstrip("/")
+
+
+def host_path(p) -> Path:
+    """Translate an absolute host path to its in-container location
+    when HOST_PREFIX is set. Relative paths and the empty-prefix case
+    are passthroughs."""
+    p = p if isinstance(p, Path) else Path(p)
+    if not HOST_PREFIX or not p.is_absolute():
+        return p
+    return Path(HOST_PREFIX + str(p))
+
+
+def host_paths_for_home(template: str) -> list[Path]:
+    """Expand a ``~/<rest>`` template into actual paths.
+
+    Without HOST_PREFIX:
+        ~/<rest> → [Path(os.path.expanduser(template))]
+
+    With HOST_PREFIX (container mode):
+        ~/<rest> → one entry per user home found under <prefix>/home/*
+                   plus <prefix>/root for the rest.
+
+    Absolute paths pass through ``host_path`` unchanged in count
+    (always one path) so callers can flatten freely.
+    """
+    if not template.startswith("~/"):
+        return [host_path(template)]
+    rest = template[2:]
+    if not HOST_PREFIX:
+        return [Path(os.path.expanduser(template))]
+    out: list[Path] = []
+    home_root = Path(HOST_PREFIX) / "home"
+    if home_root.is_dir():
+        try:
+            for user_dir in home_root.iterdir():
+                if user_dir.is_dir():
+                    out.append(user_dir / rest)
+        except OSError:
+            pass
+    root_home = Path(HOST_PREFIX) / "root"
+    if root_home.is_dir():
+        out.append(root_home / rest)
+    return out
+
+
 def run_json(cmd: list[str], timeout: int = 60) -> Any:
     r = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
     if r.returncode != 0:
@@ -2119,10 +2182,15 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
         # output with a chosen delimiter.
         fmt = "${db:Status-Status}\t${Package}\t${Version}\t" \
               "${Architecture}\t${binary:Summary}\n"
+        cmd = ["dpkg-query", "-W", "-f", fmt]
+        # When containerised, --admindir points dpkg-query at the host's
+        # package database rather than the container's.
+        host_admindir = host_path("/var/lib/dpkg")
+        if HOST_PREFIX and host_admindir.is_dir():
+            cmd[1:1] = ["--admindir", str(host_admindir)]
         try:
             r = subprocess.run(
-                ["dpkg-query", "-W", "-f", fmt],
-                capture_output=True, text=True, timeout=30, check=False,
+                cmd, capture_output=True, text=True, timeout=30, check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return
@@ -2152,13 +2220,14 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
         # XDG desktop entries are simple INI files; configparser
         # handles them. We extract [Desktop Entry] Name / Exec /
         # Comment / Categories.
-        roots = [
-            Path("/usr/share/applications"),
-            Path("/usr/local/share/applications"),
-            expand("~/.local/share/applications"),
-            Path("/var/lib/flatpak/exports/share/applications"),
-            expand("~/.local/share/flatpak/exports/share/applications"),
+        roots: list[Path] = [
+            host_path("/usr/share/applications"),
+            host_path("/usr/local/share/applications"),
+            host_path("/var/lib/flatpak/exports/share/applications"),
         ]
+        roots.extend(host_paths_for_home("~/.local/share/applications"))
+        roots.extend(host_paths_for_home(
+            "~/.local/share/flatpak/exports/share/applications"))
         for root in roots:
             if not root.is_dir():
                 continue
@@ -2250,10 +2319,12 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
                        "on-abnormal", "on-abort", "on-watchdog"}
 
     def collect(self):
-        # systemd units
+        # systemd units. Path translation honours HOST_PREFIX so the
+        # container reads the host's /etc/systemd/system rather than
+        # its own (empty) one.
         seen_units: set[str] = set()
         for scope, dir_str, pattern in self._UNIT_DIRS:
-            d = expand(dir_str)
+            d = host_paths_for_home(dir_str)[0]
             if not d.is_dir():
                 continue
             try:
@@ -2270,11 +2341,13 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
 
         # /etc/crontab — single file, has-user-column form
         scope, p = self._CRON_FILE
+        p = host_path(p)
         if p.is_file():
             yield from self._cron_rows(scope, p, has_user_col=True)
 
         # /etc/cron.d/* — drop-in files, has-user-column form
         for scope, d in self._CRON_DROP_INS:
+            d = host_path(d)
             if not d.is_dir():
                 continue
             try:
@@ -2289,6 +2362,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
         # /var/spool/cron* — per-user crontabs (no user column inside).
         # The filename IS the username.
         for scope, d in self._USER_CRONS:
+            d = host_path(d)
             if not d.is_dir():
                 continue
             try:
@@ -2467,6 +2541,12 @@ class LinuxAuthEventsCollector(StreamingCollector):
     def _cmd(self) -> list[str]:
         cmd = ["journalctl", "-f", "--output=json", "--no-pager",
                f"--priority={self.priority}"]
+        # In container mode, point journalctl at the host's journal
+        # directory rather than the container's empty one.
+        if HOST_PREFIX:
+            host_journal = host_path("/var/log/journal")
+            if host_journal.is_dir():
+                cmd.extend(["--directory", str(host_journal)])
         for i, group in enumerate(self._MATCH_GROUPS):
             if i > 0:
                 cmd.append("+")
@@ -2576,7 +2656,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
               "bMaxPower", "version", "busnum", "devnum")
 
     def collect(self):
-        root = Path("/sys/bus/usb/devices")
+        root = host_path("/sys/bus/usb/devices")
         if not root.is_dir():
             return
         try:
@@ -2626,7 +2706,7 @@ class LinuxBluetoothCollector(SnapshotCollector):
     judge_fields = ("name", "address", "minor_type")
 
     def collect(self):
-        root = Path("/var/lib/bluetooth")
+        root = host_path("/var/lib/bluetooth")
         if not root.is_dir():
             return
         try:
@@ -2684,7 +2764,10 @@ class LinuxWifiCollector(SnapshotCollector):
     judge_fields = ("ssid", "bssid", "security")
 
     def collect(self):
-        net = Path("/sys/class/net")
+        # sysfs discovery via HOST_PREFIX; iw queries via netlink which
+        # the host-network namespace (network_mode: host) already
+        # exposes to the container.
+        net = host_path("/sys/class/net")
         if not net.is_dir():
             return
         try:
@@ -2810,20 +2893,20 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     @staticmethod
     def _selinux_state() -> Optional[str]:
         """Returns 'Enforcing' / 'Permissive' / None (not present)."""
-        flag = _read_sysfs(Path("/sys/fs/selinux/enforce"))
+        flag = _read_sysfs(host_path("/sys/fs/selinux/enforce"))
         if flag is None:
             return None
         return {"0": "Permissive", "1": "Enforcing"}.get(flag, "Unknown")
 
     @staticmethod
     def _apparmor_state() -> dict:
-        enabled = _read_sysfs(Path("/sys/module/apparmor/parameters/enabled"))
+        enabled = _read_sysfs(host_path("/sys/module/apparmor/parameters/enabled"))
         return {"enabled": enabled == "Y"} if enabled is not None else {"enabled": False}
 
     @staticmethod
     def _ufw_active() -> bool:
         # /etc/ufw/ufw.conf is the canonical persistent state.
-        conf = _read_sysfs(Path("/etc/ufw/ufw.conf"))
+        conf = _read_sysfs(host_path("/etc/ufw/ufw.conf"))
         if conf is None:
             return False
         for line in conf.splitlines():
@@ -2906,6 +2989,27 @@ def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
     concepts with no Linux analog).
     """
     h = prompts.hint_for
+
+    # Expand watched-file templates through host_paths_for_home so that
+    # ~/-prefixed entries become one path per user home found under
+    # the container's bind-mounted /host/home (or the literal
+    # expanduser path on a native install). Absolute /etc paths
+    # become /host/etc paths automatically.
+    watched: list[str] = []
+    for tmpl in WATCHED_FILES_LINUX:
+        for p in host_paths_for_home(tmpl):
+            watched.append(str(p))
+
+    # Same treatment for browser profile roots — one entry per
+    # user_home/.config/<browser>.
+    expanded_browser_profiles: dict[Browser, list[str]] = {}
+    for browser, templates in BROWSER_PROFILES_LINUX.items():
+        out: list[str] = []
+        for tmpl in templates:
+            for p in host_paths_for_home(tmpl):
+                out.append(str(p))
+        expanded_browser_profiles[browser] = out
+
     return [
         ProcessCollector(judge_hints=h("processes")),
         NetworkConnectionsCollector(judge_hints=h("network_connections")),
@@ -2917,12 +3021,12 @@ def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         LinuxLaunchItemsCollector(judge_hints=h("launch_items")),
         BrowserExtensionsCollector(
             judge_hints=h("browser_extensions"),
-            profiles=BROWSER_PROFILES_LINUX,
+            profiles=expanded_browser_profiles,
         ),
         LinuxSystemIntegrityCollector(judge_hints=h("system_integrity")),
         FileIntegrityCollector(
             judge_hints=h("file_integrity"),
-            watched=WATCHED_FILES_LINUX,
+            watched=watched,
         ),
         LinuxInstalledAppsCollector(judge_hints=h("installed_apps")),
     ]
