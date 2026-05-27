@@ -89,7 +89,9 @@ LOG = logging.getLogger("host_monitor")
 # Defaults
 # ============================================================================
 
-DEFAULT_DB_PATH = Path.home() / "logs" / "host_monitor.db"
+_SCRIPT_DIR = Path(__file__).resolve().parent
+
+DEFAULT_DB_PATH = _SCRIPT_DIR / "host_monitor.db"
 DEFAULT_INTERVAL = 300
 DEFAULT_LOOKBACK_MIN = 6
 
@@ -97,9 +99,7 @@ DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_JUDGE_BATCH = 20
 DEFAULT_JUDGE_MAX_PER_COLLECTOR = 200
 
-DEFAULT_PROMPTS_PATH = (
-    Path(__file__).resolve().parent / "host_monitor_prompts.toml"
-)
+DEFAULT_PROMPTS_PATH = _SCRIPT_DIR / "host_monitor_prompts.toml"
 
 
 # ============================================================================
