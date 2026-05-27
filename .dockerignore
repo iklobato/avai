@@ -1,0 +1,38 @@
+# keep the build context small and the image free of host secrets
+
+# SQLite database + WAL sidecars (bind-mounted at runtime, not baked in)
+host_monitor.db
+host_monitor.db-wal
+host_monitor.db-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Git metadata
+.git/
+.gitignore
+
+# Docker artifacts (the meta-files for compose / build are still copied
+# implicitly when needed, but not into the image WORKDIR)
+docker-compose*.yml
+Dockerfile
+.dockerignore
+
+# Logs
+*.log

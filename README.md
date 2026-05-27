@@ -47,6 +47,89 @@ python3 host_monitor.py --interval 300
 sudo -E python3 host_monitor.py --interval 300
 ```
 
+
+## Docker
+
+Only the **dashboard** is containerised. The collector (`host_monitor.py`)
+runs natively on the macOS host — its data sources are
+macOS-host-only userland (`system_profiler`, `log stream`, `launchctl`,
+`TCC.db`, native `psutil` process visibility) and a Linux container
+running inside Docker Desktop's VM cannot reach them. Even with
+`--privileged --pid=host --network=host`, the container sees the
+Linux VM rather than your Mac.
+
+So the topology is:
+
+```
+  macOS host                      |  docker (linux container)
+  ─────────────────────────────── | ─────────────────────────────
+  host_monitor.py (sudo)          |
+       ↓                          |
+  ./host_monitor.db  ⇐ bind mount ⇒  dashboard.py (Flask, read-only)
+                                  |       ↓
+                                  |  http://localhost:8765
+```
+
+### Run the dashboard in Docker
+
+```sh
+cd ~/scripts/avai
+docker compose up -d --build
+open http://localhost:8765
+```
+
+That builds `avai-dashboard:latest`, bind-mounts the current directory
+to `/data` inside the container, exposes the dashboard on host port
+8765, and runs a healthcheck against `/api/notifications/new`.
+
+Hardening flags applied in `docker-compose.yml`:
+
+- `read_only: true` — root filesystem mounted read-only (with `/tmp`
+  as tmpfs for Flask's session cache).
+- `cap_drop: [ALL]` and `security_opt: no-new-privileges:true` — the
+  dashboard doesn't need any Linux capability.
+- Non-root runtime user (`uid 1000`).
+- The bind mount is the project directory; the dashboard application
+  only issues `SELECT` queries against the SQLite DB.
+
+The host's `host_monitor.py` writes the database; SQLite's WAL mode
+permits the container to read concurrently. Refreshing the dashboard
+or letting the HTMX polling cycle run will pick up new judgements
+within seconds of the host writing them.
+
+### Why the monitor can't be containerised on macOS
+
+| Collector | Needs |
+|---|---|
+| `processes`, `network_connections`, `listening_ports`, `network_interfaces` | native `psutil` against the macOS kernel (a Linux container sees the Docker VM, not macOS) |
+| `usb_devices`, `bluetooth_devices`, `wifi_state` | `system_profiler` (macOS binary) + IOKit |
+| `launch_items` | reads `/Library/LaunchAgents`, `/Library/LaunchDaemons`, `~/Library/LaunchAgents` — bind-mountable but unhelpful without `launchctl` |
+| `tcc_permissions` | reads `TCC.db` (macOS Privacy database, plus the running terminal needs Full Disk Access) |
+| `quarantine_events` | reads `~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2` (macOS LaunchServices) |
+| `system_integrity` | `fdesetup`, `spctl`, `launchctl`, `/Library/Preferences/com.apple.alf.plist` |
+| `auth_events` (streaming) | `log stream --style ndjson` (macOS unified log, no Linux equivalent) |
+| `browser_extensions`, `file_integrity`, `installed_apps` | bind-mountable in principle, but no value without the others |
+
+If you want full coverage, run the monitor natively:
+
+```sh
+sudo -E /Users/$(whoami)/.pyenv/versions/3.11.7/bin/python3 \
+  ~/scripts/avai/host_monitor.py --interval 300 --max-db-mb 1024
+```
+
+…and grant your Terminal **Full Disk Access** in System Settings →
+Privacy & Security → Full Disk Access for the TCC collector.
+
+### Stop / rebuild / inspect
+
+```sh
+docker compose ps                       # status + healthcheck
+docker compose logs -f dashboard        # tail logs
+docker compose restart dashboard        # restart after a code change
+docker compose down                     # stop and remove
+docker compose up -d --build            # rebuild + restart
+```
+
 By default the database is written to `./host_monitor.db` next to the
 script. Prompts are read from `./host_monitor_prompts.toml`.
 

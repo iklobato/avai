@@ -1,0 +1,40 @@
+# avai — Docker Compose for the dashboard service.
+#
+# What runs here: the read-only Flask + HTMX dashboard.
+# What does NOT run here: host_monitor.py (the collector). The monitor
+# uses macOS-native userland tools (system_profiler, log stream,
+# launchctl, TCC.db, native psutil) and the container can't reach
+# those — Docker Desktop's container sees the Linux VM, not your Mac.
+# Run the monitor on the host directly; the dashboard container
+# tails the resulting SQLite file via a bind mount.
+
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: avai-dashboard:latest
+    container_name: avai-dashboard
+    ports:
+      - "8765:8765"
+    volumes:
+      # Bind-mount the project directory so the container can read the
+      # SQLite database (host_monitor.db + .db-wal + .db-shm).
+      #
+      # SQLite in WAL mode coordinates readers and writers via the
+      # .db-shm shared-memory file; even a read-only consumer needs the
+      # filesystem to be writable so SQLite can open the SHM. The
+      # dashboard process itself never issues UPDATE/INSERT/DELETE —
+      # all the safety lives in the application, not the mount.
+      - ./:/data
+    restart: unless-stopped
+    # Nothing the dashboard does needs elevated capabilities; the host
+    # monitor (which DOES need root for psutil.net_connections and FDA
+    # for TCC.db) is intentionally not containerised here.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
