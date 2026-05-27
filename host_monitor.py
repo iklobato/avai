@@ -399,19 +399,109 @@ class NullJudge(Judge):
         return []
 
 
+class CompletionClient(ABC):
+    """Strategy for issuing an LLM chat completion. Returns the raw
+    response text — JSON parsing happens in the caller."""
+
+    @abstractmethod
+    def complete(self, *, model: str, system: str, user: str,
+                 max_tokens: int, temperature: float) -> str: ...
+
+
+class LitellmClient(CompletionClient):
+    """Multi-provider completion via litellm. Uses ANTHROPIC_API_KEY /
+    OPENAI_API_KEY / ... from the environment per litellm conventions."""
+
+    def __init__(self):
+        if not HAS_LITELLM:
+            raise RuntimeError(
+                "litellm is required for LitellmClient — pip install litellm"
+            )
+
+    def complete(self, *, model, system, user, max_tokens, temperature):
+        response = litellm.completion(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            response_format={"type": "json_object"},
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content
+
+
+class AnthropicOAuthClient(CompletionClient):
+    """Anthropic completion via the OAuth Bearer flow used by Claude Code
+    subscriptions. Reads ``CLAUDE_CODE_OAUTH_TOKEN`` from the environment
+    and sends ``Authorization: Bearer <token>`` plus the OAuth beta
+    header. Bypasses litellm because litellm sends ``x-api-key`` which
+    is incompatible with OAuth tokens.
+
+    The Claude Code OAuth scope requires the system prompt to start with
+    the Claude Code identity line; otherwise the API returns an empty
+    response. We prepend it transparently.
+    """
+
+    OAUTH_BETA_HEADER = "oauth-2025-04-20"
+    SYSTEM_PROMPT_PREFIX = (
+        "You are Claude Code, Anthropic's official CLI for Claude."
+    )
+
+    def __init__(self, oauth_token: str):
+        try:
+            from anthropic import Anthropic
+        except ImportError as e:
+            raise RuntimeError(
+                "anthropic SDK is required for OAuth auth — "
+                "pip install anthropic"
+            ) from e
+        self._client = Anthropic(
+            auth_token=oauth_token,
+            default_headers={"anthropic-beta": self.OAUTH_BETA_HEADER},
+        )
+
+    def complete(self, *, model, system, user, max_tokens, temperature):
+        # Strip litellm-style provider prefix if present.
+        if "/" in model:
+            model = model.split("/", 1)[1]
+        full_system = f"{self.SYSTEM_PROMPT_PREFIX}\n\n{system}"
+        response = self._client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=full_system,
+            messages=[{"role": "user", "content": user}],
+        )
+        return response.content[0].text if response.content else ""
+
+
+def build_completion_client() -> CompletionClient:
+    """Pick the right strategy from the environment.
+
+    - ``CLAUDE_CODE_OAUTH_TOKEN`` set → ``AnthropicOAuthClient``
+    - otherwise → ``LitellmClient`` (which itself reads
+      ``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY`` / ...)
+    """
+    oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if oauth:
+        return AnthropicOAuthClient(oauth)
+    return LitellmClient()
+
+
 class LlmJudge(Judge):
-    """Threat judge backed by an LLM via litellm. Prompts are injected."""
+    """Threat judge backed by an LLM. Auth strategy is decided by
+    ``build_completion_client()`` (OAuth → Anthropic SDK; API key →
+    litellm). Prompts are injected via the ``Prompts`` object."""
 
     def __init__(self, prompts: Prompts,
                  model: str = DEFAULT_JUDGE_MODEL,
                  batch_size: int = DEFAULT_JUDGE_BATCH,
                  max_per_collector: int = DEFAULT_JUDGE_MAX_PER_COLLECTOR,
                  temperature: float = 0.0,
-                 max_tokens: int = 4096):
-        if not HAS_LITELLM:
-            raise RuntimeError(
-                "litellm is required for LlmJudge — pip install litellm"
-            )
+                 max_tokens: int = 4096,
+                 client: Optional[CompletionClient] = None):
         self.prompts = prompts
         self.model = model
         self.batch_size = batch_size
@@ -419,6 +509,11 @@ class LlmJudge(Judge):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._user_template = Template(prompts.user_template)
+        self._client = client or build_completion_client()
+
+    @property
+    def auth_mode(self) -> str:
+        return type(self._client).__name__
 
     def judge(self, collector, hints, entries):
         if not entries:
@@ -453,17 +548,14 @@ class LlmJudge(Judge):
             hints=hints,
             entries=json.dumps(payload, ensure_ascii=False),
         )
-        response = litellm.completion(
+        content = self._client.complete(
             model=self.model,
-            messages=[
-                {"role": "system", "content": self.prompts.system},
-                {"role": "user",   "content": user},
-            ],
-            response_format={"type": "json_object"},
-            temperature=self.temperature,
+            system=self.prompts.system,
+            user=user,
             max_tokens=self.max_tokens,
+            temperature=self.temperature,
         )
-        parsed = json.loads(response.choices[0].message.content)
+        parsed = json.loads(content)
         return list(self._parse(parsed, batch, collector, now))
 
     def _parse(self, parsed, batch, collector, now):
@@ -1468,16 +1560,32 @@ def build_judge(args, prompts: Prompts) -> Judge:
     if args.no_judge:
         LOG.info("judge disabled (--no-judge)")
         return NullJudge()
-    if not HAS_LITELLM:
-        LOG.warning("litellm not installed; threat judging disabled. "
-                    "Install with: pip install litellm")
+    has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
+    has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY")
+                       or os.environ.get("OPENAI_API_KEY"))
+    if not has_oauth and not has_api_key:
+        LOG.warning(
+            "no LLM credentials in environment "
+            "(CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY / OPENAI_API_KEY) — "
+            "threat judging disabled"
+        )
         return NullJudge()
-    return LlmJudge(
-        prompts=prompts,
-        model=args.judge_model,
-        batch_size=args.judge_batch_size,
-        max_per_collector=args.judge_max_per_collector,
-    )
+    if not has_oauth and not HAS_LITELLM:
+        LOG.warning("litellm not installed and no OAuth token; threat "
+                    "judging disabled. pip install litellm")
+        return NullJudge()
+    try:
+        judge = LlmJudge(
+            prompts=prompts,
+            model=args.judge_model,
+            batch_size=args.judge_batch_size,
+            max_per_collector=args.judge_max_per_collector,
+        )
+    except RuntimeError as exc:
+        LOG.warning("LlmJudge unavailable (%s); falling back to NullJudge", exc)
+        return NullJudge()
+    LOG.info("judge auth_mode=%s model=%s", judge.auth_mode, judge.model)
+    return judge
 
 
 def main() -> int:
