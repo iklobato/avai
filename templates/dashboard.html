@@ -92,6 +92,17 @@
                   white-space: nowrap; }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
 
+    .remediation {
+      margin-top: 6px; padding-top: 6px;
+      border-top: 1px dashed var(--border);
+      color: var(--text);
+    }
+    .rem-label {
+      display: inline-block; margin-right: 6px;
+      color: var(--accent); font-weight: 600;
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px;
+    }
+
     .empty { color: var(--muted); padding: 16px; font-style: italic;
              text-align: center; }
   </style>
@@ -218,7 +229,7 @@
             <th>category</th>
             <th class="num">conf</th>
             <th>artifact</th>
-            <th>reasoning</th>
+            <th>reasoning / remediation</th>
           </tr>
         </thead>
         <tbody>
@@ -229,7 +240,14 @@
               <td>{{ f.category }}</td>
               <td class="num">{{ "%.2f"|format(f.confidence) }}</td>
               <td class="truncate" title="{{ f.artifact }}">{{ f.artifact }}</td>
-              <td>{{ f.reasoning }}</td>
+              <td>
+                <div>{{ f.reasoning }}</div>
+                {% if f.remediation %}
+                  <div class="remediation">
+                    <span class="rem-label">fix</span>{{ f.remediation }}
+                  </div>
+                {% endif %}
+              </td>
             </tr>
           {% endfor %}
         </tbody>

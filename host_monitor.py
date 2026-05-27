@@ -69,7 +69,8 @@ except ImportError:
 
 try:
     from sqlalchemy import (
-        Engine, MetaData, Table, create_engine, event, exists, select, update,
+        Engine, MetaData, Table, create_engine, event, exists, inspect,
+        select, text, update,
     )
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert
     from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
@@ -384,6 +385,7 @@ class Judgment:
     category:     ThreatCategory
     confidence:   float
     reasoning:    str
+    remediation:  str
     model:        str
     created_at:   str
 
@@ -533,17 +535,18 @@ class LlmJudge(Judge):
                     "items": {
                         "type": "object",
                         "properties": {
-                            "index":      {"type": "integer"},
-                            "verdict":    {"type": "string",
-                                           "enum": [str(v) for v in Verdict]},
-                            "category":   {"type": "string",
-                                           "enum": [str(c) for c in ThreatCategory]},
-                            "confidence": {"type": "number",
-                                           "minimum": 0, "maximum": 1},
-                            "reasoning":  {"type": "string"},
+                            "index":       {"type": "integer"},
+                            "verdict":     {"type": "string",
+                                            "enum": [str(v) for v in Verdict]},
+                            "category":    {"type": "string",
+                                            "enum": [str(c) for c in ThreatCategory]},
+                            "confidence":  {"type": "number",
+                                            "minimum": 0, "maximum": 1},
+                            "reasoning":   {"type": "string"},
+                            "remediation": {"type": "string"},
                         },
                         "required": ["index", "verdict", "category",
-                                     "confidence", "reasoning"],
+                                     "confidence", "reasoning", "remediation"],
                     },
                 },
             },
@@ -632,6 +635,7 @@ class LlmJudge(Judge):
                                      ThreatCategory.NONE),
                 confidence=max(0.0, min(1.0, confidence)),
                 reasoning=str(item.get("reasoning") or "")[:500],
+                remediation=str(item.get("remediation") or "")[:2000],
                 model=self.model,
                 created_at=now,
             )
@@ -674,6 +678,7 @@ class Judgement(Base):
     category:     Mapped[Optional[str]]
     confidence:   Mapped[Optional[float]]
     reasoning:    Mapped[Optional[str]]
+    remediation:  Mapped[Optional[str]]
     model:        Mapped[str]
     created_at:   Mapped[str]
 
@@ -959,6 +964,7 @@ class Sink:
 
     def setup(self) -> None:
         Base.metadata.create_all(self.engine)
+        _migrate_add_columns(self.engine)
 
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
         run_id = str(uuid.uuid4())
@@ -1035,6 +1041,7 @@ class Sink:
                 "category":     str(j.category),
                 "confidence":   j.confidence,
                 "reasoning":    j.reasoning,
+                "remediation":  j.remediation,
                 "model":        j.model,
                 "created_at":   j.created_at,
             }
@@ -1075,6 +1082,31 @@ def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     cur.execute("PRAGMA synchronous=NORMAL")
     cur.execute("PRAGMA foreign_keys=ON")
     cur.close()
+
+
+def _migrate_add_columns(engine: Engine) -> None:
+    """Idempotent forward-only migration: add any columns that exist on
+    the ORM models but not yet on the live tables. SQLite supports
+    ``ALTER TABLE ADD COLUMN`` (no ALTER COLUMN, no DROP COLUMN) so this
+    handles the common case of adding a new optional field to a model.
+    """
+    inspector = inspect(engine)
+    live_tables = set(inspector.get_table_names())
+    for table in Base.metadata.tables.values():
+        if table.name not in live_tables:
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in existing:
+                continue
+            col_type = col.type.compile(engine.dialect)
+            nullable = "" if col.nullable else " NOT NULL DEFAULT ''"
+            with engine.begin() as conn:
+                conn.execute(text(
+                    f"ALTER TABLE {table.name} "
+                    f"ADD COLUMN {col.name} {col_type}{nullable}"
+                ))
+            LOG.info("schema migration: added %s.%s", table.name, col.name)
 
 
 # ============================================================================

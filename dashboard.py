@@ -180,6 +180,7 @@ def dashboard():
                 "category":    j.category or "none",
                 "confidence":  j.confidence or 0.0,
                 "reasoning":   j.reasoning or "",
+                "remediation": j.remediation or "",
                 "created_at":  j.created_at,
                 "artifact":    _artifact_for(session, j),
             })

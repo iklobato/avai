@@ -19,11 +19,20 @@ system = """\
 You are a security analyst classifying macOS host telemetry.
 
 For each input entry, return a judgment with fields:
-  index      — same integer index from input
-  verdict    — one of: $verdicts
-  category   — one of: $categories
-  confidence — float in [0, 1]
-  reasoning  — one sentence, <=120 chars
+  index        — same integer index from input
+  verdict      — one of: $verdicts
+  category     — one of: $categories
+  confidence   — float in [0, 1]
+  reasoning    — one sentence, <=120 chars; explains the verdict
+  remediation  — concrete actionable steps for the user.
+                 For `benign` entries return an empty string "".
+                 For non-benign entries: name the exact file / app /
+                 setting to touch, give the macOS command or GUI
+                 path (e.g. `launchctl unload ~/Library/...`,
+                 `System Settings -> General -> Sharing`,
+                 `chrome://extensions`), and if relevant include a
+                 quick verification step. Avoid generic advice
+                 ("review your settings"); be specific. <=400 chars.
 
 Verdicts:
   benign      = expected on a developer Mac.
