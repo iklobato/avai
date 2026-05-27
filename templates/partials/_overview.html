@@ -1,0 +1,39 @@
+{% from "partials/_macros.html" import verdict_pill %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">runs in db</div>
+  <div class="text-3xl font-semibold text-slate-100">{{ runs_total }}</div>
+</div>
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">collectors (latest)</div>
+  <div class="flex items-baseline gap-2">
+    <span class="text-3xl font-semibold text-emerald-400">
+      {% if latest_run %}{{ latest_run.collectors_ok }}{% else %}–{% endif %}
+    </span>
+    <span class="text-sm text-slate-500">ok</span>
+    {% if latest_run and latest_run.collectors_failed %}
+      <span class="text-sm text-red-400 ml-3">{{ latest_run.collectors_failed }}</span>
+      <span class="text-sm text-slate-500">failed</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">judgments since latest run</div>
+  <div class="text-3xl font-semibold text-slate-100">{{ judged_this_run }}</div>
+</div>
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">verdict totals</div>
+  <div class="flex flex-wrap gap-1.5">
+    {% for v in ['malicious', 'suspicious', 'unknown', 'benign'] %}
+      <div class="inline-flex items-center gap-1.5">
+        {{ verdict_pill(v) }}
+        <span class="text-sm text-slate-300 font-mono tabular-nums">
+          {{ verdict_counts.get(v, 0) }}
+        </span>
+      </div>
+    {% endfor %}
+  </div>
+</div>

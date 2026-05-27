@@ -1,313 +1,208 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="bg-slate-950">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="refresh" content="30">
   <title>avai host monitor</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            mono: ['ui-monospace','SFMono-Regular','Menlo','Monaco','monospace'],
+            sans: ['ui-sans-serif','-apple-system','BlinkMacSystemFont','Segoe UI','sans-serif'],
+          },
+        },
+      },
+    };
+  </script>
   <style>
-    :root {
-      --bg:        #0e1116;
-      --panel:     #161b22;
-      --panel-2:   #1b2230;
-      --border:    #2a3346;
-      --text:      #d9e1ec;
-      --muted:     #8b97a8;
-      --accent:    #58a6ff;
-      --red:       #f85149;
-      --amber:     #d29922;
-      --gray:      #8b949e;
-      --green:     #3fb950;
-    }
-    * { box-sizing: border-box; }
-    html, body {
-      margin: 0; padding: 0; background: var(--bg); color: var(--text);
-      font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
-      font-size: 13px; line-height: 1.45;
-    }
-    header {
-      padding: 18px 28px 14px; border-bottom: 1px solid var(--border);
-      display: flex; align-items: baseline; justify-content: space-between;
-    }
-    header h1 { font-size: 18px; margin: 0; letter-spacing: 0.4px; }
-    header .meta { color: var(--muted); font-size: 12px; }
-    main { padding: 18px 28px 40px; }
-
-    section { margin-top: 28px; }
-    section > h2 {
-      font-size: 12px; text-transform: uppercase; letter-spacing: 1.2px;
-      color: var(--muted); margin: 0 0 10px;
-    }
-
-    .grid { display: grid; gap: 14px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    .grid.two   { grid-template-columns: 1fr 1fr; }
-    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    @media (max-width: 1100px) {
-      .grid, .grid.two, .grid.three { grid-template-columns: 1fr 1fr; }
-    }
-    @media (max-width: 700px) {
-      .grid, .grid.two, .grid.three { grid-template-columns: 1fr; }
-    }
-
-    .card {
-      background: var(--panel); border: 1px solid var(--border);
-      border-radius: 6px; padding: 14px 16px;
-    }
-    .card h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
-               color: var(--muted); margin: 0 0 10px; font-weight: 600; }
-    .stat { font-size: 28px; font-weight: 600; }
-    .stat.sub { font-size: 12px; color: var(--muted); font-weight: normal;
-                margin-left: 6px; }
-
-    .pill {
-      display: inline-block; padding: 2px 9px; border-radius: 10px;
-      font-size: 11px; font-weight: 600; letter-spacing: 0.4px;
-      text-transform: uppercase; border: 1px solid transparent;
-    }
-    .pill-malicious  { background: #3d161a; color: var(--red);   border-color: #5a1f24; }
-    .pill-suspicious { background: #3a2c0f; color: var(--amber); border-color: #5a4416; }
-    .pill-unknown    { background: #21262d; color: var(--gray);  border-color: #30363d; }
-    .pill-benign     { background: #102619; color: var(--green); border-color: #1d4a2c; }
-
-    .status-row { display: flex; align-items: center; justify-content: space-between;
-                  padding: 4px 0; }
-    .status-row + .status-row { border-top: 1px dashed #2a3346; }
-    .status-row .name { color: var(--text); }
-    .badge-on  { color: var(--green); }
-    .badge-off { color: var(--red); }
-    .badge-mu  { color: var(--muted); }
-
-    table { width: 100%; border-collapse: collapse; background: var(--panel);
-            border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
-    th, td { text-align: left; padding: 8px 12px; vertical-align: top;
-             border-bottom: 1px solid var(--border); }
-    th { background: var(--panel-2); color: var(--muted);
-         font-size: 11px; text-transform: uppercase; letter-spacing: 1px;
-         font-weight: 600; }
-    tr:last-child td { border-bottom: none; }
-    tr.row-malicious  td { background: #1e1216; }
-    tr.row-suspicious td { background: #1e1a10; }
-
-    .mono-narrow { font-size: 12px; }
-    td.truncate { max-width: 480px; overflow: hidden; text-overflow: ellipsis;
-                  white-space: nowrap; }
-    .num { text-align: right; font-variant-numeric: tabular-nums; }
-
-    .remediation {
-      margin-top: 6px; padding-top: 6px;
-      border-top: 1px dashed var(--border);
-      color: var(--text);
-    }
-    .rem-label {
-      display: inline-block; margin-right: 6px;
-      color: var(--accent); font-weight: 600;
-      font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px;
-    }
-
-    .empty { color: var(--muted); padding: 16px; font-style: italic;
-             text-align: center; }
+    /* a tiny bit of color-scheme glue Tailwind doesn't cover */
+    select { color-scheme: dark; }
+    .htmx-swapping, .htmx-settling { opacity: 0.85; transition: opacity 200ms; }
   </style>
 </head>
-<body>
+<body class="bg-slate-950 text-slate-200 font-sans antialiased min-h-screen">
 
-<header>
-  <h1>avai host monitor</h1>
-  <div class="meta">
-    {% if latest_run %}
-      host {{ latest_run.hostname }} · last cycle {{ latest_run.started_at }}
-      {% if latest_run.finished_at %}→ {{ latest_run.finished_at }}{% endif %}
-      · refresh every 30s
-    {% else %}
-      no runs yet — start <code>host_monitor.py</code>
-    {% endif %}
-  </div>
-</header>
-
-<main>
-
-  {# -------- overview cards -------- #}
-  <section>
-    <h2>overview</h2>
-    <div class="grid">
-      <div class="card">
-        <h3>runs in db</h3>
-        <div class="stat">{{ runs_total }}</div>
+  <header class="border-b border-slate-800/80 bg-slate-900/40 backdrop-blur sticky top-0 z-10">
+    <div class="max-w-screen-2xl mx-auto px-6 py-4 flex items-baseline justify-between gap-6">
+      <div class="flex items-baseline gap-3">
+        <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <h1 class="text-base font-semibold tracking-tight">avai host monitor</h1>
+        <span id="header-meta"
+              class="text-xs text-slate-500"
+              hx-get="/fragments/header-meta"
+              hx-trigger="load, every 30s"
+              hx-swap="innerHTML">loading…</span>
       </div>
-      <div class="card">
-        <h3>collectors (latest)</h3>
-        <div class="stat">
-          {% if latest_run %}{{ latest_run.collectors_ok }}<span class="stat sub">ok</span>{% else %}–{% endif %}
-        </div>
-        <div class="stat sub">
-          {% if latest_run %}{{ latest_run.collectors_failed }} failed{% endif %}
-        </div>
-      </div>
-      <div class="card">
-        <h3>judgments (this run)</h3>
-        <div class="stat">{{ judged_this_run }}</div>
-      </div>
-      <div class="card">
-        <h3>verdict totals</h3>
-        <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;">
-          {% for v in ['malicious', 'suspicious', 'unknown', 'benign'] %}
-            <span class="pill pill-{{ v }}">
-              {{ v }} · {{ verdict_counts.get(v, 0) }}
-            </span>
-          {% endfor %}
-        </div>
-      </div>
+      <span class="text-[10px] uppercase tracking-widest text-slate-500">
+        htmx · tailwind · chart.js
+      </span>
     </div>
-  </section>
+  </header>
 
-  {# -------- system integrity + collector errors -------- #}
-  <section>
-    <h2>posture</h2>
-    <div class="grid two">
-      <div class="card">
-        <h3>system integrity</h3>
-        {% if sysint %}
-          {% set rows = [
-            ('FileVault',          sysint.filevault_active),
-            ('Firewall',           sysint.firewall_global_state),
-            ('Firewall stealth',   sysint.firewall_stealth),
-            ('Gatekeeper',         sysint.gatekeeper_assessments_enabled),
-            ('SSH (sshd)',         sysint.remote_login_enabled),
-            ('Screen Sharing',     sysint.screen_sharing_enabled),
-            ('Remote Mgmt (ARD)',  sysint.remote_management_enabled),
-          ] %}
-          {% for name, value in rows %}
-            <div class="status-row">
-              <span class="name">{{ name }}</span>
-              {% if value is none %}
-                <span class="badge-mu">unknown</span>
-              {% elif value %}
-                <span class="badge-on">on</span>
-              {% else %}
-                <span class="badge-off">off</span>
-              {% endif %}
-            </div>
-          {% endfor %}
-        {% else %}
-          <div class="empty">no system_integrity row in latest run</div>
-        {% endif %}
+  <main class="max-w-screen-2xl mx-auto px-6 py-6 space-y-8">
+
+    {# ---------- overview ---------- #}
+    <section id="overview"
+             hx-get="/fragments/overview"
+             hx-trigger="load, every 30s"
+             hx-swap="innerHTML"
+             class="grid grid-cols-2 xl:grid-cols-4 gap-4">
+      <div class="col-span-full text-slate-500 italic">loading overview…</div>
+    </section>
+
+    {# ---------- posture: sysint + errors ---------- #}
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div id="sysint"
+           hx-get="/fragments/sysint"
+           hx-trigger="load, every 60s"
+           hx-swap="innerHTML"></div>
+      <div id="errors"
+           hx-get="/fragments/errors"
+           hx-trigger="load, every 60s"
+           hx-swap="innerHTML"></div>
+    </section>
+
+    {# ---------- chart ---------- #}
+    <section class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+      <div class="flex items-baseline justify-between mb-4">
+        <h2 class="text-[10px] uppercase tracking-widest text-slate-500">
+          verdicts produced — last 12 hours, hourly buckets
+        </h2>
+        <span class="text-[10px] text-slate-600">auto-refresh 30s</span>
       </div>
-
-      <div class="card">
-        <h3>collector errors (latest run)</h3>
-        {% if errors %}
-          <table>
-            <thead><tr>
-              <th>collector</th><th>error</th><th>message</th>
-            </tr></thead>
-            <tbody>
-              {% for e in errors %}
-                <tr>
-                  <td>{{ e.collector }}</td>
-                  <td class="badge-off">{{ e.error_class }}</td>
-                  <td class="truncate" title="{{ e.message }}">
-                    {{ (e.message or '')[:140] }}
-                  </td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        {% else %}
-          <div class="empty">no errors</div>
-        {% endif %}
+      <div class="h-48">
+        <canvas id="verdict-chart"></canvas>
       </div>
-    </div>
-  </section>
+    </section>
 
-  {# -------- findings -------- #}
-  <section>
-    <h2>findings — non-benign judgments (top 200 most recent)</h2>
-    {% if findings %}
-      <table>
-        <thead>
-          <tr>
-            <th>verdict</th>
-            <th>collector</th>
-            <th>category</th>
-            <th class="num">conf</th>
-            <th>artifact</th>
-            <th>reasoning / remediation</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for f in findings %}
-            <tr class="row-{{ f.verdict }}">
-              <td><span class="pill pill-{{ f.verdict }}">{{ f.verdict }}</span></td>
-              <td>{{ f.collector }}</td>
-              <td>{{ f.category }}</td>
-              <td class="num">{{ "%.2f"|format(f.confidence) }}</td>
-              <td class="truncate" title="{{ f.artifact }}">{{ f.artifact }}</td>
-              <td>
-                <div>{{ f.reasoning }}</div>
-                {% if f.remediation %}
-                  <div class="remediation">
-                    <span class="rem-label">fix</span>{{ f.remediation }}
-                  </div>
-                {% endif %}
-              </td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    {% else %}
-      <div class="card empty">no non-benign judgments yet — either the judge hasn't run, or everything classified as benign</div>
-    {% endif %}
-  </section>
-
-  {# -------- collectors + recent runs -------- #}
-  <section>
-    <h2>activity</h2>
-    <div class="grid two">
-      <div class="card">
-        <h3>rows per collector (latest run)</h3>
-        {% if row_counts %}
-          <table>
-            <thead><tr><th>collector</th><th class="num">rows</th></tr></thead>
-            <tbody>
-              {% for r in row_counts %}
-                <tr>
-                  <td>{{ r.name }}</td>
-                  <td class="num">{{ r.rows }}</td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        {% else %}
-          <div class="empty">no run yet</div>
-        {% endif %}
+    {# ---------- findings ---------- #}
+    <section>
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <h2 class="text-[10px] uppercase tracking-widest text-slate-500">findings</h2>
+        <div class="flex items-center gap-2 text-xs text-slate-400">
+          <label for="verdict-filter">verdict:</label>
+          <select id="verdict-filter" name="verdict"
+                  class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-slate-500"
+                  hx-get="/fragments/findings"
+                  hx-target="#findings"
+                  hx-trigger="change"
+                  hx-include="this">
+            <option value="">all non-benign</option>
+            <option value="malicious">malicious</option>
+            <option value="suspicious">suspicious</option>
+            <option value="unknown">unknown</option>
+            <option value="benign">benign (all)</option>
+          </select>
+        </div>
       </div>
+      <div id="findings"
+           hx-get="/fragments/findings"
+           hx-trigger="load, every 20s"
+           hx-include="#verdict-filter"
+           hx-swap="innerHTML"></div>
+    </section>
 
-      <div class="card">
-        <h3>recent runs</h3>
-        {% if recent_runs %}
-          <table>
-            <thead><tr>
-              <th>started</th>
-              <th class="num">ok</th>
-              <th class="num">failed</th>
-              <th class="num">lookback</th>
-            </tr></thead>
-            <tbody>
-              {% for r in recent_runs %}
-                <tr>
-                  <td>{{ r.started_at }}</td>
-                  <td class="num">{{ r.collectors_ok }}</td>
-                  <td class="num">{{ r.collectors_failed }}</td>
-                  <td class="num">{{ r.lookback_min }}m</td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        {% else %}
-          <div class="empty">no runs</div>
-        {% endif %}
-      </div>
-    </div>
-  </section>
+    {# ---------- activity: row counts + recent runs ---------- #}
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div id="row-counts"
+           hx-get="/fragments/row-counts"
+           hx-trigger="load, every 30s"
+           hx-swap="innerHTML"></div>
+      <div id="runs"
+           hx-get="/fragments/runs"
+           hx-trigger="load, every 30s"
+           hx-swap="innerHTML"></div>
+    </section>
 
-</main>
+  </main>
+
+  <script>
+    // ---- Chart.js: stacked-bar verdict timeline ----
+    const COLOR = {
+      malicious:  '#ef4444',
+      suspicious: '#f59e0b',
+      unknown:    '#94a3b8',
+      benign:     '#10b981',
+    };
+
+    const canvas = document.getElementById('verdict-chart');
+    let chart = null;
+
+    function formatLabel(iso13) {
+      // 'YYYY-MM-DDTHH' → 'MM-DD HH:00'
+      if (!iso13 || iso13.length < 13) return iso13 || '';
+      return iso13.slice(5, 10) + ' ' + iso13.slice(11, 13) + ':00';
+    }
+
+    async function refreshChart() {
+      try {
+        const r = await fetch('/api/chart/verdicts', { cache: 'no-store' });
+        if (!r.ok) return;
+        const data = await r.json();
+        const labels = data.labels.map(formatLabel);
+        const datasets = ['malicious','suspicious','unknown','benign'].map(v => ({
+          label: v,
+          data: data.datasets[v] || [],
+          backgroundColor: COLOR[v],
+          stack: 'verdicts',
+          borderWidth: 0,
+        }));
+        if (chart) {
+          chart.data.labels = labels;
+          chart.data.datasets = datasets;
+          chart.update('none');
+        } else {
+          chart = new Chart(canvas.getContext('2d'), {
+            type: 'bar',
+            data: { labels, datasets },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              interaction: { mode: 'index', intersect: false },
+              scales: {
+                x: {
+                  stacked: true,
+                  ticks: { color: '#64748b', font: { size: 10 } },
+                  grid:  { color: '#1e293b' },
+                },
+                y: {
+                  stacked: true,
+                  beginAtZero: true,
+                  ticks: { color: '#64748b', font: { size: 10 }, precision: 0 },
+                  grid:  { color: '#1e293b' },
+                },
+              },
+              plugins: {
+                legend: {
+                  position: 'bottom',
+                  labels: {
+                    color: '#cbd5e1',
+                    font: { size: 11 },
+                    boxWidth: 12,
+                    boxHeight: 12,
+                    padding: 16,
+                  },
+                },
+                tooltip: {
+                  backgroundColor: '#0f172a',
+                  borderColor: '#334155',
+                  borderWidth: 1,
+                  titleColor: '#e2e8f0',
+                  bodyColor: '#cbd5e1',
+                },
+              },
+            },
+          });
+        }
+      } catch (e) { /* ignore — next tick will retry */ }
+    }
+    refreshChart();
+    setInterval(refreshChart, 30000);
+  </script>
 </body>
 </html>

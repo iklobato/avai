@@ -1,0 +1,43 @@
+{% from "partials/_macros.html" import verdict_pill %}
+
+{% if findings %}
+  <div class="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-slate-800/40 text-slate-500 uppercase tracking-wider text-[10px]">
+        <tr>
+          <th class="text-left  font-semibold px-3 py-2 w-24">verdict</th>
+          <th class="text-left  font-semibold px-3 py-2">collector</th>
+          <th class="text-left  font-semibold px-3 py-2">category</th>
+          <th class="text-right font-semibold px-3 py-2 w-16">conf</th>
+          <th class="text-left  font-semibold px-3 py-2">artifact</th>
+          <th class="text-left  font-semibold px-3 py-2">reasoning / fix</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for f in findings %}
+          <tr class="hover:bg-slate-800/30 transition-colors">
+            <td class="px-3 py-2.5 align-top">{{ verdict_pill(f.verdict) }}</td>
+            <td class="px-3 py-2.5 align-top text-slate-300 font-mono text-xs">{{ f.collector }}</td>
+            <td class="px-3 py-2.5 align-top text-slate-400 text-xs">{{ f.category }}</td>
+            <td class="px-3 py-2.5 align-top text-right font-mono text-slate-300 tabular-nums text-xs">{{ "%.2f"|format(f.confidence) }}</td>
+            <td class="px-3 py-2.5 align-top font-mono text-slate-300 text-xs max-w-[20rem] truncate" title="{{ f.artifact }}">{{ f.artifact }}</td>
+            <td class="px-3 py-2.5 align-top">
+              <div class="text-slate-200">{{ f.reasoning }}</div>
+              {% if f.remediation %}
+                <div class="mt-1.5 pt-1.5 border-t border-dashed border-slate-700/60 text-xs text-slate-300 leading-relaxed">
+                  <span class="inline-block mr-2 px-1.5 py-0.5 rounded bg-sky-900/40 text-sky-300 text-[9px] font-semibold uppercase tracking-wider align-middle">
+                    fix
+                  </span>{{ f.remediation }}
+                </div>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <div class="bg-slate-900 border border-slate-800 rounded-lg p-10 text-center text-slate-500 italic">
+    no judgments yet — either the judge hasn't run, or nothing matches the filter
+  </div>
+{% endif %}

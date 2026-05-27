@@ -1,0 +1,26 @@
+{% from "partials/_macros.html" import status_badge, card_header %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5 h-full">
+  {{ card_header("system integrity") }}
+  {% if sysint %}
+    {% set rows = [
+      ('FileVault',          sysint.filevault_active),
+      ('Firewall',           sysint.firewall_global_state),
+      ('Firewall stealth',   sysint.firewall_stealth),
+      ('Gatekeeper',         sysint.gatekeeper_assessments_enabled),
+      ('SSH (sshd)',         sysint.remote_login_enabled),
+      ('Screen Sharing',     sysint.screen_sharing_enabled),
+      ('Remote Mgmt (ARD)',  sysint.remote_management_enabled),
+    ] %}
+    <ul class="divide-y divide-slate-800/80 text-sm">
+      {% for name, value in rows %}
+        <li class="flex items-center justify-between py-2">
+          <span class="text-slate-300">{{ name }}</span>
+          {{ status_badge(value) }}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="text-slate-500 italic">no system_integrity row in latest run</div>
+  {% endif %}
+</div>

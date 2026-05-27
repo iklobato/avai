@@ -1,0 +1,33 @@
+{% from "partials/_macros.html" import card_header %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("rows per collector (since latest run)") }}
+  {% if row_counts %}
+    {% set maxr = row_counts | map(attribute='rows') | max %}
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+          <th class="text-left  font-semibold pb-2">collector</th>
+          <th class="text-right font-semibold pb-2 w-20">rows</th>
+          <th class="w-40 pb-2"></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for r in row_counts %}
+          <tr>
+            <td class="py-1.5 text-slate-300 font-mono text-xs">{{ r.name }}</td>
+            <td class="py-1.5 text-right font-mono text-slate-300 tabular-nums text-xs">{{ r.rows }}</td>
+            <td class="py-1.5 pl-3">
+              <div class="h-1.5 rounded bg-slate-800 overflow-hidden">
+                {% set pct = (r.rows / maxr * 100) if maxr > 0 else 0 %}
+                <div class="h-full bg-sky-500/70" style="width: {{ pct }}%"></div>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="text-slate-500 italic">no run yet</div>
+  {% endif %}
+</div>

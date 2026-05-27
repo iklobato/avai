@@ -1,0 +1,29 @@
+{% from "partials/_macros.html" import card_header %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5 h-full">
+  {{ card_header("collector errors (latest run)") }}
+  {% if errors %}
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+          <th class="text-left font-semibold pb-2">collector</th>
+          <th class="text-left font-semibold pb-2">error</th>
+          <th class="text-left font-semibold pb-2">message</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for e in errors %}
+          <tr>
+            <td class="py-1.5 text-slate-300">{{ e.collector }}</td>
+            <td class="py-1.5 text-red-400 font-mono">{{ e.error_class }}</td>
+            <td class="py-1.5 text-slate-400 truncate max-w-[16rem]" title="{{ e.message }}">
+              {{ (e.message or '')[:140] }}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="text-slate-500 italic">no errors</div>
+  {% endif %}
+</div>

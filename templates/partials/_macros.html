@@ -1,0 +1,25 @@
+{% macro verdict_pill(verdict) %}
+  {% set styles = {
+    'malicious':  'bg-red-900/40 text-red-300 border-red-900/60',
+    'suspicious': 'bg-amber-900/40 text-amber-300 border-amber-900/60',
+    'unknown':    'bg-slate-700/40 text-slate-300 border-slate-600',
+    'benign':     'bg-emerald-900/40 text-emerald-300 border-emerald-900/60',
+  } %}
+  <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider {{ styles.get(verdict, 'bg-slate-700/40 text-slate-300 border-slate-600') }}">
+    {{ verdict }}
+  </span>
+{% endmacro %}
+
+{% macro status_badge(value) %}
+  {% if value is none %}
+    <span class="text-slate-500 text-xs">unknown</span>
+  {% elif value %}
+    <span class="text-emerald-400 text-xs font-semibold tracking-wider">ON</span>
+  {% else %}
+    <span class="text-red-400 text-xs font-semibold tracking-wider">OFF</span>
+  {% endif %}
+{% endmacro %}
+
+{% macro card_header(title) %}
+  <h3 class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">{{ title }}</h3>
+{% endmacro %}

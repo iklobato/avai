@@ -1,0 +1,29 @@
+{% from "partials/_macros.html" import card_header %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("recent runs") }}
+  {% if recent_runs %}
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+          <th class="text-left  font-semibold pb-2">started</th>
+          <th class="text-right font-semibold pb-2 w-12">ok</th>
+          <th class="text-right font-semibold pb-2 w-16">failed</th>
+          <th class="text-right font-semibold pb-2 w-20">lookback</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for r in recent_runs %}
+          <tr>
+            <td class="py-1.5 text-slate-300 font-mono text-xs">{{ r.started_at }}</td>
+            <td class="py-1.5 text-right font-mono text-emerald-400 tabular-nums text-xs">{{ r.collectors_ok }}</td>
+            <td class="py-1.5 text-right font-mono {% if r.collectors_failed %}text-red-400{% else %}text-slate-500{% endif %} tabular-nums text-xs">{{ r.collectors_failed }}</td>
+            <td class="py-1.5 text-right font-mono text-slate-400 tabular-nums text-xs">{{ r.lookback_min }}m</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="text-slate-500 italic">no runs</div>
+  {% endif %}
+</div>
