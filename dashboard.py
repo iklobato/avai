@@ -94,7 +94,7 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
 SEVERITY_ORDER = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3}
 VERDICTS = ("malicious", "suspicious", "unknown", "benign")
 PER_PAGE_OPTIONS = (10, 25, 50, 100)
-DEFAULT_PER_PAGE = 25
+DEFAULT_PER_PAGE = 10
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "host_monitor.db"
 
@@ -121,6 +121,22 @@ def _relative_time(iso_string: str) -> str:
 
 
 app.add_template_filter(_relative_time, "relative_time")
+
+
+def _pretty_json(value) -> str:
+    """Re-serialize a JSON string with indentation. Pass non-JSON through."""
+    if value in (None, "", b""):
+        return ""
+    try:
+        return __import__("json").dumps(__import__("json").loads(value), indent=2)
+    except Exception:
+        return str(value)
+
+
+app.add_template_filter(_pretty_json, "pretty_json")
+
+# Columns hidden from the "all info" expansion (internal SQL plumbing).
+_HIDDEN_SOURCE_FIELDS = {"id", "run_id"}
 
 
 def _engine():
@@ -171,20 +187,34 @@ def judged_since(session: Session, since: str) -> int:
     ).scalar() or 0
 
 
-def _artifact_for(session: Session, j: Judgement) -> str:
+def _row_and_artifact(session: Session, j: Judgement) -> tuple[dict, str]:
+    """Return ``(source_row_dict, artifact_display_string)`` for a judgment.
+
+    The source row is the *most recent* observation of the judgment's
+    ``content_hash`` in its collector table (so we always show the
+    latest state of the artifact, not the row from the run when it was
+    first judged). Internal SQL plumbing columns are stripped.
+    """
     model = COLLECTOR_MODELS.get(j.collector)
-    fields = DISPLAY_FIELDS.get(j.collector, ())
-    if model is None or not fields:
-        return ""
-    row = session.execute(
+    if model is None:
+        return {}, ""
+    row_obj = session.execute(
         select(model)
         .where(model.content_hash == j.content_hash)
+        .order_by(model.collected_at.desc())
         .limit(1)
     ).scalar_one_or_none()
-    if row is None:
-        return ""
-    parts = [str(getattr(row, f)) for f in fields if getattr(row, f) is not None]
-    return " · ".join(parts)
+    if row_obj is None:
+        return {}, ""
+    full = {
+        col.name: getattr(row_obj, col.name)
+        for col in model.__table__.columns
+        if col.name not in _HIDDEN_SOURCE_FIELDS
+    }
+    fields = DISPLAY_FIELDS.get(j.collector, ())
+    artifact_parts = [str(full[f]) for f in fields
+                      if full.get(f) is not None and full[f] != ""]
+    return full, " · ".join(artifact_parts)
 
 
 _SEVERITY_CASE = case(
@@ -292,6 +322,7 @@ def findings(session: Session, *,
     raw = session.execute(stmt).scalars().all()
     items = []
     for j in raw:
+        source_row, artifact = _row_and_artifact(session, j)
         is_active = bool(latest_started and j.last_seen_at
                          and j.last_seen_at >= latest_started)
         items.append({
@@ -304,7 +335,9 @@ def findings(session: Session, *,
             "created_at":   j.created_at,
             "last_seen_at": j.last_seen_at,
             "status":       "active" if is_active else "resolved",
-            "artifact":     _artifact_for(session, j),
+            "artifact":     artifact,
+            "source_row":   source_row,
+            "content_hash": j.content_hash,
         })
 
     return {

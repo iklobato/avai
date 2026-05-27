@@ -196,11 +196,15 @@
             </tr>
             <tr id="{{ detail_id }}" class="hidden bg-slate-950/60">
               <td colspan="8" class="px-6 py-4">
-                <div class="pl-4 border-l-2 {% if resolved %}border-sky-700/70{% else %}border-emerald-700/70{% endif %} space-y-3 max-w-5xl">
+                <div class="pl-4 border-l-2 {% if resolved %}border-sky-700/70{% else %}border-emerald-700/70{% endif %} space-y-4 max-w-6xl">
+
+                  {# ----- LLM reasoning ----- #}
                   <div>
                     <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">reasoning</div>
                     <div class="text-slate-200 leading-relaxed">{{ f.reasoning or '—' }}</div>
                   </div>
+
+                  {# ----- LLM remediation ----- #}
                   {% if f.remediation %}
                     <div>
                       <div class="text-[10px] uppercase tracking-widest text-sky-400 mb-1">
@@ -209,9 +213,34 @@
                       <div class="text-slate-100 leading-relaxed">{{ f.remediation }}</div>
                     </div>
                   {% endif %}
-                  <div class="text-xs text-slate-500 font-mono pt-1 border-t border-slate-800/60 leading-relaxed">
-                    artifact: <span class="text-slate-400">{{ f.artifact or '—' }}</span><br>
-                    judged: <span class="text-slate-400">{{ f.created_at }}</span><br>
+
+                  {# ----- ALL collected data for this artifact ----- #}
+                  {% if f.source_row %}
+                    <div>
+                      <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">
+                        collected data ({{ f.collector }})
+                      </div>
+                      <dl class="text-xs grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 font-mono">
+                        {% for key, value in f.source_row.items() %}
+                          {% if value is not none and value != '' %}
+                            <dt class="text-slate-500 self-start whitespace-nowrap">{{ key }}</dt>
+                            <dd class="text-slate-300 break-all">
+                              {% if key.endswith('_json') or key == 'raw_json' %}
+                                <pre class="whitespace-pre-wrap bg-slate-950/60 border border-slate-800 rounded p-2 text-[11px] max-h-64 overflow-auto">{{ value | pretty_json }}</pre>
+                              {% else %}
+                                {{ value }}
+                              {% endif %}
+                            </dd>
+                          {% endif %}
+                        {% endfor %}
+                      </dl>
+                    </div>
+                  {% endif %}
+
+                  {# ----- judgment metadata footer ----- #}
+                  <div class="text-xs text-slate-500 font-mono pt-2 border-t border-slate-800/60 leading-relaxed">
+                    content_hash: <span class="text-slate-400">{{ f.content_hash[:16] }}…</span><br>
+                    judged: <span class="text-slate-400">{{ f.created_at }} ({{ f.created_at | relative_time }})</span><br>
                     {% if f.last_seen_at %}
                       last seen: <span class="text-slate-400">{{ f.last_seen_at }} ({{ f.last_seen_at | relative_time }})</span>
                     {% else %}

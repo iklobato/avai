@@ -55,8 +55,8 @@
       <div class="col-span-full text-slate-500 italic">loading overview…</div>
     </section>
 
-    {# ---------- posture: sysint + errors ---------- #}
-    <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    {# ---------- posture row: sysint + errors + verdict chart, all side-by-side ---------- #}
+    <section class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div id="sysint"
            hx-get="/fragments/sysint"
            hx-trigger="load, every 60s"
@@ -65,18 +65,16 @@
            hx-get="/fragments/errors"
            hx-trigger="load, every 60s"
            hx-swap="innerHTML"></div>
-    </section>
-
-    {# ---------- chart ---------- #}
-    <section class="bg-slate-900 border border-slate-800 rounded-lg p-5">
-      <div class="flex items-baseline justify-between mb-4">
-        <h2 class="text-[10px] uppercase tracking-widest text-slate-500">
-          verdicts produced — last 12 hours, hourly buckets
-        </h2>
-        <span class="text-[10px] text-slate-600">auto-refresh 30s</span>
-      </div>
-      <div class="h-48">
-        <canvas id="verdict-chart"></canvas>
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 flex flex-col">
+        <div class="flex items-baseline justify-between mb-3">
+          <h3 class="text-[10px] uppercase tracking-widest text-slate-500">
+            verdicts produced — last 12h
+          </h3>
+          <span class="text-[10px] text-slate-600">auto 30s</span>
+        </div>
+        <div class="flex-1 min-h-[12rem]">
+          <canvas id="verdict-chart"></canvas>
+        </div>
       </div>
     </section>
 
