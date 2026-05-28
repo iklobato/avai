@@ -1,0 +1,186 @@
+# Taskfile.yml — high-level lifecycle for avai.
+#
+# Requires github.com/go-task/task ≥ 3 (`brew install go-task`).
+# List everything: `task --list`.
+#
+# The two commands you asked for:
+#
+#   task start       — start the host monitor (native, sudo, full param set)
+#   task dashboard   — start the read-only Flask dashboard (Docker)
+#
+# Plus stop / logs / ps / clean for the daily lifecycle.
+
+version: '3'
+
+vars:
+  # The avai project root. {{.TASKFILE_DIR}} resolves to wherever this
+  # file lives, so the tasks work no matter where you invoke them from.
+  AVAI_DIR: '{{.TASKFILE_DIR}}'
+
+  # Absolute python path for sudo (sudo resets PATH; pyenv shims aren't
+  # on root's PATH so we resolve once via the invoking user's shell).
+  PYTHON:
+    sh: command -v python3
+
+  # Where the monitor writes; where the dashboard reads from.
+  DB: '{{.AVAI_DIR}}/host_monitor.db'
+
+  # Monitor knobs (override at the command line, e.g.
+  # `task start INTERVAL=60 MAX_DB_MB=512`).
+  INTERVAL:   300        # seconds between snapshot cycles
+  LOOKBACK:   6          # minutes of unified-log history per cycle
+  MAX_DB_MB:  1024       # rotation cap; 0 disables
+  JUDGE_BATCH: 12        # LLM entries per call
+  JUDGE_CAP:  60         # max new entries judged per collector per cycle
+
+  # Dashboard knobs.
+  PORT: 8765
+
+  # Log files for backgrounded tasks. Both rotated by the user / OS.
+  MONITOR_LOG:   /tmp/host_monitor.log
+  DASHBOARD_LOG: /tmp/dashboard.log
+
+
+tasks:
+
+  # =========================================================================
+  # Headline commands — the two you asked for
+  # =========================================================================
+
+  start:
+    desc: >
+      Start the host monitor with sudo (preserves CLAUDE_CODE_OAUTH_TOKEN
+      / ANTHROPIC_API_KEY from the invoking shell via -E). Stops any
+      existing monitor first. Override params at the CLI:
+      `task start INTERVAL=180 MAX_DB_MB=512 JUDGE_CAP=40`.
+    silent: false
+    cmds:
+      - task: _kill-monitor
+      - |
+        # nohup detaches from the calling shell (task's sh -c) so the
+        # monitor survives `task` exiting. `disown` is a bash/zsh
+        # builtin; task's default /bin/sh on Debian doesn't have it.
+        sudo -E nohup '{{.PYTHON}}' '{{.AVAI_DIR}}/host_monitor.py' \
+          --db '{{.DB}}' \
+          --interval {{.INTERVAL}} \
+          --lookback-min {{.LOOKBACK}} \
+          --max-db-mb {{.MAX_DB_MB}} \
+          --judge-batch-size {{.JUDGE_BATCH}} \
+          --judge-max-per-collector {{.JUDGE_CAP}} \
+          > '{{.MONITOR_LOG}}' 2>&1 &
+      - sleep 2
+      - |
+        if pgrep -f 'python.*host_monitor.py' > /dev/null; then
+          echo "monitor: started (log → {{.MONITOR_LOG}})"
+        else
+          echo "monitor: FAILED to start — check {{.MONITOR_LOG}}"
+          exit 1
+        fi
+
+  dashboard:
+    desc: >
+      Start the Flask dashboard in Docker on port {{.PORT}}. Builds the
+      image if needed. Bind-mounts the project directory so the
+      container reads the same SQLite file the monitor writes.
+    silent: false
+    cmds:
+      - cd '{{.AVAI_DIR}}' && docker compose up -d --build dashboard
+      - |
+        # wait for the HTTP listener
+        for i in $(seq 1 30); do
+          if curl -fsS -o /dev/null http://127.0.0.1:{{.PORT}}/; then
+            echo "dashboard: ready  →  http://localhost:{{.PORT}}/"
+            exit 0
+          fi
+          sleep 1
+        done
+        echo "dashboard: NOT REACHABLE after 30s; check `task logs:dashboard`"
+        exit 1
+
+
+  # =========================================================================
+  # Linux-host deployment — both services in Docker (--profile linux)
+  # =========================================================================
+
+  start:linux:
+    desc: >
+      [Linux hosts only] Start both monitor + dashboard via docker compose
+      with --profile linux. The monitor service runs as root with pid=host,
+      network=host, and the bind-mount matrix needed to observe the host.
+      Has no effect on macOS — see README for why.
+    silent: false
+    cmds:
+      - cd '{{.AVAI_DIR}}' && docker compose --profile linux up -d --build
+      - docker compose ps
+
+
+  # =========================================================================
+  # Stop / status / logs / clean
+  # =========================================================================
+
+  stop:
+    desc: Stop both the native monitor and any Docker services.
+    cmds:
+      - task: _kill-monitor
+      - cd '{{.AVAI_DIR}}' && docker compose --profile linux stop 2>/dev/null || true
+      - echo "stopped"
+
+  ps:
+    desc: Show monitor process + Docker container status.
+    cmds:
+      - |
+        echo "=== native monitor ==="
+        pgrep -fl 'python.*host_monitor.py' || echo "  (none)"
+      - |
+        echo
+        echo "=== docker services ==="
+        cd '{{.AVAI_DIR}}' && docker compose ps 2>/dev/null || echo "  (none)"
+
+  logs:monitor:
+    desc: Tail the host monitor log file.
+    cmds:
+      - tail -f '{{.MONITOR_LOG}}'
+
+  logs:dashboard:
+    desc: Tail the dashboard container's stdout/stderr.
+    cmds:
+      - cd '{{.AVAI_DIR}}' && docker compose logs -f dashboard
+
+  clean:
+    desc: >
+      Stop everything and delete the SQLite database (host_monitor.db
+      and its WAL/SHM sidecars). Asks for confirmation.
+    prompt: This will permanently delete the SQLite database. Continue?
+    cmds:
+      - task: stop
+      - rm -f '{{.DB}}' '{{.DB}}-wal' '{{.DB}}-shm'
+      - echo "db wiped"
+
+
+  # =========================================================================
+  # Internal helpers (prefixed with _, hidden by default in task --list)
+  # =========================================================================
+
+  _kill-monitor:
+    internal: true
+    cmds:
+      - |
+        if pgrep -f 'python.*host_monitor.py' > /dev/null; then
+          # Prefer SIGINT — Runner.run_forever installs a signal handler
+          # that drains streaming workers cleanly. Fall back to SIGKILL
+          # only if it ignores SIGINT for 5s.
+          pkill -INT -f 'python.*host_monitor.py' 2>/dev/null || true
+          for i in 1 2 3 4 5; do
+            sleep 1
+            pgrep -f 'python.*host_monitor.py' > /dev/null || break
+          done
+          # Some monitor processes are owned by root (started via sudo);
+          # killing them needs sudo too.
+          if pgrep -f 'python.*host_monitor.py' > /dev/null; then
+            sudo pkill -INT -f 'python.*host_monitor.py' 2>/dev/null || true
+            sleep 2
+          fi
+          pgrep -f 'python.*host_monitor.py' > /dev/null \
+            && (sudo pkill -KILL -f 'python.*host_monitor.py' 2>/dev/null || true) \
+            || true
+        fi

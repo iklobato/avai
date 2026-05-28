@@ -40,6 +40,7 @@ RUN pip install \
 
 COPY host_monitor.py dashboard.py host_monitor_prompts.toml ./
 COPY templates ./templates
+COPY static ./static
 
 
 # ---------------------------------------------------------------------------

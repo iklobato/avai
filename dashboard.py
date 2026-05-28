@@ -160,7 +160,27 @@ _HIDDEN_SOURCE_FIELDS = {"id", "run_id"}
 
 
 def _engine():
-    return create_engine(f"sqlite:///{current_app.config['DB_PATH']}")
+    """Open the SQLite database read-only with ``immutable=1``.
+
+    Rationale: the dashboard never writes. The host monitor maintains
+    the WAL. When the dashboard runs in a Linux container reading the
+    DB through a bind mount from a macOS host, SQLite's normal mode
+    tries to mmap the ``.db-shm`` shared-memory file — and that mmap
+    fails through Docker Desktop's virtual filesystem layer, with the
+    cryptic "(sqlite3.OperationalError) disk I/O error".
+
+    ``mode=ro&immutable=1`` skips SHM entirely. The cost is that the
+    reader only sees data that's been checkpointed back to the main
+    ``.db`` file — anything sitting in the WAL waiting to be merged
+    is invisible. In practice that's a few-second lag, well within
+    the dashboard's 30-second refresh budget. ``_engine()`` is called
+    fresh per request, so each refresh sees the latest checkpointed
+    state.
+    """
+    db_path = current_app.config["DB_PATH"]
+    return create_engine(
+        f"sqlite:///file:{db_path}?mode=ro&immutable=1&uri=true",
+    )
 
 
 def _session() -> Session:

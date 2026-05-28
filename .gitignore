@@ -6,3 +6,9 @@ __pycache__/
 .DS_Store
 .venv/
 venv/
+
+# The user's global ~/.gitignore excludes `static/` (probably for
+# Django collectstatic output). The dashboard's vendored JS lives
+# under static/ and is part of the source tree — un-ignore it here.
+!static/
+!static/**
