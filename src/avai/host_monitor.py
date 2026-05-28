@@ -82,6 +82,10 @@ except ImportError:
     sys.exit(2)
 
 try:
+    # Quiet litellm's per-import warnings about optional AWS deps
+    # (botocore not installed → bedrock/sagemaker stream pre-load fails).
+    # They don't affect us; they just clutter every CLI invocation.
+    os.environ.setdefault("LITELLM_LOG", "ERROR")
     import litellm
     HAS_LITELLM = True
 except ImportError:
@@ -3665,7 +3669,7 @@ def build_judge(args, prompts: Prompts) -> Judge:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="macOS host security telemetry + LLM threat judge"
+        description="avai — host security telemetry + LLM threat judge"
     )
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH),
                         help=f"SQLite database path (default: {DEFAULT_DB_PATH})")

@@ -42,6 +42,15 @@ RUN pip install '.[judge]' \
 
 EXPOSE 8765
 
+# Healthcheck targets the dashboard. It's a no-op for the monitor
+# role (no port listening), but `docker run` / compose treats a
+# 30 s-interval failing healthcheck as just a non-healthy container —
+# the monitor still runs. If you want a green healthcheck on the
+# monitor role too, override with `--no-healthcheck` at run time.
+HEALTHCHECK --interval=30s --timeout=4s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request,sys; \
+sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/notifications/new?since=2099-01-01', timeout=3).status==200 else 1)"
+
 # Default = dashboard. Override with `avai monitor ...` for the
 # collector role.
 CMD ["avai", "dashboard", \

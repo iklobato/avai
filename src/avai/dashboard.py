@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 # Reuse models from host_monitor.py — single source of schema truth.
 from avai.host_monitor import (  # noqa: E402
     AuthEventRow,
+    Base,
     BluetoothDeviceRow,
     BrowserExtensionRow,
     CollectionRun,
@@ -649,7 +650,7 @@ def api_notifications_new():
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="avai host monitor — single-page dashboard"
+        description="avai — read-only Flask + HTMX dashboard for the host monitor DB"
     )
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH))
     parser.add_argument("--host", default="127.0.0.1")
@@ -658,8 +659,33 @@ def main() -> int:
     args = parser.parse_args()
 
     app.config["DB_PATH"] = args.db
+    _ensure_db_exists(args.db)
     app.run(host=args.host, port=args.port, debug=args.debug)
     return 0
+
+
+def _ensure_db_exists(db_path: str) -> None:
+    """Create an empty schema if the DB file doesn't exist yet.
+
+    The dashboard opens the database read-only with ``immutable=1``,
+    which SQLite *refuses* to apply to a non-existent file (the
+    immutable flag promises the file won't change — there's no file
+    to promise about). Without this, a dashboard launched before the
+    monitor has run produces 500s on every query.
+
+    Creating the schema also makes empty-state rendering work: every
+    table exists, every query returns zero rows, every panel renders
+    empty rather than erroring.
+    """
+    db_file = Path(db_path)
+    if db_file.exists() and db_file.stat().st_size > 0:
+        return
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    write_engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        Base.metadata.create_all(write_engine)
+    finally:
+        write_engine.dispose()
 
 
 if __name__ == "__main__":
