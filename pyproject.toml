@@ -4,7 +4,11 @@ build-backend = "hatchling.build"
 
 
 [project]
-name = "avai"
+# PyPI distribution name. The import name and CLI entry point both
+# stay `avai`; only the install name (`pip install avai-monitor`)
+# differs, because the canonical `avai` slot is blocked by PyPI's
+# name-similarity policy.
+name = "avai-monitor"
 version = "0.1.0"
 description = "macOS / Linux host-security telemetry collector with an LLM threat judge and a single-page web dashboard."
 readme = "README.md"
@@ -49,7 +53,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Pull these in with: pip install 'avai[judge]'
+# Pull these in with: pip install 'avai-monitor[judge]'
 judge = [
     "litellm>=1.0",
     "anthropic>=0.30",

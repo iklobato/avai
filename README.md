@@ -3,7 +3,7 @@
 > **Know what's actually running on your machines.**
 > Open-source host telemetry + LLM threat classifier. One `docker run`.
 
-[![PyPI](https://img.shields.io/pypi/v/avai?color=10b981&label=pypi)](https://pypi.org/project/avai/)
+[![PyPI](https://img.shields.io/pypi/v/avai-monitor?color=10b981&label=pypi)](https://pypi.org/project/avai-monitor/)
 [![Docker](https://img.shields.io/docker/pulls/iklobato/avai?color=10b981&label=docker%20pulls)](https://hub.docker.com/r/iklobato/avai)
 [![License](https://img.shields.io/github/license/iklobato/avai?color=10b981)](LICENSE)
 [![Site](https://img.shields.io/badge/site-getavai.com-10b981)](https://getavai.com)
@@ -34,7 +34,8 @@ MITRE-aligned category, a confidence, and a one-line remediation.
 
 The image's default `CMD` is the dashboard. Override the command at
 `docker run` / compose level to run the monitor instead. Native install
-is also possible (`pip install avai`) but is not the documented path.
+is also possible (`pip install avai-monitor`, then `avai monitor` /
+`avai dashboard`) but is not the documented path.
 
 The image carries a `HEALTHCHECK` against the dashboard's
 `/api/notifications/new` endpoint — `starting → healthy` in ~10 s on
@@ -363,8 +364,8 @@ fine on macOS Docker — you'd just need to write the database from
 somewhere else.
 
 If you want full macOS coverage, install natively (`pip install
-avai`) and run `avai monitor` with `sudo`. That's a separate path
-not documented here.
+avai-monitor`) and run `avai monitor` with `sudo`. That's a separate
+path not documented here.
 
 ---
 
