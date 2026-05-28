@@ -4,7 +4,7 @@
 > Open-source host telemetry + LLM threat classifier. One `docker run`.
 
 [![PyPI](https://img.shields.io/pypi/v/avai-monitor?color=10b981&label=pypi)](https://pypi.org/project/avai-monitor/)
-[![Docker](https://img.shields.io/docker/pulls/iklobato/avai?color=10b981&label=docker%20pulls)](https://hub.docker.com/r/iklobato/avai)
+[![Docker](https://img.shields.io/docker/pulls/iklob1/avai?color=10b981&label=docker%20pulls)](https://hub.docker.com/r/iklob1/avai)
 [![License](https://img.shields.io/github/license/iklobato/avai?color=10b981)](LICENSE)
 [![Site](https://img.shields.io/badge/site-getavai.com-10b981)](https://getavai.com)
 
@@ -24,7 +24,7 @@ MITRE-aligned category, a confidence, and a one-line remediation.
 - BYO key (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`), or swap to any litellm-supported provider.
 
 → Marketing site & screenshots: **<https://getavai.com>**
-→ Source: <https://github.com/iklobato/avai>
+→ Source: <https://github.com/iklob1/avai>
 
 ---
 
@@ -32,8 +32,8 @@ MITRE-aligned category, a confidence, and a one-line remediation.
 
 | Run | Command | Where it makes sense |
 |---|---|---|
-| Dashboard (default) | `docker run iklobato/avai` | any host — read-only Flask + HTMX on :8765 |
-| Monitor | `docker run ... iklobato/avai avai monitor ...` | **Linux hosts only** — needs `pid=host`, `network=host`, and host filesystem bind-mounts |
+| Dashboard (default) | `docker run iklob1/avai` | any host — read-only Flask + HTMX on :8765 |
+| Monitor | `docker run ... iklob1/avai avai monitor ...` | **Linux hosts only** — needs `pid=host`, `network=host`, and host filesystem bind-mounts |
 
 The image's default `CMD` is the dashboard. Override the command at
 `docker run` / compose level to run the monitor instead. Native install
@@ -57,11 +57,11 @@ green dashboard you can poke at.
 mkdir -p ~/.avai && cd ~/.avai
 
 # 1. populate the DB with one snapshot of the container's view
-docker run --rm -v "$PWD":/data iklobato/avai \
+docker run --rm -v "$PWD":/data iklob1/avai \
   avai monitor --once --no-streaming --no-judge --db /data/avai.db
 
 # 2. serve it
-docker run -d --name avai -p 8765:8765 -v "$PWD":/data iklobato/avai
+docker run -d --name avai -p 8765:8765 -v "$PWD":/data iklob1/avai
 
 open http://localhost:8765/      # macOS;  xdg-open on Linux
 ```
@@ -90,7 +90,7 @@ docker run -d \
   --name avai-dashboard \
   -p 8765:8765 \
   -v "$PWD":/data \
-  iklobato/avai
+  iklob1/avai
 
 open http://localhost:8765/
 ```
@@ -105,7 +105,7 @@ docker rm avai-dashboard`.
 ```sh
 docker run --rm -p 9000:9000 \
   -v /var/lib/avai:/data \
-  iklobato/avai \
+  iklob1/avai \
   avai dashboard --host 0.0.0.0 --port 9000 --db /data/custom.db
 ```
 
@@ -143,7 +143,7 @@ docker run --rm \
   -v /home:/host/home:ro \
   -v /root:/host/root:ro \
   -v "$PWD":/data \
-  iklobato/avai \
+  iklob1/avai \
   avai monitor --once --no-streaming --no-judge --db /data/avai.db
 ```
 
@@ -151,7 +151,7 @@ When the command exits, `~/.avai/avai.db` contains one
 `collection_runs` row plus the populated collector tables. Verify:
 
 ```sh
-docker run --rm -v "$PWD":/data iklobato/avai python -c "
+docker run --rm -v "$PWD":/data iklob1/avai python -c "
 import sqlite3
 c = sqlite3.connect('/data/avai.db')
 for n, in c.execute(\"select name from sqlite_master where type='table'\"):
@@ -177,7 +177,7 @@ the environment (`VT_API_KEY`, `ABUSE_CH_AUTH_KEY`, `ABUSEIPDB_API_KEY`,
 
 ```sh
 cp .env.example .env  &&  vi .env       # fill in only the keys you have
-docker run -d --env-file .env --name avai-monitor ... iklobato/avai
+docker run -d --env-file .env --name avai-monitor ... iklob1/avai
 ```
 
 See **§ Threat-intel enrichment** below for the full source list and
@@ -205,7 +205,7 @@ docker run -d --name avai-monitor --restart unless-stopped \
   -v /dev/mapper:/dev/mapper:ro \
   -v /home:/host/home:ro -v /root:/host/root:ro \
   -v "$PWD":/data \
-  iklobato/avai \
+  iklob1/avai \
   avai monitor --db /data/avai.db --interval 300
 
 docker logs -f avai-monitor      # watch the cycle
@@ -226,8 +226,8 @@ Defaults baked into `avai monitor`:
 | `--no-enrich` | (off) | skips the whole threat-intel layer; collectors → judge directly |
 | `--enrich-only NAME` | (all) | restrict the chain to one named source (repeatable); useful for debugging |
 
-Append any flag to the `docker run … iklobato/avai avai monitor …`
-command to override. Full reference: `docker run --rm iklobato/avai
+Append any flag to the `docker run … iklob1/avai avai monitor …`
+command to override. Full reference: `docker run --rm iklob1/avai
 avai monitor --help`.
 
 ---
@@ -238,7 +238,7 @@ avai monitor --help`.
 
 ```yaml
 x-avai-image: &avai-image
-  image: iklobato/avai:latest
+  image: iklob1/avai:latest
 
 services:
 
@@ -303,7 +303,7 @@ If you already have an `avai.db` (produced by the monitor on a
 different machine, dropped into the current directory, etc.):
 
 ```sh
-docker run --rm -p 8765:8765 -v "$PWD":/data iklobato/avai
+docker run --rm -p 8765:8765 -v "$PWD":/data iklob1/avai
 ```
 
 The dashboard opens the file with `?mode=ro&immutable=1`, so it never
@@ -316,10 +316,10 @@ being written by the monitor in another container.
 
 ```sh
 # Inspect the bundled CLI
-docker run --rm iklobato/avai avai --help
-docker run --rm iklobato/avai avai monitor --help
-docker run --rm iklobato/avai avai dashboard --help
-docker run --rm iklobato/avai avai --version
+docker run --rm iklob1/avai avai --help
+docker run --rm iklob1/avai avai monitor --help
+docker run --rm iklob1/avai avai dashboard --help
+docker run --rm iklob1/avai avai --version
 
 # Healthcheck + status
 docker inspect avai-dashboard --format '{{.State.Health.Status}}'   # healthy|unhealthy|starting
@@ -338,7 +338,7 @@ docker rm   avai-dashboard avai-monitor 2>/dev/null
 rm -f data/avai.db data/avai.db-wal data/avai.db-shm
 
 # Pull the latest image
-docker pull iklobato/avai
+docker pull iklob1/avai
 ```
 
 ---

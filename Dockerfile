@@ -8,8 +8,8 @@
 # Default CMD is the dashboard (most common standalone use). Override
 # the command at `docker run` / compose level to invoke the monitor:
 #
-#   docker run -p 8765:8765 -v "$PWD":/data iklobato/avai
-#   docker run --pid=host --network=host ... iklobato/avai \
+#   docker run -p 8765:8765 -v "$PWD":/data iklob1/avai
+#   docker run --pid=host --network=host ... iklob1/avai \
 #       avai monitor --db /data/avai.db
 
 ARG PYTHON_VERSION=3.11

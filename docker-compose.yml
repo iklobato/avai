@@ -1,6 +1,6 @@
 # avai — Docker Compose for the full stack (Linux deployment).
 #
-# Single image (iklobato/avai), two services with different commands:
+# Single image (iklob1/avai), two services with different commands:
 #
 #   monitor    — Linux-only. Runs as root in the host's PID + network
 #                namespaces with bind-mounts under /host. Opt-in via
@@ -17,7 +17,7 @@ x-avai-image: &avai-image
   build:
     context: .
     dockerfile: Dockerfile
-  image: iklobato/avai:latest
+  image: iklob1/avai:latest
 
 services:
 
