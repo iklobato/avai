@@ -24,7 +24,9 @@ from avai.enrichers.base import RateLimitedError
 
 LOG = logging.getLogger("avai.enrichers.http")
 
-_USER_AGENT = "avai-monitor/0.1 (+https://github.com/iklobato/avai)"
+from avai import __version__ as _AVAI_VERSION
+
+_USER_AGENT = f"avai-monitor/{_AVAI_VERSION} (+https://github.com/iklobato/avai)"
 _DEFAULT_TIMEOUT = 8.0
 _RETRY_STATUS    = (500, 502, 503, 504)
 _RETRY_BACKOFFS  = (0.4, 1.2, 3.0)  # seconds, jittered ±25%

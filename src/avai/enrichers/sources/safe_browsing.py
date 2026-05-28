@@ -19,9 +19,11 @@ from avai.enrichers.http import HttpClient
 
 _URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
 
+from avai import __version__ as _AVAI_VERSION
+
 _CLIENT_INFO = {
     "clientId":      "avai-monitor",
-    "clientVersion": "0.1.0",
+    "clientVersion": _AVAI_VERSION,
 }
 _THREAT_TYPES = [
     "MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE",
