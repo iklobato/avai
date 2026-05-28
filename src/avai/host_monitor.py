@@ -100,9 +100,13 @@ import platform as _platform
 IS_MACOS = _platform.system() == "Darwin"
 IS_LINUX = _platform.system() == "Linux"
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
+_PKG_DIR = Path(__file__).resolve().parent
 
-DEFAULT_DB_PATH = _SCRIPT_DIR / "host_monitor.db"
+# Default database location: user's current working directory so the
+# pip-installed `avai monitor` doesn't try to write into the read-only
+# site-packages dir. Containerised invocations override via --db
+# (compose passes --db /data/avai.db).
+DEFAULT_DB_PATH = Path.cwd() / "avai.db"
 DEFAULT_INTERVAL = 300
 DEFAULT_LOOKBACK_MIN = 6
 
@@ -110,7 +114,8 @@ DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_JUDGE_BATCH = 20
 DEFAULT_JUDGE_MAX_PER_COLLECTOR = 200
 
-DEFAULT_PROMPTS_PATH = _SCRIPT_DIR / "host_monitor_prompts.toml"
+# Bundled inside the package — installed alongside this module.
+DEFAULT_PROMPTS_PATH = _PKG_DIR / "prompts.toml"
 
 
 # ============================================================================

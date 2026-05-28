@@ -1,0 +1,91 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+
+[project]
+name = "avai"
+version = "0.1.0"
+description = "macOS / Linux host-security telemetry collector with an LLM threat judge and a single-page web dashboard."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "iklo", email = "tiktachack@gmail.com" },
+]
+keywords = [
+    "security",
+    "monitoring",
+    "macos",
+    "linux",
+    "audit",
+    "edr",
+    "llm",
+    "threat-detection",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Framework :: Flask",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
+]
+
+dependencies = [
+    "psutil>=5.9",
+    "sqlalchemy>=2.0",
+    "flask>=3.0",
+]
+
+[project.optional-dependencies]
+# Pull these in with: pip install 'avai[judge]'
+judge = [
+    "litellm>=1.0",
+    "anthropic>=0.30",
+]
+dev = [
+    "build>=1.0",
+    "twine>=5.0",
+    "pytest>=7.0",
+]
+
+[project.scripts]
+avai = "avai.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/iklobato/avai"
+Repository = "https://github.com/iklobato/avai"
+Issues = "https://github.com/iklobato/avai/issues"
+
+
+# -----------------------------------------------------------------------------
+# Hatchling build config — include the package data (prompts.toml,
+# templates/, static/) in both wheel and sdist.
+# -----------------------------------------------------------------------------
+
+[tool.hatch.build.targets.wheel]
+# packages = ["src/avai"] is enough — hatchling walks the directory
+# and includes every file (Python and otherwise), so prompts.toml,
+# templates/, and static/ end up under avai/ in the wheel
+# automatically.
+packages = ["src/avai"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/avai/**",
+    "README.md",
+    "Dockerfile",
+    "docker-compose.yml",
+    "pyproject.toml",
+]

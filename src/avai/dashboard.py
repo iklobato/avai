@@ -34,8 +34,7 @@ from sqlalchemy import asc, case, create_engine, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 # Reuse models from host_monitor.py — single source of schema truth.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from host_monitor import (  # noqa: E402
+from avai.host_monitor import (  # noqa: E402
     AuthEventRow,
     BluetoothDeviceRow,
     BrowserExtensionRow,
@@ -116,9 +115,24 @@ VERDICTS = ("malicious", "suspicious", "unknown", "benign")
 PER_PAGE_OPTIONS = (10, 25, 50, 100)
 DEFAULT_PER_PAGE = 10
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parent / "host_monitor.db"
+# Default DB lives in the current working directory so the pip-
+# installed `avai dashboard` doesn't try to read from site-packages.
+# Override at runtime with --db or by setting app.config["DB_PATH"].
+DEFAULT_DB_PATH = Path.cwd() / "avai.db"
 
-app = Flask(__name__)
+# Templates and static assets ship inside the installed package
+# (src/avai/templates/, src/avai/static/). Flask defaults to looking
+# in <module>/templates and <module>/static, but we set them
+# explicitly here so the path is unambiguous regardless of how the
+# module is invoked (entry-point script, `python -m avai.dashboard`,
+# Docker CMD, etc.).
+_PKG_DIR = Path(__file__).resolve().parent
+
+app = Flask(
+    __name__,
+    template_folder=str(_PKG_DIR / "templates"),
+    static_folder=str(_PKG_DIR / "static"),
+)
 app.config["DB_PATH"] = str(DEFAULT_DB_PATH)
 
 

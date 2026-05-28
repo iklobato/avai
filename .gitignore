@@ -12,3 +12,9 @@ venv/
 # under static/ and is part of the source tree — un-ignore it here.
 !static/
 !static/**
+
+
+# Python build outputs
+/dist/
+/build/
+*.egg-info/
