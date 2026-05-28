@@ -1,7 +1,31 @@
 # avai
 
-Host-security telemetry collector + LLM threat judge + read-only web
-dashboard, distributed as **one** Docker image with two roles:
+> **Know what's actually running on your machines.**
+> Open-source host telemetry + LLM threat classifier. One `docker run`.
+
+[![PyPI](https://img.shields.io/pypi/v/avai?color=10b981&label=pypi)](https://pypi.org/project/avai/)
+[![Docker](https://img.shields.io/docker/pulls/iklobato/avai?color=10b981&label=docker%20pulls)](https://hub.docker.com/r/iklobato/avai)
+[![License](https://img.shields.io/github/license/iklobato/avai?color=10b981)](LICENSE)
+[![Site](https://img.shields.io/badge/site-getavai.com-10b981)](https://getavai.com)
+
+`avai` snapshots 21 corners of your host on macOS (16 on Linux) —
+processes, USB, persistence, file integrity, browser extensions, exec
+events — and lets a Claude-class LLM tell you which findings are worth
+caring about. Verdicts come back as
+**malicious** / **suspicious** / **unknown** / **benign** with a
+MITRE-aligned category, a confidence, and a one-line remediation.
+
+- No agent contract, no SIEM, no cloud control plane.
+- Dedup by content hash — the same artifact is never sent to the LLM twice.
+- Read-only Flask + HTMX + Chart.js dashboard on `:8765`.
+- BYO key (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`), or swap to any litellm-supported provider.
+
+→ Marketing site & screenshots: **<https://getavai.com>**
+→ Source: <https://github.com/iklobato/avai>
+
+---
+
+## One image, two roles
 
 | Run | Command | Where it makes sense |
 |---|---|---|
