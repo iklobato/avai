@@ -119,10 +119,14 @@ tasks:
   # =========================================================================
 
   stop:
-    desc: Stop both the native monitor and any Docker services.
+    desc: Stop both the native monitor and every Docker service.
     cmds:
       - task: _kill-monitor
-      - cd '{{.AVAI_DIR}}' && docker compose --profile linux stop 2>/dev/null || true
+      # --profile '*' targets every profile (including services with no
+      # profile like the default-profile `dashboard`), so this stops
+      # both `monitor` and `dashboard` regardless of how they were
+      # started.
+      - cd '{{.AVAI_DIR}}' && docker compose --profile '*' stop 2>/dev/null || docker compose stop 2>/dev/null || true
       - echo "stopped"
 
   ps:
@@ -163,24 +167,25 @@ tasks:
 
   _kill-monitor:
     internal: true
+    # ignore_error means a non-zero exit (e.g. pgrep returning 1 when
+    # there's nothing to kill, which is the *success* case for us)
+    # doesn't abort the parent task. The helper does best-effort
+    # cleanup; the caller verifies via `task ps` whether it succeeded.
+    ignore_error: true
     cmds:
       - |
-        if pgrep -f 'python.*host_monitor.py' > /dev/null; then
-          # Prefer SIGINT — Runner.run_forever installs a signal handler
-          # that drains streaming workers cleanly. Fall back to SIGKILL
-          # only if it ignores SIGINT for 5s.
-          pkill -INT -f 'python.*host_monitor.py' 2>/dev/null || true
-          for i in 1 2 3 4 5; do
-            sleep 1
-            pgrep -f 'python.*host_monitor.py' > /dev/null || break
-          done
-          # Some monitor processes are owned by root (started via sudo);
-          # killing them needs sudo too.
-          if pgrep -f 'python.*host_monitor.py' > /dev/null; then
-            sudo pkill -INT -f 'python.*host_monitor.py' 2>/dev/null || true
-            sleep 2
-          fi
-          pgrep -f 'python.*host_monitor.py' > /dev/null \
-            && (sudo pkill -KILL -f 'python.*host_monitor.py' 2>/dev/null || true) \
-            || true
-        fi
+        # Escalating-signal kill: SIGINT (drains streaming workers) →
+        # sudo SIGINT (for root-owned processes started via sudo) →
+        # sudo SIGKILL (last resort). Each stage gives the previous
+        # one a few seconds to take effect.
+        pkill -INT -f 'python.*host_monitor.py' 2>/dev/null
+        for _ in 1 2 3 4 5; do
+          sleep 1
+          pgrep -f 'python.*host_monitor.py' >/dev/null 2>&1 || exit 0
+        done
+        sudo pkill -INT -f 'python.*host_monitor.py' 2>/dev/null
+        sleep 2
+        pgrep -f 'python.*host_monitor.py' >/dev/null 2>&1 || exit 0
+        sudo pkill -KILL -f 'python.*host_monitor.py' 2>/dev/null
+        sleep 1
+        exit 0
