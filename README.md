@@ -10,13 +10,16 @@
 
 `avai` snapshots 21 corners of your host on macOS (16 on Linux) —
 processes, USB, persistence, file integrity, browser extensions, exec
-events — and lets a Claude-class LLM tell you which findings are worth
-caring about. Verdicts come back as
+events — enriches each new finding with up to **17 threat-intel
+sources** (VirusTotal, MalwareBazaar, URLhaus, CISA KEV, Shodan,
+AbuseIPDB, OSV, NVD, …), and lets a Claude-class LLM tell you which
+ones are worth caring about. Verdicts come back as
 **malicious** / **suspicious** / **unknown** / **benign** with a
 MITRE-aligned category, a confidence, and a one-line remediation.
 
 - No agent contract, no SIEM, no cloud control plane.
 - Dedup by content hash — the same artifact is never sent to the LLM twice.
+- 17 plug-and-play threat-intel sources behind the LLM — see [`.env.example`](.env.example); missing keys disable a source cleanly.
 - Read-only Flask + HTMX + Chart.js dashboard on `:8765`.
 - BYO key (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`), or swap to any litellm-supported provider.
 
@@ -168,6 +171,18 @@ Anthropic API) or `CLAUDE_CODE_OAUTH_TOKEN` (Claude Code OAuth) — and
 defaults to **Claude Haiku 4.5** (`claude-haiku-4-5-20251001`).
 Override with `--judge-model` to point litellm at any other provider.
 
+Threat-intel enrichment runs automatically with whatever keys are in
+the environment (`VT_API_KEY`, `ABUSE_CH_AUTH_KEY`, `ABUSEIPDB_API_KEY`,
+…). Easiest pattern is a project-local `.env`:
+
+```sh
+cp .env.example .env  &&  vi .env       # fill in only the keys you have
+docker run -d --env-file .env --name avai-monitor ... iklobato/avai
+```
+
+See **§ Threat-intel enrichment** below for the full source list and
+each source's gate condition.
+
 ```sh
 mkdir -p ~/.avai && cd ~/.avai
 
@@ -208,6 +223,8 @@ Defaults baked into `avai monitor`:
 | `--judge-max-per-collector` | unlimited | per-cycle cap of new entries judged |
 | `--no-streaming` | (off) | disables `auth_events` + `process_exec_events` tailers |
 | `--no-judge` | (off) | runs collectors but stores no verdicts |
+| `--no-enrich` | (off) | skips the whole threat-intel layer; collectors → judge directly |
+| `--enrich-only NAME` | (all) | restrict the chain to one named source (repeatable); useful for debugging |
 
 Append any flag to the `docker run … iklobato/avai avai monitor …`
 command to override. Full reference: `docker run --rm iklobato/avai
@@ -233,10 +250,12 @@ services:
     pid: host
     network_mode: host
     cap_add: [SYS_PTRACE, NET_ADMIN, NET_RAW, DAC_READ_SEARCH]
+    # Loads LLM-judge + every threat-intel API key from .env. Copy
+    # .env.example to .env and fill in only the keys you have.
+    env_file: [.env]
     environment:
       - HOST_PREFIX=/host
       - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
-      - ANTHROPIC_API_KEY        # or CLAUDE_CODE_OAUTH_TOKEN
     volumes:
       - ./data:/data
       - /proc:/host/proc:ro
@@ -270,7 +289,7 @@ Then:
 
 ```sh
 mkdir -p data
-export ANTHROPIC_API_KEY=sk-ant-...
+cp .env.example .env  &&  vi .env       # fill in the keys you have
 docker compose up -d
 docker compose logs -f monitor
 open http://localhost:8765/
