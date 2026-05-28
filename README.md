@@ -1,15 +1,16 @@
 # avai
 
 Host-security telemetry collector + LLM threat judge + read-only web
-dashboard, distributed as two Docker images:
+dashboard, distributed as **one** Docker image with two roles:
 
-| Image | What it runs | Where it makes sense |
+| Run | Command | Where it makes sense |
 |---|---|---|
-| `iklobato/avai:dashboard` | Read-only Flask + HTMX dashboard on port 8765 | any host — only needs the SQLite DB written by the monitor |
-| `iklobato/avai:monitor` | The collector: snapshots processes, USB, launch units, file integrity, …; streams auth + exec events; writes findings classified by an LLM | **Linux hosts only** — needs `pid=host`, `network=host`, and host filesystem bind-mounts |
+| Dashboard (default) | `docker run iklobato/avai` | any host — read-only Flask + HTMX on :8765 |
+| Monitor | `docker run ... iklobato/avai avai monitor ...` | **Linux hosts only** — needs `pid=host`, `network=host`, and host filesystem bind-mounts |
 
-Everything below is Docker. Native install is also possible (`pip
-install avai`) but is not the documented path.
+The image's default `CMD` is the dashboard. Override the command at
+`docker run` / compose level to run the monitor instead. Native install
+is also possible (`pip install avai`) but is not the documented path.
 
 ---
 
@@ -26,21 +27,21 @@ docker run -d \
   --name avai-dashboard \
   -p 8765:8765 \
   -v "$PWD":/data \
-  iklobato/avai:dashboard
+  iklobato/avai
 
 open http://localhost:8765/
 ```
 
-If the database doesn't exist yet, the dashboard will start but every
-panel will be empty until the monitor produces some rows. Stop it with
+If the database doesn't exist yet, the dashboard starts but every panel
+is empty until the monitor produces rows. Stop with
 `docker stop avai-dashboard && docker rm avai-dashboard`.
 
-### Override the DB path or bind port
+### Override port or DB path
 
 ```sh
 docker run --rm -p 9000:9000 \
   -v /var/lib/avai:/data \
-  iklobato/avai:dashboard \
+  iklobato/avai \
   avai dashboard --host 0.0.0.0 --port 9000 --db /data/custom.db
 ```
 
@@ -78,18 +79,18 @@ docker run --rm \
   -v /home:/host/home:ro \
   -v /root:/host/root:ro \
   -v "$PWD":/data \
-  iklobato/avai:monitor \
+  iklobato/avai \
   avai monitor --once --no-streaming --no-judge --db /data/avai.db
 ```
 
-When the command exits, `~/.avai/avai.db` will contain one
+When the command exits, `~/.avai/avai.db` contains one
 `collection_runs` row plus the populated collector tables.
 
 ---
 
 ## 3 — Monitor: continuous, with LLM judge (Linux host)
 
-Same bind-mounts as §2 but detached, with the LLM judge enabled. The
+Same bind mounts as §2 but detached, with the LLM judge enabled. The
 judge needs one credential — either `ANTHROPIC_API_KEY` (standard
 Anthropic API) or `CLAUDE_CODE_OAUTH_TOKEN` (Claude Code OAuth).
 
@@ -115,20 +116,14 @@ docker run -d --name avai-monitor --restart unless-stopped \
   -v /dev/mapper:/dev/mapper:ro \
   -v /home:/host/home:ro -v /root:/host/root:ro \
   -v "$PWD":/data \
-  iklobato/avai:monitor
+  iklobato/avai \
+  avai monitor --db /data/avai.db --interval 300
 
 docker logs -f avai-monitor      # watch the cycle
 ```
 
-The container will run `avai monitor` with the image's default
-flags: `--interval 300 --lookback-min 6 --max-db-mb 1024
---judge-max-per-collector 60`. Override any of them by appending
-your own command:
-
-```sh
-docker run ... iklobato/avai:monitor \
-  avai monitor --interval 60 --max-db-mb 4096 --judge-max-per-collector 100
-```
+Override any of `--interval`, `--lookback-min`, `--max-db-mb`,
+`--judge-max-per-collector` etc. by appending them to the command.
 
 ---
 
@@ -137,11 +132,15 @@ docker run ... iklobato/avai:monitor \
 `docker-compose.yml`:
 
 ```yaml
+x-avai-image: &avai-image
+  image: iklobato/avai:latest
+
 services:
 
   monitor:
-    image: iklobato/avai:monitor
+    <<: *avai-image
     container_name: avai-monitor
+    command: ["avai","monitor","--db","/data/avai.db","--interval","300"]
     user: "0:0"
     pid: host
     network_mode: host
@@ -171,14 +170,11 @@ services:
     restart: unless-stopped
 
   dashboard:
-    image: iklobato/avai:dashboard
+    <<: *avai-image
     container_name: avai-dashboard
+    # uses the image's default CMD
     ports: ["8765:8765"]
     volumes: ["./data:/data"]
-    cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
-    read_only: true
-    tmpfs: [/tmp]
     restart: unless-stopped
 ```
 
@@ -200,7 +196,7 @@ If you already have an `avai.db` (produced by the monitor on a
 different machine, dropped into the current directory, etc.):
 
 ```sh
-docker run --rm -p 8765:8765 -v "$PWD":/data iklobato/avai:dashboard
+docker run --rm -p 8765:8765 -v "$PWD":/data iklobato/avai
 ```
 
 The dashboard opens the file with `?mode=ro&immutable=1`, so it never
@@ -213,22 +209,21 @@ being written by the monitor in another container.
 
 ```sh
 # Inspect the bundled CLI
-docker run --rm iklobato/avai:dashboard avai --help
-docker run --rm iklobato/avai:dashboard avai monitor --help
-docker run --rm iklobato/avai:dashboard avai dashboard --help
-docker run --rm iklobato/avai:dashboard avai --version
+docker run --rm iklobato/avai avai --help
+docker run --rm iklobato/avai avai monitor --help
+docker run --rm iklobato/avai avai dashboard --help
+docker run --rm iklobato/avai avai --version
 
 # Stop / clean up
 docker compose down                                # if using compose
 docker stop avai-dashboard avai-monitor 2>/dev/null
 docker rm   avai-dashboard avai-monitor 2>/dev/null
 
-# Wipe the database (does NOT remove findings/judgments cache)
+# Wipe the database
 rm -f data/avai.db data/avai.db-wal data/avai.db-shm
 
-# Pull the latest images
-docker pull iklobato/avai:dashboard
-docker pull iklobato/avai:monitor
+# Pull the latest image
+docker pull iklobato/avai
 ```
 
 ---
@@ -266,11 +261,11 @@ persisted; the same artifact is never sent twice.
 The monitor relies on Linux-native facilities — `pid=host` reaching
 the host's `/proc`, sysfs at `/sys/bus/usb`, `journalctl` with
 `auditd`, `systemctl is-active`, `dpkg-query`, `dmsetup` for LUKS.
-Docker Desktop on macOS only exposes the Linux VM that ships with
-it, not the macOS host, so a containerised monitor on macOS reports
-on the VM (empty/uninteresting) rather than the Mac. The dashboard
-image works fine on macOS Docker — you'd just need to write the
-database from somewhere else.
+Docker Desktop on macOS only exposes the Linux VM it ships with, not
+the macOS host, so a containerised monitor on macOS reports on the VM
+(empty/uninteresting) rather than the Mac. The dashboard role works
+fine on macOS Docker — you'd just need to write the database from
+somewhere else.
 
 If you want full macOS coverage, install natively (`pip install
 avai`) and run `avai monitor` with `sudo`. That's a separate path
