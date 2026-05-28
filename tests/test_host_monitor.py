@@ -348,13 +348,15 @@ class TestSinkWriteJudgments:
 # ---------------------------------------------------------------------------
 
 class TestSinkDatabaseSize:
-    def test_database_size_bytes_returns_int(self, sink):
-        n = sink.database_size_bytes()
-        # In-memory DB URL → returns 0 (no file).
-        assert isinstance(n, int)
-        assert n >= 0
+    def test_size_bytes_is_zero_for_in_memory_url(self, sink):
+        # database_size_bytes parses the file path out of the engine
+        # URL; an in-memory DB has no file, so the contract is to
+        # return 0 (not crash trying to stat a nonexistent path).
+        # (File-backed growth is covered in test_sink_rotation.py.)
+        assert sink.database_size_bytes() == 0
 
-    def test_database_live_bytes_returns_nonneg_int(self, sink):
-        n = sink.database_live_bytes()
-        assert isinstance(n, int)
-        assert n >= 0
+    def test_live_bytes_reflects_allocated_pages(self, sink):
+        # live_bytes = (page_count - freelist) * page_size. After setup
+        # the schema occupies a handful of pages, so it must be > 0 even
+        # with no data rows — proves the PRAGMA arithmetic runs.
+        assert sink.database_live_bytes() > 0

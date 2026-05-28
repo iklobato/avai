@@ -90,9 +90,6 @@ class TestDatabaseSizeBytes:
 
 
 class TestDatabaseLiveBytes:
-    def test_returns_nonneg(self, file_sink):
-        assert file_sink.database_live_bytes() >= 0
-
     def test_decreases_after_delete_and_pragma(self, file_sink):
         ts = utcnow()
         run_id, _ = file_sink.start_run("h", 5)

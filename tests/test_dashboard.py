@@ -100,13 +100,18 @@ class TestDashboardEndpoints:
                         "now": body["now"],   # presence — value is a timestamp
                         "since": "2099-01-01"}
 
-    def test_chart_verdicts_endpoint(self, client):
+    def test_chart_verdicts_shape_on_empty_db(self, client):
         r = client.get("/api/chart/verdicts")
         assert r.status_code == 200
         body = r.get_json()
-        assert isinstance(body, dict)
-        # Empty DB → every verdict bucket is zero or missing — either
-        # is acceptable as long as the endpoint doesn't 500.
+        # Contract: {"labels": [...], "datasets": {verdict: [counts]}}.
+        # Even with no data the keys must exist and datasets must carry
+        # an entry for every verdict — the Chart.js front-end indexes
+        # into these by name, so a missing key silently breaks the donut.
+        assert body["labels"] == []
+        assert set(body["datasets"].keys()) == {
+            "benign", "suspicious", "malicious", "unknown"}
+        assert all(v == [] for v in body["datasets"].values())
 
     @pytest.mark.parametrize("path", [
         "/fragments/header-meta",

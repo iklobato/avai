@@ -68,18 +68,17 @@ class TestIsDomain:
         assert _is_domain(d)
 
     @pytest.mark.parametrize("d", [
-        "",
+        "",                # empty
         "no-tld",          # no dot
-        "1.2.3.4",         # an IP, not a domain — but matches the regex
-        ".starts-dot",
-        "ends-dot.",
-        "_underscore.com",
+        "1.2.3.4",         # IPv4 literal — must NOT be classified as a domain
+        ".starts-dot",     # leading dot
+        "ends-dot.",       # trailing dot
     ])
-    def test_rejects_or_accepts_consistently(self, d):
-        # We don't assert behaviour for every case — just that the
-        # function returns a bool and doesn't raise on weird input.
-        result = _is_domain(d)
-        assert isinstance(result, bool)
+    def test_rejects_non_domains(self, d):
+        # Concrete behaviour: each of these must be rejected. The IPv4
+        # case is the load-bearing one (regression for the _is_domain
+        # vs _is_ipv4 collision bug).
+        assert _is_domain(d) is False
 
 
 # ---------------------------------------------------------------------------
