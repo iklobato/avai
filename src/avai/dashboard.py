@@ -681,6 +681,12 @@ def _ensure_db_exists(db_path: str) -> None:
     if db_file.exists() and db_file.stat().st_size > 0:
         return
     db_file.parent.mkdir(parents=True, exist_ok=True)
+    # Register the enrichment model on Base.metadata before create_all,
+    # so a dashboard-only deployment (no monitor co-located) still gets
+    # the enrichment_evidence table — otherwise any dashboard query
+    # against it 500s.
+    from avai.enrichers.cache import register_schema
+    register_schema(Base)
     write_engine = create_engine(f"sqlite:///{db_path}")
     try:
         Base.metadata.create_all(write_engine)

@@ -52,27 +52,34 @@ def _register_model(base_cls):
     return EnrichmentRow
 
 
-# Module-global, populated on first call to ``EvidenceCache(...)``. The
-# alternative is each Runner passing the model around — that creates
-# strong import coupling, which is exactly what this layer avoids.
-_MODEL = None
+# Per-base registry. Production only ever uses one ``Base`` (the one
+# in host_monitor); but tests create throwaway DeclarativeBase classes
+# per fixture, so a single global model would either collide on the
+# second register or get attached to the wrong metadata. Keying by
+# ``base_cls`` avoids both.
+_MODELS: dict[type, type] = {}
 
 
-def register_schema(base_cls) -> None:
+def register_schema(base_cls) -> type:
     """Idempotently register the enrichment ORM model against
-    ``base_cls``. Call this at startup before
-    ``Base.metadata.create_all()`` so the table exists even when the
-    enrichment chain isn't running on this process (the dashboard
+    ``base_cls`` and return the class. Call this at startup before
+    ``base_cls.metadata.create_all()`` so the table exists even when
+    the enrichment chain isn't running on this process (the dashboard
     still reads from it)."""
-    global _MODEL
-    if _MODEL is None:
-        _MODEL = _register_model(base_cls)
+    if base_cls not in _MODELS:
+        _MODELS[base_cls] = _register_model(base_cls)
+    return _MODELS[base_cls]
 
 
-def get_model():
-    """Returns the registered ORM class, or None if not yet registered.
-    The dashboard imports this to query persisted evidence."""
-    return _MODEL
+def get_model(base_cls=None):
+    """Return the ORM class registered against ``base_cls`` (preferred),
+    or — for callers that only ever use one Base — any registered class.
+    Returns ``None`` if nothing's been registered yet."""
+    if base_cls is not None:
+        return _MODELS.get(base_cls)
+    if not _MODELS:
+        return None
+    return next(iter(_MODELS.values()))
 
 
 class EvidenceCache:
@@ -84,9 +91,8 @@ class EvidenceCache:
     """
 
     def __init__(self, engine: Engine, base_cls):
-        register_schema(base_cls)
         self._engine = engine
-        self._model = _MODEL
+        self._model = register_schema(base_cls)
 
     # -- core API --------------------------------------------------------
 
@@ -164,14 +170,16 @@ def _evidence_from_row(row, indicator: Indicator) -> Evidence:
 class _LazyModel:
     """Placeholder so ``from .cache import EnrichmentRow`` doesn't fail
     before the Runner registers the model. Attribute access proxies to
-    the real class once it exists."""
+    a registered class once one exists. Production only ever has one
+    base; tests may have several but only need one for queries."""
 
     def __getattr__(self, name):
-        if _MODEL is None:
+        model = get_model()
+        if model is None:
             raise AttributeError(
                 "EnrichmentRow accessed before Runner registered the model"
             )
-        return getattr(_MODEL, name)
+        return getattr(model, name)
 
 
 EnrichmentRow = _LazyModel()
