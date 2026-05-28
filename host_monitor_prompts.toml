@@ -130,3 +130,51 @@ Flag: apps outside /Applications and ~/Applications (unusual install \
 location); bundle IDs that don't match the app name; bundle IDs that \
 impersonate Apple / well-known vendors.\
 """
+
+# ----- Phase 4 collectors -----
+
+mounts = """\
+Flag: tmpfs mounted over /etc/passwd, /etc/shadow, /etc/sudoers, or \
+similar (classic rootkit hiding); unexpected loopback or fuse mounts \
+in unusual locations (/home, /opt, /var/lib/<something>); mounts with \
+`exec` enabled on /tmp or /home; unexpected nfs / smb / sshfs mounts. \
+Standard system pseudo-fs (procfs, sysfs, devpts, cgroup, autofs) are \
+benign.\
+"""
+
+setuid_files = """\
+Flag: setuid binaries not provided by the OS package manager (compare \
+to known set: sudo, su, ping, mount, passwd, chsh, chfn, gpasswd, \
+newgrp, pkexec); setuid scripts (always suspicious — interpreters can't \
+safely be setuid); setuid files in /opt, /usr/local/bin, or user-writable \
+directories.\
+"""
+
+mdm_profiles = """\
+Flag: profiles from an organization the user doesn't recognise; \
+profiles with system-scope (vs user-scope) that the user didn't \
+explicitly install; profiles installing root CAs, VPN configs, or \
+restricting security settings.\
+"""
+
+kernel_extensions = """\
+Flag: third-party kexts (anything not signed by Apple); kexts loaded \
+from /Library/Extensions or /Applications (not /System); kexts without \
+a known team ID. Loaded kernel code has full machine access.\
+"""
+
+system_extensions = """\
+Flag: NEFilter (network filtering) extensions from unknown vendors — \
+they can MitM all traffic; DriverKit extensions from unknown vendors; \
+endpoint-security extensions from anything other than the user's \
+chosen EDR vendor.\
+"""
+
+process_exec_events = """\
+Flag: execs from /tmp, /var/tmp, ~/Downloads, ~/Library/Caches; \
+commands invoking curl|sh, wget|sh, base64 -d, eval; shells \
+(/bin/{ba,z,k}sh) launched by network-facing processes (web, ssh, \
+docker); unsigned binaries on macOS (missing signing_id); execs \
+running as a user other than the one who logged in; rapid bursts of \
+the same binary (possible enumeration or loop).\
+"""

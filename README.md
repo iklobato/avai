@@ -106,7 +106,7 @@ The `--profile linux` flag activates the `monitor` service, which:
 - bind-mounts `/proc`, `/sys`, `/etc`, `/var/log`, `/home` read-only;
 - writes to the same SQLite DB the dashboard reads.
 
-Collector coverage on Linux (Phases 1 + 2 + 3):
+Collector coverage on Linux (Phases 1 + 2 + 3 + 4):
 
 | Collector | Linux |
 |---|---|
@@ -120,7 +120,11 @@ Collector coverage on Linux (Phases 1 + 2 + 3):
 | bluetooth_devices | ✓ (`/var/lib/bluetooth/<adapter>/<mac>/info` INI files via configparser) |
 | wifi_state | ✓ (sysfs `/sys/class/net/<iface>/wireless` + `iw dev <iface> link` for SSID/BSSID/freq) |
 | system_integrity | ✓ (LUKS dm-crypt mappings → FileVault-equivalent; SELinux+AppArmor → Gatekeeper-equivalent; ufw OR firewalld → firewall; sshd / x11vnc systemctl states) |
+| **mounts** | ✓ (psutil.disk_partitions(all=True) — tmpfs-over-/etc rootkit detection) |
+| **setuid_files** | ✓ (walk /bin, /sbin, /usr/bin, /usr/sbin, /usr/local/{bin,sbin}, /usr/libexec, /opt looking for st_mode & 04000/02000) |
+| **process_exec_events (streaming)** | ✓ (`journalctl -f --output=json _AUDIT_TYPE_NAME=EXECVE + SYSCALL` — requires auditd execve rule on host) |
 | tcc_permissions, quarantine_events | ✗ (no Linux equivalents) |
+| mdm_profiles, kernel_extensions, system_extensions | ✗ (macOS-only concepts) |
 
 The mapping uses the existing `system_integrity` row schema — its
 macOS-named columns (`filevault_active`, `gatekeeper_assessments_enabled`,

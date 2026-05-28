@@ -997,6 +997,82 @@ class InstalledAppRow(_RowBase):
     raw_json:  Mapped[Optional[str]]
 
 
+# ----- Phase 4: process exec, mounts, setuid files, macOS hardening -----
+
+class ProcessExecRow(_RowBase):
+    """One row per process exec event from eslogger (macOS) or
+    auditd-via-journalctl (Linux). Same shape both sides so the
+    dashboard treats them identically."""
+    __tablename__ = "process_exec_events"
+    event_timestamp: Mapped[Optional[str]] = mapped_column(index=True)
+    event_type:      Mapped[Optional[str]]
+    pid:             Mapped[Optional[int]]
+    ppid:            Mapped[Optional[int]]
+    uid:             Mapped[Optional[int]]
+    username:        Mapped[Optional[str]]
+    exe_path:        Mapped[Optional[str]] = mapped_column(index=True)
+    exe_args_json:   Mapped[Optional[str]]
+    parent_path:     Mapped[Optional[str]]
+    signing_id:      Mapped[Optional[str]]
+    raw_json:        Mapped[Optional[str]]
+
+
+class MountRow(_RowBase):
+    __tablename__ = "mounts"
+    device:     Mapped[Optional[str]]
+    mountpoint: Mapped[Optional[str]] = mapped_column(index=True)
+    fstype:     Mapped[Optional[str]]
+    opts:       Mapped[Optional[str]]
+    raw_json:   Mapped[Optional[str]]
+
+
+class SetuidFileRow(_RowBase):
+    __tablename__ = "setuid_files"
+    path:     Mapped[Optional[str]] = mapped_column(index=True)
+    mode:     Mapped[Optional[int]]
+    uid:      Mapped[Optional[int]]
+    gid:      Mapped[Optional[int]]
+    size:     Mapped[Optional[int]]
+    mtime:    Mapped[Optional[float]]
+    sha256:   Mapped[Optional[str]]
+    setuid:   Mapped[Optional[int]]
+    setgid:   Mapped[Optional[int]]
+    raw_json: Mapped[Optional[str]]
+
+
+class MdmProfileRow(_RowBase):
+    __tablename__ = "mdm_profiles"
+    identifier:    Mapped[Optional[str]] = mapped_column(index=True)
+    display_name:  Mapped[Optional[str]]
+    organization: Mapped[Optional[str]]
+    description:   Mapped[Optional[str]]
+    install_date:  Mapped[Optional[str]]
+    profile_scope: Mapped[Optional[str]]
+    is_supervised: Mapped[Optional[int]]
+    raw_json:      Mapped[Optional[str]]
+
+
+class KernelExtensionRow(_RowBase):
+    __tablename__ = "kernel_extensions"
+    bundle_id:  Mapped[Optional[str]] = mapped_column(index=True)
+    name:       Mapped[Optional[str]]
+    version:    Mapped[Optional[str]]
+    path:       Mapped[Optional[str]]
+    team_id:    Mapped[Optional[str]]
+    signing_id: Mapped[Optional[str]]
+    raw_json:   Mapped[Optional[str]]
+
+
+class SystemExtensionRow(_RowBase):
+    __tablename__ = "system_extensions"
+    bundle_id:  Mapped[Optional[str]] = mapped_column(index=True)
+    team_id:    Mapped[Optional[str]]
+    version:    Mapped[Optional[str]]
+    state:      Mapped[Optional[str]]
+    categories: Mapped[Optional[str]]
+    raw_json:   Mapped[Optional[str]]
+
+
 # ============================================================================
 # Core abstractions
 # ============================================================================
@@ -1114,18 +1190,33 @@ class Sink:
         run_id = self.run_id
         if run_id is None or not collector.judge_fields:
             return []
+        return self._unjudged_select(collector, run_id_filter=run_id)
+
+    def unjudged_all(self, collector: Collector) -> list[dict]:
+        """Same as ``unjudged`` but with no run_id filter — used for
+        streaming collectors whose rows accumulate continuously
+        between snapshot runs. The Runner calls this once per cycle
+        so the judge gets a chance to classify newly-streamed
+        content_hashes."""
+        if not collector.judge_fields:
+            return []
+        return self._unjudged_select(collector, run_id_filter=None)
+
+    def _unjudged_select(self, collector: Collector,
+                         run_id_filter: Optional[str]) -> list[dict]:
         model = collector.model
         cols = [model.content_hash] + [getattr(model, f)
                                        for f in collector.judge_fields]
-        stmt = (
-            select(*cols).distinct()
-            .where(model.run_id == run_id,
-                   model.content_hash.is_not(None),
-                   ~exists().where(
-                       Judgement.content_hash == model.content_hash,
-                       Judgement.collector == collector.name,
-                   ))
-        )
+        conditions = [
+            model.content_hash.is_not(None),
+            ~exists().where(
+                Judgement.content_hash == model.content_hash,
+                Judgement.collector == collector.name,
+            ),
+        ]
+        if run_id_filter is not None:
+            conditions.insert(0, model.run_id == run_id_filter)
+        stmt = select(*cols).distinct().where(*conditions)
         col_names = ["content_hash"] + list(collector.judge_fields)
         with Session(self.engine) as session:
             return [
@@ -1519,6 +1610,11 @@ class Runner:
                 self.sink.write_error(c.name, exc)
                 LOG.warning("collector=%s status=failed error=%s message=%s",
                             c.name, type(exc).__name__, str(exc)[:200])
+        # Streaming collectors accumulate rows in background threads.
+        # After the snapshot phase, give the LLM judge a chance to
+        # classify any new content_hashes those streamers produced
+        # since the previous cycle.
+        self._judge_streaming_collectors()
         self.sink.end_run(ok, failed)
 
         # Rotation: keep the DB under the configured size cap by pruning
@@ -1565,6 +1661,30 @@ class Runner:
 
         LOG.info("collector=%s rows=%d duration_ms=%d judged=%d",
                  c.name, len(rows), collected_ms, judged)
+
+    def _judge_streaming_collectors(self) -> None:
+        """Run the LLM judge against new content_hashes produced by
+        streaming collectors since the previous cycle. Uses
+        ``Sink.unjudged_all`` so streaming rows (which aren't tied to
+        a CollectionRun.run_id) are still classified once each."""
+        for c in self.streaming_collectors:
+            if not (c.judge_enabled and c.judge_fields):
+                continue
+            try:
+                unjudged = self.sink.unjudged_all(c)
+            except Exception as exc:
+                LOG.warning("streaming-judge: unjudged_all(%s) failed: %s",
+                            c.name, exc)
+                continue
+            if not unjudged:
+                continue
+            try:
+                judgments = self.judge.judge(c.name, c.judge_hints, unjudged)
+                self.sink.write_judgments(judgments)
+                LOG.info("streaming-judge collector=%s judged=%d",
+                         c.name, len(judgments))
+            except Exception:
+                LOG.exception("streaming-judge failed for %s", c.name)
 
     def run_forever(self, interval: int) -> None:
         while not self.shutdown_event.is_set():
@@ -2943,6 +3063,452 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
         return sum(1 for line in r.stdout.splitlines() if line.strip())
 
 
+# ----------------------------------------------------------------------------
+# Phase 4 — cross-platform: mounts + setuid binaries
+# ----------------------------------------------------------------------------
+
+class MountsCollector(SnapshotCollector):
+    """Cross-platform mount-table snapshot via ``psutil.disk_partitions``.
+
+    Detects new mounts (an attacker shadowing ``/etc/passwd`` with a
+    tmpfs is a classic rootkit move) and persistent device →
+    mountpoint mappings. ``all=True`` keeps pseudo-filesystems
+    (``proc``, ``sys``, ``tmpfs``, ``cgroup``, …) in the result —
+    those are exactly what we want to watch for surprises.
+    """
+    name = "mounts"
+    model = MountRow
+    judge_fields = ("device", "mountpoint", "fstype", "opts")
+
+    def collect(self):
+        try:
+            partitions = psutil.disk_partitions(all=True)
+        except (psutil.AccessDenied, PermissionError):
+            return
+        for p in partitions:
+            yield {
+                "device":     p.device,
+                "mountpoint": p.mountpoint,
+                "fstype":     p.fstype,
+                "opts":       p.opts,
+                "raw_json":   json.dumps({
+                    "device":     p.device,
+                    "mountpoint": p.mountpoint,
+                    "fstype":     p.fstype,
+                    "opts":       p.opts,
+                    "maxfile":    getattr(p, "maxfile", None),
+                    "maxpath":    getattr(p, "maxpath", None),
+                }),
+            }
+
+
+class SetuidFilesCollector(SnapshotCollector):
+    """Enumerate setuid / setgid files in common executable directories.
+
+    A *new* setuid binary on a system is one of the loudest signals
+    of privilege-escalation persistence — and is invisible to most
+    of the other collectors. The walk is bounded to typical bin /
+    sbin / libexec dirs to keep cycle time short; a full ``/`` walk
+    takes minutes on a populated host.
+
+    Honors ``HOST_PREFIX`` on Linux so a container monitor walks the
+    host's ``/usr/bin`` rather than its own.
+    """
+    name = "setuid_files"
+    model = SetuidFileRow
+    judge_fields = ("path", "uid", "setuid", "setgid")
+
+    _BIN_DIRS_MACOS = (
+        "/bin", "/sbin", "/usr/bin", "/usr/sbin",
+        "/usr/local/bin", "/usr/local/sbin", "/usr/libexec",
+    )
+    _BIN_DIRS_LINUX = (
+        "/bin", "/sbin", "/usr/bin", "/usr/sbin",
+        "/usr/local/bin", "/usr/local/sbin",
+        "/usr/libexec", "/opt",
+    )
+
+    def collect(self):
+        bin_dirs = self._BIN_DIRS_LINUX if IS_LINUX else self._BIN_DIRS_MACOS
+        for d in bin_dirs:
+            base = host_path(d) if IS_LINUX else Path(d)
+            if not base.is_dir():
+                continue
+            try:
+                paths = list(base.rglob("*"))
+            except (PermissionError, OSError):
+                continue
+            for path in paths:
+                try:
+                    if not path.is_file():
+                        continue
+                    st = path.lstat()
+                except (PermissionError, OSError):
+                    continue
+                mode = st.st_mode
+                setuid = bool(mode & 0o4000)
+                setgid = bool(mode & 0o2000)
+                if not (setuid or setgid):
+                    continue
+                yield {
+                    "path":     str(path),
+                    "mode":     mode,
+                    "uid":      st.st_uid,
+                    "gid":      st.st_gid,
+                    "size":     st.st_size,
+                    "mtime":    st.st_mtime,
+                    "sha256":   sha256_file(path),
+                    "setuid":   int(setuid),
+                    "setgid":   int(setgid),
+                    "raw_json": json.dumps({
+                        "path":   str(path),
+                        "mode":   oct(mode),
+                        "setuid": setuid,
+                        "setgid": setgid,
+                    }),
+                }
+
+
+# ----------------------------------------------------------------------------
+# Phase 4 — macOS-specific: MDM profiles, kernel + system extensions
+# ----------------------------------------------------------------------------
+
+class MdmProfilesCollector(SnapshotCollector):
+    """macOS configuration profiles (MDM payloads). Unauthorized MDM
+    enrollment is a major compromise vector — a malicious profile
+    can install root CAs, push launch agents, configure VPNs, or
+    restrict settings system-wide. ``system_profiler
+    SPConfigurationProfileDataType`` gives us a structured (JSON)
+    view of every installed profile."""
+    name = "mdm_profiles"
+    model = MdmProfileRow
+    judge_fields = ("identifier", "display_name", "organization", "profile_scope")
+
+    def collect(self):
+        try:
+            data = run_json(
+                ["system_profiler", "-json", "SPConfigurationProfileDataType"],
+                timeout=30,
+            )
+        except (RuntimeError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        profiles = data.get("SPConfigurationProfileDataType", []) or []
+        # The output structure is "list of nested groups, with profile
+        # records under either _items or directly at the top level."
+        for entry in self._walk(profiles):
+            yield {
+                "identifier":     entry.get("spconfigprofile_profile_identifier"),
+                "display_name":   entry.get("_name") or entry.get(
+                    "spconfigprofile_profile_display_name"),
+                "organization":   entry.get("spconfigprofile_profile_organization"),
+                "description":    entry.get("spconfigprofile_profile_description"),
+                "install_date":   entry.get("spconfigprofile_install_date"),
+                "profile_scope":  entry.get("spconfigprofile_profile_scope"),
+                "is_supervised":  None,
+                "raw_json":       json.dumps(jsonable(entry)),
+            }
+
+    @classmethod
+    def _walk(cls, items):
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            # A node is a profile if it has an identifier field, else
+            # descend into _items.
+            if item.get("spconfigprofile_profile_identifier"):
+                yield item
+            if "_items" in item:
+                yield from cls._walk(item.get("_items"))
+
+
+class KernelExtensionsCollector(SnapshotCollector):
+    """macOS kernel extensions (kexts). Apple has deprecated them in
+    favour of System Extensions, but third-party kexts can still
+    load on older macOS or via legacy paths. Anything in ring 0 has
+    full machine access — every loaded kext is high-signal.
+
+    ``system_profiler -json SPExtensionsDataType`` is the structured
+    source. It enumerates every installed kext (loaded or not),
+    including the signing chain and notarisation state. The judge
+    naturally ignores Apple-signed kexts and focuses on third-party
+    ones via the prompt hints.
+    """
+    name = "kernel_extensions"
+    model = KernelExtensionRow
+    judge_fields = ("bundle_id", "name", "team_id")
+
+    def collect(self):
+        try:
+            data = run_json(
+                ["system_profiler", "-json", "SPExtensionsDataType"],
+                timeout=60,
+            )
+        except (RuntimeError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        for kext in data.get("SPExtensionsDataType", []) or []:
+            if not isinstance(kext, dict):
+                continue
+            yield {
+                "bundle_id":  kext.get("spext_bundleid"),
+                "name":       kext.get("_name"),
+                "version":    kext.get("spext_version"),
+                "path":       kext.get("spext_path"),
+                "team_id":    None,
+                "signing_id": kext.get("spext_signed_by"),
+                "raw_json":   json.dumps(jsonable({
+                    k: v for k, v in kext.items()
+                    if k in (
+                        "_name", "spext_bundleid", "spext_version",
+                        "spext_path", "spext_signed_by",
+                        "spext_obtained_from", "spext_notarized",
+                        "spext_loaded", "spext_loadable",
+                        "spext_lastModified", "spext_hasAllDependencies",
+                    )
+                })),
+            }
+
+
+class SystemExtensionsCollector(SnapshotCollector):
+    """macOS System Extensions — the post-Catalina replacement for
+    kexts. Used by network filters (NEFilter), DriverKit
+    (USB/serial), and endpoint-security extensions (ES).
+
+    Source: ``/Library/SystemExtensions/db.plist`` — the LaunchServices
+    plist that records every installed extension and its enabled /
+    active state. Parsed via :mod:`plistlib`; no text scraping of
+    ``systemextensionsctl list`` output.
+    """
+    name = "system_extensions"
+    model = SystemExtensionRow
+    judge_fields = ("bundle_id", "team_id")
+
+    def collect(self):
+        db = Path("/Library/SystemExtensions/db.plist")
+        data = read_plist(db)
+        if not data:
+            return
+        # The plist is a top-level dict with 'extensions' as the list
+        # of every installed System Extension (one entry per ext,
+        # regardless of activation state). 'bundleVersion' is a
+        # nested dict carrying both CFBundleShortVersionString and
+        # CFBundleVersion. 'categories' is a list of extension-point
+        # identifiers (network_extension, endpoint_security, …).
+        for ext in data.get("extensions", []) or []:
+            if not isinstance(ext, dict):
+                continue
+            version = ext.get("bundleVersion")
+            if isinstance(version, dict):
+                version = (version.get("CFBundleShortVersionString")
+                           or version.get("CFBundleVersion"))
+            categories = ext.get("categories") or []
+            yield {
+                "bundle_id":  ext.get("identifier"),
+                "team_id":    ext.get("teamID"),
+                "version":    version,
+                "state":      ext.get("state"),
+                "categories": ",".join(categories) if categories else None,
+                "raw_json":   json.dumps(jsonable(ext)),
+            }
+
+
+# ----------------------------------------------------------------------------
+# Phase 4 — streaming: per-platform process exec events
+# ----------------------------------------------------------------------------
+
+class MacosProcessExecCollector(StreamingCollector):
+    """Tails ``eslogger exec`` — Apple's Endpoint-Security CLI, shipped
+    since macOS Ventura. Each ``exec(2)`` on the host emits one JSON
+    object with the executing binary, args, parent, and signing
+    information. Requires root (the binary itself enforces this).
+
+    judge_enabled is True so the LLM evaluates each *unique*
+    (exe_path, args, user, parent_path) combination — content_hash
+    dedupe means a busy machine costs O(unique-binaries-run) LLM
+    calls, not O(every-exec).
+    """
+    name = "process_exec_events"
+    model = ProcessExecRow
+    judge_enabled = True
+    judge_fields = ("exe_path", "exe_args_json", "uid", "parent_path")
+
+    _EVENTS = ("exec",)
+
+    def stream(self, stop_event: threading.Event):
+        cmd = ["eslogger", *self._EVENTS]
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1,
+        )
+
+        def _terminator():
+            stop_event.wait()
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+        threading.Thread(target=_terminator, daemon=True,
+                         name="eslogger-killer").start()
+
+        try:
+            for line in proc.stdout:
+                if stop_event.is_set():
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                yield self._row_from_eslogger_event(e)
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+    @staticmethod
+    def _row_from_eslogger_event(e: dict) -> dict:
+        # eslogger emits ES events: { time, action_type, event,
+        # process, ... } where event.exec.{target, args, ...}
+        event_obj = e.get("event") or {}
+        exec_evt = event_obj.get("exec") or {}
+        target = exec_evt.get("target") or {}
+        target_exe = (target.get("executable") or {}).get("path")
+        args = exec_evt.get("args") or []
+        parent = e.get("process") or {}
+        parent_path = (parent.get("executable") or {}).get("path")
+        target_token = target.get("audit_token") or {}
+        parent_token = parent.get("audit_token") or {}
+        return {
+            "event_timestamp": e.get("time"),
+            "event_type":      "exec",
+            "pid":             target_token.get("pid"),
+            "ppid":            parent_token.get("pid"),
+            "uid":             target_token.get("ruid"),
+            "username":        None,
+            "exe_path":        target_exe,
+            "exe_args_json":   json.dumps(args),
+            "parent_path":     parent_path,
+            "signing_id":      target.get("signing_id"),
+            "raw_json":        json.dumps(e),
+        }
+
+
+class LinuxProcessExecCollector(StreamingCollector):
+    """Tails the Linux audit subsystem for ``execve`` events via
+    ``journalctl -f --output=json`` matchers on the audit type names.
+
+    Requires ``auditd`` running on the host with the execve rule
+    installed, e.g.::
+
+        auditctl -a always,exit -F arch=b64 -S execve
+
+    (most distros ship ``audit`` enabled by default for SECCOMP /
+    PAM events; the execve rule is the additional configuration.)
+    """
+    name = "process_exec_events"
+    model = ProcessExecRow
+    judge_enabled = True
+    judge_fields = ("exe_path", "exe_args_json", "uid", "parent_path")
+
+    def _cmd(self) -> list[str]:
+        cmd = ["journalctl", "-f", "--output=json", "--no-pager"]
+        if HOST_PREFIX:
+            host_journal = host_path("/var/log/journal")
+            if host_journal.is_dir():
+                cmd.extend(["--directory", str(host_journal)])
+        cmd.extend(["_AUDIT_TYPE_NAME=EXECVE",
+                    "+", "_AUDIT_TYPE_NAME=SYSCALL"])
+        return cmd
+
+    def stream(self, stop_event: threading.Event):
+        proc = subprocess.Popen(
+            self._cmd(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1,
+        )
+
+        def _terminator():
+            stop_event.wait()
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    pass
+        threading.Thread(target=_terminator, daemon=True,
+                         name="journalctl-audit-killer").start()
+
+        try:
+            for line in proc.stdout:
+                if stop_event.is_set():
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                yield self._row_from_audit_event(e)
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+    @staticmethod
+    def _row_from_audit_event(e: dict) -> dict:
+        ts_us = e.get("__REALTIME_TIMESTAMP")
+        ts = None
+        if ts_us:
+            try:
+                ts = datetime.fromtimestamp(
+                    int(ts_us) / 1_000_000, tz=timezone.utc
+                ).isoformat(timespec="seconds")
+            except (TypeError, ValueError):
+                pass
+        try:
+            pid = int(e["_PID"]) if e.get("_PID") else None
+        except (TypeError, ValueError):
+            pid = None
+        try:
+            uid = int(e["_UID"]) if e.get("_UID") else None
+        except (TypeError, ValueError):
+            uid = None
+        # audit EXECVE messages carry the args as separate fields a0,
+        # a1, ... in the structured message; SYSCALL records have
+        # the exe= path and comm= name. The combined-record view is
+        # typically captured under MESSAGE; we surface what's
+        # available and dump the full event into raw_json so the
+        # judge sees everything.
+        return {
+            "event_timestamp": ts,
+            "event_type":      e.get("_AUDIT_TYPE_NAME") or "AUDIT",
+            "pid":             pid,
+            "ppid":            None,
+            "uid":             uid,
+            "username":        None,
+            "exe_path":        e.get("EXE") or e.get("_EXE"),
+            "exe_args_json":   None,
+            "parent_path":     None,
+            "signing_id":      None,
+            "raw_json":        json.dumps(e),
+        }
+
+
 # ============================================================================
 # Composition + entry point
 # ============================================================================
@@ -2964,6 +3530,12 @@ def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         SystemIntegrityCollector(judge_hints=h("system_integrity")),
         FileIntegrityCollector(judge_hints=h("file_integrity")),
         InstalledAppsCollector(judge_hints=h("installed_apps")),
+        # Phase 4 additions
+        MountsCollector(judge_hints=h("mounts")),
+        SetuidFilesCollector(judge_hints=h("setuid_files")),
+        MdmProfilesCollector(judge_hints=h("mdm_profiles")),
+        KernelExtensionsCollector(judge_hints=h("kernel_extensions")),
+        SystemExtensionsCollector(judge_hints=h("system_extensions")),
     ]
 
 
@@ -3029,6 +3601,9 @@ def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
             watched=watched,
         ),
         LinuxInstalledAppsCollector(judge_hints=h("installed_apps")),
+        # Phase 4 additions — cross-platform
+        MountsCollector(judge_hints=h("mounts")),
+        SetuidFilesCollector(judge_hints=h("setuid_files")),
     ]
 
 
@@ -3043,9 +3618,11 @@ def build_streaming_collectors(prompts: Prompts) -> list[StreamingCollector]:
     if IS_LINUX:
         return [
             LinuxAuthEventsCollector(judge_hints=h("auth_events")),
+            LinuxProcessExecCollector(judge_hints=h("process_exec_events")),
         ]
     return [
         AuthEventsCollector(judge_hints=h("auth_events")),
+        MacosProcessExecCollector(judge_hints=h("process_exec_events")),
     ]
 
 
