@@ -1,0 +1,23 @@
+name: avai-landing
+region: nyc
+
+static_sites:
+  - name: web
+    source_dir: /landing-page
+    github:
+      repo: iklobato/avai
+      branch: release/0.1.0
+      deploy_on_push: true
+    index_document: index.html
+    error_document: index.html
+    catchall_document: index.html
+    routes:
+      - path: /
+
+domains:
+  - domain: getavai.com
+    type: PRIMARY
+    zone: getavai.com
+  - domain: www.getavai.com
+    type: ALIAS
+    zone: getavai.com

@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>avai — see what's actually running on your machines</title>
+<meta name="description" content="Open-source host security telemetry with an LLM threat judge and a single-pane dashboard. One docker command on macOS or Linux." />
+<meta property="og:title" content="avai — see what's actually running on your machines" />
+<meta property="og:description" content="21 collectors, a Claude-powered threat judge, and a live HTMX dashboard. One docker command." />
+<meta property="og:type" content="website" />
+<meta property="og:url" content="https://getavai.com" />
+<meta name="theme-color" content="#0b0d10" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111418'/%3E%3Ctext x='50%25' y='58%25' font-family='ui-monospace,Menlo,monospace' font-size='17' font-weight='700' text-anchor='middle' fill='%2364ffda'%3Ea%3C/text%3E%3C/svg%3E" />
+<script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+<style>
+  :root { color-scheme: dark; }
+  html { font-family: ui-sans-serif, system-ui, -apple-system, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  body { background: radial-gradient(1100px 700px at 50% -200px, #142028 0%, #0b0d10 55%, #07090b 100%); }
+  .grid-bg::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      linear-gradient(rgba(100,255,218,.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(100,255,218,.06) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(700px 400px at 50% 0%, black 30%, transparent 80%);
+  }
+  .pulse-dot {
+    width: 8px; height: 8px; border-radius: 999px; background: #22c55e;
+    box-shadow: 0 0 0 0 rgba(34,197,94,.7);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0   rgba(34,197,94,.7); }
+    70%  { box-shadow: 0 0 0 12px rgba(34,197,94,0); }
+    100% { box-shadow: 0 0 0 0   rgba(34,197,94,0); }
+  }
+  .verdict-pill { font-feature-settings: "tnum"; }
+  .copy-btn:active { transform: translateY(1px); }
+  .grad-text {
+    background: linear-gradient(180deg,#e9fff8 0%,#86efd0 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .card { background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.015)); border: 1px solid rgba(255,255,255,.06); }
+  .card:hover { border-color: rgba(100,255,218,.25); }
+  .ascii { white-space: pre; line-height: 1.15; }
+  details > summary { list-style: none; cursor: pointer; }
+  details > summary::-webkit-details-marker { display: none; }
+</style>
+</head>
+<body class="text-slate-200 antialiased">
+
+<!-- nav -->
+<header class="relative z-10">
+  <div class="max-w-6xl mx-auto px-6 py-5 flex items-center justify-between">
+    <a href="#" class="flex items-center gap-2">
+      <span class="mono inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-900 ring-1 ring-emerald-400/30 text-emerald-300 font-bold">a</span>
+      <span class="mono text-slate-100 font-semibold tracking-tight">avai</span>
+      <span class="ml-2 text-[11px] uppercase tracking-widest text-slate-500">host telemetry</span>
+    </a>
+    <nav class="hidden md:flex items-center gap-7 text-sm text-slate-400">
+      <a href="#what" class="hover:text-slate-100 transition">What it sees</a>
+      <a href="#judge" class="hover:text-slate-100 transition">LLM judge</a>
+      <a href="#install" class="hover:text-slate-100 transition">Install</a>
+      <a href="#dashboard" class="hover:text-slate-100 transition">Dashboard</a>
+      <a href="https://github.com/iklobato/avai" class="hover:text-slate-100 transition">GitHub →</a>
+    </nav>
+    <a href="#install"
+       class="text-sm font-medium px-3 py-1.5 rounded-md bg-emerald-400/10 text-emerald-300 ring-1 ring-emerald-400/30 hover:bg-emerald-400/20 transition">
+      Run it
+    </a>
+  </div>
+</header>
+
+<!-- hero -->
+<section class="relative grid-bg">
+  <div class="max-w-6xl mx-auto px-6 pt-14 pb-24 text-center">
+    <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900/70 ring-1 ring-white/10 text-xs text-slate-400">
+      <span class="pulse-dot"></span>
+      <span>v0.1.0 — open source, MIT licensed</span>
+    </div>
+
+    <h1 class="mt-7 text-5xl md:text-6xl font-semibold tracking-tight">
+      <span class="grad-text">Know what's actually</span><br/>
+      <span class="grad-text">running on your machines.</span>
+    </h1>
+
+    <p class="mt-6 max-w-2xl mx-auto text-lg text-slate-400">
+      <span class="text-slate-200 font-medium">avai</span> snapshots 21 things your OS won't tell you about —
+      processes, USB, launch units, persistence, file integrity, browser extensions, exec events —
+      and lets an LLM tell you which ones are worth caring about.
+    </p>
+
+    <p class="mt-3 text-sm text-slate-500">
+      No agent contract. No SIEM. One <span class="mono text-emerald-300">docker run</span>.
+    </p>
+
+    <!-- primary CTA -->
+    <div class="mt-10 flex flex-col sm:flex-row items-center justify-center gap-3">
+      <div class="group relative">
+        <pre class="mono text-left text-sm bg-slate-950/80 ring-1 ring-white/10 rounded-lg px-5 py-3 text-slate-200 shadow-2xl shadow-emerald-500/5">
+<span class="text-slate-500">$</span> docker run -p 8765:8765 -v "$PWD":/data iklobato/avai:dashboard</pre>
+        <button onclick="navigator.clipboard.writeText('docker run -p 8765:8765 -v "$PWD":/data iklobato/avai:dashboard'); this.innerText='copied'; setTimeout(()=>this.innerText='copy',1500);"
+                class="copy-btn absolute -top-2 -right-2 text-[11px] mono px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 ring-1 ring-white/10 transition">copy</button>
+      </div>
+      <a href="https://github.com/iklobato/avai" class="text-sm text-slate-400 hover:text-slate-200 transition">
+        or read the source →
+      </a>
+    </div>
+
+    <!-- ticker -->
+    <div class="mt-14 grid grid-cols-2 md:grid-cols-4 gap-3 max-w-3xl mx-auto text-sm">
+      <div class="card rounded-xl px-4 py-3">
+        <div class="mono text-emerald-300 text-xl">21</div>
+        <div class="text-slate-500 text-xs uppercase tracking-wider">collectors on macOS</div>
+      </div>
+      <div class="card rounded-xl px-4 py-3">
+        <div class="mono text-emerald-300 text-xl">16</div>
+        <div class="text-slate-500 text-xs uppercase tracking-wider">on Linux</div>
+      </div>
+      <div class="card rounded-xl px-4 py-3">
+        <div class="mono text-emerald-300 text-xl">4</div>
+        <div class="text-slate-500 text-xs uppercase tracking-wider">verdict categories</div>
+      </div>
+      <div class="card rounded-xl px-4 py-3">
+        <div class="mono text-emerald-300 text-xl">0</div>
+        <div class="text-slate-500 text-xs uppercase tracking-wider">agents to install</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- problem / why -->
+<section class="border-t border-white/5">
+  <div class="max-w-6xl mx-auto px-6 py-20">
+    <div class="grid md:grid-cols-2 gap-10 items-start">
+      <div>
+        <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">The problem</div>
+        <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
+          Your laptop is a black box.
+        </h2>
+        <p class="mt-5 text-slate-400 leading-relaxed">
+          You install a homebrew formula, a Cursor extension, a "free" PDF reader, an npm dependency.
+          A week later something connects to a hostname you've never seen.
+          You have <em>no</em> baseline to compare against — and no easy way to ask "is this normal?"
+        </p>
+        <p class="mt-4 text-slate-400 leading-relaxed">
+          Commercial EDR is overkill, expensive, and ships your data to someone else.
+          Native tools (<span class="mono text-slate-300">ps</span>, <span class="mono text-slate-300">launchctl</span>, <span class="mono text-slate-300">systemctl</span>, <span class="mono text-slate-300">journalctl</span>) are correct but tedious — by the time you've correlated them, the moment has passed.
+        </p>
+      </div>
+      <div>
+        <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">The fix</div>
+        <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
+          A diff, judged by an LLM.
+        </h2>
+        <p class="mt-5 text-slate-400 leading-relaxed">
+          <span class="text-slate-200 font-medium">avai</span> runs every 5 minutes, hashes every entity it finds,
+          and only sends <em>new</em> things to the judge — so you spend tokens on signal, not noise.
+        </p>
+        <p class="mt-4 text-slate-400 leading-relaxed">
+          Each finding comes back tagged
+          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 ring-1 ring-rose-500/30 text-xs">malicious</span>,
+          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30 text-xs">suspicious</span>,
+          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-300 ring-1 ring-slate-500/30 text-xs">unknown</span>, or
+          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30 text-xs">benign</span>
+          — with a one-line remediation. The data never leaves your machine except the prompt itself, and
+          the prompt only contains the artifact being judged.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- what it sees -->
+<section id="what" class="border-t border-white/5 bg-black/20">
+  <div class="max-w-6xl mx-auto px-6 py-20">
+    <div class="text-center">
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">What it sees</div>
+      <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
+        Twenty-one corners of your host. One screen.
+      </h2>
+    </div>
+
+    <div class="mt-12 grid md:grid-cols-3 gap-4">
+      <!-- card -->
+      <div class="card rounded-2xl p-6">
+        <div class="text-emerald-300 mono text-sm">processes / network</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          Every running PID, every open connection, every listening port. With the binary path, parent chain, and the user it runs as.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-emerald-300 mono text-sm">persistence</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          LaunchAgents / LaunchDaemons (macOS), systemd unit files + cron (Linux). The classic "what runs when I'm not looking" surface.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-emerald-300 mono text-sm">file integrity</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          <span class="mono">/etc/passwd</span>, <span class="mono">/etc/shadow</span>, <span class="mono">sshd_config</span>, sudoers, your shell dotfiles. Hashes every cycle; diff is loud.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-emerald-300 mono text-sm">hardware</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          USB devices (sysfs / system_profiler), paired Bluetooth, current Wi-Fi BSSID. Catches the "rubber ducky" and the rogue hotspot.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-emerald-300 mono text-sm">apps + extensions</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          Installed apps (dpkg / .app bundles), browser extensions across Chrome / Brave / Firefox / Edge. The most common malware vector still.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-emerald-300 mono text-sm">posture</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          SIP / Gatekeeper / FileVault / TCC.db (macOS) — SELinux / AppArmor / ufw / sshd / LUKS (Linux). Did something just downgrade your defaults?
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-emerald-300 mono text-sm">streaming auth</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          A <span class="mono">tail -f</span> on every <span class="mono">sshd</span>, <span class="mono">sudo</span>, <span class="mono">su</span>, <span class="mono">polkitd</span>, <span class="mono">systemd-logind</span> event. Failed logins surface within seconds.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-emerald-300 mono text-sm">streaming exec</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          Every <span class="mono">execve(2)</span> on Linux (auditd), every process spawn on macOS (eslogger). Reverse shells don't get to live in peace.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-emerald-300 mono text-sm">setuid + mounts</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          Every <span class="mono">+s</span> binary on disk, every mounted filesystem with its options. Privilege-escalation primitives, on a list, judged.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- judge example -->
+<section id="judge" class="border-t border-white/5">
+  <div class="max-w-6xl mx-auto px-6 py-20 grid md:grid-cols-2 gap-12 items-center">
+    <div>
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">The LLM judge</div>
+      <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
+        A second opinion at 3 AM, every 5 minutes.
+      </h2>
+      <p class="mt-5 text-slate-400 leading-relaxed">
+        avai uses <span class="text-slate-200 font-medium">litellm</span> + Anthropic (Claude) to classify each new
+        finding. Every prompt is structured: the collector, the entity, the judge fields. The model returns
+        a verdict, a MITRE-aligned category, a confidence, and one line of remediation — no markdown,
+        no "as a large language model" preamble.
+      </p>
+      <ul class="mt-6 space-y-2 text-sm text-slate-400">
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> Dedup by content hash. Same artifact is never sent twice.</li>
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> Bring your own key — <span class="mono text-slate-300">ANTHROPIC_API_KEY</span> or <span class="mono text-slate-300">CLAUDE_CODE_OAUTH_TOKEN</span>.</li>
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> Or swap to any litellm-supported provider. Local Ollama works.</li>
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> Verdicts persist. Diff tells you what changed since last cycle.</li>
+      </ul>
+    </div>
+
+    <div class="space-y-4">
+      <!-- example finding -->
+      <div class="card rounded-xl p-5">
+        <div class="flex items-center justify-between text-xs">
+          <span class="mono text-slate-500">launch_items · LaunchAgent</span>
+          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 ring-1 ring-rose-500/30">malicious · 0.92</span>
+        </div>
+        <div class="mono mt-2 text-sm text-slate-200">com.example.updater.plist</div>
+        <div class="text-xs text-slate-500 mono mt-1">~/Library/LaunchAgents/com.example.updater.plist · RunAtLoad=true</div>
+        <p class="text-sm text-slate-400 mt-3"><span class="text-rose-300 font-medium">defense_evasion · t1547.011</span> — runs a binary from <span class="mono">/private/tmp</span> as the user at every login. No Apple notarisation; no parent app.</p>
+        <p class="text-xs text-emerald-300 mt-3 mono">→ launchctl unload &amp;&amp; rm; investigate /private/tmp/.upd</p>
+      </div>
+
+      <div class="card rounded-xl p-5">
+        <div class="flex items-center justify-between text-xs">
+          <span class="mono text-slate-500">browser_extensions · Chrome</span>
+          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30">suspicious · 0.74</span>
+        </div>
+        <div class="mono mt-2 text-sm text-slate-200">"Free YouTube Video Downloader"</div>
+        <div class="text-xs text-slate-500 mono mt-1">id: bjcbflk... · permissions: tabs, &lt;all_urls&gt;, webRequest, cookies</div>
+        <p class="text-sm text-slate-400 mt-3"><span class="text-amber-300 font-medium">credential_access</span> — broad host permissions + cookie access are inconsistent with stated function. Common monetisation-malware pattern.</p>
+        <p class="text-xs text-emerald-300 mt-3 mono">→ disable; check chrome://extensions install date</p>
+      </div>
+
+      <div class="card rounded-xl p-5">
+        <div class="flex items-center justify-between text-xs">
+          <span class="mono text-slate-500">network_connections · psutil</span>
+          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30">benign · 0.98</span>
+        </div>
+        <div class="mono mt-2 text-sm text-slate-200">Spotify.app → 35.186.224.47:443</div>
+        <p class="text-sm text-slate-400 mt-3">Signed Apple binary, established TLS to Spotify-owned ASN. Expected.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- dashboard -->
+<section id="dashboard" class="border-t border-white/5 bg-black/30">
+  <div class="max-w-6xl mx-auto px-6 py-20">
+    <div class="text-center max-w-2xl mx-auto">
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">The dashboard</div>
+      <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
+        One page. Live. Read-only.
+      </h2>
+      <p class="mt-5 text-slate-400">
+        Flask + HTMX + Chart.js. Pages auto-refresh, sounds on new <span class="text-rose-300">malicious</span> findings,
+        diffs against the previous cycle so resolved items don't haunt you forever.
+      </p>
+    </div>
+
+    <!-- ascii dashboard mock -->
+    <div class="mt-12 mx-auto max-w-4xl card rounded-2xl p-5 md:p-8 shadow-2xl shadow-black/40">
+      <div class="flex items-center gap-2 mb-4">
+        <span class="w-3 h-3 rounded-full bg-rose-400/80"></span>
+        <span class="w-3 h-3 rounded-full bg-amber-400/80"></span>
+        <span class="w-3 h-3 rounded-full bg-emerald-400/80"></span>
+        <span class="ml-3 mono text-xs text-slate-500">localhost:8765 — avai dashboard</span>
+      </div>
+
+      <div class="grid grid-cols-3 gap-3 text-center">
+        <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 py-3">
+          <div class="text-xs text-slate-500 uppercase tracking-wider">verdicts</div>
+          <div class="mt-1 mono text-slate-200 text-sm">
+            <span class="text-rose-300">2 ●</span>
+            <span class="text-amber-300">11 ●</span>
+            <span class="text-slate-300">37 ●</span>
+            <span class="text-emerald-300">684 ●</span>
+          </div>
+        </div>
+        <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 py-3">
+          <div class="text-xs text-slate-500 uppercase tracking-wider">collectors</div>
+          <div class="mt-1 mono text-emerald-300 text-sm">21 / 21 ok</div>
+        </div>
+        <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 py-3">
+          <div class="text-xs text-slate-500 uppercase tracking-wider">integrity</div>
+          <div class="mt-1 mono text-emerald-300 text-sm">passing</div>
+        </div>
+      </div>
+
+      <div class="mt-4 rounded-lg bg-slate-950/60 ring-1 ring-white/5 overflow-hidden">
+        <div class="px-4 py-2 text-xs text-slate-500 uppercase tracking-wider flex justify-between">
+          <span>recent findings</span><span>10 / page · filter, sort, click for raw</span>
+        </div>
+        <table class="w-full text-sm">
+          <tbody class="mono">
+            <tr class="border-t border-white/5">
+              <td class="px-4 py-2 text-rose-300">malicious</td>
+              <td class="px-4 py-2 text-slate-400">launch_items</td>
+              <td class="px-4 py-2 text-slate-300 truncate">com.example.updater.plist</td>
+              <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
+            </tr>
+            <tr class="border-t border-white/5">
+              <td class="px-4 py-2 text-amber-300">suspicious</td>
+              <td class="px-4 py-2 text-slate-400">browser_extensions</td>
+              <td class="px-4 py-2 text-slate-300 truncate">"Free YouTube Video Downloader"</td>
+              <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
+            </tr>
+            <tr class="border-t border-white/5">
+              <td class="px-4 py-2 text-emerald-300">benign</td>
+              <td class="px-4 py-2 text-slate-400">processes</td>
+              <td class="px-4 py-2 text-slate-300 truncate">/Applications/Spotify.app/...</td>
+              <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
+            </tr>
+            <tr class="border-t border-white/5">
+              <td class="px-4 py-2 text-slate-300">unknown</td>
+              <td class="px-4 py-2 text-slate-400">usb_devices</td>
+              <td class="px-4 py-2 text-slate-300 truncate">Logitech USB Receiver (046d:c52b)</td>
+              <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- install -->
+<section id="install" class="border-t border-white/5">
+  <div class="max-w-6xl mx-auto px-6 py-20">
+    <div class="text-center max-w-2xl mx-auto">
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">Install</div>
+      <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
+        Three paths. Pick one.
+      </h2>
+    </div>
+
+    <div class="mt-12 grid md:grid-cols-3 gap-5">
+      <!-- Docker -->
+      <div class="card rounded-2xl p-6">
+        <div class="flex items-center justify-between">
+          <div class="text-slate-100 font-medium">Docker</div>
+          <span class="text-[10px] uppercase tracking-widest text-emerald-300 bg-emerald-400/10 ring-1 ring-emerald-400/30 rounded px-1.5 py-0.5">recommended</span>
+        </div>
+        <p class="mt-2 text-sm text-slate-400">Dashboard runs anywhere. Monitor needs a Linux host.</p>
+        <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">docker run -p 8765:8765 \
+  -v "$PWD":/data \
+  iklobato/avai:dashboard</pre>
+      </div>
+
+      <!-- compose -->
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">docker compose</div>
+        <p class="mt-2 text-sm text-slate-400">Monitor + dashboard, both auto-restart.</p>
+        <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">curl -O https://raw.githubusercontent.com/\
+iklobato/avai/main/docker-compose.yml
+docker compose up -d</pre>
+      </div>
+
+      <!-- pip -->
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">pip</div>
+        <p class="mt-2 text-sm text-slate-400">Full macOS coverage needs the native install + sudo.</p>
+        <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">pip install 'avai[judge]'
+sudo avai monitor &
+avai dashboard</pre>
+      </div>
+    </div>
+
+    <p class="mt-10 text-center text-sm text-slate-500">
+      Everything's MIT-licensed and lives at
+      <a class="text-emerald-300 hover:underline mono" href="https://github.com/iklobato/avai">github.com/iklobato/avai</a>.
+    </p>
+  </div>
+</section>
+
+<!-- footer -->
+<footer class="border-t border-white/5">
+  <div class="max-w-6xl mx-auto px-6 py-10 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-slate-500">
+    <div class="flex items-center gap-2">
+      <span class="mono inline-flex items-center justify-center w-6 h-6 rounded bg-slate-900 ring-1 ring-emerald-400/30 text-emerald-300 text-xs font-bold">a</span>
+      <span class="mono">avai</span>
+      <span>·</span>
+      <span>MIT</span>
+      <span>·</span>
+      <span>built for paranoid sysadmins</span>
+    </div>
+    <div class="flex items-center gap-5">
+      <a class="hover:text-slate-200" href="https://github.com/iklobato/avai">GitHub</a>
+      <a class="hover:text-slate-200" href="https://pypi.org/project/avai/">PyPI</a>
+      <a class="hover:text-slate-200" href="https://hub.docker.com/r/iklobato/avai">Docker Hub</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
