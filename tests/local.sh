@@ -109,27 +109,37 @@ phase_0() {
 phase_1() {
   log "Phase 1 — CLI surface"
 
-  local v
+  # Capture each docker run's output once into a variable, then grep
+  # against the var. Avoids piping into `grep -q`, which exits early
+  # on the first match and broken-pipes the upstream `docker run`
+  # (Python sees the closed FD, raises BrokenPipeError on flush at
+  # exit, docker exits non-zero, pipefail trips the `if` even though
+  # the match was found).
+  local v help mhelp dhelp
   v="$(docker run --rm "$AVAI_IMAGE" avai --version 2>/dev/null || echo '?')"
+  help="$(docker run --rm "$AVAI_IMAGE" avai --help 2>&1 || true)"
+  mhelp="$(docker run --rm "$AVAI_IMAGE" avai monitor --help 2>&1 || true)"
+  dhelp="$(docker run --rm "$AVAI_IMAGE" avai dashboard --help 2>&1 || true)"
+
   if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     ok "Phase 1a: avai --version → $v"
   else
     bad "Phase 1a: avai --version returned '$v' (expected semver)"
   fi
 
-  if docker run --rm "$AVAI_IMAGE" avai --help 2>&1 | grep -q 'avai monitor'; then
+  if [[ "$help" == *"avai monitor"* ]]; then
     ok "Phase 1b: avai --help mentions the monitor subcommand"
   else
     bad "Phase 1b: avai --help is missing the monitor subcommand"
   fi
 
-  if docker run --rm "$AVAI_IMAGE" avai monitor --help 2>&1 | grep -q -- '--no-enrich'; then
+  if [[ "$mhelp" == *"--no-enrich"* ]]; then
     ok "Phase 1c: avai monitor --help advertises --no-enrich"
   else
     bad "Phase 1c: --no-enrich flag missing from monitor --help"
   fi
 
-  if docker run --rm "$AVAI_IMAGE" avai dashboard --help 2>&1 | grep -q -- '--host'; then
+  if [[ "$dhelp" == *"--host"* ]]; then
     ok "Phase 1d: avai dashboard --help advertises --host"
   else
     bad "Phase 1d: dashboard --help missing"
