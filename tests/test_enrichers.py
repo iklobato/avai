@@ -294,6 +294,21 @@ class TestRegistry:
         monkeypatch.delenv("VT_API_KEY", raising=False)
         assert VirusTotalEnricher.from_env() is None
 
+    def test_from_env_skips_when_token_set_to_empty(self, monkeypatch):
+        # ``docker run -e VT_API_KEY=`` produces an empty string in
+        # the container — should be treated as "missing", not "present".
+        from avai.enrichers.sources.virustotal import VirusTotalEnricher
+        monkeypatch.setenv("VT_API_KEY", "")
+        assert VirusTotalEnricher.env_token() is None
+        assert VirusTotalEnricher.from_env() is None
+
+    def test_keyless_enricher_always_registers(self, monkeypatch):
+        from avai.enrichers.sources.cisa_kev import CisaKevEnricher
+        monkeypatch.delenv("ABUSE_CH_AUTH_KEY", raising=False)
+        # No env var matters for a keyless source.
+        assert CisaKevEnricher.env_token() is not None
+        assert CisaKevEnricher.env_token()  # truthy sentinel
+
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -112,9 +112,22 @@ class Enricher(ABC):
 
     @classmethod
     def env_token(cls) -> Optional[str]:
+        """Return the gate value for this enricher's registration.
+
+        Contract:
+            - ``requires_token is None`` (keyless source) → returns
+              a fixed non-empty sentinel; the enricher is always
+              registered.
+            - ``requires_token`` set + env var unset → returns ``None``.
+            - ``requires_token`` set + env var present but empty → also
+              returns ``None``. Empty strings are common when users
+              clear a key via ``-e VAR=`` in docker; treating them as
+              "missing" prevents an enricher from running with no key.
+            - ``requires_token`` set + env var non-empty → returns it.
+        """
         if cls.requires_token is None:
-            return ""  # sentinel: "no token needed, instance always valid"
-        return os.environ.get(cls.requires_token)
+            return "(no token required)"
+        return os.environ.get(cls.requires_token, "") or None
 
     @classmethod
     def from_env(cls) -> Optional["Enricher"]:
