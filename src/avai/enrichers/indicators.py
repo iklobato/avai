@@ -58,7 +58,9 @@ def _is_private_ip(s: str) -> bool:
 
 
 def _is_domain(s: str) -> bool:
-    return bool(_DOMAIN_RE.match(s)) and "." in s
+    # An IPv4 literal matches the regex (all-digit labels separated by
+    # dots) but isn't a domain — classify it as IPv4 instead.
+    return bool(_DOMAIN_RE.match(s)) and "." in s and not _is_ipv4(s)
 
 
 def _safe_loads(s: object) -> object:
