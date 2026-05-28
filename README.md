@@ -352,6 +352,51 @@ persisted; the same artifact is never sent twice.
 
 ---
 
+## Threat-intel enrichment
+
+Before each finding hits the LLM, avai extracts indicators (SHA256,
+IPv4, domain, URL, CVE, package, OS version) and runs them through
+external threat-intel APIs. The judge then sees the raw evidence
+inline in the prompt, which dramatically tightens verdicts.
+
+Every source is optional. Keyless ones always run. Keyed ones only
+register if the env var below is set — see [`.env.example`](.env.example)
+for a copy-paste template.
+
+| Source | Indicator | Env var | Quota | What it adds |
+|---|---|---|---|---|
+| **MalwareBazaar** (abuse.ch) | SHA256/1/MD5 | `ABUSE_CH_AUTH_KEY` | unlimited | Known-malware family |
+| **CIRCL hashlookup** (NSRL) | SHA256/1/MD5 | — | unlimited | Known-good vendor binary (whitelist) |
+| **Shodan InternetDB** | IPv4 | — | 1 rps | Open ports, CVEs, tags |
+| **URLhaus** (abuse.ch) | URL, domain | `ABUSE_CH_AUTH_KEY` | unlimited | Malware-distribution URLs |
+| **Feodo Tracker** (abuse.ch) | IPv4 | — | unlimited | Botnet C2 IPs (cached feed) |
+| **ThreatFox** (abuse.ch) | IPv4 / domain / URL / hash | `ABUSE_CH_AUTH_KEY` | unlimited | Mixed IOC search |
+| **OSV.dev** | CVE, package | — | unlimited | Open-source advisories |
+| **CISA KEV** | CVE | — | static feed | Actively-exploited CVEs |
+| **NVD** | CVE | `NVD_API_KEY` (optional) | 5 → 50 / 30 s | CVSS + description |
+| **crt.sh** | domain | — | gentle | Certificate transparency history |
+| **endoflife.date** | OS version | — | unlimited | EOL'd OS / runtime |
+| **VirusTotal** | SHA256/1/MD5, URL, domain, IPv4 | `VT_API_KEY` | 4/min, 500/day | Multi-engine reputation |
+| **AbuseIPDB** | IPv4 | `ABUSEIPDB_API_KEY` | 1000/day | Abuse confidence score |
+| **GreyNoise Community** | IPv4 | `GREYNOISE_API_KEY` | 50/day | "Is this IP just noise?" |
+| **Google Safe Browsing** | URL | `GOOGLE_SAFE_BROWSING_API_KEY` | 10k/day | Phishing / malware verdict |
+| **PhishTank** | URL | `PHISHTANK_API_KEY` | generous | Community phishing DB |
+| **GitHub Advisory** | CVE | `GITHUB_TOKEN` | high | Curated advisories + fix versions |
+
+Per-indicator results are cached in the same SQLite (`enrichment_evidence`
+table) with a per-source TTL (6 h – 14 d). Fresh cache hits skip the
+network entirely; the cache survives restarts.
+
+Toggle with:
+
+```sh
+avai monitor                              # all enabled sources, default
+avai monitor --no-enrich                  # collectors + judge, no external lookups
+avai monitor --enrich-only malware_bazaar # debugging: only this one
+```
+
+---
+
 ## Why no macOS in this README
 
 The monitor relies on Linux-native facilities — `pid=host` reaching

@@ -1151,6 +1151,14 @@ class Sink:
         event.listen(engine, "connect", _set_sqlite_pragmas)
 
     def setup(self) -> None:
+        # Register the enrichment evidence model on Base.metadata so
+        # `create_all` provisions its table even when the enrichment
+        # chain isn't enabled (the dashboard reads from it regardless).
+        try:
+            from avai.enrichers.cache import register_schema
+            register_schema(Base)
+        except Exception:
+            LOG.exception("enrichment schema registration failed")
         Base.metadata.create_all(self.engine)
         _migrate_add_columns(self.engine)
 
@@ -1572,7 +1580,8 @@ class Runner:
                  snapshot_collectors: list[SnapshotCollector],
                  streaming_collectors: list[StreamingCollector],
                  judge: Judge, lookback_min: int,
-                 max_db_bytes: int = 0):
+                 max_db_bytes: int = 0,
+                 enrichment_chain=None):
         self.sink = sink
         self.snapshot_collectors = snapshot_collectors
         self.streaming_collectors = streaming_collectors
@@ -1581,6 +1590,11 @@ class Runner:
         self.max_db_bytes = max_db_bytes  # 0 = unlimited
         self._streaming_workers: list[StreamingWorker] = []
         self.shutdown_event = threading.Event()
+        # Optional threat-intel enrichment between collection and judging.
+        # None ⇒ disabled (no API calls, no schema rows). Lazily imported
+        # so the enrichers package's `requests` dep is only needed when
+        # enrichment is on.
+        self._enrichment_chain = enrichment_chain
 
     def request_shutdown(self) -> None:
         """Idempotent — safe to call from a signal handler."""
@@ -1654,9 +1668,11 @@ class Runner:
         collected_ms = int((time.monotonic() - t0) * 1000)
 
         judged = 0
+        enriched_indicators = 0
         if c.judge_enabled and c.judge_fields:
             unjudged = self.sink.unjudged(c)
             if unjudged:
+                enriched_indicators = self._enrich_entries(c, unjudged, rows)
                 judgments = self.judge.judge(c.name, c.judge_hints, unjudged)
                 self.sink.write_judgments(judgments)
                 judged = len(judgments)
@@ -1668,8 +1684,58 @@ class Runner:
             if observed:
                 self.sink.touch_judgments(c.name, observed, started)
 
-        LOG.info("collector=%s rows=%d duration_ms=%d judged=%d",
-                 c.name, len(rows), collected_ms, judged)
+        LOG.info(
+            "collector=%s rows=%d duration_ms=%d judged=%d enriched=%d",
+            c.name, len(rows), collected_ms, judged, enriched_indicators,
+        )
+
+    def _enrich_entries(self, c: SnapshotCollector,
+                        unjudged: list[dict],
+                        rows: list[dict]) -> int:
+        """Attach external threat-intel evidence to each unjudged entry
+        in-place by adding an ``evidence`` key.
+
+        Indicators come from the collector's ``rows`` (richer than the
+        unjudged projection); we map by ``content_hash`` so an entry's
+        evidence is derived from one of the rows that produced it.
+        Returns the count of distinct indicators looked up — used only
+        for the per-collector log line.
+        """
+        chain = self._enrichment_chain
+        if chain is None:
+            return 0
+        from avai.enrichers import extract_indicators
+
+        rows_by_hash: dict[str, dict] = {}
+        for r in rows:
+            h = r.get("content_hash")
+            if isinstance(h, str) and h and h not in rows_by_hash:
+                rows_by_hash[h] = r
+
+        total = 0
+        for entry in unjudged:
+            h = entry.get("content_hash")
+            row = rows_by_hash.get(h) if isinstance(h, str) else None
+            if row is None:
+                continue
+            indicators = extract_indicators(c.name, row)
+            if not indicators:
+                continue
+            ev_dicts: list[dict] = []
+            for ind in indicators:
+                total += 1
+                for ev in chain.enrich(ind):
+                    ev_dicts.append({
+                        "src":        ev.source,
+                        "type":       str(ind.type),
+                        "value":      ind.value,
+                        "hint":       str(ev.verdict_hint),
+                        "confidence": round(ev.confidence, 2),
+                        "note":       ev.summary,
+                    })
+            if ev_dicts:
+                entry["evidence"] = ev_dicts
+        return total
 
     def _judge_streaming_collectors(self) -> None:
         """Run the LLM judge against new content_hashes produced by
@@ -3700,6 +3766,17 @@ def main() -> int:
                              "run are deleted until the DB fits under the "
                              "cap, then VACUUM reclaims the space. Pass 0 "
                              "to disable rotation. Default: 1024 (1 GB).")
+    parser.add_argument("--no-enrich", action="store_true",
+                        help="Disable the threat-intel enrichment chain "
+                             "(MalwareBazaar / VirusTotal / Shodan / "
+                             "URLhaus / abuse.ch / CISA KEV / OSV / NVD / "
+                             "AbuseIPDB / GreyNoise / Safe Browsing / "
+                             "PhishTank / GitHub Advisory / endoflife / "
+                             "crt.sh). Keyless sources always run; keyed "
+                             "sources only run when their env var is set.")
+    parser.add_argument("--enrich-only", action="append", metavar="NAME",
+                        help="Limit enrichment to the named source(s). "
+                             "Pass once per source. Useful for debugging.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -3734,9 +3811,21 @@ def main() -> int:
         streaming_collectors = (
             [] if args.no_streaming else build_streaming_collectors(prompts)
         )
+        enrichment_chain = None
+        if args.no_enrich:
+            LOG.info("enrichment disabled (--no-enrich)")
+        else:
+            # Importing here keeps the `requests` dep out of the startup
+            # path for `--no-enrich` smoke tests.
+            from avai.enrichers import build_default_chain
+            enrichment_chain = build_default_chain(
+                engine, Base,
+                enable=args.enrich_only,
+            )
         runner = Runner(sink, snapshot_collectors, streaming_collectors,
                         judge, args.lookback_min,
-                        max_db_bytes=max(0, args.max_db_mb) * 1024 * 1024)
+                        max_db_bytes=max(0, args.max_db_mb) * 1024 * 1024,
+                        enrichment_chain=enrichment_chain)
         runner.setup()
 
         if args.once:
