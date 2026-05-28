@@ -36,6 +36,41 @@ The image's default `CMD` is the dashboard. Override the command at
 `docker run` / compose level to run the monitor instead. Native install
 is also possible (`pip install avai`) but is not the documented path.
 
+The image carries a `HEALTHCHECK` against the dashboard's
+`/api/notifications/new` endpoint — `starting → healthy` in ~10 s on
+first launch. `docker compose ps` and `docker inspect --format
+'{{.State.Health.Status}}'` will both reflect it.
+
+---
+
+## TL;DR — 60-second test, no LLM key
+
+A safe first run on any host (macOS or Linux), no privileges, no
+credentials, no host bind-mounts. Produces a populated DB and a
+green dashboard you can poke at.
+
+```sh
+mkdir -p ~/.avai && cd ~/.avai
+
+# 1. populate the DB with one snapshot of the container's view
+docker run --rm -v "$PWD":/data iklobato/avai \
+  avai monitor --once --no-streaming --no-judge --db /data/avai.db
+
+# 2. serve it
+docker run -d --name avai -p 8765:8765 -v "$PWD":/data iklobato/avai
+
+open http://localhost:8765/      # macOS;  xdg-open on Linux
+```
+
+You'll see ~14 collectors' worth of rows (`processes`,
+`network_connections`, `listening_ports`, `network_interfaces`,
+`usb_devices`, `launch_items`, `installed_apps`, `mounts`,
+`setuid_files`, etc.) — read off the container itself rather than the
+host, since the run above doesn't bind-mount host state. To get real
+data, jump to §2 / §3 below.
+
+Stop with `docker stop avai && docker rm avai`.
+
 ---
 
 ## 1 — Dashboard only (any host, including macOS)
@@ -56,9 +91,10 @@ docker run -d \
 open http://localhost:8765/
 ```
 
-If the database doesn't exist yet, the dashboard starts but every panel
-is empty until the monitor produces rows. Stop with
-`docker stop avai-dashboard && docker rm avai-dashboard`.
+If the database file doesn't exist yet, the dashboard creates an
+empty schema on launch and every panel renders empty until the
+monitor produces rows. Stop with `docker stop avai-dashboard &&
+docker rm avai-dashboard`.
 
 ### Override port or DB path
 
@@ -108,7 +144,18 @@ docker run --rm \
 ```
 
 When the command exits, `~/.avai/avai.db` contains one
-`collection_runs` row plus the populated collector tables.
+`collection_runs` row plus the populated collector tables. Verify:
+
+```sh
+docker run --rm -v "$PWD":/data iklobato/avai python -c "
+import sqlite3
+c = sqlite3.connect('/data/avai.db')
+for n, in c.execute(\"select name from sqlite_master where type='table'\"):
+    print(f'{n:<22} {c.execute(f\"select count(*) from {n}\").fetchone()[0]}')"
+```
+
+To smoke-test on macOS without the bind-mounts (no host data, but
+proves the toolchain works) see §0 above.
 
 ---
 
@@ -116,7 +163,9 @@ When the command exits, `~/.avai/avai.db` contains one
 
 Same bind mounts as §2 but detached, with the LLM judge enabled. The
 judge needs one credential — either `ANTHROPIC_API_KEY` (standard
-Anthropic API) or `CLAUDE_CODE_OAUTH_TOKEN` (Claude Code OAuth).
+Anthropic API) or `CLAUDE_CODE_OAUTH_TOKEN` (Claude Code OAuth) — and
+defaults to **Claude Haiku 4.5** (`claude-haiku-4-5-20251001`).
+Override with `--judge-model` to point litellm at any other provider.
 
 ```sh
 mkdir -p ~/.avai && cd ~/.avai
@@ -146,8 +195,22 @@ docker run -d --name avai-monitor --restart unless-stopped \
 docker logs -f avai-monitor      # watch the cycle
 ```
 
-Override any of `--interval`, `--lookback-min`, `--max-db-mb`,
-`--judge-max-per-collector` etc. by appending them to the command.
+Defaults baked into `avai monitor`:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--interval` | `300` | seconds between snapshot cycles |
+| `--lookback-min` | `6` | minutes of journal/log history per run |
+| `--max-db-mb` | `1024` | rotation cap (0 disables); oldest runs are pruned + `VACUUM`'d after each cycle |
+| `--judge-model` | `claude-haiku-4-5-20251001` | any litellm model id |
+| `--judge-batch-size` | `20` | entries per LLM call |
+| `--judge-max-per-collector` | unlimited | per-cycle cap of new entries judged |
+| `--no-streaming` | (off) | disables `auth_events` + `process_exec_events` tailers |
+| `--no-judge` | (off) | runs collectors but stores no verdicts |
+
+Append any flag to the `docker run … iklobato/avai avai monitor …`
+command to override. Full reference: `docker run --rm iklobato/avai
+avai monitor --help`.
 
 ---
 
@@ -238,12 +301,20 @@ docker run --rm iklobato/avai avai monitor --help
 docker run --rm iklobato/avai avai dashboard --help
 docker run --rm iklobato/avai avai --version
 
+# Healthcheck + status
+docker inspect avai-dashboard --format '{{.State.Health.Status}}'   # healthy|unhealthy|starting
+docker compose ps                                                   # if using compose
+docker logs -f avai-monitor                                         # follow monitor cycles
+
+# DB rotation in action — watch the size cap kick in
+docker exec avai-monitor du -h /data/avai.db
+
 # Stop / clean up
-docker compose down                                # if using compose
+docker compose down                                                  # if using compose
 docker stop avai-dashboard avai-monitor 2>/dev/null
 docker rm   avai-dashboard avai-monitor 2>/dev/null
 
-# Wipe the database
+# Wipe the database (also wipes verdicts; monitor will re-judge from scratch)
 rm -f data/avai.db data/avai.db-wal data/avai.db-shm
 
 # Pull the latest image
