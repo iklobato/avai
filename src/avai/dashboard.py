@@ -31,7 +31,18 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, current_app, jsonify, render_template, request
-from sqlalchemy import and_, asc, case, create_engine, desc, func, or_, select, text
+from sqlalchemy import (
+    and_,
+    asc,
+    case,
+    create_engine,
+    desc,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+)
 from sqlalchemy.orm import Session
 
 # Reuse models from host_monitor.py — single source of schema truth.
@@ -223,6 +234,15 @@ def _existing_tables(session: Session) -> set[str]:
             text("SELECT name FROM sqlite_master WHERE type='table'")
         ).scalars()
     )
+
+
+def _existing_columns(session: Session, table: str) -> set[str]:
+    """Column names present on ``table``. The DB may have been written by
+    an older monitor missing a newly-added column (e.g. network_flows.
+    iface); selecting it would 500. Callers substitute a NULL literal
+    for absent columns instead."""
+    rows = session.execute(text(f"PRAGMA table_info({table})")).all()
+    return {r[1] for r in rows}  # row[1] is the column name
 
 
 def latest_run(session: Session):
@@ -522,13 +542,24 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
     if "network_flows" not in _existing_tables(session):
         return empty
 
+    # Tolerate a network_flows table written by an older monitor that
+    # lacks newer columns (iface / service) — substitute a NULL literal
+    # so the SELECT doesn't 500 on "no such column".
+    cols = _existing_columns(session, "network_flows")
+    iface_sel = (
+        NetworkFlowRow.iface if "iface" in cols else literal(None).label("iface")
+    )
+    service_sel = (
+        NetworkFlowRow.service if "service" in cols else literal(None).label("service")
+    )
+
     stmt = (
         select(
-            NetworkFlowRow.iface,
+            iface_sel,
             NetworkFlowRow.proto,
             NetworkFlowRow.dst_ip,
             NetworkFlowRow.dst_port,
-            NetworkFlowRow.service,
+            service_sel,
             NetworkFlowRow.packets,
             Judgement.verdict,
             Judgement.confidence,

@@ -249,3 +249,32 @@ class TestMissingTableGraceful:
         names = {c["name"] for c in counts}
         assert "network_flows" not in names
         assert "processes" in names
+
+
+class TestMissingColumnGraceful:
+    """network_flows table written by an OLDER monitor lacks the iface
+    column; the read-only dashboard can't migrate it, so the query must
+    tolerate the missing column instead of 500-ing."""
+
+    def test_handles_table_without_iface_column(self, tmp_path):
+        from sqlalchemy import text
+        db = tmp_path / "noiface.db"
+        engine = create_engine(f"sqlite:///{db}",
+                               connect_args={"check_same_thread": False})
+        sink = Sink(engine)
+        sink.setup()
+        run_id, ts = sink.start_run("h", 5)
+        # simulate the pre-iface schema: drop the column
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE network_flows DROP COLUMN iface"))
+            conn.execute(text(
+                "INSERT INTO network_flows "
+                "(run_id, collected_at, content_hash, proto, dst_ip, dst_port, "
+                " service, packets) "
+                "VALUES (:r, :t, 'h1', 'tcp', '8.8.8.8', 443, 'https', 5)"
+            ), {"r": run_id, "t": ts})
+        with Session(engine) as s:
+            data = network_flows(s, run_id)
+        assert data["summary"]["destinations"] == 1
+        assert data["rows"][0]["dst_ip"] == "8.8.8.8"
+        assert data["rows"][0]["iface"] == "—"   # NULL → rendered placeholder

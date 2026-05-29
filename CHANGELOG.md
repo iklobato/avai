@@ -3,6 +3,15 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.2.10] — 2026-05-29
+
+### Fixed
+- **Dashboard 500 ("no such column: network_flows.iface") against a
+  network_flows table written by an older monitor.** The read-only
+  dashboard can't migrate the schema, so `network_flows()` now checks
+  the table's columns and substitutes a NULL literal for any missing
+  newer column (iface / service) instead of crashing. (`_existing_columns`.)
+
 ## [0.2.9] — 2026-05-29
 
 ### Added
