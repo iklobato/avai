@@ -81,6 +81,14 @@ class TestParseLine:
             "(en6) IP 192.168.1.209.56258 > 18.190.38.130.443: tcp 0"
         ) == ("en6", "tcp", "18.190.38.130", 443)
 
+    def test_macos_k_ipv6_expanded_address(self):
+        # Real macOS capture: '-k I' + IP6 + a fully-expanded v6 address
+        # (no '::'); the trailing '.443' still splits off the port.
+        assert NetworkFlowsCollector._parse_line(
+            "(en6) IP6 2803:9810:469f:7108:f5ff:a108:be74:f78a.55987 "
+            "> 2a03:2880:f205:2c6:face:b00c:0:7260.443: tcp 1380"
+        ) == ("en6", "tcp", "2a03:2880:f205:2c6:face:b00c:0:7260", 443)
+
 
 class TestIfaceFromBanner:
     def test_extracts_interface(self):
