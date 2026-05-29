@@ -95,14 +95,38 @@
               </div>
             </td>
             <td class="py-2 font-mono {{ 'text-slate-200' if f.process and f.process != '—' else 'text-slate-600' }}">{{ f.process }}</td>
-            <td class="py-2 text-sky-300 font-mono">{{ f.iface }}</td>
-            <td class="py-2 text-slate-400 font-mono">{{ f.proto }}</td>
-            <td class="py-2 text-slate-400 font-mono">{{ f.ports }}</td>
+            <td class="py-2">
+              {% if f.iface and f.iface != '—' %}
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-mono
+                             bg-sky-900/30 text-sky-300 border border-sky-900/50">{{ f.iface }}</span>
+              {% else %}
+                <span class="text-slate-600 text-[10px]">—</span>
+              {% endif %}
+            </td>
+            <td class="py-2">
+              <div class="flex flex-wrap gap-1">
+                {% for p in f.proto %}
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono
+                               bg-slate-800 text-slate-300 border border-slate-700">{{ p }}</span>
+                {% endfor %}
+              </div>
+            </td>
+            <td class="py-2">
+              <div class="flex flex-wrap gap-1 max-w-[15rem]">
+                {% for p in f.ports[:12] %}
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono
+                               bg-slate-800/70 text-slate-400 border border-slate-700/60">{{ p }}</span>
+                {% endfor %}
+                {% if f.ports | length > 12 %}
+                  <span class="px-1 py-0.5 text-[10px] text-slate-500">+{{ f.ports | length - 12 }}</span>
+                {% endif %}
+              </div>
+            </td>
             <td class="py-2 text-right whitespace-nowrap">
-              <div class="text-slate-200 font-mono">{{ "{:,}".format(f.packets) }}<span class="ml-1 text-[10px] text-slate-500">pkts</span></div>
+              <div class="text-slate-200 font-mono">{{ "{:,}".format(f.packets) }} <span class="text-[10px] text-slate-500">pkts</span></div>
               <div class="text-[10px] text-slate-500 font-mono">{{ f.flows }} flow{{ '' if f.flows == 1 else 's' }}</div>
             </td>
-            <td class="py-2 text-slate-400 line-clamp-2">{{ f.reasoning }}</td>
+            <td class="py-2 text-slate-400 text-[11px] leading-snug line-clamp-3">{{ f.reasoning }}</td>
           </tr>
         {% endfor %}
       </tbody>

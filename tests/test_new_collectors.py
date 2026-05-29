@@ -334,6 +334,19 @@ class TestDashboardDns:
         assert data["summary"]["domains"] == 2
         assert data["summary"]["queries"] == 4
         assert data["summary"]["doh"] == 1
+        by_name = {r["qname"]: r["level"] for r in data["rows"]}
+        assert by_name["good.com"] == "external DNS"  # public resolver
+        assert by_name["Cloudflare"] == "DoH (encrypted)"
+
+    def test_resolution_level_classification(self):
+        from avai.dashboard import _dns_resolution_level
+
+        assert _dns_resolution_level("192.168.1.1", "A") == "local resolver"
+        assert _dns_resolution_level("127.0.0.1", "A") == "local resolver"
+        assert _dns_resolution_level("8.8.8.8", "A") == "external DNS"
+        assert _dns_resolution_level("1.1.1.1", "DoH") == "DoH (encrypted)"
+        assert _dns_resolution_level(None, "A") == "unknown"
+        assert _dns_resolution_level("not-an-ip", "A") == "unknown"
 
     def test_fragment_renders(self, db):
         engine, sink, run_id, ts = db

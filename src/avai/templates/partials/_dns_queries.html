@@ -7,6 +7,13 @@
   'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
 } %}
 
+{% set level_cls = {
+  'DoH (encrypted)': 'bg-sky-900/40 text-sky-300 border border-sky-900/60',
+  'external DNS':    'bg-amber-900/30 text-amber-300 border border-amber-900/50',
+  'local resolver':  'bg-slate-800 text-slate-300 border border-slate-700',
+  'unknown':         'bg-slate-800/60 text-slate-500 border border-slate-700/60',
+} %}
+
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
   {{ card_header("DNS queries — what your host is resolving") }}
 
@@ -40,6 +47,7 @@
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
           <th class="text-left  font-semibold pb-2">verdict</th>
           <th class="text-left  font-semibold pb-2">domain</th>
+          <th class="text-left  font-semibold pb-2">resolved via</th>
           <th class="text-left  font-semibold pb-2">type</th>
           <th class="text-left  font-semibold pb-2">resolver</th>
           <th class="text-left  font-semibold pb-2">process</th>
@@ -63,12 +71,10 @@
                 <span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>
               {% endif %}
             </td>
-            <td class="py-2 text-slate-200 font-mono break-all">
-              {{ q.qname }}
-              {% if q.qtype == 'DoH' %}
-                <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px]
-                             bg-sky-900/40 text-sky-300 border border-sky-900/60">DoH</span>
-              {% endif %}
+            <td class="py-2 text-slate-200 font-mono break-all">{{ q.qname }}</td>
+            <td class="py-2">
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px]
+                           {{ level_cls.get(q.level, level_cls['unknown']) }}">{{ q.level }}</span>
             </td>
             <td class="py-2 text-slate-400 font-mono">{{ q.qtype or "—" }}</td>
             <td class="py-2 text-slate-400 font-mono">{{ q.server_ip or "—" }}</td>
