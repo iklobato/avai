@@ -74,11 +74,12 @@ class TestParseLine:
         ) == ("eth0", "tcp", "2001:4860:4860::8888", 443)
 
     def test_macos_k_interface_prefix(self):
-        # macOS '-k I' prefixes the real interface (no direction token),
-        # so flows land on en0/en1/… instead of the 'pktap' pseudo-device.
+        # macOS '-k I' prefixes the real interface in parentheses (verified
+        # live: "(en6) IP 18.190.38.130.443 > ..."), so flows land on
+        # en6/en0/… instead of the 'pktap' pseudo-device.
         assert NetworkFlowsCollector._parse_line(
-            "en0 IP 10.0.0.5.54321 > 142.250.80.46.443: tcp 0"
-        ) == ("en0", "tcp", "142.250.80.46", 443)
+            "(en6) IP 192.168.1.209.56258 > 18.190.38.130.443: tcp 0"
+        ) == ("en6", "tcp", "18.190.38.130", 443)
 
 
 class TestIfaceFromBanner:

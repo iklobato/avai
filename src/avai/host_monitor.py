@@ -2259,7 +2259,7 @@ class NetworkFlowsCollector(SnapshotCollector):
         the port after a final ``.`` for both families, so the trailing
         ``.<port>`` splits off the destination address either way.
 
-        macOS '-k I':   ``en0 IP src.port > dst.port: proto len``
+        macOS '-k I':   ``(en6) IP src.port > dst.port: proto len``
         Linux -i any:   ``eth0 Out IP6 src.port > dst.port: proto len``
         """
         parts = line.split()
