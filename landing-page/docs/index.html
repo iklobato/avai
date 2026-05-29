@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>avai docs — Docker usage & full parameter reference</title>
+<meta name="description" content="Complete avai documentation: Docker commands with every parameter, the avai monitor / avai dashboard CLI reference, environment variables, docker-compose, recipes, and troubleshooting." />
+<meta name="theme-color" content="#0b0d10" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111418'/%3E%3Ctext x='50%25' y='58%25' font-family='ui-monospace,Menlo,monospace' font-size='17' font-weight='700' text-anchor='middle' fill='%2364ffda'%3Ea%3C/text%3E%3C/svg%3E" />
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root { color-scheme: dark; }
+  html { font-family: ui-sans-serif, system-ui, -apple-system, "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif; scroll-behavior: smooth; scroll-padding-top: 5rem; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  body { background: radial-gradient(1100px 700px at 50% -240px, #142028 0%, #0b0d10 55%, #07090b 100%); }
+  .card { background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.015)); border: 1px solid rgba(255,255,255,.06); }
+  pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .codeblock { position: relative; }
+  .copy-btn { position: absolute; top: .5rem; right: .5rem; }
+  .copy-btn:active { transform: translateY(1px); }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .55rem .75rem; border-bottom: 1px solid rgba(255,255,255,.06); vertical-align: top; }
+  th { color: #94a3b8; font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; }
+  td code, p code, li code { background: rgba(255,255,255,.06); padding: .05rem .35rem; border-radius: .25rem; font-family: ui-monospace, Menlo, monospace; font-size: .85em; color: #c7d2fe; }
+  .nav-link.active { color: #6ee7b7; }
+  details > summary { cursor: pointer; }
+  h2 { scroll-margin-top: 5rem; }
+</style>
+</head>
+<body class="text-slate-300 antialiased">
+
+<!-- top bar -->
+<header class="sticky top-0 z-30 backdrop-blur bg-slate-950/70 border-b border-white/5">
+  <div class="max-w-7xl mx-auto px-5 py-3 flex items-center justify-between">
+    <a href="/" class="flex items-center gap-2">
+      <span class="mono inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-900 ring-1 ring-emerald-400/30 text-emerald-300 font-bold">a</span>
+      <span class="mono text-slate-100 font-semibold">avai</span>
+      <span class="text-[11px] uppercase tracking-widest text-slate-500 ml-1">docs</span>
+    </a>
+    <nav class="flex items-center gap-5 text-sm text-slate-400">
+      <a href="/" class="hover:text-slate-100">← Home</a>
+      <a href="https://github.com/iklobato/avai" class="hover:text-slate-100">GitHub</a>
+      <a href="https://pypi.org/project/avai-monitor/" class="hover:text-slate-100 hidden sm:inline">PyPI</a>
+    </nav>
+  </div>
+</header>
+
+<div class="max-w-7xl mx-auto px-5 flex gap-10">
+
+  <!-- sidebar -->
+  <aside class="hidden lg:block w-56 shrink-0 sticky top-16 self-start h-[calc(100vh-4rem)] overflow-y-auto py-8 text-sm">
+    <nav class="space-y-1">
+      <a href="#overview"     class="nav-link block py-1 text-slate-400 hover:text-slate-100">Overview</a>
+      <a href="#images"       class="nav-link block py-1 text-slate-400 hover:text-slate-100">The image &amp; two roles</a>
+      <a href="#quickstart"   class="nav-link block py-1 text-slate-400 hover:text-slate-100">Quick start</a>
+      <a href="#dashboard-cmd" class="nav-link block py-1 text-slate-400 hover:text-slate-100">Run the dashboard</a>
+      <a href="#monitor-cmd"  class="nav-link block py-1 text-slate-400 hover:text-slate-100">Run the monitor</a>
+      <a href="#docker-flags" class="nav-link block py-1 text-slate-400 hover:text-slate-100">Docker run flags</a>
+      <a href="#mounts"       class="nav-link block py-1 text-slate-400 hover:text-slate-100">Bind mounts</a>
+      <a href="#monitor-params" class="nav-link block py-1 text-slate-400 hover:text-slate-100"><code>avai monitor</code> params</a>
+      <a href="#dashboard-params" class="nav-link block py-1 text-slate-400 hover:text-slate-100"><code>avai dashboard</code> params</a>
+      <a href="#env"          class="nav-link block py-1 text-slate-400 hover:text-slate-100">Environment variables</a>
+      <a href="#compose"      class="nav-link block py-1 text-slate-400 hover:text-slate-100">docker compose</a>
+      <a href="#recipes"      class="nav-link block py-1 text-slate-400 hover:text-slate-100">Recipes</a>
+      <a href="#cli-data"     class="nav-link block py-1 text-slate-400 hover:text-slate-100">Reading findings</a>
+      <a href="#troubleshoot" class="nav-link block py-1 text-slate-400 hover:text-slate-100">Troubleshooting</a>
+    </nav>
+  </aside>
+
+  <!-- content -->
+  <main class="min-w-0 flex-1 py-10 max-w-3xl">
+
+    <h1 class="text-4xl font-semibold text-slate-100 tracking-tight">avai documentation</h1>
+    <p class="mt-4 text-slate-400 leading-relaxed">
+      Everything you need to run <span class="mono text-slate-200">avai</span> with Docker — every command,
+      every parameter, every environment variable. For the plain‑English overview, see the
+      <a href="/" class="text-emerald-300 hover:underline">home page</a>.
+    </p>
+
+    <!-- OVERVIEW -->
+    <h2 id="overview" class="mt-14 text-2xl font-semibold text-slate-100">Overview</h2>
+    <p class="mt-4 text-slate-400 leading-relaxed">
+      avai has two parts that share a single SQLite file:
+    </p>
+    <ul class="mt-3 space-y-2 text-slate-400">
+      <li class="flex gap-2"><span class="text-emerald-400">•</span> <b class="text-slate-200">monitor</b> — runs the collectors, enriches findings against threat‑intel sources, and asks an LLM for a verdict. <b>Writes</b> the database.</li>
+      <li class="flex gap-2"><span class="text-emerald-400">•</span> <b class="text-slate-200">dashboard</b> — a read‑only Flask web UI on port 8765. <b>Reads</b> the database.</li>
+    </ul>
+    <p class="mt-4 text-slate-400 leading-relaxed">
+      Both ship in <b>one</b> Docker image, <code>iklob1/avai</code>. The default command is the dashboard;
+      override it to run the monitor. The monitor needs a <b>Linux host</b> (it reads <code>/proc</code>, sysfs,
+      journald, systemd); the dashboard runs anywhere Docker does.
+    </p>
+
+    <!-- IMAGES -->
+    <h2 id="images" class="mt-14 text-2xl font-semibold text-slate-100">The image &amp; two roles</h2>
+    <table class="mt-4 card rounded-xl overflow-hidden text-sm">
+      <thead><tr><th>Role</th><th>Command</th><th>Runs where</th></tr></thead>
+      <tbody>
+        <tr><td><b class="text-slate-200">Dashboard</b> (default)</td><td><code>docker run iklob1/avai</code></td><td>any host</td></tr>
+        <tr><td><b class="text-slate-200">Monitor</b></td><td><code>docker run … iklob1/avai avai monitor …</code></td><td>Linux host only</td></tr>
+      </tbody>
+    </table>
+    <p class="mt-3 text-sm text-slate-500">Tags: <code>iklob1/avai:latest</code>, <code>iklob1/avai:0.2.2</code>. Also on PyPI as <code>pip install avai-monitor</code>.</p>
+
+    <!-- QUICKSTART -->
+    <h2 id="quickstart" class="mt-14 text-2xl font-semibold text-slate-100">Quick start (60 seconds, no key)</h2>
+    <p class="mt-4 text-slate-400">Populate a database with one scan, then serve it. Works on macOS or Linux.</p>
+    <div class="codeblock mt-4">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">mkdir -p ~/.avai &amp;&amp; cd ~/.avai
+
+<span class="text-slate-500"># 1. one scan (no LLM, no external calls — just inventory)</span>
+docker run --rm -v "$PWD":/data iklob1/avai \
+  avai monitor --once --no-streaming --no-judge --no-enrich --db /data/avai.db
+
+<span class="text-slate-500"># 2. view it</span>
+docker run -d --name avai -p 8765:8765 -v "$PWD":/data iklob1/avai
+open http://localhost:8765/   <span class="text-slate-500"># macOS;  xdg-open on Linux</span></pre>
+    </div>
+
+    <!-- DASHBOARD CMD -->
+    <h2 id="dashboard-cmd" class="mt-14 text-2xl font-semibold text-slate-100">Run the dashboard</h2>
+    <p class="mt-4 text-slate-400">The dashboard needs no privileges — just a directory holding <code>avai.db</code> mounted at <code>/data</code> and a published port.</p>
+    <div class="codeblock mt-4">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">docker run -d \
+  --name avai-dashboard \
+  -p 8765:8765 \                <span class="text-slate-500"># publish container :8765 → host :8765</span>
+  -v "$PWD":/data \             <span class="text-slate-500"># dir containing avai.db</span>
+  iklob1/avai                   <span class="text-slate-500"># default CMD = avai dashboard</span></pre>
+    </div>
+    <p class="mt-4 text-slate-400">Custom port / DB path — append your own <code>avai dashboard</code> command:</p>
+    <div class="codeblock mt-3">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">docker run --rm -p 9000:9000 -v /var/lib/avai:/data iklob1/avai \
+  avai dashboard --host 0.0.0.0 --port 9000 --db /data/custom.db</pre>
+    </div>
+    <p class="mt-3 text-sm text-slate-500">On a fresh empty dir the dashboard creates an empty schema and every panel renders empty until the monitor writes rows.</p>
+
+    <!-- MONITOR CMD -->
+    <h2 id="monitor-cmd" class="mt-14 text-2xl font-semibold text-slate-100">Run the monitor (Linux host)</h2>
+    <p class="mt-4 text-slate-400">
+      The monitor reads host state, so it needs the host PID + network namespaces, a few capabilities,
+      and the host filesystem bind‑mounted under <code>/host</code> (via <code>HOST_PREFIX</code>).
+      Continuous, with the LLM judge + enrichment enabled:
+    </p>
+    <div class="codeblock mt-4">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">docker run -d --name avai-monitor --restart unless-stopped \
+  --pid=host --network=host --user 0:0 \
+  --cap-add SYS_PTRACE --cap-add NET_ADMIN --cap-add NET_RAW --cap-add DAC_READ_SEARCH \
+  -e HOST_PREFIX=/host \
+  -e DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+  -e ANTHROPIC_API_KEY \
+  -e ABUSE_CH_AUTH_KEY \
+  -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /etc:/host/etc:ro \
+  -v /var/lib/dpkg:/host/var/lib/dpkg:ro \
+  -v /var/lib/bluetooth:/host/var/lib/bluetooth:ro \
+  -v /usr/share/applications:/host/usr/share/applications:ro \
+  -v /lib/systemd:/host/lib/systemd:ro -v /usr/lib/systemd:/host/usr/lib/systemd:ro \
+  -v /var/log/journal:/host/var/log/journal:ro -v /var/spool/cron:/host/var/spool/cron:ro \
+  -v /run/systemd:/run/systemd:ro -v /run/dbus:/run/dbus:ro \
+  -v /etc/machine-id:/etc/machine-id:ro -v /dev/mapper:/dev/mapper:ro \
+  -v /home:/host/home:ro -v /root:/host/root:ro \
+  -v "$PWD":/data \
+  iklob1/avai \
+  avai monitor --db /data/avai.db --interval 300</pre>
+    </div>
+
+    <!-- DOCKER FLAGS -->
+    <h2 id="docker-flags" class="mt-14 text-2xl font-semibold text-slate-100">Docker run flags (monitor)</h2>
+    <p class="mt-4 text-slate-400">Why each privilege flag is needed:</p>
+    <table class="mt-4 card rounded-xl overflow-hidden text-sm">
+      <thead><tr><th>Flag</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td><code>--pid=host</code></td><td>so psutil sees the host's processes, not just the container's</td></tr>
+        <tr><td><code>--network=host</code></td><td>so network connections / listening ports are the host's</td></tr>
+        <tr><td><code>--user 0:0</code></td><td>root inside the container — needed to read protected host files</td></tr>
+        <tr><td><code>--cap-add SYS_PTRACE</code></td><td>read <code>/proc/&lt;pid&gt;</code> across processes (psutil)</td></tr>
+        <tr><td><code>--cap-add NET_ADMIN</code> <code>NET_RAW</code></td><td>Wi‑Fi (NL80211 netlink) + some sysfs network reads</td></tr>
+        <tr><td><code>--cap-add DAC_READ_SEARCH</code></td><td>read root‑owned files (<code>/etc/shadow</code>, other users' crontabs) without UID juggling</td></tr>
+        <tr><td><code>--restart unless-stopped</code></td><td>keep the monitor running across reboots</td></tr>
+      </tbody>
+    </table>
+
+    <!-- MOUNTS -->
+    <h2 id="mounts" class="mt-14 text-2xl font-semibold text-slate-100">Bind mounts</h2>
+    <p class="mt-4 text-slate-400">
+      With <code>HOST_PREFIX=/host</code>, collectors read <code>/host/&lt;path&gt;</code> instead of the container's own.
+      Mount each host path you want covered read‑only under <code>/host</code>:
+    </p>
+    <table class="mt-4 card rounded-xl overflow-hidden text-sm">
+      <thead><tr><th>Mount</th><th>Feeds collector</th></tr></thead>
+      <tbody>
+        <tr><td><code>/proc:/host/proc:ro</code></td><td>processes, network</td></tr>
+        <tr><td><code>/sys:/host/sys:ro</code></td><td>usb_devices, wifi_state</td></tr>
+        <tr><td><code>/etc:/host/etc:ro</code></td><td>file_integrity, system_integrity</td></tr>
+        <tr><td><code>/var/lib/dpkg:/host/var/lib/dpkg:ro</code></td><td>installed_apps (Debian/Ubuntu)</td></tr>
+        <tr><td><code>/var/lib/bluetooth:/host/var/lib/bluetooth:ro</code></td><td>bluetooth_devices</td></tr>
+        <tr><td><code>/{lib,usr/lib}/systemd:/host/…:ro</code></td><td>launch_items (unit files)</td></tr>
+        <tr><td><code>/var/spool/cron:/host/var/spool/cron:ro</code></td><td>launch_items (cron)</td></tr>
+        <tr><td><code>/var/log/journal:/host/var/log/journal:ro</code></td><td>auth_events, process_exec_events</td></tr>
+        <tr><td><code>/home:/host/home:ro</code>, <code>/root:/host/root:ro</code></td><td>per‑user dotfiles, user systemd units, browser extensions</td></tr>
+        <tr><td><code>/run/systemd</code>, <code>/run/dbus</code> (native paths)</td><td>systemctl / dmsetup talk to the host's systemd + D‑Bus</td></tr>
+        <tr><td><code>"$PWD":/data</code></td><td>where <code>avai.db</code> is written</td></tr>
+      </tbody>
+    </table>
+    <p class="mt-3 text-sm text-slate-500">Mount only what you need — a missing mount just means that collector finds nothing; it never crashes.</p>
+
+    <!-- MONITOR PARAMS -->
+    <h2 id="monitor-params" class="mt-14 text-2xl font-semibold text-slate-100"><code>avai monitor</code> parameters</h2>
+    <table class="mt-4 card rounded-xl overflow-hidden text-sm">
+      <thead><tr><th>Flag</th><th>Default</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>--db PATH</code></td><td><code>/data/avai.db</code></td><td>SQLite database path</td></tr>
+        <tr><td><code>--once</code></td><td>off (loop)</td><td>run a single cycle and exit</td></tr>
+        <tr><td><code>--interval N</code></td><td><code>300</code></td><td>seconds between snapshot cycles</td></tr>
+        <tr><td><code>--lookback-min N</code></td><td><code>6</code></td><td>minutes of log/journal history per run</td></tr>
+        <tr><td><code>--no-judge</code></td><td>off</td><td>collect (and enrich) but store no LLM verdicts</td></tr>
+        <tr><td><code>--judge-model ID</code></td><td><code>claude-haiku-4-5-20251001</code></td><td>any litellm model id (provider via env)</td></tr>
+        <tr><td><code>--judge-batch-size N</code></td><td><code>20</code></td><td>entries per LLM call</td></tr>
+        <tr><td><code>--judge-max-per-collector N</code></td><td><code>200</code></td><td>cap of new entries judged per collector per cycle</td></tr>
+        <tr><td><code>--no-streaming</code></td><td>off</td><td>disable the auth + exec event tailers</td></tr>
+        <tr><td><code>--max-db-mb N</code></td><td><code>1024</code></td><td>size cap; oldest runs pruned + VACUUM'd after each cycle. <code>0</code> = no rotation</td></tr>
+        <tr><td><code>--no-enrich</code></td><td>off</td><td>skip the threat‑intel chain entirely</td></tr>
+        <tr><td><code>--enrich-only NAME</code></td><td>all</td><td>limit enrichment to one source (repeatable)</td></tr>
+        <tr><td><code>--prompts-file PATH</code></td><td>bundled</td><td>override the prompts TOML</td></tr>
+        <tr><td><code>--verbose</code></td><td>off</td><td>debug logging</td></tr>
+      </tbody>
+    </table>
+
+    <!-- DASHBOARD PARAMS -->
+    <h2 id="dashboard-params" class="mt-14 text-2xl font-semibold text-slate-100"><code>avai dashboard</code> parameters</h2>
+    <table class="mt-4 card rounded-xl overflow-hidden text-sm">
+      <thead><tr><th>Flag</th><th>Default</th><th>What it does</th></tr></thead>
+      <tbody>
+        <tr><td><code>--db PATH</code></td><td><code>/data/avai.db</code></td><td>SQLite database to read (opened read‑only)</td></tr>
+        <tr><td><code>--host HOST</code></td><td><code>127.0.0.1</code></td><td>bind address — use <code>0.0.0.0</code> in Docker</td></tr>
+        <tr><td><code>--port PORT</code></td><td><code>8765</code></td><td>port to serve on</td></tr>
+        <tr><td><code>--debug</code></td><td>off</td><td>Flask debug mode</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ENV -->
+    <h2 id="env" class="mt-14 text-2xl font-semibold text-slate-100">Environment variables</h2>
+    <p class="mt-4 text-slate-400"><b class="text-slate-200">LLM judge</b> — one credential enables verdicts:</p>
+    <table class="mt-3 card rounded-xl overflow-hidden text-sm">
+      <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>ANTHROPIC_API_KEY</code></td><td>standard Anthropic API (via litellm)</td></tr>
+        <tr><td><code>CLAUDE_CODE_OAUTH_TOKEN</code></td><td>Claude Code OAuth (preferred when present)</td></tr>
+        <tr><td><code>OPENAI_API_KEY</code></td><td>used when <code>--judge-model</code> is an OpenAI model</td></tr>
+      </tbody>
+    </table>
+    <p class="mt-5 text-slate-400"><b class="text-slate-200">Threat‑intel sources</b> — each key turns on its source; missing keys disable it silently. Keyless sources always run.</p>
+    <table class="mt-3 card rounded-xl overflow-hidden text-sm">
+      <thead><tr><th>Variable</th><th>Source(s)</th><th>Quota</th></tr></thead>
+      <tbody>
+        <tr><td><code>ABUSE_CH_AUTH_KEY</code></td><td>MalwareBazaar · URLhaus · ThreatFox</td><td>free, one key for all 3</td></tr>
+        <tr><td><code>VT_API_KEY</code></td><td>VirusTotal</td><td>4/min · 500/day</td></tr>
+        <tr><td><code>ABUSEIPDB_API_KEY</code></td><td>AbuseIPDB</td><td>1000/day</td></tr>
+        <tr><td><code>GREYNOISE_API_KEY</code></td><td>GreyNoise Community</td><td>free tier</td></tr>
+        <tr><td><code>GOOGLE_SAFE_BROWSING_API_KEY</code></td><td>Google Safe Browsing</td><td>10k/day</td></tr>
+        <tr><td><code>PHISHTANK_API_KEY</code></td><td>PhishTank</td><td>free</td></tr>
+        <tr><td><code>GITHUB_TOKEN</code></td><td>GitHub Advisory DB</td><td>any PAT</td></tr>
+        <tr><td><code>NVD_API_KEY</code></td><td>NVD (optional — raises rate limit)</td><td>5 → 50 / 30s</td></tr>
+      </tbody>
+    </table>
+    <p class="mt-3 text-sm text-slate-500">No key needed: CIRCL hashlookup, Shodan InternetDB, Feodo Tracker, OSV.dev, CISA KEV, endoflife.date, crt.sh.</p>
+    <p class="mt-5 text-slate-400"><b class="text-slate-200">Container</b>:</p>
+    <table class="mt-3 card rounded-xl overflow-hidden text-sm">
+      <thead><tr><th>Variable</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>HOST_PREFIX=/host</code></td><td>collectors read host paths under this prefix (container monitor)</td></tr>
+        <tr><td><code>DBUS_SYSTEM_BUS_ADDRESS</code></td><td><code>unix:path=/run/dbus/system_bus_socket</code> — lets systemctl reach the host's systemd</td></tr>
+      </tbody>
+    </table>
+    <p class="mt-4 text-slate-400">Easiest is an <code>.env</code> file with <code>--env-file</code>:</p>
+    <div class="codeblock mt-3">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">cp .env.example .env   <span class="text-slate-500"># fill in the keys you have</span>
+docker run -d --env-file .env … iklob1/avai avai monitor …</pre>
+    </div>
+
+    <!-- COMPOSE -->
+    <h2 id="compose" class="mt-14 text-2xl font-semibold text-slate-100">docker compose</h2>
+    <p class="mt-4 text-slate-400">One image, two services. Monitor writes <code>./data/avai.db</code>; dashboard reads it.</p>
+    <div class="codeblock mt-4">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">x-avai-image: &amp;avai-image
+  image: iklob1/avai:latest
+
+services:
+  monitor:
+    &lt;&lt;: *avai-image
+    command: ["avai","monitor","--db","/data/avai.db","--interval","300"]
+    user: "0:0"
+    pid: host
+    network_mode: host
+    cap_add: [SYS_PTRACE, NET_ADMIN, NET_RAW, DAC_READ_SEARCH]
+    env_file: [.env]
+    environment:
+      - HOST_PREFIX=/host
+      - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
+    volumes:
+      - ./data:/data
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc:/host/etc:ro
+      - /run/systemd:/run/systemd:ro
+      - /run/dbus:/run/dbus:ro
+      # … add the rest of the /host mounts as needed
+    restart: unless-stopped
+
+  dashboard:
+    &lt;&lt;: *avai-image
+    ports: ["8765:8765"]
+    volumes: ["./data:/data"]
+    restart: unless-stopped</pre>
+    </div>
+    <div class="codeblock mt-3">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">mkdir -p data &amp;&amp; cp .env.example .env
+docker compose up -d
+docker compose logs -f monitor</pre>
+    </div>
+
+    <!-- RECIPES -->
+    <h2 id="recipes" class="mt-14 text-2xl font-semibold text-slate-100">Recipes</h2>
+
+    <h3 class="mt-6 text-lg font-medium text-slate-200">One‑shot scan (no daemon)</h3>
+    <div class="codeblock mt-2">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">docker run --rm --pid=host --network=host --user 0:0 \
+  --cap-add SYS_PTRACE --cap-add DAC_READ_SEARCH -e HOST_PREFIX=/host \
+  -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /etc:/host/etc:ro \
+  -v "$PWD":/data iklob1/avai \
+  avai monitor --once --no-streaming --db /data/avai.db</pre>
+    </div>
+
+    <h3 class="mt-6 text-lg font-medium text-slate-200">Keep LLM cost low</h3>
+    <div class="codeblock mt-2">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">avai monitor --judge-model claude-haiku-4-5-20251001 \
+             --judge-max-per-collector 20</pre>
+    </div>
+    <p class="mt-2 text-sm text-slate-500">Only <i>new</i> artifacts are judged and verdicts are cached, so steady‑state cost is near zero.</p>
+
+    <h3 class="mt-6 text-lg font-medium text-slate-200">Debug / restrict enrichment</h3>
+    <div class="codeblock mt-2">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">avai monitor --no-enrich                          <span class="text-slate-500"># off entirely</span>
+avai monitor --enrich-only cisa_kev               <span class="text-slate-500"># one source</span>
+avai monitor --enrich-only virustotal --enrich-only abuseipdb</pre>
+    </div>
+    <p class="mt-2 text-sm text-slate-500 mono">
+      sources: malware_bazaar urlhaus threatfox circl_hashlookup shodan_internetdb
+      feodo_tracker osv cisa_kev nvd endoflife crtsh virustotal abuseipdb greynoise
+      safe_browsing phishtank github_advisory
+    </p>
+
+    <h3 class="mt-6 text-lg font-medium text-slate-200">Bring your own LLM provider</h3>
+    <div class="codeblock mt-2">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">avai monitor --judge-model gpt-4o-mini            <span class="text-slate-500"># OpenAI (OPENAI_API_KEY)</span>
+avai monitor --judge-model ollama/llama3.1        <span class="text-slate-500"># local, offline, free</span>
+avai monitor --judge-model gemini/gemini-1.5-pro  <span class="text-slate-500"># Google</span></pre>
+    </div>
+
+    <!-- CLI DATA -->
+    <h2 id="cli-data" class="mt-14 text-2xl font-semibold text-slate-100">Reading findings without the dashboard</h2>
+    <p class="mt-4 text-slate-400">It's one SQLite file — query it directly for scripting or a headless server:</p>
+    <div class="codeblock mt-4">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto"><span class="text-slate-500"># dangerous + suspicious findings, newest first</span>
+sqlite3 -box data/avai.db "SELECT verdict, collector, substr(reasoning,1,60)
+  FROM judgements WHERE verdict IN ('malicious','suspicious')
+  ORDER BY created_at DESC LIMIT 20;"
+
+<span class="text-slate-500"># count by verdict</span>
+sqlite3 data/avai.db "SELECT verdict, count(*) FROM judgements GROUP BY verdict;"
+
+<span class="text-slate-500"># what the threat-intel sources said</span>
+sqlite3 -box data/avai.db "SELECT source, verdict_hint, substr(summary,1,70)
+  FROM enrichment_evidence WHERE verdict_hint IN ('malicious','suspicious');"</pre>
+    </div>
+
+    <!-- TROUBLESHOOTING -->
+    <h2 id="troubleshoot" class="mt-14 text-2xl font-semibold text-slate-100">Troubleshooting</h2>
+    <div class="mt-4 space-y-3">
+      <details class="card rounded-xl p-4">
+        <summary class="text-slate-200">Dashboard shows nothing / all panels empty</summary>
+        <p class="mt-2 text-sm text-slate-400">No data yet — run the monitor at least once against the same <code>/data</code> dir. On macOS the monitor in Docker only sees the Linux VM, so install natively for real Mac data.</p>
+      </details>
+      <details class="card rounded-xl p-4">
+        <summary class="text-slate-200">No <code>malicious</code>/<code>suspicious</code> verdicts, only raw rows</summary>
+        <p class="mt-2 text-sm text-slate-400">The judge is off. Pass an LLM credential (<code>-e ANTHROPIC_API_KEY=…</code>) and don't use <code>--no-judge</code>.</p>
+      </details>
+      <details class="card rounded-xl p-4">
+        <summary class="text-slate-200">An enricher isn't running</summary>
+        <p class="mt-2 text-sm text-slate-400">Keyed sources only start if their env var is set and non‑empty. Check the monitor log at startup — it prints <code>enricher enabled: …</code> / <code>enricher disabled (token missing): …</code> for each.</p>
+      </details>
+      <details class="card rounded-xl p-4">
+        <summary class="text-slate-200">A collector reports rows=0 on Linux</summary>
+        <p class="mt-2 text-sm text-slate-400">Usually a missing bind mount — e.g. no <code>launch_items</code> without <code>/lib/systemd</code> mounted under <code>/host</code>. Mount the relevant path (see <a href="#mounts" class="text-emerald-300 hover:underline">Bind mounts</a>).</p>
+      </details>
+      <details class="card rounded-xl p-4">
+        <summary class="text-slate-200">Check container health &amp; logs</summary>
+        <div class="codeblock mt-2">
+<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded p-3 text-slate-200 overflow-x-auto">docker logs -f avai-monitor
+docker inspect avai-dashboard --format '{{.State.Health.Status}}'
+docker exec avai-monitor du -h /data/avai.db   <span class="text-slate-500"># DB growth / rotation</span></pre>
+        </div>
+      </details>
+    </div>
+
+    <p class="mt-14 pt-8 border-t border-white/10 text-sm text-slate-500">
+      Source &amp; full README: <a href="https://github.com/iklobato/avai" class="text-emerald-300 hover:underline">github.com/iklobato/avai</a>
+      · <a href="https://github.com/iklobato/avai/blob/release/0.1.0/CHANGELOG.md" class="text-emerald-300 hover:underline">changelog</a>
+      · <a href="/" class="text-emerald-300 hover:underline">home</a>
+    </p>
+  </main>
+</div>
+
+<script>
+  // Copy buttons on every code block.
+  document.querySelectorAll('.codeblock').forEach(function (block) {
+    var pre = block.querySelector('pre');
+    if (!pre) return;
+    var btn = document.createElement('button');
+    btn.textContent = 'copy';
+    btn.className = 'copy-btn text-[11px] mono px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 ring-1 ring-white/10';
+    btn.onclick = function () {
+      navigator.clipboard.writeText(pre.innerText.trim());
+      btn.textContent = 'copied'; setTimeout(function () { btn.textContent = 'copy'; }, 1500);
+    };
+    block.appendChild(btn);
+  });
+
+  // Scroll-spy: highlight the current section in the sidebar.
+  var links = Array.from(document.querySelectorAll('.nav-link'));
+  var map = {};
+  links.forEach(function (l) { var id = l.getAttribute('href').slice(1); if (id) map[id] = l; });
+  var obs = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (e.isIntersecting) {
+        links.forEach(function (l) { l.classList.remove('active'); });
+        if (map[e.target.id]) map[e.target.id].classList.add('active');
+      }
+    });
+  }, { rootMargin: '-10% 0px -80% 0px' });
+  document.querySelectorAll('main h2[id]').forEach(function (h) { obs.observe(h); });
+</script>
+</body>
+</html>
