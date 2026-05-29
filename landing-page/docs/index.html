@@ -18,6 +18,17 @@
   .codeblock { position: relative; }
   .copy-btn { position: absolute; top: .5rem; right: .5rem; }
   .copy-btn:active { transform: translateY(1px); }
+  /* OS tabs */
+  .os-tabs { margin-top: 1rem; }
+  .os-tabbar { display: flex; gap: .25rem; }
+  .os-tab {
+    font-size: .72rem; padding: .3rem .7rem; border-radius: .4rem .4rem 0 0;
+    color: #94a3b8; background: rgba(255,255,255,.03);
+    border: 1px solid rgba(255,255,255,.06); border-bottom: none; cursor: pointer;
+  }
+  .os-tab.active { color: #6ee7b7; background: rgba(2,6,9,.8); border-color: rgba(110,231,183,.3); }
+  .os-pane[hidden] { display: none; }
+  .os-tabs > .copy-btn { top: 2.3rem; }   /* clear the tab bar */
   table { border-collapse: collapse; width: 100%; }
   th, td { text-align: left; padding: .55rem .75rem; border-bottom: 1px solid rgba(255,255,255,.06); vertical-align: top; }
   th { color: #94a3b8; font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; }
@@ -105,9 +116,10 @@
 
     <!-- QUICKSTART -->
     <h2 id="quickstart" class="mt-14 text-2xl font-semibold text-slate-100">Quick start (60 seconds, no key)</h2>
-    <p class="mt-4 text-slate-400">Populate a database with one scan, then serve it. Works on macOS or Linux.</p>
-    <div class="codeblock mt-4">
-<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">mkdir -p ~/.avai &amp;&amp; cd ~/.avai
+    <p class="mt-4 text-slate-400">Populate a database with one scan, then serve it. Works on any OS that runs Docker.</p>
+    <div class="os-tabs">
+      <div class="os-tabbar"></div>
+<pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="macos">mkdir -p ~/.avai &amp;&amp; cd ~/.avai
 
 <span class="text-slate-500"># 1. one scan (no LLM, no external calls — just inventory)</span>
 docker run --rm -v "$PWD":/data iklob1/avai \
@@ -115,18 +127,44 @@ docker run --rm -v "$PWD":/data iklob1/avai \
 
 <span class="text-slate-500"># 2. view it</span>
 docker run -d --name avai -p 8765:8765 -v "$PWD":/data iklob1/avai
-open http://localhost:8765/   <span class="text-slate-500"># macOS;  xdg-open on Linux</span></pre>
+open http://localhost:8765/</pre>
+<pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="linux" hidden>mkdir -p ~/.avai &amp;&amp; cd ~/.avai
+
+<span class="text-slate-500"># 1. one scan (no LLM, no external calls — just inventory)</span>
+docker run --rm -v "$PWD":/data iklob1/avai \
+  avai monitor --once --no-streaming --no-judge --no-enrich --db /data/avai.db
+
+<span class="text-slate-500"># 2. view it</span>
+docker run -d --name avai -p 8765:8765 -v "$PWD":/data iklob1/avai
+xdg-open http://localhost:8765/</pre>
+<pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="windows" hidden><span class="text-slate-500"># PowerShell. mkdir then cd:</span>
+mkdir $HOME\.avai -Force; cd $HOME\.avai
+
+<span class="text-slate-500"># 1. one scan (single line — PowerShell)</span>
+docker run --rm -v ${PWD}:/data iklob1/avai avai monitor --once --no-streaming --no-judge --no-enrich --db /data/avai.db
+
+<span class="text-slate-500"># 2. view it</span>
+docker run -d --name avai -p 8765:8765 -v ${PWD}:/data iklob1/avai
+start http://localhost:8765/</pre>
     </div>
 
     <!-- DASHBOARD CMD -->
     <h2 id="dashboard-cmd" class="mt-14 text-2xl font-semibold text-slate-100">Run the dashboard</h2>
     <p class="mt-4 text-slate-400">The dashboard needs no privileges — just a directory holding <code>avai.db</code> mounted at <code>/data</code> and a published port.</p>
-    <div class="codeblock mt-4">
-<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">docker run -d \
+    <div class="os-tabs">
+      <div class="os-tabbar"></div>
+<pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="macos">docker run -d \
   --name avai-dashboard \
-  -p 8765:8765 \                <span class="text-slate-500"># publish container :8765 → host :8765</span>
+  -p 8765:8765 \                <span class="text-slate-500"># publish :8765</span>
   -v "$PWD":/data \             <span class="text-slate-500"># dir containing avai.db</span>
   iklob1/avai                   <span class="text-slate-500"># default CMD = avai dashboard</span></pre>
+<pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="linux" hidden>docker run -d \
+  --name avai-dashboard \
+  -p 8765:8765 \                <span class="text-slate-500"># publish :8765</span>
+  -v "$PWD":/data \             <span class="text-slate-500"># dir containing avai.db</span>
+  iklob1/avai                   <span class="text-slate-500"># default CMD = avai dashboard</span></pre>
+<pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="windows" hidden><span class="text-slate-500"># PowerShell — single line</span>
+docker run -d --name avai-dashboard -p 8765:8765 -v ${PWD}:/data iklob1/avai</pre>
     </div>
     <p class="mt-4 text-slate-400">Custom port / DB path — append your own <code>avai dashboard</code> command:</p>
     <div class="codeblock mt-3">
@@ -140,16 +178,17 @@ open http://localhost:8765/   <span class="text-slate-500"># macOS;  xdg-open on
     <p class="mt-4 text-slate-400">
       The monitor reads host state, so it needs the host PID + network namespaces, a few capabilities,
       and the host filesystem bind‑mounted under <code>/host</code> (via <code>HOST_PREFIX</code>).
-      Continuous, with the LLM judge + enrichment enabled:
+      Continuous, with the LLM judge + enrichment enabled. Add your keys with
+      <code>-e ANTHROPIC_API_KEY -e ABUSE_CH_AUTH_KEY</code>.
     </p>
-    <div class="codeblock mt-4">
-<pre class="text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-lg p-4 text-slate-200 overflow-x-auto">docker run -d --name avai-monitor --restart unless-stopped \
+    <div class="os-tabs">
+      <div class="os-tabbar"></div>
+<pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="linux">docker run -d --name avai-monitor --restart unless-stopped \
   --pid=host --network=host --user 0:0 \
   --cap-add SYS_PTRACE --cap-add NET_ADMIN --cap-add NET_RAW --cap-add DAC_READ_SEARCH \
   -e HOST_PREFIX=/host \
   -e DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
-  -e ANTHROPIC_API_KEY \
-  -e ABUSE_CH_AUTH_KEY \
+  -e ANTHROPIC_API_KEY -e ABUSE_CH_AUTH_KEY \
   -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /etc:/host/etc:ro \
   -v /var/lib/dpkg:/host/var/lib/dpkg:ro \
   -v /var/lib/bluetooth:/host/var/lib/bluetooth:ro \
@@ -162,6 +201,25 @@ open http://localhost:8765/   <span class="text-slate-500"># macOS;  xdg-open on
   -v "$PWD":/data \
   iklob1/avai \
   avai monitor --db /data/avai.db --interval 300</pre>
+<pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="macos" hidden><span class="text-slate-500"># Docker Desktop on macOS can't share /root, /home, etc. and only</span>
+<span class="text-slate-500"># exposes its Linux VM — so this monitors the VM, not your Mac.</span>
+<span class="text-slate-500"># For real Mac coverage use the native install (see note below).</span>
+docker run -d --name avai-monitor --restart unless-stopped \
+  --pid=host --network=host --user 0:0 \
+  --cap-add SYS_PTRACE --cap-add NET_ADMIN --cap-add NET_RAW --cap-add DAC_READ_SEARCH \
+  -e HOST_PREFIX=/host \
+  -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /etc:/host/etc:ro \
+  -v "$PWD":/data \
+  iklob1/avai \
+  avai monitor --db /data/avai.db --interval 300 --no-streaming</pre>
+<pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="windows" hidden><span class="text-slate-500"># PowerShell. Docker Desktop exposes only its Linux VM (WSL2), not</span>
+<span class="text-slate-500"># Windows — so this monitors the VM. Single line:</span>
+docker run -d --name avai-monitor --restart unless-stopped --pid=host --network=host --user 0:0 --cap-add SYS_PTRACE --cap-add NET_ADMIN --cap-add NET_RAW --cap-add DAC_READ_SEARCH -e HOST_PREFIX=/host -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /etc:/host/etc:ro -v ${PWD}:/data iklob1/avai avai monitor --db /data/avai.db --interval 300 --no-streaming</pre>
+    </div>
+    <div class="mt-3 card rounded-lg p-3 text-sm text-amber-200/90 bg-amber-500/5 ring-1 ring-amber-500/20">
+      ⚠️ <b>macOS / Windows:</b> the monitor only works fully on a <b>Linux host</b>. On Docker Desktop it
+      sees the bundled Linux VM, not your real machine. To watch your actual Mac/PC, install natively:
+      <code>pip install 'avai-monitor[judge]'</code> then <code>sudo avai monitor</code> (Linux/macOS).
     </div>
 
     <!-- DOCKER FLAGS -->
@@ -412,18 +470,54 @@ docker exec avai-monitor du -h /data/avai.db   <span class="text-slate-500"># DB
 </div>
 
 <script>
-  // Copy buttons on every code block.
-  document.querySelectorAll('.codeblock').forEach(function (block) {
-    var pre = block.querySelector('pre');
-    if (!pre) return;
+  var OS_LABELS = { macos: 'macOS', linux: 'Linux', windows: 'Windows' };
+
+  function addCopy(container, getText) {
     var btn = document.createElement('button');
     btn.textContent = 'copy';
     btn.className = 'copy-btn text-[11px] mono px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 ring-1 ring-white/10';
     btn.onclick = function () {
-      navigator.clipboard.writeText(pre.innerText.trim());
+      navigator.clipboard.writeText(getText().trim());
       btn.textContent = 'copied'; setTimeout(function () { btn.textContent = 'copy'; }, 1500);
     };
-    block.appendChild(btn);
+    container.style.position = container.style.position || 'relative';
+    container.appendChild(btn);
+  }
+
+  // Plain code blocks (non-tabbed): one copy button.
+  document.querySelectorAll('.codeblock').forEach(function (block) {
+    var pre = block.querySelector('pre');
+    if (pre) addCopy(block, function () { return pre.innerText; });
+  });
+
+  // OS-tabbed blocks: build a tab bar from the panes present, wire
+  // switching, and copy whichever pane is visible.
+  document.querySelectorAll('.os-tabs').forEach(function (group) {
+    var bar = group.querySelector('.os-tabbar');
+    var panes = Array.prototype.slice.call(group.querySelectorAll('.os-pane'));
+    if (!bar || !panes.length) return;
+
+    function show(os) {
+      panes.forEach(function (p) { p.hidden = (p.dataset.os !== os); });
+      bar.querySelectorAll('.os-tab').forEach(function (t) {
+        t.classList.toggle('active', t.dataset.os === os);
+      });
+    }
+
+    panes.forEach(function (p, i) {
+      var tab = document.createElement('button');
+      tab.className = 'os-tab' + (i === 0 ? ' active' : '');
+      tab.dataset.os = p.dataset.os;
+      tab.textContent = OS_LABELS[p.dataset.os] || p.dataset.os;
+      tab.onclick = function () { show(p.dataset.os); };
+      bar.appendChild(tab);
+      p.hidden = (i !== 0);   // first pane visible by default
+    });
+
+    addCopy(group, function () {
+      var vis = panes.find(function (p) { return !p.hidden; });
+      return vis ? vis.innerText : '';
+    });
   });
 
   // Scroll-spy: highlight the current section in the sidebar.
