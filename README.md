@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/github/license/iklobato/avai?color=10b981)](LICENSE)
 [![Site](https://img.shields.io/badge/site-getavai.com-10b981)](https://getavai.com)
 
-`avai` snapshots 21 corners of your host on macOS (16 on Linux) —
+`avai` snapshots 22 corners of your host on macOS (17 on Linux) —
 processes, USB, persistence, file integrity, browser extensions, exec
 events — enriches each new finding with up to **17 threat-intel
 sources** (VirusTotal, MalwareBazaar, URLhaus, CISA KEV, Shodan,

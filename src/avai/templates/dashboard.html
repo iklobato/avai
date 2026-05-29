@@ -143,6 +143,12 @@
            hx-swap="innerHTML"></div>
     </section>
 
+    {# ---------- network flows (tcpdump aggregator) — full-width, end of page ---------- #}
+    <section id="network-flows"
+             hx-get="/fragments/network-flows"
+             hx-trigger="load, every 30s"
+             hx-swap="innerHTML"></section>
+
   </main>
 
   <script>

@@ -957,6 +957,21 @@ class ListeningPortRow(_RowBase):
     laddr_port: Mapped[Optional[int]]
 
 
+class NetworkFlowRow(_RowBase):
+    """One aggregated network flow observed by the tcpdump aggregator:
+    a distinct (proto, dst_ip, dst_port) seen during the capture window,
+    with how many packets matched it."""
+
+    __tablename__ = "network_flows"
+    proto: Mapped[Optional[str]]
+    dst_ip: Mapped[Optional[str]] = mapped_column(index=True)
+    dst_port: Mapped[Optional[int]]
+    service: Mapped[Optional[str]]  # well-known name for dst_port, if any
+    packets: Mapped[Optional[int]]
+    first_seen: Mapped[Optional[str]]
+    last_seen: Mapped[Optional[str]]
+
+
 class NetworkInterfaceRow(_RowBase):
     __tablename__ = "network_interfaces"
     name: Mapped[str]
@@ -2115,6 +2130,117 @@ class ListeningPortsCollector(SnapshotCollector):
                 "laddr_ip": c.laddr.ip if c.laddr else None,
                 "laddr_port": c.laddr.port if c.laddr else None,
             }
+
+
+class NetworkFlowsCollector(SnapshotCollector):
+    """tcpdump-based flow aggregator.
+
+    Each cycle, captures live packets for a bounded window and
+    aggregates them into distinct ``(proto, dst_ip, dst_port)`` flows
+    with a packet count — the "top talkers" your host is sending to.
+    Each new public-destination flow is enriched against the threat-
+    intel sources (Feodo Tracker, AbuseIPDB, GreyNoise, Shodan, …) and
+    then judged by the LLM, so malicious requests — C2 beacons,
+    exfiltration, connections to known-bad IPs — surface as findings.
+
+    Parsing is split-based (no regex): tcpdump ``-q`` prints one line
+    per packet as ``IP src.port > dst.port: proto len``; we read the
+    token after ``>`` for the destination and the next for the proto.
+    Requires root to capture — the monitor already runs as root.
+    """
+
+    name = "network_flows"
+    model = NetworkFlowRow
+    judge_fields = ("proto", "dst_ip", "dst_port")
+
+    CAPTURE_SECONDS = 8  # wall-clock cap per cycle
+    MAX_PACKETS = 2000  # stop after this many packets
+    MAX_FLOWS = 200  # emit only the top-N flows by packet count
+
+    def collect(self):
+        flows = self._aggregate(self._capture())
+        ranked = sorted(flows.values(), key=lambda f: f["packets"], reverse=True)
+        yield from ranked[: self.MAX_FLOWS]
+
+    def _capture(self) -> str:
+        if shutil.which("tcpdump") is None:
+            raise RuntimeError("tcpdump not found on PATH")
+        # IPv4 TCP/UDP only — ARP/IPv6/ICMP have no (proto, ip, port)
+        # shape and would pollute the aggregation.
+        cmd = [
+            "tcpdump",
+            "-n",
+            "-q",
+            "-l",
+            "-c",
+            str(self.MAX_PACKETS),
+            "tcp",
+            "or",
+            "udp",
+        ]
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.CAPTURE_SECONDS
+            )
+            return r.stdout or ""
+        except subprocess.TimeoutExpired as e:
+            # Slow link: we hit the time cap before MAX_PACKETS. Keep
+            # whatever was captured so far.
+            out = e.stdout or ""
+            return out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+
+    def _aggregate(self, output: str) -> dict:
+        now = utcnow()
+        flows: dict[tuple, dict] = {}
+        for line in output.splitlines():
+            parsed = self._parse_line(line)
+            if parsed is None:
+                continue
+            proto, dst_ip, dst_port = parsed
+            key = (proto, dst_ip, dst_port)
+            f = flows.get(key)
+            if f is None:
+                flows[key] = {
+                    "proto": proto,
+                    "dst_ip": dst_ip,
+                    "dst_port": dst_port,
+                    "service": self._service(dst_port, proto),
+                    "packets": 1,
+                    "first_seen": now,
+                    "last_seen": now,
+                }
+            else:
+                f["packets"] += 1
+                f["last_seen"] = now
+        return flows
+
+    @staticmethod
+    def _parse_line(line: str):
+        """Return (proto, dst_ip, dst_port) from one tcpdump -q line, or
+        None if the line isn't a parseable IPv4 TCP/UDP packet."""
+        parts = line.split()
+        if len(parts) < 5 or ">" not in parts:
+            return None
+        gt = parts.index(">")
+        if gt + 1 >= len(parts):
+            return None
+        dst = parts[gt + 1].rstrip(":")  # e.g. 142.250.80.46.443
+        ip, _, port_s = dst.rpartition(".")  # ip=142.250.80.46 port=443
+        if not ip or not port_s.isdigit():
+            return None
+        proto = "ip"
+        if gt + 2 < len(parts):
+            proto = parts[gt + 2].rstrip(",").lower()
+        return proto, ip, int(port_s)
+
+    @staticmethod
+    def _service(port: int, proto: str):
+        try:
+            return socket.getservbyport(
+                port, proto if proto in ("tcp", "udp") else "tcp"
+            )
+        except (OSError, OverflowError, TypeError):
+            return None
 
 
 class NetworkInterfacesCollector(SnapshotCollector):
@@ -3996,6 +4122,7 @@ def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         ProcessCollector(judge_hints=h("processes")),
         NetworkConnectionsCollector(judge_hints=h("network_connections")),
         ListeningPortsCollector(judge_hints=h("listening_ports")),
+        NetworkFlowsCollector(judge_hints=h("network_flows")),
         NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
         UsbDevicesCollector(judge_hints=h("usb_devices")),
         BluetoothCollector(judge_hints=h("bluetooth_devices")),
@@ -4063,6 +4190,7 @@ def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         ProcessCollector(judge_hints=h("processes")),
         NetworkConnectionsCollector(judge_hints=h("network_connections")),
         ListeningPortsCollector(judge_hints=h("listening_ports")),
+        NetworkFlowsCollector(judge_hints=h("network_flows")),
         NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
         LinuxUsbDevicesCollector(judge_hints=h("usb_devices")),
         LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),

@@ -83,6 +83,19 @@ shells / interpreters listening; high ports owned by unsigned binaries; \
 remote-access services (SSH, VNC, ARD) bound publicly.\
 """
 
+network_flows = """\
+Each row is an aggregated outbound flow (proto, dst_ip, dst_port) with a \
+packet count, captured by tcpdump. If an `evidence` array is present it \
+holds threat-intel verdicts for the destination IP — trust it. Flag: \
+destinations flagged malicious by threat-intel (Feodo C2, AbuseIPDB, \
+ThreatFox); connections to raw IPs (no service) on unusual high ports; \
+beacon-like patterns (steady low-packet flows to one external IP); \
+known C2 / RAT / cryptominer ports; DNS (53) or DoH (443) to non-standard \
+resolvers; large sustained flows to a single external IP (possible \
+exfiltration). Benign: flows to well-known CDNs / cloud providers on \
+443/80, local/RFC1918 destinations, OS update servers.\
+"""
+
 usb_devices = """\
 Flag: unknown HID (keyboard/mouse) devices that could inject keystrokes \
 (BadUSB / Rubber Ducky); unknown mass-storage; devices with vendor IDs \

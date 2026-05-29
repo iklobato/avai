@@ -3,6 +3,23 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.2.8] — 2026-05-29
+
+### Added
+- **Network-flow aggregator collector (`network_flows`).** A new
+  collector runs `tcpdump` for a bounded window each cycle and
+  aggregates outbound packets into distinct `(proto, dst_ip, dst_port)`
+  flows with a packet count ("top talkers"). Each new public-IP
+  destination is enriched against the threat-intel sources (Feodo
+  Tracker, AbuseIPDB, GreyNoise, Shodan, …) and then judged by the LLM,
+  so malicious requests — C2 beacons, exfiltration, connections to
+  known-bad IPs — surface as findings. Parsing is split-based (no
+  regex). Requires root to capture (the monitor already runs as root).
+  Collector counts are now 22 (macOS) / 17 (Linux).
+- **Dashboard "network flows" table** at the bottom of the page — one
+  full-width table listing each flow with its verdict, destination,
+  port/service, packet count, and the LLM's reasoning.
+
 ## [0.2.7] — 2026-05-29
 
 ### Added

@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, current_app, jsonify, render_template, request
-from sqlalchemy import asc, case, create_engine, desc, func, or_, select
+from sqlalchemy import and_, asc, case, create_engine, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 # Reuse models from host_monitor.py — single source of schema truth.
@@ -51,6 +51,7 @@ from avai.host_monitor import (
     MdmProfileRow,
     MountRow,
     NetworkConnectionRow,
+    NetworkFlowRow,
     NetworkInterfaceRow,
     ProcessExecRow,
     ProcessRow,
@@ -66,6 +67,7 @@ from avai.host_monitor import (
 COLLECTOR_MODELS = {
     "processes": ProcessRow,
     "network_connections": NetworkConnectionRow,
+    "network_flows": NetworkFlowRow,
     "listening_ports": ListeningPortRow,
     "network_interfaces": NetworkInterfaceRow,
     "usb_devices": UsbDeviceRow,
@@ -90,6 +92,7 @@ COLLECTOR_MODELS = {
 
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "processes": ("name", "exe"),
+    "network_flows": ("dst_ip", "dst_port"),
     "listening_ports": ("process_name", "laddr_port"),
     "usb_devices": ("name", "manufacturer"),
     "bluetooth_devices": ("name",),
@@ -471,6 +474,50 @@ def collector_errors(session: Session, run_id: str) -> list[CollectorErrorRow]:
     )
 
 
+def network_flows(session: Session, run_id: str, limit: int = 300):
+    """Aggregated tcpdump flows for ``run_id``, each with its LLM verdict
+    (LEFT JOIN — a flow may not be judged yet). Ordered worst-verdict
+    first, then by packet count, so the riskiest talkers sit on top."""
+    sev = case(
+        {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3},
+        value=Judgement.verdict,
+        else_=4,
+    )
+    stmt = (
+        select(
+            NetworkFlowRow,
+            Judgement.verdict,
+            Judgement.confidence,
+            Judgement.reasoning,
+        )
+        .outerjoin(
+            Judgement,
+            and_(
+                Judgement.content_hash == NetworkFlowRow.content_hash,
+                Judgement.collector == "network_flows",
+            ),
+        )
+        .where(NetworkFlowRow.run_id == run_id)
+        .order_by(sev.asc(), desc(NetworkFlowRow.packets))
+        .limit(limit)
+    )
+    out = []
+    for flow, verdict, confidence, reasoning in session.execute(stmt).all():
+        out.append(
+            {
+                "proto": flow.proto,
+                "dst_ip": flow.dst_ip,
+                "dst_port": flow.dst_port,
+                "service": flow.service,
+                "packets": flow.packets or 0,
+                "verdict": verdict,
+                "confidence": confidence,
+                "reasoning": reasoning or "",
+            }
+        )
+    return out
+
+
 def system_integrity(session: Session, run_id: str):
     """Return the latest system-integrity posture as a platform-tagged
     dict the template can render directly.
@@ -635,6 +682,16 @@ def fragment_sysint():
         return render_template(
             "partials/_sysint.html",
             sysint=(system_integrity(s, latest.run_id) if latest else None),
+        )
+
+
+@app.route("/fragments/network-flows")
+def fragment_network_flows():
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_network_flows.html",
+            flows=(network_flows(s, latest.run_id) if latest else []),
         )
 
 

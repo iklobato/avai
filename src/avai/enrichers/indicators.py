@@ -15,6 +15,7 @@ What we deliberately don't do:
     job (cheap row-time op) — we read the precomputed value.
   - Re-validate inputs. The collector emitted it; we trust the shape.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -53,8 +54,14 @@ def _is_private_ip(s: str) -> bool:
         ip = ipaddress.ip_address(s)
     except ValueError:
         return False
-    return (ip.is_private or ip.is_loopback or ip.is_link_local
-            or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
 
 
 def _is_domain(s: str) -> bool:
@@ -93,6 +100,7 @@ def _sha256_of_file(path: str) -> str | None:
 # Strategy base + concrete extractors.
 # ---------------------------------------------------------------------------
 
+
 class IndicatorExtractor(ABC):
     @abstractmethod
     def extract(self, row: Mapping[str, object]) -> Iterable[Indicator]: ...
@@ -104,8 +112,9 @@ class ProcessExtractor(IndicatorExtractor):
         if isinstance(exe, str) and exe:
             digest = _sha256_of_file(exe)
             if digest:
-                yield Indicator(IndicatorType.SHA256, digest,
-                                context={"binary_path": exe})
+                yield Indicator(
+                    IndicatorType.SHA256, digest, context={"binary_path": exe}
+                )
 
 
 class NetworkConnectionExtractor(IndicatorExtractor):
@@ -114,8 +123,22 @@ class NetworkConnectionExtractor(IndicatorExtractor):
         if isinstance(raddr, str) and ":" in raddr:
             host = raddr.rsplit(":", 1)[0]
             if _is_ipv4(host) and not _is_private_ip(host):
-                yield Indicator(IndicatorType.IPV4, host,
-                                context={"raddr": raddr})
+                yield Indicator(IndicatorType.IPV4, host, context={"raddr": raddr})
+
+
+class NetworkFlowExtractor(IndicatorExtractor):
+    """tcpdump-aggregator flows — enrich the public destination IP so
+    the judge sees threat-intel (Feodo C2, AbuseIPDB, GreyNoise, …)
+    before deciding if the flow is malicious."""
+
+    def extract(self, row):
+        ip = row.get("dst_ip")
+        if isinstance(ip, str) and _is_ipv4(ip) and not _is_private_ip(ip):
+            yield Indicator(
+                IndicatorType.IPV4,
+                ip,
+                context={"dst_port": str(row.get("dst_port") or "")},
+            )
 
 
 class ListeningPortExtractor(IndicatorExtractor):
@@ -125,8 +148,7 @@ class ListeningPortExtractor(IndicatorExtractor):
         if isinstance(laddr, str) and ":" in laddr:
             host = laddr.rsplit(":", 1)[0]
             if _is_ipv4(host) and not _is_private_ip(host):
-                yield Indicator(IndicatorType.IPV4, host,
-                                context={"laddr": laddr})
+                yield Indicator(IndicatorType.IPV4, host, context={"laddr": laddr})
 
 
 class LaunchItemExtractor(IndicatorExtractor):
@@ -136,8 +158,9 @@ class LaunchItemExtractor(IndicatorExtractor):
         if isinstance(target, str) and target.startswith("/"):
             digest = _sha256_of_file(target.split()[0])
             if digest:
-                yield Indicator(IndicatorType.SHA256, digest,
-                                context={"target": target})
+                yield Indicator(
+                    IndicatorType.SHA256, digest, context={"target": target}
+                )
 
 
 class SetuidFileExtractor(IndicatorExtractor):
@@ -146,8 +169,7 @@ class SetuidFileExtractor(IndicatorExtractor):
         if isinstance(path, str):
             digest = _sha256_of_file(path)
             if digest:
-                yield Indicator(IndicatorType.SHA256, digest,
-                                context={"path": path})
+                yield Indicator(IndicatorType.SHA256, digest, context={"path": path})
 
 
 class QuarantineExtractor(IndicatorExtractor):
@@ -191,14 +213,17 @@ class InstalledAppExtractor(IndicatorExtractor):
         if not isinstance(name, str) or not name:
             return
         value = f"{name}@{version}" if version else name
-        yield Indicator(IndicatorType.PACKAGE, value,
-                        context={"name": name, "version": str(version)})
+        yield Indicator(
+            IndicatorType.PACKAGE,
+            value,
+            context={"name": name, "version": str(version)},
+        )
 
 
 class SystemIntegrityExtractor(IndicatorExtractor):
     def extract(self, row):
         product = row.get("os_name") or row.get("distro")
-        cycle   = row.get("os_version") or row.get("version")
+        cycle = row.get("os_version") or row.get("version")
         if isinstance(product, str) and isinstance(cycle, str) and product and cycle:
             yield Indicator(
                 IndicatorType.OS_VERSION,
@@ -213,22 +238,23 @@ class ProcessExecEventExtractor(IndicatorExtractor):
         if isinstance(exe, str):
             digest = _sha256_of_file(exe.split()[0])
             if digest:
-                yield Indicator(IndicatorType.SHA256, digest,
-                                context={"exe": exe})
+                yield Indicator(IndicatorType.SHA256, digest, context={"exe": exe})
 
 
 class FileIntegrityExtractor(IndicatorExtractor):
     def extract(self, row):
         # avai already records sha256 — use it directly.
         digest = row.get("sha256")
-        path   = row.get("path")
+        path = row.get("path")
         if isinstance(digest, str) and len(digest) == 64:
-            yield Indicator(IndicatorType.SHA256, digest,
-                            context={"path": str(path or "")})
+            yield Indicator(
+                IndicatorType.SHA256, digest, context={"path": str(path or "")}
+            )
 
 
 class _NoOp(IndicatorExtractor):
     """Sink for collectors we deliberately don't enrich yet."""
+
     def extract(self, row):
         return ()
 
@@ -238,24 +264,24 @@ class _NoOp(IndicatorExtractor):
 # ---------------------------------------------------------------------------
 
 EXTRACTORS: dict[str, IndicatorExtractor] = {
-    "processes":            ProcessExtractor(),
-    "network_connections":  NetworkConnectionExtractor(),
-    "listening_ports":      ListeningPortExtractor(),
-    "launch_items":         LaunchItemExtractor(),
-    "setuid_files":         SetuidFileExtractor(),
-    "quarantine_events":    QuarantineExtractor(),
-    "browser_extensions":   BrowserExtensionExtractor(),
-    "installed_apps":       InstalledAppExtractor(),
-    "system_integrity":     SystemIntegrityExtractor(),
-    "process_exec_events":  ProcessExecEventExtractor(),
-    "file_integrity":       FileIntegrityExtractor(),
+    "processes": ProcessExtractor(),
+    "network_connections": NetworkConnectionExtractor(),
+    "network_flows": NetworkFlowExtractor(),
+    "listening_ports": ListeningPortExtractor(),
+    "launch_items": LaunchItemExtractor(),
+    "setuid_files": SetuidFileExtractor(),
+    "quarantine_events": QuarantineExtractor(),
+    "browser_extensions": BrowserExtensionExtractor(),
+    "installed_apps": InstalledAppExtractor(),
+    "system_integrity": SystemIntegrityExtractor(),
+    "process_exec_events": ProcessExecEventExtractor(),
+    "file_integrity": FileIntegrityExtractor(),
 }
 
 _NOOP = _NoOp()
 
 
-def extract_indicators(collector: str,
-                       row: Mapping[str, object]) -> list[Indicator]:
+def extract_indicators(collector: str, row: Mapping[str, object]) -> list[Indicator]:
     """One row in, list of indicators out. Deduped within the row."""
     extractor = EXTRACTORS.get(collector, _NOOP)
     seen: set[tuple[str, str]] = set()
