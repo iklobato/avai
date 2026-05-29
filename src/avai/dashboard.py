@@ -629,13 +629,14 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
                 "confidence": g["confidence"],
                 "reasoning": g["reasoning"],
                 "geo": None,  # filled below from the enrichment cache
+                "hostname": None,  # filled below from the enrichment cache
             }
         )
 
-    # Attach geolocation per destination IP — country / city / region /
-    # org / ASN — pulled from the enrichment_evidence cache the monitor
-    # already populated (ipwho.is, plus AbuseIPDB / Feodo fallbacks).
-    _attach_ip_geo(session, rows)
+    # Attach geolocation + resolved hostname per destination IP from the
+    # enrichment_evidence cache the monitor already populated (ipwho.is
+    # geo, Shodan/AbuseIPDB hostnames, AbuseIPDB/Feodo geo fallbacks).
+    _attach_ip_enrichment(session, rows)
 
     rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -r["packets"]))
 
@@ -683,16 +684,38 @@ def _geo_richness(g: dict) -> int:
     )
 
 
-def _attach_ip_geo(session: Session, rows: list[dict]) -> None:
-    """Populate each flow row's ``geo`` with the richest geolocation
-    (country / city / region / org / ASN) found across any cached
-    enrichment source for its destination IP — ipwho.is primarily, with
-    fallback to the country / ISP / ASN that AbuseIPDB and Feodo already
-    carry. ``None`` when nothing is cached. No-op if the enrichment cache
-    table doesn't exist or there are no rows.
+def _host_from_details(details: dict) -> str | None:
+    """Pull a hostname / domain for the IP out of one evidence row's
+    details: Shodan InternetDB carries reverse-DNS ``hostnames`` (keyless,
+    on by default), AbuseIPDB carries a registered ``domain``. ``None``
+    when the row names no host."""
+    hostnames = details.get("hostnames")
+    if isinstance(hostnames, list):
+        for h in hostnames:
+            if isinstance(h, str) and h:
+                return h
+    dom = details.get("domain")
+    if isinstance(dom, str) and dom:
+        return dom
+    return None
+
+
+def _attach_ip_enrichment(session: Session, rows: list[dict]) -> None:
+    """Populate each flow row from the cached enrichment evidence for its
+    destination IP:
+
+    - ``geo``:      the richest geolocation (country / city / region /
+      org / ASN) across any source — ipwho.is primarily, with AbuseIPDB /
+      Feodo as fallbacks.
+    - ``hostname``: a reverse-DNS hostname / domain for the IP, if any
+      source resolved one (Shodan ``hostnames``, AbuseIPDB ``domain``).
+
+    Both default to ``None``. No-op if the enrichment cache table doesn't
+    exist or there are no rows.
     """
     for r in rows:
         r["geo"] = None
+        r["hostname"] = None
     if not rows or "enrichment_evidence" not in _existing_tables(session):
         return
     ips = [r["dst_ip"] for r in rows if r.get("dst_ip")]
@@ -709,23 +732,29 @@ def _attach_ip_geo(session: Session, rows: list[dict]) -> None:
         model.indicator_value,
         model.details_json,
     ).where(
-        model.indicator_type == str(IndicatorType.IPV4),
+        model.indicator_type.in_([str(IndicatorType.IPV4), str(IndicatorType.IPV6)]),
         model.indicator_value.in_(ips),
     )
     geo_by_ip: dict[str, dict] = {}
+    host_by_ip: dict[str, set] = {}
     for ip, details_json in session.execute(stmt).all():
         try:
             details = json.loads(details_json) if details_json else {}
         except (TypeError, ValueError):
             details = {}
         geo = _geo_from_details(details)
-        if geo is None:
-            continue
-        best = geo_by_ip.get(ip)
-        if best is None or _geo_richness(geo) > _geo_richness(best):
-            geo_by_ip[ip] = geo
+        if geo is not None:
+            best = geo_by_ip.get(ip)
+            if best is None or _geo_richness(geo) > _geo_richness(best):
+                geo_by_ip[ip] = geo
+        host = _host_from_details(details)
+        if host:
+            host_by_ip.setdefault(ip, set()).add(host)
     for r in rows:
         r["geo"] = geo_by_ip.get(r["dst_ip"])
+        hosts = host_by_ip.get(r["dst_ip"])
+        # Deterministic pick when several sources name different hosts.
+        r["hostname"] = sorted(hosts)[0] if hosts else None
 
 
 def system_integrity(session: Session, run_id: str):

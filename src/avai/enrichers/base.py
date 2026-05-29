@@ -5,6 +5,7 @@ the chain, the cache, the indicator extractors. No source module imports
 from another source; the chain and the registry are the only things that
 know about every enricher.
 """
+
 from __future__ import annotations
 
 import logging
@@ -26,24 +27,27 @@ class IndicatorType(StrEnum):
     one enricher claims to support it. No silent producers / no silent
     consumers.
     """
-    SHA256       = "sha256"
-    SHA1         = "sha1"
-    MD5          = "md5"
-    IPV4         = "ipv4"
-    DOMAIN       = "domain"
-    URL          = "url"
-    CVE          = "cve"
-    PACKAGE      = "package"   # e.g. "openssl@3.0.2"
-    OS_VERSION   = "os_version"  # e.g. "macos@14.4" / "debian@12"
+
+    SHA256 = "sha256"
+    SHA1 = "sha1"
+    MD5 = "md5"
+    IPV4 = "ipv4"
+    IPV6 = "ipv6"
+    DOMAIN = "domain"
+    URL = "url"
+    CVE = "cve"
+    PACKAGE = "package"  # e.g. "openssl@3.0.2"
+    OS_VERSION = "os_version"  # e.g. "macos@14.4" / "debian@12"
 
 
 @unique
 class VerdictHint(StrEnum):
     """Coarse signal an enricher contributes toward the LLM verdict."""
-    MALICIOUS  = "malicious"
+
+    MALICIOUS = "malicious"
     SUSPICIOUS = "suspicious"
-    BENIGN     = "benign"     # e.g. NSRL whitelist hit
-    UNKNOWN    = "unknown"
+    BENIGN = "benign"  # e.g. NSRL whitelist hit
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -55,15 +59,22 @@ class Indicator:
     callers. ``context`` is opaque side data — kept so an enricher can
     cross-reference the originating row without having to re-derive it.
     """
+
     type: IndicatorType
     value: str
     context: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         v = self.value
-        if self.type in (IndicatorType.SHA256, IndicatorType.SHA1,
-                         IndicatorType.MD5, IndicatorType.IPV4,
-                         IndicatorType.DOMAIN, IndicatorType.CVE):
+        if self.type in (
+            IndicatorType.SHA256,
+            IndicatorType.SHA1,
+            IndicatorType.MD5,
+            IndicatorType.IPV4,
+            IndicatorType.IPV6,
+            IndicatorType.DOMAIN,
+            IndicatorType.CVE,
+        ):
             v = v.lower()
         if self.type is IndicatorType.URL and "#" in v:
             v = v.split("#", 1)[0]
@@ -79,13 +90,14 @@ class Evidence:
     the ``verdict_hint`` and ``confidence`` — ``details`` is opaque
     JSON for the dashboard.
     """
-    source:        str
-    indicator:     Indicator
-    verdict_hint:  VerdictHint
-    confidence:    float
-    summary:       str
-    details:       Mapping[str, Any] = field(default_factory=dict)
-    fetched_at:    datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    source: str
+    indicator: Indicator
+    verdict_hint: VerdictHint
+    confidence: float
+    summary: str
+    details: Mapping[str, Any] = field(default_factory=dict)
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class EnricherError(Exception):
@@ -105,10 +117,10 @@ class Enricher(ABC):
     handles caching, rate-limit handling, and supports-check.
     """
 
-    name:            ClassVar[str]
-    supports_types:  ClassVar[frozenset[IndicatorType]]
-    requires_token:  ClassVar[Optional[str]] = None
-    ttl_hours:       ClassVar[int] = 24
+    name: ClassVar[str]
+    supports_types: ClassVar[frozenset[IndicatorType]]
+    requires_token: ClassVar[Optional[str]] = None
+    ttl_hours: ClassVar[int] = 24
 
     @classmethod
     def env_token(cls) -> Optional[str]:
@@ -158,10 +170,10 @@ class Enricher(ABC):
 # downgrade conflicting evidence to the worst case (a malicious hit on
 # any source wins over a benign hit on another).
 _HINT_PRIORITY = {
-    VerdictHint.MALICIOUS:  3,
+    VerdictHint.MALICIOUS: 3,
     VerdictHint.SUSPICIOUS: 2,
-    VerdictHint.UNKNOWN:    1,
-    VerdictHint.BENIGN:     0,
+    VerdictHint.UNKNOWN: 1,
+    VerdictHint.BENIGN: 0,
 }
 
 

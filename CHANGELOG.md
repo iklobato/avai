@@ -10,15 +10,31 @@ All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
   by-destination flow table now shows where each destination IP sits —
   city / region / country plus the network owner (org / ASN). The data
   comes from the `enrichment_evidence` cache the monitor already
-  populates, read through the ORM model (`_attach_ip_geo`); when several
-  sources carry geo, the richest wins. Degrades to "no geo" when a
-  destination has no cached evidence or the cache table is absent
+  populates, read through the ORM model (`_attach_ip_enrichment`); when
+  several sources carry geo, the richest wins. Degrades to "no geo" when
+  a destination has no cached evidence or the cache table is absent
   (older DBs).
 - **New enricher: `ipwhois_geo` (ipwho.is).** Free, keyless, HTTPS IP
   geolocation so *every* public destination gets a location, not just
-  threat-flagged ones. Purely informational — it never raises a threat
-  verdict. AbuseIPDB (countryCode/isp) and Feodo (country/as_name) still
-  serve as fallbacks for the column when present.
+  threat-flagged ones. Validated live against IPv4 and IPv6. Purely
+  informational — it never raises a threat verdict. AbuseIPDB
+  (countryCode/isp) and Feodo (country/as_name) serve as fallbacks.
+- **IPv6 destinations are now enriched + geolocated.** Added an `ipv6`
+  indicator type; `NetworkFlowExtractor` emits public IPv6 destinations
+  (skipping link-local / ULA / multicast), the geo enricher accepts both
+  families, and the dashboard joins geo for both. The tcpdump aggregator
+  already captured IPv6 (`IP6`) flows; they just weren't being enriched.
+- **network_flows: resolved hostname in the destination column.** When
+  any source resolved a hostname/domain for a destination IP (Shodan
+  `hostnames`, AbuseIPDB `domain`), it's shown under the IP.
+
+### Fixed
+- **macOS: flows mislabelled `pktap` instead of the real interface.**
+  Without `-i`, macOS tcpdump captures through the `pktap` pseudo-device
+  that aggregates every interface, so all flows showed `pktap`. The
+  collector now passes `-k I` so tcpdump prints the real per-packet
+  interface (en0, en1, awdl0, …), and a `pktap*` listen-banner falls
+  back to "unknown" rather than masking it.
 
 ## [0.2.10] — 2026-05-29
 

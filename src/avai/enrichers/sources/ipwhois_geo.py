@@ -26,7 +26,7 @@ _BASE = "https://ipwho.is"
 
 class IpwhoisGeoEnricher(Enricher):
     name = "ipwhois_geo"
-    supports_types = frozenset({IndicatorType.IPV4})
+    supports_types = frozenset({IndicatorType.IPV4, IndicatorType.IPV6})
     requires_token: ClassVar[Optional[str]] = None
     ttl_hours = 24 * 7  # geolocation is stable — refresh weekly
 

@@ -2174,11 +2174,18 @@ class NetworkFlowsCollector(SnapshotCollector):
         per-packet interface, i.e. not the Linux '-i any' path)."""
         if shutil.which("tcpdump") is None:
             raise RuntimeError("tcpdump not found on PATH")
-        # -t drops timestamps (we stamp our own); IPv4 TCP/UDP only.
+        # -t drops timestamps (we stamp our own); TCP/UDP (v4 + v6) only.
         cmd = ["tcpdump", "-n", "-q", "-l", "-t", "-c", str(self.MAX_PACKETS)]
         if IS_LINUX:
             # 'any' prefixes each line with the interface + direction.
             cmd += ["-i", "any"]
+        else:
+            # macOS auto-selects the 'pktap' pseudo-device, which aggregates
+            # every interface — so without this every flow is labelled
+            # 'pktap'. '-k I' prints the real per-packet interface name as
+            # the leading token (same shape as Linux '-i any'), which
+            # _parse_line already picks up.
+            cmd += ["-k", "I"]
         cmd += ["tcp", "or", "udp"]
         try:
             r = subprocess.run(
@@ -2193,7 +2200,7 @@ class NetworkFlowsCollector(SnapshotCollector):
                 )
 
             stdout, stderr = _txt(e.stdout), _txt(e.stderr)
-        return stdout, self._iface_from_banner(stderr)
+        return stdout, self._normalize_default_iface(self._iface_from_banner(stderr))
 
     @staticmethod
     def _iface_from_banner(stderr: str) -> Optional[str]:
@@ -2203,6 +2210,18 @@ class NetworkFlowsCollector(SnapshotCollector):
                 rest = line.split("listening on", 1)[1].strip()
                 return rest.split(",", 1)[0].strip() or None
         return None
+
+    @staticmethod
+    def _normalize_default_iface(iface: Optional[str]) -> Optional[str]:
+        """Drop the macOS 'pktap' pseudo-device as a default interface.
+
+        pktap0 / pktap aren't real interfaces — they're the aggregating
+        tap macOS captures through. With '-k I' each line carries its
+        real interface, so a pktap banner should fall back to 'unknown'
+        rather than mislabel every flow 'pktap'."""
+        if iface and iface.startswith("pktap"):
+            return None
+        return iface
 
     def _aggregate(self, output: str, default_iface: Optional[str]) -> dict:
         now = utcnow()
@@ -2234,10 +2253,14 @@ class NetworkFlowsCollector(SnapshotCollector):
     @staticmethod
     def _parse_line(line: str):
         """Return (iface, proto, dst_ip, dst_port) from one tcpdump -t -q
-        line, or None if it isn't a parseable IPv4 TCP/UDP packet.
+        line, or None if it isn't a parseable TCP/UDP packet.
 
-        macOS/default:  ``IP src.port > dst.port: proto len``  (iface None)
-        Linux -i any:   ``eth0 Out IP src.port > dst.port: proto len``
+        Handles both IPv4 (``IP``) and IPv6 (``IP6``) — tcpdump appends
+        the port after a final ``.`` for both families, so the trailing
+        ``.<port>`` splits off the destination address either way.
+
+        macOS '-k I':   ``en0 IP src.port > dst.port: proto len``
+        Linux -i any:   ``eth0 Out IP6 src.port > dst.port: proto len``
         """
         parts = line.split()
         if ">" not in parts:
@@ -2249,8 +2272,9 @@ class NetworkFlowsCollector(SnapshotCollector):
         else:
             return None
         # If "IP" isn't the first token, the leading token is the
-        # interface (Linux '-i any' prefixes "<iface> In/Out IP …").
-        iface = parts[0] if ip_idx >= 1 else None
+        # interface — Linux '-i any' prefixes "<iface> In/Out IP …",
+        # macOS '-k I' prefixes "<iface> IP …". Strip any decoration.
+        iface = parts[0].strip("()") if ip_idx >= 1 else None
         gt = parts.index(">")
         if gt + 1 >= len(parts):
             return None

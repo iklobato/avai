@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-
 from avai.enrichers.base import Indicator, IndicatorType, VerdictHint
 
 # ---------------------------------------------------------------------------
@@ -268,6 +267,30 @@ class TestIpwhoisGeo:
         http = _FakeHttp(_FakeResp(status=503))
         e = self._enricher(http)
         assert e._fetch(Indicator(IndicatorType.IPV4, "8.8.8.8")) is None
+
+    def test_ipv6_indicator_supported_and_parsed(self):
+        http = _FakeHttp(
+            _FakeResp(
+                json_body={
+                    "success": True,
+                    "type": "IPv6",
+                    "country": "United States",
+                    "country_code": "US",
+                    "region": "California",
+                    "city": "San Francisco",
+                    "connection": {"asn": 13335, "org": "Cloudflare, Inc."},
+                }
+            )
+        )
+        e = self._enricher(http)
+        ind = Indicator(IndicatorType.IPV6, "2606:4700:4700::1111")
+        assert e.supports(ind)
+        ev = e._fetch(ind)
+        assert ev is not None
+        assert ev.details["city"] == "San Francisco"
+        assert ev.details["asn"] == 13335
+        # the v6 literal was used directly in the request URL
+        assert any("2606:4700:4700::1111" in url for _, url, _ in http.calls)
 
 
 # ---------------------------------------------------------------------------

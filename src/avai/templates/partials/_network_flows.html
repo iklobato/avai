@@ -67,7 +67,12 @@
                 <span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>
               {% endif %}
             </td>
-            <td class="py-2 text-slate-200 font-mono">{{ f.dst_ip }}</td>
+            <td class="py-2">
+              <div class="text-slate-200 font-mono">{{ f.dst_ip }}</div>
+              {% if f.hostname %}
+                <div class="text-[10px] text-slate-500 font-mono">{{ f.hostname }}</div>
+              {% endif %}
+            </td>
             <td class="py-2">
               {% if f.geo %}
                 {% set place = [f.geo.city, f.geo.region, f.geo.country] | select | join(", ") %}

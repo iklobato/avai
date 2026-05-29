@@ -61,6 +61,25 @@ class TestParseLine:
             is None
         )
 
+    def test_ipv6_line_macos(self):
+        # tcpdump 'IP6' lines append the port after a final '.' just like
+        # IPv4, so the trailing .443 splits off the v6 destination.
+        assert NetworkFlowsCollector._parse_line(
+            "IP6 2600:1f18::1.50000 > 2606:4700:4700::1111.443: tcp 0"
+        ) == (None, "tcp", "2606:4700:4700::1111", 443)
+
+    def test_ipv6_line_linux_any(self):
+        assert NetworkFlowsCollector._parse_line(
+            "eth0 Out IP6 fe80::1.5353 > 2001:4860:4860::8888.443: tcp 52"
+        ) == ("eth0", "tcp", "2001:4860:4860::8888", 443)
+
+    def test_macos_k_interface_prefix(self):
+        # macOS '-k I' prefixes the real interface (no direction token),
+        # so flows land on en0/en1/… instead of the 'pktap' pseudo-device.
+        assert NetworkFlowsCollector._parse_line(
+            "en0 IP 10.0.0.5.54321 > 142.250.80.46.443: tcp 0"
+        ) == ("en0", "tcp", "142.250.80.46", 443)
+
 
 class TestIfaceFromBanner:
     def test_extracts_interface(self):
@@ -69,6 +88,19 @@ class TestIfaceFromBanner:
 
     def test_none_when_absent(self):
         assert NetworkFlowsCollector._iface_from_banner("some other output") is None
+
+
+class TestNormalizeDefaultIface:
+    def test_pktap_pseudo_device_dropped(self):
+        # 'pktap'/'pktap0' is the macOS aggregating tap, not a real iface
+        assert NetworkFlowsCollector._normalize_default_iface("pktap0") is None
+        assert NetworkFlowsCollector._normalize_default_iface("pktap") is None
+
+    def test_real_interface_kept(self):
+        assert NetworkFlowsCollector._normalize_default_iface("en0") == "en0"
+
+    def test_none_passthrough(self):
+        assert NetworkFlowsCollector._normalize_default_iface(None) is None
 
 
 class TestAggregate:
@@ -98,6 +130,18 @@ class TestFlowIndicators:
     def test_multicast_and_private_skipped(self):
         assert extract_indicators("network_flows", {"dst_ip": "224.0.0.251"}) == []
         assert extract_indicators("network_flows", {"dst_ip": "10.0.0.1"}) == []
+
+    def test_public_ipv6_emits_ipv6(self):
+        out = extract_indicators(
+            "network_flows", {"dst_ip": "2606:4700:4700::1111", "dst_port": 443}
+        )
+        assert [(i.type, i.value) for i in out] == [
+            (IndicatorType.IPV6, "2606:4700:4700::1111")
+        ]
+
+    def test_link_local_and_ula_ipv6_skipped(self):
+        assert extract_indicators("network_flows", {"dst_ip": "fe80::1"}) == []
+        assert extract_indicators("network_flows", {"dst_ip": "fd00::1"}) == []
 
 
 @pytest.fixture
@@ -219,7 +263,7 @@ def _seed_geo(engine, evidence: list[dict]) -> None:
             s.add(
                 model(
                     source=e.get("source", "ipwhois_geo"),
-                    indicator_type="ipv4",
+                    indicator_type=e.get("itype", "ipv4"),
                     indicator_value=e["ip"],
                     verdict_hint=e.get("hint", "unknown"),
                     confidence=e.get("confidence", 0.0),
@@ -305,6 +349,56 @@ class TestGeolocationColumn:
         benign = next(r for r in rows if r["dst_ip"] == "142.250.80.46")
         assert benign["geo"] is None
 
+    def test_geo_attached_for_ipv6_destination(self, tmp_path):
+        # IPv6 flows are captured + enriched too: geo evidence is keyed by
+        # indicator_type='ipv6' and must still join to the flow's dst_ip.
+        db = tmp_path / "v6.db"
+        engine = create_engine(
+            f"sqlite:///{db}", connect_args={"check_same_thread": False}
+        )
+        sink = Sink(engine)
+        sink.setup()
+        run_id, ts = sink.start_run("h", 5)
+        from avai.host_monitor import content_hash
+
+        fields = ("iface", "proto", "dst_ip", "dst_port")
+        row = {
+            "iface": "en0",
+            "proto": "tcp",
+            "dst_ip": "2606:4700:4700::1111",
+            "dst_port": 443,
+            "service": "https",
+            "packets": 7,
+            "first_seen": ts,
+            "last_seen": ts,
+            "run_id": run_id,
+            "collected_at": ts,
+        }
+        row["content_hash"] = content_hash(row, fields)
+        sink.write(NetworkFlowRow, [row])
+        _seed_geo(
+            engine,
+            [
+                {
+                    "source": "ipwhois_geo",
+                    "ip": "2606:4700:4700::1111",
+                    "itype": "ipv6",
+                    "details": {
+                        "country": "United States",
+                        "city": "San Francisco",
+                        "asn": 13335,
+                        "org": "Cloudflare, Inc.",
+                    },
+                }
+            ],
+        )
+        with Session(engine) as s:
+            rows = network_flows(s, run_id)["rows"]
+        geo = next(r for r in rows if r["dst_ip"] == "2606:4700:4700::1111")["geo"]
+        assert geo is not None
+        assert geo["city"] == "San Francisco"
+        assert geo["asn"] == 13335
+
     def test_fragment_renders_location_column(self, seeded):
         engine, run_id = seeded
         _seed_geo(
@@ -365,6 +459,81 @@ class TestGeolocationColumn:
         with Session(engine) as s:
             rows = network_flows(s, run_id)["rows"]
         assert rows[0]["geo"] is None
+
+
+class TestDestinationHostname:
+    """The destination column shows a resolved hostname/domain under the
+    IP when any enrichment source named one."""
+
+    def test_hostname_from_shodan_hostnames(self, seeded):
+        engine, run_id = seeded
+        _seed_geo(
+            engine,
+            [
+                {
+                    "source": "shodan_internetdb",
+                    "ip": "203.0.113.9",
+                    "details": {"hostnames": ["evil.example.com"], "ports": [4444]},
+                }
+            ],
+        )
+        with Session(engine) as s:
+            rows = network_flows(s, run_id)["rows"]
+        bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
+        assert bad["hostname"] == "evil.example.com"
+
+    def test_hostname_falls_back_to_abuseipdb_domain(self, seeded):
+        engine, run_id = seeded
+        _seed_geo(
+            engine,
+            [
+                {
+                    "source": "abuseipdb",
+                    "ip": "203.0.113.9",
+                    "hint": "malicious",
+                    "details": {"domain": "bad-host.net", "countryCode": "US"},
+                }
+            ],
+        )
+        with Session(engine) as s:
+            rows = network_flows(s, run_id)["rows"]
+        bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
+        assert bad["hostname"] == "bad-host.net"
+
+    def test_destination_without_hostname_is_none(self, seeded):
+        engine, run_id = seeded
+        _seed_geo(
+            engine,
+            [
+                {
+                    "source": "ipwhois_geo",
+                    "ip": "203.0.113.9",
+                    "details": {"country": "US", "city": "Ashburn"},
+                }
+            ],
+        )
+        with Session(engine) as s:
+            rows = network_flows(s, run_id)["rows"]
+        bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
+        assert bad["hostname"] is None
+
+    def test_fragment_renders_hostname_in_destination(self, seeded):
+        engine, run_id = seeded
+        _seed_geo(
+            engine,
+            [
+                {
+                    "source": "shodan_internetdb",
+                    "ip": "203.0.113.9",
+                    "details": {"hostnames": ["host.evil.example"]},
+                }
+            ],
+        )
+        db = str(engine.url).replace("sqlite:///", "")
+        app.config.update(TESTING=True, DB_PATH=db)
+        with app.test_client() as c:
+            html = c.get("/fragments/network-flows").data.decode()
+        assert "host.evil.example" in html
 
 
 class TestMissingTableGraceful:

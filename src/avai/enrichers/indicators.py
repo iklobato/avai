@@ -49,6 +49,13 @@ def _is_ipv4(s: str) -> bool:
         return False
 
 
+def _is_ipv6(s: str) -> bool:
+    try:
+        return isinstance(ipaddress.ip_address(s), ipaddress.IPv6Address)
+    except ValueError:
+        return False
+
+
 def _is_private_ip(s: str) -> bool:
     try:
         ip = ipaddress.ip_address(s)
@@ -127,18 +134,25 @@ class NetworkConnectionExtractor(IndicatorExtractor):
 
 
 class NetworkFlowExtractor(IndicatorExtractor):
-    """tcpdump-aggregator flows — enrich the public destination IP so
-    the judge sees threat-intel (Feodo C2, AbuseIPDB, GreyNoise, …)
-    before deciding if the flow is malicious."""
+    """tcpdump-aggregator flows — enrich the public destination IP
+    (IPv4 or IPv6) so the judge / dashboard sees threat-intel and
+    geolocation for the destination."""
 
     def extract(self, row):
         ip = row.get("dst_ip")
-        if isinstance(ip, str) and _is_ipv4(ip) and not _is_private_ip(ip):
-            yield Indicator(
-                IndicatorType.IPV4,
-                ip,
-                context={"dst_port": str(row.get("dst_port") or "")},
-            )
+        if not isinstance(ip, str) or _is_private_ip(ip):
+            return
+        if _is_ipv4(ip):
+            itype = IndicatorType.IPV4
+        elif _is_ipv6(ip):
+            itype = IndicatorType.IPV6
+        else:
+            return
+        yield Indicator(
+            itype,
+            ip,
+            context={"dst_port": str(row.get("dst_port") or "")},
+        )
 
 
 class ListeningPortExtractor(IndicatorExtractor):
