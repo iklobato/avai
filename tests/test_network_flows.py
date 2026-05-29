@@ -408,7 +408,10 @@ class TestGeolocationColumn:
         assert geo["city"] == "San Francisco"
         assert geo["asn"] == 13335
 
-    def test_fragment_renders_location_column(self, seeded):
+    def test_fragment_renders_consolidated_destination(self, seeded):
+        # geolocation + hostname now live inside the destination cell
+        # (no separate 'location' column); the country flag is derived
+        # from the 2-letter code.
         engine, run_id = seeded
         _seed_geo(
             engine,
@@ -418,6 +421,7 @@ class TestGeolocationColumn:
                     "ip": "203.0.113.9",
                     "details": {
                         "country": "United States",
+                        "country_code": "US",
                         "city": "Ashburn",
                         "asn": 14618,
                         "org": "Amazon",
@@ -429,11 +433,13 @@ class TestGeolocationColumn:
         app.config.update(TESTING=True, DB_PATH=db)
         with app.test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
-        assert "location" in html  # new column header
-        assert "Ashburn" in html  # city rendered
-        assert "AS14618" in html  # ASN rendered
-        assert "no geo" in html  # benign destination has none
+        assert "203.0.113.9" in html  # the IP anchor
+        assert "Ashburn" in html  # city, now in the destination cell
+        assert "AS14618" in html  # ASN, now in the destination cell
+        assert "\U0001F1FA\U0001F1F8" in html  # 🇺🇸 flag from country_code
         assert "threat intel" not in html  # threat-intel column removed
+        # the separate location column header is gone
+        assert ">location</th>" not in html
 
     def test_no_geo_when_evidence_table_absent(self, tmp_path):
         """Older DB lacking enrichment_evidence must not 500 — geo None."""
@@ -468,6 +474,22 @@ class TestGeolocationColumn:
         with Session(engine) as s:
             rows = network_flows(s, run_id)["rows"]
         assert rows[0]["geo"] is None
+
+
+class TestFlagEmoji:
+    def test_two_letter_code_to_flag(self):
+        from avai.dashboard import _flag_emoji
+
+        assert _flag_emoji("US") == "\U0001F1FA\U0001F1F8"
+        assert _flag_emoji("de") == "\U0001F1E9\U0001F1EA"  # case-insensitive
+
+    def test_non_code_returns_empty(self):
+        from avai.dashboard import _flag_emoji
+
+        assert _flag_emoji("United States") == ""
+        assert _flag_emoji(None) == ""
+        assert _flag_emoji("U1") == ""
+        assert _flag_emoji("") == ""
 
 
 class TestDestinationHostname:

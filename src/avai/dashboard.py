@@ -197,6 +197,18 @@ def _pretty_json(value) -> str:
         return str(value)
 
 
+def _flag_emoji(cc) -> str:
+    """Render a 2-letter ISO country code as its flag emoji (regional
+    indicator symbols), e.g. 'US' -> 🇺🇸. Empty string for anything that
+    isn't a clean 2-letter code."""
+    if not isinstance(cc, str) or len(cc) != 2 or not cc.isalpha():
+        return ""
+    return "".join(chr(0x1F1E6 + ord(ch) - ord("A")) for ch in cc.upper())
+
+
+app.add_template_filter(_flag_emoji, "flag_emoji")
+
+
 app.add_template_filter(_pretty_json, "pretty_json")
 
 # Columns hidden from the "all info" expansion (internal SQL plumbing).
@@ -683,18 +695,22 @@ def _geo_from_details(details: dict) -> dict | None:
     (country/city/region/asn/org), AbuseIPDB (countryCode/isp), Feodo
     (country/as_name/as_number). Returns ``None`` when the row carries no
     geo at all."""
-    country = (
-        details.get("country")
-        or details.get("country_code")
-        or details.get("countryCode")
-    )
+    cc = details.get("country_code") or details.get("countryCode")
+    country = details.get("country") or cc
     city = details.get("city")
     region = details.get("region")
     org = details.get("org") or details.get("as_name") or details.get("isp")
     asn = details.get("asn") or details.get("as_number")
     if not any((country, city, org, asn)):
         return None
-    return {"country": country, "city": city, "region": region, "org": org, "asn": asn}
+    return {
+        "country": country,
+        "cc": cc,
+        "city": city,
+        "region": region,
+        "org": org,
+        "asn": asn,
+    }
 
 
 def _geo_richness(g: dict) -> int:

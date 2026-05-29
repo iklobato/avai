@@ -41,8 +41,7 @@
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
           <th class="text-left  font-semibold pb-2">verdict</th>
-          <th class="text-left  font-semibold pb-2">destination</th>
-          <th class="text-left  font-semibold pb-2">location</th>
+          <th class="text-left  font-semibold pb-2 w-1/4">destination</th>
           <th class="text-left  font-semibold pb-2">process</th>
           <th class="text-left  font-semibold pb-2">interface</th>
           <th class="text-left  font-semibold pb-2">proto</th>
@@ -54,7 +53,7 @@
       </thead>
       <tbody class="divide-y divide-slate-800/80">
         {% for f in flows.rows %}
-          <tr class="hover:bg-slate-800/40 transition-colors">
+          <tr class="hover:bg-slate-800/40 transition-colors [&>td]:align-top">
             <td class="py-2">
               {% if f.verdict %}
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px]
@@ -69,24 +68,32 @@
               {% endif %}
             </td>
             <td class="py-2">
-              <div class="text-slate-200 font-mono">{{ f.dst_ip }}</div>
-              {% if f.hostname %}
-                <div class="text-[10px] text-slate-500 font-mono">{{ f.hostname }}</div>
-              {% endif %}
-            </td>
-            <td class="py-2">
-              {% if f.geo %}
-                {% set place = [f.geo.city, f.geo.region, f.geo.country] | select | join(", ") %}
-                <div class="text-slate-300">{{ place or "—" }}</div>
-                {% if f.geo.org or f.geo.asn %}
-                  <div class="text-[10px] text-slate-500 font-mono"
-                       title="{% if f.geo.asn %}AS{{ f.geo.asn }} {% endif %}{{ f.geo.org }}">
-                    {% if f.geo.asn %}AS{{ f.geo.asn }} {% endif %}{{ f.geo.org }}
-                  </div>
+              <div class="leading-snug space-y-0.5">
+                {# IP — the anchor #}
+                <div class="text-slate-200 font-mono break-all">{{ f.dst_ip }}</div>
+                {# resolved hostname / domain #}
+                {% if f.hostname %}
+                  <div class="text-[11px] text-slate-400 font-mono break-all">{{ f.hostname }}</div>
                 {% endif %}
-              {% else %}
-                <span class="text-slate-600 text-[10px]">no geo</span>
-              {% endif %}
+                {# geolocation — city / region / country with flag #}
+                {% if f.geo %}
+                  {% set place = [f.geo.city, f.geo.region, f.geo.country] | select | join(", ") %}
+                  {% if place %}
+                    <div class="text-[10px] text-slate-500">
+                      {%- set flag = f.geo.cc | flag_emoji -%}
+                      {%- if flag %}<span class="mr-1">{{ flag }}</span>{% endif -%}
+                      {{ place }}
+                    </div>
+                  {% endif %}
+                  {# network owner — ASN / org #}
+                  {% if f.geo.org or f.geo.asn %}
+                    <div class="text-[10px] text-slate-600 font-mono break-all">
+                      {%- if f.geo.asn %}AS{{ f.geo.asn }}{% if f.geo.org %} · {% endif %}{% endif -%}
+                      {{ f.geo.org or "" }}
+                    </div>
+                  {% endif %}
+                {% endif %}
+              </div>
             </td>
             <td class="py-2 font-mono {{ 'text-slate-200' if f.process and f.process != '—' else 'text-slate-600' }}">{{ f.process }}</td>
             <td class="py-2 text-sky-300 font-mono">{{ f.iface }}</td>
