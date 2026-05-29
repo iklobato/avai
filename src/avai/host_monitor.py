@@ -1770,6 +1770,13 @@ class Runner:
         run_id, started = self.sink.start_run(socket.gethostname(), self.lookback_min)
         ok = failed = 0
         for c in self.snapshot_collectors:
+            # Honour a shutdown request mid-cycle. The first cycle judges
+            # every collector via the LLM, which can take minutes; without
+            # this check Ctrl-C wouldn't take effect until the whole cycle
+            # finished (the loop is the long pole, not run_forever).
+            if self.shutdown_event.is_set():
+                LOG.info("shutdown requested — stopping collector loop early")
+                break
             try:
                 self._run_collector(c, run_id, started)
                 ok += 1
@@ -1785,8 +1792,10 @@ class Runner:
         # Streaming collectors accumulate rows in background threads.
         # After the snapshot phase, give the LLM judge a chance to
         # classify any new content_hashes those streamers produced
-        # since the previous cycle.
-        self._judge_streaming_collectors()
+        # since the previous cycle. Skip if we're shutting down — no
+        # point starting a fresh round of LLM calls on the way out.
+        if not self.shutdown_event.is_set():
+            self._judge_streaming_collectors()
         self.sink.end_run(ok, failed)
 
         # Rotation: keep the DB under the configured size cap by pruning
@@ -4274,9 +4283,22 @@ def main() -> int:
             return 0
 
         # Install signal handlers so SIGINT/SIGTERM cleanly stop both
-        # the snapshot loop and every streaming worker.
+        # the snapshot loop and every streaming worker. First signal =
+        # graceful (let the current collector finish, then stop). Second
+        # signal = force-quit immediately — a guaranteed escape hatch so
+        # Ctrl-C is never swallowed during a long LLM-judging cycle.
+        _signal_count = {"n": 0}
+
         def _handle_signal(signum, _frame):
-            LOG.info("received signal %d; shutting down", signum)
+            _signal_count["n"] += 1
+            if _signal_count["n"] >= 2:
+                LOG.warning("second signal — forcing immediate exit")
+                os._exit(130)
+            LOG.warning(
+                "received signal %d; stopping after the current step "
+                "(press Ctrl-C again to force-quit now)",
+                signum,
+            )
             runner.request_shutdown()
 
         signal.signal(signal.SIGINT, _handle_signal)

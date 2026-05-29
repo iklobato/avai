@@ -195,3 +195,51 @@ class TestEnrichEntries:
         assert unjudged[0].get("evidence") in (None, [])
         # The chain recorded the error.
         assert chain.stats()["broken"]["error"] == 1
+
+
+class _CountingCollector:
+    """Records each collect() call; can trip the runner's shutdown
+    while collecting to simulate Ctrl-C mid-cycle."""
+    model = ProcessRow
+    judge_enabled = False
+    judge_fields = ()
+    judge_hints = ""
+
+    def __init__(self, name, runner_ref=None, trip=False):
+        self.name = name
+        self._runner_ref = runner_ref
+        self._trip = trip
+
+    def collect(self):
+        _CountingCollector.calls.append(self.name)
+        if self._trip and self._runner_ref["r"] is not None:
+            self._runner_ref["r"].request_shutdown()
+        return []
+
+
+class TestShutdownResponsiveness:
+    """run_once must honour a shutdown request mid-cycle so Ctrl-C
+    takes effect during a long LLM-judging cycle instead of running
+    every remaining collector first."""
+
+    def test_no_collectors_run_when_shutdown_already_set(self, sink):
+        _CountingCollector.calls = []
+        c1 = _CountingCollector("a")
+        c2 = _CountingCollector("b")
+        runner = Runner(sink, [c1, c2], [], NullJudge(), 5)
+        runner.request_shutdown()           # Ctrl-C before the loop starts
+        run_id, ok, failed = runner.run_once()
+        assert _CountingCollector.calls == []   # loop broke immediately
+        assert ok == 0
+
+    def test_stops_after_collector_that_trips_shutdown(self, sink):
+        _CountingCollector.calls = []
+        ref = {"r": None}
+        c1 = _CountingCollector("a", runner_ref=ref, trip=True)
+        c2 = _CountingCollector("b")
+        c3 = _CountingCollector("c")
+        runner = Runner(sink, [c1, c2, c3], [], NullJudge(), 5)
+        ref["r"] = runner                   # c1 trips shutdown while collecting
+        runner.run_once()
+        # c1 runs fully; the pre-loop check then breaks before c2/c3.
+        assert _CountingCollector.calls == ["a"]

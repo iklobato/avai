@@ -3,6 +3,18 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.2.4] — 2026-05-29
+
+### Fixed
+- **Ctrl-C didn't stop `avai monitor` during a cycle.** The SIGINT
+  handler only set a shutdown flag (replacing Python's default
+  KeyboardInterrupt), and the flag was checked only between cycles —
+  so while the LLM judge ground through every collector (minutes on
+  the first run), Ctrl-C was swallowed and the terminal appeared
+  hung. Now: the collector loop checks the flag and stops after the
+  current step on the first Ctrl-C, and a **second Ctrl-C force-quits
+  immediately** (guaranteed escape hatch).
+
 ## [0.2.3] — 2026-05-28
 
 ### Fixed
