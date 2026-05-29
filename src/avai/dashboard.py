@@ -178,26 +178,26 @@ _HIDDEN_SOURCE_FIELDS = {"id", "run_id"}
 
 
 def _engine():
-    """Open the SQLite database read-only with ``immutable=1``.
+    """Open the SQLite database read-only (``mode=ro``).
 
-    Rationale: the dashboard never writes. The host monitor maintains
-    the WAL. When the dashboard runs in a Linux container reading the
-    DB through a bind mount from a macOS host, SQLite's normal mode
-    tries to mmap the ``.db-shm`` shared-memory file — and that mmap
-    fails through Docker Desktop's virtual filesystem layer, with the
-    cryptic "(sqlite3.OperationalError) disk I/O error".
+    The dashboard never writes; the monitor maintains the WAL.
 
-    ``mode=ro&immutable=1`` skips SHM entirely. The cost is that the
-    reader only sees data that's been checkpointed back to the main
-    ``.db`` file — anything sitting in the WAL waiting to be merged
-    is invisible. In practice that's a few-second lag, well within
-    the dashboard's 30-second refresh budget. ``_engine()`` is called
-    fresh per request, so each refresh sees the latest checkpointed
-    state.
+    We deliberately do NOT pass ``immutable=1``. ``immutable=1`` tells
+    SQLite the file is a frozen snapshot and to ignore the ``-wal``
+    file — which means the reader sees only data already checkpointed
+    into the main ``.db``. On a live database that the monitor is
+    actively writing (and especially in the first seconds before the
+    very first WAL checkpoint), the schema + rows live in the ``-wal``,
+    so ``immutable=1`` reads an empty/incomplete database and every
+    query 500s with "no such table". ``mode=ro`` reads the WAL
+    correctly, so the dashboard sees live data immediately.
+
+    ``_engine()`` is called fresh per request, so each refresh sees the
+    latest committed state.
     """
     db_path = current_app.config["DB_PATH"]
     return create_engine(
-        f"sqlite:///file:{db_path}?mode=ro&immutable=1&uri=true",
+        f"sqlite:///file:{db_path}?mode=ro&uri=true",
     )
 
 

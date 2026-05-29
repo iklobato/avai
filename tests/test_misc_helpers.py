@@ -3,29 +3,23 @@ get attention: ``_sha256_of_file`` (used by every binary-hashing
 extractor), the dashboard's ``_engine`` URL construction, and the
 chain stats counters.
 """
+
 from __future__ import annotations
 
 import hashlib
-import os
-from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from avai.dashboard import _engine, app, _ensure_db_exists
-from avai.enrichers import (
-    EnrichmentChain,
-    EvidenceCache,
-    Indicator,
-    IndicatorType,
-)
+from avai.dashboard import _engine, _ensure_db_exists, app
+from avai.enrichers import EnrichmentChain, EvidenceCache, Indicator, IndicatorType
 from avai.enrichers.indicators import _safe_loads, _sha256_of_file
-
 
 # ---------------------------------------------------------------------------
 # _sha256_of_file — file hashing helper used by every binary indicator
 # ---------------------------------------------------------------------------
+
 
 class TestSha256OfFile:
     def test_returns_correct_hex_digest(self, tmp_path):
@@ -68,6 +62,7 @@ class TestSha256OfFile:
 # _safe_loads — JSON parser for collector-emitted strings
 # ---------------------------------------------------------------------------
 
+
 class TestSafeLoads:
     def test_valid_json_object(self):
         assert _safe_loads('{"a": 1}') == {"a": 1}
@@ -88,21 +83,23 @@ class TestSafeLoads:
 
 
 # ---------------------------------------------------------------------------
-# Dashboard _engine — URL construction (the immutable=1 URI is fragile)
+# Dashboard _engine — read-only URL construction
 # ---------------------------------------------------------------------------
 
+
 class TestDashboardEngine:
-    def test_url_contains_immutable_and_ro_flags(self, tmp_path):
+    def test_url_is_read_only_but_not_immutable(self, tmp_path):
         db = tmp_path / "x.db"
         _ensure_db_exists(str(db))
         app.config["DB_PATH"] = str(db)
         with app.app_context():
             url = str(_engine().url)
-        # mode=ro skips WAL; immutable=1 lets SQLite skip mmap of
-        # shared-memory files. Both are required.
+        # mode=ro = read-only; uri=true enables the file: URI form.
         assert "mode=ro" in url
-        assert "immutable=1" in url
         assert "uri=true" in url
+        # immutable=1 must NOT be present — it ignores the WAL, which
+        # made the dashboard 500 on a live DB still writing to its -wal.
+        assert "immutable" not in url
 
     def test_engine_can_open_existing_db(self, tmp_path):
         db = tmp_path / "exists.db"
@@ -119,6 +116,7 @@ class TestDashboardEngine:
 # EnrichmentChain stats — used by the per-cycle log line
 # ---------------------------------------------------------------------------
 
+
 class _Base(DeclarativeBase):
     pass
 
@@ -127,6 +125,7 @@ class _Base(DeclarativeBase):
 def cache():
     engine = create_engine("sqlite:///:memory:")
     from avai.enrichers.cache import register_schema
+
     register_schema(_Base)
     _Base.metadata.create_all(engine)
     return EvidenceCache(engine, _Base)
@@ -134,7 +133,6 @@ def cache():
 
 class _Fake:
     def __init__(self, name, hint, ret=None, exc=None):
-        from avai.enrichers.base import VerdictHint, Evidence
         self.name = name
         self.supports_types = frozenset({IndicatorType.IPV4})
         self.requires_token = None
@@ -147,6 +145,7 @@ class _Fake:
 
     def freshness_cutoff(self):
         from datetime import datetime, timedelta, timezone
+
         return datetime.now(timezone.utc) - timedelta(hours=self.ttl_hours)
 
     def _fetch(self, ind):
@@ -158,10 +157,15 @@ class _Fake:
 class TestChainStats:
     def test_records_hit_and_cached_separately(self, cache):
         from avai.enrichers.base import Evidence, VerdictHint
+
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
-        ev = Evidence(source="x", indicator=ind,
-                      verdict_hint=VerdictHint.MALICIOUS,
-                      confidence=0.9, summary="s")
+        ev = Evidence(
+            source="x",
+            indicator=ind,
+            verdict_hint=VerdictHint.MALICIOUS,
+            confidence=0.9,
+            summary="s",
+        )
         e = _Fake("x", VerdictHint.MALICIOUS, ret=ev)
         chain = EnrichmentChain([e], cache)
         chain.enrich(ind)  # miss → hit + miss tallied
@@ -188,11 +192,18 @@ class TestChainStats:
     def test_reset_stats_clears(self, cache):
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
         from avai.enrichers.base import Evidence, VerdictHint
-        e = _Fake("x", VerdictHint.MALICIOUS, ret=Evidence(
-            source="x", indicator=ind,
-            verdict_hint=VerdictHint.MALICIOUS,
-            confidence=0.9, summary="s",
-        ))
+
+        e = _Fake(
+            "x",
+            VerdictHint.MALICIOUS,
+            ret=Evidence(
+                source="x",
+                indicator=ind,
+                verdict_hint=VerdictHint.MALICIOUS,
+                confidence=0.9,
+                summary="s",
+            ),
+        )
         chain = EnrichmentChain([e], cache)
         chain.enrich(ind)
         chain.reset_stats()
@@ -203,13 +214,19 @@ class TestChainStats:
 # Sink.unjudged_all — streaming variant (no run_id filter)
 # ---------------------------------------------------------------------------
 
+
 class TestSinkUnjudgedAll:
     def test_returns_distinct_hashes_across_runs(self, tmp_path):
         # The streaming variant of unjudged ignores run_id so streaming
         # rows that span runs are still classified once each.
         from avai.host_monitor import (
-            AuthEventRow, Judgment, Sink, Verdict, ThreatCategory,
-            content_hash, utcnow,
+            AuthEventRow,
+            Judgment,
+            Sink,
+            ThreatCategory,
+            Verdict,
+            content_hash,
+            utcnow,
         )
 
         class _S:
@@ -220,39 +237,66 @@ class TestSinkUnjudgedAll:
             judge_hints = ""
 
         db = tmp_path / "u.db"
-        engine = create_engine(f"sqlite:///{db}",
-                               connect_args={"check_same_thread": False})
+        engine = create_engine(
+            f"sqlite:///{db}", connect_args={"check_same_thread": False}
+        )
         sink = Sink(engine)
         sink.setup()
         ts = utcnow()
 
         # Write two rows: one judged, one unjudged.
-        h_judged   = content_hash(
-            {"event_type": "login_ok", "event_message": "alice"},
-            _S.judge_fields)
+        h_judged = content_hash(
+            {"event_type": "login_ok", "event_message": "alice"}, _S.judge_fields
+        )
         h_unjudged = content_hash(
-            {"event_type": "login_fail", "event_message": "bob"},
-            _S.judge_fields)
-        sink.write(AuthEventRow, [
-            {"event_timestamp": ts, "subsystem": "auth",
-             "category": "auth", "process": "sshd", "pid": 1,
-             "event_type": "login_ok", "event_message": "alice",
-             "raw_json": "{}",
-             "content_hash": h_judged, "run_id": "r1",
-             "collected_at": ts},
-            {"event_timestamp": ts, "subsystem": "auth",
-             "category": "auth", "process": "sshd", "pid": 2,
-             "event_type": "login_fail", "event_message": "bob",
-             "raw_json": "{}",
-             "content_hash": h_unjudged, "run_id": "r1",
-             "collected_at": ts},
-        ])
-        sink.write_judgments([Judgment(
-            content_hash=h_judged, collector="auth_events",
-            verdict=Verdict.BENIGN, category=ThreatCategory.NONE,
-            confidence=1.0, reasoning="ok", remediation="",
-            model="m", created_at=ts,
-        )])
+            {"event_type": "login_fail", "event_message": "bob"}, _S.judge_fields
+        )
+        sink.write(
+            AuthEventRow,
+            [
+                {
+                    "event_timestamp": ts,
+                    "subsystem": "auth",
+                    "category": "auth",
+                    "process": "sshd",
+                    "pid": 1,
+                    "event_type": "login_ok",
+                    "event_message": "alice",
+                    "raw_json": "{}",
+                    "content_hash": h_judged,
+                    "run_id": "r1",
+                    "collected_at": ts,
+                },
+                {
+                    "event_timestamp": ts,
+                    "subsystem": "auth",
+                    "category": "auth",
+                    "process": "sshd",
+                    "pid": 2,
+                    "event_type": "login_fail",
+                    "event_message": "bob",
+                    "raw_json": "{}",
+                    "content_hash": h_unjudged,
+                    "run_id": "r1",
+                    "collected_at": ts,
+                },
+            ],
+        )
+        sink.write_judgments(
+            [
+                Judgment(
+                    content_hash=h_judged,
+                    collector="auth_events",
+                    verdict=Verdict.BENIGN,
+                    category=ThreatCategory.NONE,
+                    confidence=1.0,
+                    reasoning="ok",
+                    remediation="",
+                    model="m",
+                    created_at=ts,
+                )
+            ]
+        )
 
         result = sink.unjudged_all(_S())
         assert len(result) == 1
@@ -269,8 +313,9 @@ class TestSinkUnjudgedAll:
             judge_hints = ""
 
         db = tmp_path / "z.db"
-        engine = create_engine(f"sqlite:///{db}",
-                               connect_args={"check_same_thread": False})
+        engine = create_engine(
+            f"sqlite:///{db}", connect_args={"check_same_thread": False}
+        )
         sink = Sink(engine)
         sink.setup()
         assert sink.unjudged_all(_S()) == []

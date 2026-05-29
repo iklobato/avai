@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import _ensure_db_exists, app, system_integrity
+from avai.dashboard import _engine, _ensure_db_exists, app, system_integrity
 from avai.host_monitor import Sink, SystemIntegrityRow
 
 # ---------------------------------------------------------------------------
@@ -237,3 +237,43 @@ class TestSystemIntegrityPlatform:
         run_id, _ = self._run(sink)
         with Session(sink.engine) as s:
             assert system_integrity(s, run_id) is None
+
+
+# ---------------------------------------------------------------------------
+# WAL visibility — regression for the monitor↔dashboard startup race where
+# immutable=1 made the dashboard 500 with "no such table" because the schema
+# was still in the -wal, not yet checkpointed into the main .db.
+# ---------------------------------------------------------------------------
+
+
+class TestWalVisibility:
+    def test_engine_url_is_not_immutable(self):
+        # immutable=1 ignores the WAL — must not be used.
+        app.config["DB_PATH"] = "/tmp/whatever.db"
+        with app.app_context():
+            assert "immutable" not in str(_engine().url)
+            assert "mode=ro" in str(_engine().url)
+
+    def test_reads_rows_sitting_in_uncheckpointed_wal(self, tmp_path):
+        import sqlite3
+
+        from sqlalchemy import text
+
+        db = tmp_path / "wal.db"
+        # Writer in WAL mode; commit data but keep the connection OPEN so
+        # the WAL is never checkpointed into the main .db — exactly the
+        # state during the monitor's first seconds.
+        w = sqlite3.connect(str(db))
+        w.execute("PRAGMA journal_mode=WAL")
+        w.execute("CREATE TABLE collection_runs (run_id TEXT)")
+        w.execute("INSERT INTO collection_runs VALUES ('x')")
+        w.commit()
+        try:
+            app.config["DB_PATH"] = str(db)
+            with app.app_context():
+                with _engine().connect() as c:
+                    n = c.execute(text("SELECT count(*) FROM collection_runs")).scalar()
+            # Pre-fix (immutable=1) this raised "no such table".
+            assert n == 1
+        finally:
+            w.close()

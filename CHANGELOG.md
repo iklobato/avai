@@ -3,6 +3,22 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.2.3] — 2026-05-28
+
+### Fixed
+- **Dashboard 500'd ("no such table") on first run against a live
+  database.** The read engine used `?mode=ro&immutable=1`; `immutable=1`
+  tells SQLite to ignore the `-wal` file, so when the monitor and
+  dashboard start together the schema is still in the WAL (not yet
+  checkpointed) and every query fails. Dropped `immutable=1` — `mode=ro`
+  reads the WAL correctly. Verified it doesn't regress the Docker
+  bind-mount case it was originally added for.
+- **System-integrity panel mislabeled Linux data as macOS.** A row
+  collected by the Linux collector (e.g. the monitor in Docker's Linux
+  VM) rendered under macOS labels (FileVault, Gatekeeper…) with unset
+  columns showing a false "OFF". The panel is now platform-aware and
+  shows a macOS/Linux badge.
+
 ## [0.2.2] — 2026-05-28
 
 ### Fixed
