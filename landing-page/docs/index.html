@@ -155,14 +155,14 @@ start http://localhost:8765/</pre>
       <div class="os-tabbar"></div>
 <pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="macos">docker run -d \
   --name avai-dashboard \
-  -p 8765:8765 \                <span class="text-slate-500"># publish :8765</span>
-  -v "$PWD":/data \             <span class="text-slate-500"># dir containing avai.db</span>
-  iklob1/avai                   <span class="text-slate-500"># default CMD = avai dashboard</span></pre>
+  -p 8765:8765 \
+  -v "$PWD":/data \
+  iklob1/avai</pre>
 <pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="linux" hidden>docker run -d \
   --name avai-dashboard \
-  -p 8765:8765 \                <span class="text-slate-500"># publish :8765</span>
-  -v "$PWD":/data \             <span class="text-slate-500"># dir containing avai.db</span>
-  iklob1/avai                   <span class="text-slate-500"># default CMD = avai dashboard</span></pre>
+  -p 8765:8765 \
+  -v "$PWD":/data \
+  iklob1/avai</pre>
 <pre class="os-pane text-xs bg-slate-950/80 ring-1 ring-white/10 rounded-b-lg rounded-tr-lg p-4 text-slate-200 overflow-x-auto" data-os="windows" hidden><span class="text-slate-500"># PowerShell — single line</span>
 docker run -d --name avai-dashboard -p 8765:8765 -v ${PWD}:/data iklob1/avai</pre>
     </div>
