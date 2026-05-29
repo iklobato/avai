@@ -1,19 +1,16 @@
 {% from "partials/_macros.html" import status_badge, card_header %}
 
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 h-full">
-  {{ card_header("system integrity") }}
+  <div class="flex items-center justify-between">
+    {{ card_header("system integrity") }}
+    {% if sysint %}
+      <span class="text-[10px] uppercase tracking-widest text-slate-500
+                   bg-slate-800/70 rounded px-1.5 py-0.5">{{ sysint.platform }}</span>
+    {% endif %}
+  </div>
   {% if sysint %}
-    {% set rows = [
-      ('FileVault',          sysint.filevault_active),
-      ('Firewall',           sysint.firewall_global_state),
-      ('Firewall stealth',   sysint.firewall_stealth),
-      ('Gatekeeper',         sysint.gatekeeper_assessments_enabled),
-      ('SSH (sshd)',         sysint.remote_login_enabled),
-      ('Screen Sharing',     sysint.screen_sharing_enabled),
-      ('Remote Mgmt (ARD)',  sysint.remote_management_enabled),
-    ] %}
     <ul class="divide-y divide-slate-800/80 text-sm">
-      {% for name, value in rows %}
+      {% for name, value in sysint.rows %}
         <li class="flex items-center justify-between py-2">
           <span class="text-slate-300">{{ name }}</span>
           {{ status_badge(value) }}
