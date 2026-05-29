@@ -126,6 +126,11 @@ DEFAULT_LOOKBACK_MIN = 6
 DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_JUDGE_BATCH = 20
 DEFAULT_JUDGE_MAX_PER_COLLECTOR = 200
+# Per-LLM-call timeout. Without it, one stalled API request blocks the
+# whole cycle forever — the run never finishes, so the dashboard (which
+# only shows completed runs) stays empty. On timeout the batch is
+# skipped (judge.judge swallows per-batch errors) and the cycle moves on.
+DEFAULT_JUDGE_TIMEOUT_S = 60
 
 # Bundled inside the package — installed alongside this module.
 DEFAULT_PROMPTS_PATH = _PKG_DIR / "prompts.toml"
@@ -607,6 +612,7 @@ class LitellmClient(CompletionClient):
             response_format={"type": "json_object"},
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=DEFAULT_JUDGE_TIMEOUT_S,
         )
         return json.loads(response.choices[0].message.content)
 
@@ -637,6 +643,8 @@ class AnthropicOAuthClient(CompletionClient):
         self._client = Anthropic(
             auth_token=oauth_token,
             default_headers={"anthropic-beta": self.OAUTH_BETA_HEADER},
+            timeout=DEFAULT_JUDGE_TIMEOUT_S,
+            max_retries=2,
         )
 
     def complete_structured(

@@ -3,6 +3,19 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.2.5] — 2026-05-29
+
+### Fixed
+- **LLM judge calls had no timeout — a stalled API request froze the
+  whole cycle.** With the judge enabled the first cycle makes hundreds
+  of LLM calls (one batch per 20 entries per collector); if any single
+  request hung, the run never reached `end_run`, so it never showed as
+  *completed* and the dashboard (which only lists completed runs)
+  stayed empty forever. Added a 60 s per-call timeout to both the
+  litellm and Anthropic-OAuth paths (`DEFAULT_JUDGE_TIMEOUT_S`); on
+  timeout the batch is skipped and the cycle proceeds, so runs always
+  complete and the dashboard populates.
+
 ## [0.2.4] — 2026-05-29
 
 ### Fixed
