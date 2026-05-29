@@ -3,6 +3,23 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.2.9] — 2026-05-29
+
+### Added
+- **network_flows: source interface + by-destination aggregation.**
+  Flows now record the capture interface (Linux `tcpdump -i any`
+  per-packet; macOS reads it from tcpdump's "listening on <iface>"
+  banner). The dashboard table is now aggregated **by destination IP** —
+  SUM(packets), COUNT(flows), the set of interfaces / protocols / ports,
+  and the worst verdict per destination — with a summary header
+  (destinations / flows / packets / malicious / suspicious).
+
+### Fixed
+- **Dashboard 500 ("no such table: network_flows") against an older
+  DB.** A database written by a monitor that predates a collector lacks
+  its table; the row-counts and network-flows panels now skip / empty
+  out missing tables instead of crashing (`_existing_tables` guard).
+
 ## [0.2.8] — 2026-05-29
 
 ### Added

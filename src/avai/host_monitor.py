@@ -963,6 +963,7 @@ class NetworkFlowRow(_RowBase):
     with how many packets matched it."""
 
     __tablename__ = "network_flows"
+    iface: Mapped[Optional[str]]  # capture interface (e.g. en0, eth0)
     proto: Mapped[Optional[str]]
     dst_ip: Mapped[Optional[str]] = mapped_column(index=True)
     dst_port: Mapped[Optional[int]]
@@ -2143,64 +2144,80 @@ class NetworkFlowsCollector(SnapshotCollector):
     then judged by the LLM, so malicious requests — C2 beacons,
     exfiltration, connections to known-bad IPs — surface as findings.
 
-    Parsing is split-based (no regex): tcpdump ``-q`` prints one line
-    per packet as ``IP src.port > dst.port: proto len``; we read the
-    token after ``>`` for the destination and the next for the proto.
+    Parsing is split-based (no regex): with ``-t -n -q`` tcpdump prints
+    one line per packet as ``IP src.port > dst.port: proto len``. On
+    Linux we capture with ``-i any``, which prefixes each line with the
+    interface + direction (``eth0 Out IP …``) — that's where the
+    per-flow interface comes from. On macOS ``-i any`` isn't supported,
+    so we capture the default interface and read its name from
+    tcpdump's "listening on <iface>" banner on stderr.
     Requires root to capture — the monitor already runs as root.
     """
 
     name = "network_flows"
     model = NetworkFlowRow
-    judge_fields = ("proto", "dst_ip", "dst_port")
+    judge_fields = ("iface", "proto", "dst_ip", "dst_port")
 
     CAPTURE_SECONDS = 8  # wall-clock cap per cycle
     MAX_PACKETS = 2000  # stop after this many packets
     MAX_FLOWS = 200  # emit only the top-N flows by packet count
 
     def collect(self):
-        flows = self._aggregate(self._capture())
+        stdout, default_iface = self._capture()
+        flows = self._aggregate(stdout, default_iface)
         ranked = sorted(flows.values(), key=lambda f: f["packets"], reverse=True)
         yield from ranked[: self.MAX_FLOWS]
 
-    def _capture(self) -> str:
+    def _capture(self) -> tuple[str, Optional[str]]:
+        """Return (stdout, default_iface). default_iface is the interface
+        tcpdump reported listening on (used when a line carries no
+        per-packet interface, i.e. not the Linux '-i any' path)."""
         if shutil.which("tcpdump") is None:
             raise RuntimeError("tcpdump not found on PATH")
-        # IPv4 TCP/UDP only — ARP/IPv6/ICMP have no (proto, ip, port)
-        # shape and would pollute the aggregation.
-        cmd = [
-            "tcpdump",
-            "-n",
-            "-q",
-            "-l",
-            "-c",
-            str(self.MAX_PACKETS),
-            "tcp",
-            "or",
-            "udp",
-        ]
+        # -t drops timestamps (we stamp our own); IPv4 TCP/UDP only.
+        cmd = ["tcpdump", "-n", "-q", "-l", "-t", "-c", str(self.MAX_PACKETS)]
+        if IS_LINUX:
+            # 'any' prefixes each line with the interface + direction.
+            cmd += ["-i", "any"]
+        cmd += ["tcp", "or", "udp"]
         try:
             r = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=self.CAPTURE_SECONDS
             )
-            return r.stdout or ""
+            stdout, stderr = r.stdout or "", r.stderr or ""
         except subprocess.TimeoutExpired as e:
-            # Slow link: we hit the time cap before MAX_PACKETS. Keep
-            # whatever was captured so far.
-            out = e.stdout or ""
-            return out.decode("utf-8", "replace") if isinstance(out, bytes) else out
+            # Slow link: hit the time cap before MAX_PACKETS — keep partial.
+            def _txt(b):
+                return (
+                    b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or "")
+                )
 
-    def _aggregate(self, output: str) -> dict:
+            stdout, stderr = _txt(e.stdout), _txt(e.stderr)
+        return stdout, self._iface_from_banner(stderr)
+
+    @staticmethod
+    def _iface_from_banner(stderr: str) -> Optional[str]:
+        """tcpdump prints 'listening on en0, link-type ...' to stderr."""
+        for line in stderr.splitlines():
+            if "listening on" in line:
+                rest = line.split("listening on", 1)[1].strip()
+                return rest.split(",", 1)[0].strip() or None
+        return None
+
+    def _aggregate(self, output: str, default_iface: Optional[str]) -> dict:
         now = utcnow()
         flows: dict[tuple, dict] = {}
         for line in output.splitlines():
             parsed = self._parse_line(line)
             if parsed is None:
                 continue
-            proto, dst_ip, dst_port = parsed
-            key = (proto, dst_ip, dst_port)
+            iface, proto, dst_ip, dst_port = parsed
+            iface = iface or default_iface
+            key = (iface, proto, dst_ip, dst_port)
             f = flows.get(key)
             if f is None:
                 flows[key] = {
+                    "iface": iface,
                     "proto": proto,
                     "dst_ip": dst_ip,
                     "dst_port": dst_port,
@@ -2216,11 +2233,24 @@ class NetworkFlowsCollector(SnapshotCollector):
 
     @staticmethod
     def _parse_line(line: str):
-        """Return (proto, dst_ip, dst_port) from one tcpdump -q line, or
-        None if the line isn't a parseable IPv4 TCP/UDP packet."""
+        """Return (iface, proto, dst_ip, dst_port) from one tcpdump -t -q
+        line, or None if it isn't a parseable IPv4 TCP/UDP packet.
+
+        macOS/default:  ``IP src.port > dst.port: proto len``  (iface None)
+        Linux -i any:   ``eth0 Out IP src.port > dst.port: proto len``
+        """
         parts = line.split()
-        if len(parts) < 5 or ">" not in parts:
+        if ">" not in parts:
             return None
+        if "IP" in parts:
+            ip_idx = parts.index("IP")
+        elif "IP6" in parts:
+            ip_idx = parts.index("IP6")
+        else:
+            return None
+        # If "IP" isn't the first token, the leading token is the
+        # interface (Linux '-i any' prefixes "<iface> In/Out IP …").
+        iface = parts[0] if ip_idx >= 1 else None
         gt = parts.index(">")
         if gt + 1 >= len(parts):
             return None
@@ -2231,7 +2261,7 @@ class NetworkFlowsCollector(SnapshotCollector):
         proto = "ip"
         if gt + 2 < len(parts):
             proto = parts[gt + 2].rstrip(",").lower()
-        return proto, ip, int(port_s)
+        return iface, proto, ip, int(port_s)
 
     @staticmethod
     def _service(port: int, proto: str):

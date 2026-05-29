@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, current_app, jsonify, render_template, request
-from sqlalchemy import and_, asc, case, create_engine, desc, func, or_, select
+from sqlalchemy import and_, asc, case, create_engine, desc, func, or_, select, text
 from sqlalchemy.orm import Session
 
 # Reuse models from host_monitor.py — single source of schema truth.
@@ -211,6 +211,18 @@ def _session() -> Session:
 # ============================================================================
 # Service layer — pure DB queries, no Flask
 # ============================================================================
+
+
+def _existing_tables(session: Session) -> set[str]:
+    """Tables actually present in the DB. The dashboard may read a
+    database written by an *older* monitor that predates a collector
+    (e.g. network_flows), so querying a not-yet-created table would 500.
+    Callers check membership here and degrade gracefully instead."""
+    return set(
+        session.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table'")
+        ).scalars()
+    )
 
 
 def latest_run(session: Session):
@@ -452,7 +464,12 @@ def findings(
 
 def row_counts(session: Session, since: str) -> list[dict]:
     out = []
+    present = _existing_tables(session)
     for name, model in COLLECTOR_MODELS.items():
+        # Skip tables an older monitor never created — querying them
+        # would raise "no such table" and 500 the whole panel.
+        if model.__tablename__ not in present:
+            continue
         n = (
             session.execute(
                 select(func.count())
@@ -474,18 +491,45 @@ def collector_errors(session: Session, run_id: str) -> list[CollectorErrorRow]:
     )
 
 
-def network_flows(session: Session, run_id: str, limit: int = 300):
-    """Aggregated tcpdump flows for ``run_id``, each with its LLM verdict
-    (LEFT JOIN — a flow may not be judged yet). Ordered worst-verdict
-    first, then by packet count, so the riskiest talkers sit on top."""
-    sev = case(
-        {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3},
-        value=Judgement.verdict,
-        else_=4,
-    )
+# Verdict severity for "worst-first" ordering. Unjudged flows (None)
+# sort last so judged risk floats to the top.
+_FLOW_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3, None: 4}
+
+
+def network_flows(session: Session, run_id: str, limit: int = 1000):
+    """Tcpdump flows for ``run_id``, **aggregated by destination IP** for
+    a compact, glanceable table.
+
+    Each raw flow is one (iface, proto, dst_ip, dst_port) with a packet
+    count and (LEFT JOIN) its LLM verdict. We roll those up per dst_ip:
+    SUM(packets), COUNT(flows), the set of interfaces / protocols /
+    ports, and the worst verdict among the destination's flows. Returns
+    ``{"summary": {...}, "rows": [...]}`` with rows worst-verdict first
+    then by total packets.
+
+    Degrades to empty if the network_flows table doesn't exist yet
+    (DB written by a monitor that predates this collector)."""
+    empty = {
+        "summary": {
+            "destinations": 0,
+            "flows": 0,
+            "packets": 0,
+            "malicious": 0,
+            "suspicious": 0,
+        },
+        "rows": [],
+    }
+    if "network_flows" not in _existing_tables(session):
+        return empty
+
     stmt = (
         select(
-            NetworkFlowRow,
+            NetworkFlowRow.iface,
+            NetworkFlowRow.proto,
+            NetworkFlowRow.dst_ip,
+            NetworkFlowRow.dst_port,
+            NetworkFlowRow.service,
+            NetworkFlowRow.packets,
             Judgement.verdict,
             Judgement.confidence,
             Judgement.reasoning,
@@ -498,24 +542,79 @@ def network_flows(session: Session, run_id: str, limit: int = 300):
             ),
         )
         .where(NetworkFlowRow.run_id == run_id)
-        .order_by(sev.asc(), desc(NetworkFlowRow.packets))
         .limit(limit)
     )
-    out = []
-    for flow, verdict, confidence, reasoning in session.execute(stmt).all():
-        out.append(
+
+    groups: dict[str, dict] = {}
+    for (
+        iface,
+        proto,
+        dst_ip,
+        dst_port,
+        service,
+        packets,
+        verdict,
+        conf,
+        reason,
+    ) in session.execute(stmt).all():
+        g = groups.get(dst_ip)
+        if g is None:
+            g = groups[dst_ip] = {
+                "dst_ip": dst_ip,
+                "packets": 0,
+                "flows": 0,
+                "_ifaces": set(),
+                "_protos": set(),
+                "_ports": set(),
+                "verdict": None,
+                "confidence": None,
+                "reasoning": "",
+            }
+        g["packets"] += packets or 0
+        g["flows"] += 1
+        if iface:
+            g["_ifaces"].add(iface)
+        if proto:
+            g["_protos"].add(proto)
+        if dst_port is not None:
+            g["_ports"].add(f"{dst_port}/{service}" if service else str(dst_port))
+        # Keep the worst (lowest-severity-number) verdict + its reasoning.
+        if _FLOW_SEV.get(verdict, 4) < _FLOW_SEV.get(g["verdict"], 4):
+            g["verdict"] = verdict
+            g["confidence"] = conf
+            g["reasoning"] = reason or ""
+
+    rows = []
+    for g in groups.values():
+        rows.append(
             {
-                "proto": flow.proto,
-                "dst_ip": flow.dst_ip,
-                "dst_port": flow.dst_port,
-                "service": flow.service,
-                "packets": flow.packets or 0,
-                "verdict": verdict,
-                "confidence": confidence,
-                "reasoning": reasoning or "",
+                "dst_ip": g["dst_ip"],
+                "iface": ", ".join(sorted(g["_ifaces"])) or "—",
+                "proto": ", ".join(sorted(g["_protos"])).upper(),
+                "ports": ", ".join(sorted(g["_ports"], key=_port_sort_key)),
+                "packets": g["packets"],
+                "flows": g["flows"],
+                "verdict": g["verdict"],
+                "confidence": g["confidence"],
+                "reasoning": g["reasoning"],
             }
         )
-    return out
+    rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -r["packets"]))
+
+    summary = {
+        "destinations": len(rows),
+        "flows": sum(r["flows"] for r in rows),
+        "packets": sum(r["packets"] for r in rows),
+        "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
+        "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
+    }
+    return {"summary": summary, "rows": rows}
+
+
+def _port_sort_key(p: str):
+    """Sort '443/https' or '4444' numerically by the leading port."""
+    head = p.split("/", 1)[0]
+    return int(head) if head.isdigit() else 0
 
 
 def system_integrity(session: Session, run_id: str):

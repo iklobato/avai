@@ -1,9 +1,10 @@
 """Tests for the tcpdump flow aggregator collector + its dashboard table.
 
-The live capture needs root, so these don't run tcpdump — they feed
-canned ``tcpdump -q`` output through the parser/aggregator (the part
-that has the bugs), test the indicator extraction, and render the
-dashboard table from seeded rows.
+Live capture needs root, so these feed canned ``tcpdump -t -q`` output
+through the parser/aggregator (the part with the bugs), test indicator
+extraction, and render the dashboard table from seeded rows — including
+the by-destination aggregation, the interface column, and graceful
+behaviour when the network_flows table doesn't exist yet.
 """
 
 from __future__ import annotations
@@ -12,113 +13,91 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import _ensure_db_exists, app, network_flows
+from avai.dashboard import app, network_flows
 from avai.enrichers import IndicatorType, extract_indicators
 from avai.host_monitor import NetworkFlowRow, NetworkFlowsCollector, Sink
 
-SAMPLE = """\
-13:00:00.1 IP 10.0.0.5.54321 > 142.250.80.46.443: tcp 0
-13:00:00.2 IP 10.0.0.5.54322 > 142.250.80.46.443: tcp 52
-13:00:00.3 IP 10.0.0.5.5353 > 224.0.0.251.5353: UDP, length 45
+# macOS/default form (no interface prefix), -t (no timestamp)
+SAMPLE_MACOS = """\
+IP 10.0.0.5.54321 > 142.250.80.46.443: tcp 0
+IP 10.0.0.5.54322 > 142.250.80.46.443: tcp 52
+IP 10.0.0.5.5353 > 224.0.0.251.5353: UDP, length 45
 ARP, Request who-has 10.0.0.1 tell 10.0.0.5, length 28
-13:00:00.4 IP 10.0.0.5.51000 > 8.8.8.8.53: UDP, length 30
+IP 10.0.0.5.51000 > 8.8.8.8.53: UDP, length 30
 
 """
 
-
-# ---------------------------------------------------------------------------
-# _parse_line — split-based extraction (no regex)
-# ---------------------------------------------------------------------------
+# Linux 'tcpdump -i any -t' form — interface + direction prefix
+SAMPLE_LINUX = """\
+eth0 Out IP 10.0.0.5.54321 > 1.2.3.4.443: tcp 0
+wlan0 Out IP 10.0.0.5.51000 > 1.2.3.4.443: tcp 52
+"""
 
 
 class TestParseLine:
-    def test_tcp_line(self):
+    def test_macos_tcp_line_no_iface(self):
         assert NetworkFlowsCollector._parse_line(
-            "13:00 IP 10.0.0.5.54321 > 142.250.80.46.443: tcp 0"
-        ) == ("tcp", "142.250.80.46", 443)
+            "IP 10.0.0.5.54321 > 142.250.80.46.443: tcp 0"
+        ) == (None, "tcp", "142.250.80.46", 443)
 
     def test_udp_line_with_comma(self):
         assert NetworkFlowsCollector._parse_line(
-            "13:00 IP 10.0.0.5.5353 > 224.0.0.251.5353: UDP, length 45"
-        ) == ("udp", "224.0.0.251", 5353)
+            "IP 10.0.0.5.5353 > 224.0.0.251.5353: UDP, length 45"
+        ) == (None, "udp", "224.0.0.251", 5353)
 
-    def test_arp_line_is_skipped(self):
-        assert (
-            NetworkFlowsCollector._parse_line(
-                "ARP, Request who-has 10.0.0.1 tell 10.0.0.5, length 28"
-            )
-            is None
-        )
+    def test_linux_any_line_has_interface(self):
+        # 'eth0 Out IP ...' → interface is the leading token
+        assert NetworkFlowsCollector._parse_line(
+            "eth0 Out IP 10.0.0.5.54321 > 1.2.3.4.443: tcp 0"
+        ) == ("eth0", "tcp", "1.2.3.4", 443)
 
-    def test_blank_line_is_skipped(self):
+    def test_arp_and_blank_skipped(self):
+        assert NetworkFlowsCollector._parse_line("ARP, Request who-has x") is None
         assert NetworkFlowsCollector._parse_line("") is None
-        assert NetworkFlowsCollector._parse_line("   ") is None
 
-    def test_no_direction_arrow_is_skipped(self):
-        assert NetworkFlowsCollector._parse_line("garbage without arrow") is None
-
-    def test_non_numeric_port_is_skipped(self):
-        # malformed dst with a non-numeric "port"
+    def test_non_numeric_port_skipped(self):
         assert (
-            NetworkFlowsCollector._parse_line(
-                "13:00 IP 10.0.0.5.x > host.example: tcp 0"
-            )
+            NetworkFlowsCollector._parse_line("IP 10.0.0.5.x > host.example: tcp 0")
             is None
         )
 
 
-# ---------------------------------------------------------------------------
-# _aggregate — flows deduped + packet counts
-# ---------------------------------------------------------------------------
+class TestIfaceFromBanner:
+    def test_extracts_interface(self):
+        stderr = "tcpdump: listening on en0, link-type EN10MB (Ethernet), capture..."
+        assert NetworkFlowsCollector._iface_from_banner(stderr) == "en0"
+
+    def test_none_when_absent(self):
+        assert NetworkFlowsCollector._iface_from_banner("some other output") is None
 
 
 class TestAggregate:
-    def test_aggregates_and_counts(self):
-        flows = NetworkFlowsCollector()._aggregate(SAMPLE)
-        # 3 distinct flows: 142.250.80.46:443 (x2), 224.0.0.251:5353, 8.8.8.8:53
-        assert len(flows) == 3
-        google = flows[("tcp", "142.250.80.46", 443)]
-        assert google["packets"] == 2  # two packets collapsed into one flow
-        assert flows[("udp", "8.8.8.8", 53)]["packets"] == 1
-        # service name resolution is best-effort; key fields are exact
-        assert google["dst_ip"] == "142.250.80.46"
-        assert google["dst_port"] == 443
+    def test_macos_uses_default_iface_and_counts(self):
+        flows = NetworkFlowsCollector()._aggregate(SAMPLE_MACOS, "en0")
+        assert len(flows) == 3  # google:443 (x2), mdns, dns
+        g = flows[("en0", "tcp", "142.250.80.46", 443)]
+        assert g["packets"] == 2
+        assert g["iface"] == "en0"
 
-    def test_empty_capture_yields_no_flows(self):
-        assert NetworkFlowsCollector()._aggregate("") == {}
+    def test_linux_per_line_interface(self):
+        flows = NetworkFlowsCollector()._aggregate(SAMPLE_LINUX, None)
+        # same dst:port but different interfaces → two distinct flows
+        assert ("eth0", "tcp", "1.2.3.4", 443) in flows
+        assert ("wlan0", "tcp", "1.2.3.4", 443) in flows
 
-
-# ---------------------------------------------------------------------------
-# Indicator extraction — public dst enriched, private/multicast skipped
-# ---------------------------------------------------------------------------
+    def test_empty(self):
+        assert NetworkFlowsCollector()._aggregate("", "en0") == {}
 
 
 class TestFlowIndicators:
     def test_public_dst_emits_ipv4(self):
         out = extract_indicators("network_flows", {"dst_ip": "8.8.8.8", "dst_port": 53})
-        assert len(out) == 1
+        assert [i.value for i in out] == ["8.8.8.8"]
         assert out[0].type is IndicatorType.IPV4
-        assert out[0].value == "8.8.8.8"
 
-    def test_multicast_dst_skipped(self):
-        # 224.0.0.251 (mDNS) is multicast → not enriched
-        assert (
-            extract_indicators(
-                "network_flows", {"dst_ip": "224.0.0.251", "dst_port": 5353}
-            )
-            == []
-        )
-
-    def test_private_dst_skipped(self):
-        assert (
-            extract_indicators("network_flows", {"dst_ip": "10.0.0.1", "dst_port": 443})
-            == []
-        )
-
-
-# ---------------------------------------------------------------------------
-# Dashboard table — service query + rendering
-# ---------------------------------------------------------------------------
+    def test_multicast_and_private_skipped(self):
+        assert extract_indicators("network_flows", {"dst_ip": "224.0.0.251"}) == []
+        assert extract_indicators("network_flows", {"dst_ip": "10.0.0.1"}) == []
 
 
 @pytest.fixture
@@ -130,9 +109,11 @@ def seeded(tmp_path):
     run_id, ts = sink.start_run("h", 5)
     from avai.host_monitor import Judgment, ThreatCategory, Verdict, content_hash
 
-    fields = ("proto", "dst_ip", "dst_port")
+    fields = ("iface", "proto", "dst_ip", "dst_port")
+    # two flows to the SAME bad destination on different ports + one benign
     rows = [
         {
+            "iface": "en0",
             "proto": "tcp",
             "dst_ip": "203.0.113.9",
             "dst_port": 4444,
@@ -142,11 +123,22 @@ def seeded(tmp_path):
             "last_seen": ts,
         },
         {
+            "iface": "en0",
+            "proto": "tcp",
+            "dst_ip": "203.0.113.9",
+            "dst_port": 8080,
+            "service": "http-alt",
+            "packets": 30,
+            "first_seen": ts,
+            "last_seen": ts,
+        },
+        {
+            "iface": "en0",
             "proto": "tcp",
             "dst_ip": "142.250.80.46",
             "dst_port": 443,
             "service": "https",
-            "packets": 30,
+            "packets": 500,
             "first_seen": ts,
             "last_seen": ts,
         },
@@ -156,7 +148,6 @@ def seeded(tmp_path):
         r["collected_at"] = ts
         r["content_hash"] = content_hash(r, fields)
     sink.write(NetworkFlowRow, rows)
-    # judge the first flow malicious, leave the second unjudged
     sink.write_judgments(
         [
             Judgment(
@@ -175,38 +166,86 @@ def seeded(tmp_path):
     return engine, run_id
 
 
-class TestNetworkFlowsTable:
-    def test_service_query_joins_verdict_and_orders_worst_first(self, seeded):
+class TestNetworkFlowsAggregation:
+    def test_groups_by_destination_with_sums_and_counts(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
-            flows = network_flows(s, run_id)
-        assert len(flows) == 2
-        # malicious flow sorts first despite fewer... (it has MORE packets too)
-        assert flows[0]["verdict"] == "malicious"
-        assert flows[0]["dst_port"] == 4444
-        assert flows[0]["reasoning"] == "beacon to raw IP on 4444"
-        # the unjudged flow has verdict None
-        assert flows[1]["verdict"] is None
-        assert flows[1]["service"] == "https"
+            data = network_flows(s, run_id)
+        rows = data["rows"]
+        # 2 distinct destinations (203.0.113.9 collapses its two flows)
+        assert len(rows) == 2
+        bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
+        assert bad["flows"] == 2  # two ports collapsed
+        assert bad["packets"] == 150  # 120 + 30 summed
+        assert "4444" in bad["ports"] and "8080/http-alt" in bad["ports"]
+        assert bad["iface"] == "en0"
+        assert bad["verdict"] == "malicious"  # worst verdict across the group
+        # malicious destination sorts first
+        assert rows[0]["dst_ip"] == "203.0.113.9"
 
-    def test_fragment_renders_with_flows(self, seeded, tmp_path):
+    def test_summary_totals(self, seeded):
         engine, run_id = seeded
-        # point the dashboard at this DB and render the fragment
+        with Session(engine) as s:
+            summary = network_flows(s, run_id)["summary"]
+        assert summary["destinations"] == 2
+        assert summary["flows"] == 3
+        assert summary["packets"] == 650
+        assert summary["malicious"] == 1
+
+    def test_fragment_renders_interface_and_verdict(self, seeded):
+        engine, run_id = seeded
         db = str(engine.url).replace("sqlite:///", "")
         app.config.update(TESTING=True, DB_PATH=db)
         with app.test_client() as c:
-            r = c.get("/fragments/network-flows")
-        assert r.status_code == 200
-        html = r.data.decode()
+            html = c.get("/fragments/network-flows").data.decode()
         assert "203.0.113.9" in html
+        assert "en0" in html  # interface column
         assert "malicious" in html
         assert "tcpdump aggregator" in html
 
-    def test_fragment_empty_db_renders_hint(self, tmp_path):
-        db = tmp_path / "empty.db"
-        _ensure_db_exists(str(db))
+
+class TestMissingTableGraceful:
+    """Simulate a DB written by an older monitor that predates this
+    collector: full schema, then drop network_flows. The dashboard must
+    degrade to empty, not 500."""
+
+    def _db_without_flows(self, tmp_path):
+        from sqlalchemy import text
+
+        db = tmp_path / "old.db"
+        engine = create_engine(
+            f"sqlite:///{db}", connect_args={"check_same_thread": False}
+        )
+        sink = Sink(engine)
+        sink.setup()
+        sink.start_run("h", 5)
+        sink.end_run(ok=1, failed=0)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE network_flows"))
+        return engine, db
+
+    def test_returns_empty_when_table_absent(self, tmp_path):
+        engine, _ = self._db_without_flows(tmp_path)
+        with Session(engine) as s:
+            data = network_flows(s, "x")
+        assert data["rows"] == []
+        assert data["summary"]["destinations"] == 0
+
+    def test_fragment_200_on_db_without_table(self, tmp_path):
+        engine, db = self._db_without_flows(tmp_path)
+        engine.dispose()
         app.config.update(TESTING=True, DB_PATH=str(db))
         with app.test_client() as c:
             r = c.get("/fragments/network-flows")
         assert r.status_code == 200
         assert "no network flows yet" in r.data.decode()
+
+    def test_row_counts_skips_missing_table(self, tmp_path):
+        from avai.dashboard import row_counts
+
+        engine, _ = self._db_without_flows(tmp_path)
+        with Session(engine) as s:
+            counts = row_counts(s, "2000-01-01")
+        names = {c["name"] for c in counts}
+        assert "network_flows" not in names
+        assert "processes" in names

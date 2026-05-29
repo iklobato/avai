@@ -8,21 +8,50 @@
 } %}
 
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
-  {{ card_header("network flows — tcpdump aggregator") }}
-  {% if flows %}
+  {{ card_header("network flows — tcpdump aggregator (by destination)") }}
+
+  {% if flows.rows %}
+    {# ----- aggregate summary: sum + counts ----- #}
+    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
+      {% set s = flows.summary %}
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ s.destinations }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">destinations</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ s.flows }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">flows</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ "{:,}".format(s.packets) }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">packets</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
+        <div class="mono text-red-300 text-lg">{{ s.malicious }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">malicious</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-amber-900/40 px-3 py-2">
+        <div class="mono text-amber-300 text-lg">{{ s.suspicious }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">suspicious</div>
+      </div>
+    </div>
+
+    {# ----- one row per destination IP (grouped / summed) ----- #}
     <table class="w-full text-xs">
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
           <th class="text-left  font-semibold pb-2">verdict</th>
-          <th class="text-left  font-semibold pb-2">proto</th>
           <th class="text-left  font-semibold pb-2">destination</th>
-          <th class="text-left  font-semibold pb-2">port / service</th>
+          <th class="text-left  font-semibold pb-2">interface</th>
+          <th class="text-left  font-semibold pb-2">proto</th>
+          <th class="text-left  font-semibold pb-2">ports</th>
+          <th class="text-right font-semibold pb-2">flows</th>
           <th class="text-right font-semibold pb-2">packets</th>
-          <th class="text-left  font-semibold pb-2 w-1/3">why</th>
+          <th class="text-left  font-semibold pb-2 w-1/4">why</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-slate-800/80">
-        {% for f in flows %}
+        {% for f in flows.rows %}
           <tr class="hover:bg-slate-800/40 transition-colors">
             <td class="py-2">
               {% if f.verdict %}
@@ -30,19 +59,19 @@
                              font-semibold uppercase tracking-wider
                              {{ verdict_cls.get(f.verdict, verdict_cls['unknown']) }}">
                   {{ f.verdict }}{% if f.confidence is not none %}
-                    <span class="ml-1 opacity-70">{{ '%.0f' % (f.confidence * 100) }}%</span>
+                    <span class="ml-1 opacity-70">{{ "%.0f"|format(f.confidence * 100) }}%</span>
                   {% endif %}
                 </span>
               {% else %}
                 <span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>
               {% endif %}
             </td>
-            <td class="py-2 text-slate-400 font-mono uppercase">{{ f.proto }}</td>
             <td class="py-2 text-slate-200 font-mono">{{ f.dst_ip }}</td>
-            <td class="py-2 text-slate-400 font-mono">
-              {{ f.dst_port }}{% if f.service %} <span class="text-slate-500">({{ f.service }})</span>{% endif %}
-            </td>
-            <td class="py-2 text-right text-slate-300 font-mono">{{ f.packets }}</td>
+            <td class="py-2 text-sky-300 font-mono">{{ f.iface }}</td>
+            <td class="py-2 text-slate-400 font-mono">{{ f.proto }}</td>
+            <td class="py-2 text-slate-400 font-mono">{{ f.ports }}</td>
+            <td class="py-2 text-right text-slate-400 font-mono">{{ f.flows }}</td>
+            <td class="py-2 text-right text-slate-300 font-mono">{{ "{:,}".format(f.packets) }}</td>
             <td class="py-2 text-slate-400 line-clamp-2">{{ f.reasoning }}</td>
           </tr>
         {% endfor %}
