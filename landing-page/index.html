@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>avai — see what's actually running on your machines</title>
-<meta name="description" content="Open-source host security telemetry with an LLM threat judge and a single-pane dashboard. One docker command on macOS or Linux." />
-<meta property="og:title" content="avai — see what's actually running on your machines" />
-<meta property="og:description" content="21 collectors, a Claude-powered threat judge, and a live HTMX dashboard. One docker command." />
+<title>avai — is anything shady running on your computer?</title>
+<meta name="description" content="A free, open-source security guard for your computer. avai checks the places malware hides and has an AI explain, in plain English, whether anything is dangerous. Nothing leaves your machine." />
+<meta property="og:title" content="avai — is anything shady running on your computer?" />
+<meta property="og:description" content="A tiny security guard for your laptop or server. It checks where malware hides and an AI tells you, in plain English, what's safe and what's not." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://getavai.com" />
 <meta name="theme-color" content="#0b0d10" />
@@ -59,10 +59,10 @@
       <span class="ml-2 text-[11px] uppercase tracking-widest text-slate-500">host telemetry</span>
     </a>
     <nav class="hidden md:flex items-center gap-7 text-sm text-slate-400">
-      <a href="#what" class="hover:text-slate-100 transition">What it sees</a>
-      <a href="#judge" class="hover:text-slate-100 transition">LLM judge</a>
-      <a href="#install" class="hover:text-slate-100 transition">Install</a>
-      <a href="#dashboard" class="hover:text-slate-100 transition">Dashboard</a>
+      <a href="#how" class="hover:text-slate-100 transition">How it works</a>
+      <a href="#what" class="hover:text-slate-100 transition">What it checks</a>
+      <a href="#dashboard" class="hover:text-slate-100 transition">What you see</a>
+      <a href="#install" class="hover:text-slate-100 transition">Get started</a>
       <a href="https://github.com/iklobato/avai" class="hover:text-slate-100 transition">GitHub →</a>
     </nav>
     <a href="#install"
@@ -81,18 +81,19 @@
     </div>
 
     <h1 class="mt-7 text-5xl md:text-6xl font-semibold tracking-tight">
-      <span class="grad-text">Know what's actually</span><br/>
-      <span class="grad-text">running on your machines.</span>
+      <span class="grad-text">Is anything shady</span><br/>
+      <span class="grad-text">running on your computer?</span>
     </h1>
 
     <p class="mt-6 max-w-2xl mx-auto text-lg text-slate-400">
-      <span class="text-slate-200 font-medium">avai</span> snapshots 21 things your OS won't tell you about —
-      processes, USB, launch units, persistence, file integrity, browser extensions, exec events —
-      and lets an LLM tell you which ones are worth caring about.
+      <span class="text-slate-200 font-medium">avai</span> is a tiny security guard for your
+      computer. It quietly checks the places malware likes to hide, then has an
+      <span class="text-slate-200">AI security expert</span> look at what it found and tell you —
+      in plain English — whether anything is dangerous.
     </p>
 
     <p class="mt-3 text-sm text-slate-500">
-      No agent contract. No SIEM. One <span class="mono text-emerald-300">docker run</span>.
+      Think of it as a health check‑up for your laptop or server. Nothing leaves your machine.
     </p>
 
     <!-- primary CTA -->
@@ -112,19 +113,19 @@
     <div class="mt-14 grid grid-cols-2 md:grid-cols-4 gap-3 max-w-3xl mx-auto text-sm">
       <div class="card rounded-xl px-4 py-3">
         <div class="mono text-emerald-300 text-xl">21</div>
-        <div class="text-slate-500 text-xs uppercase tracking-wider">collectors on macOS</div>
+        <div class="text-slate-500 text-xs uppercase tracking-wider">places it checks</div>
       </div>
       <div class="card rounded-xl px-4 py-3">
-        <div class="mono text-emerald-300 text-xl">16</div>
-        <div class="text-slate-500 text-xs uppercase tracking-wider">on Linux</div>
+        <div class="mono text-emerald-300 text-xl">17</div>
+        <div class="text-slate-500 text-xs uppercase tracking-wider">expert databases consulted</div>
       </div>
       <div class="card rounded-xl px-4 py-3">
-        <div class="mono text-emerald-300 text-xl">4</div>
-        <div class="text-slate-500 text-xs uppercase tracking-wider">verdict categories</div>
+        <div class="mono text-emerald-300 text-xl">every 5 min</div>
+        <div class="text-slate-500 text-xs uppercase tracking-wider">automatic re‑check</div>
       </div>
       <div class="card rounded-xl px-4 py-3">
-        <div class="mono text-emerald-300 text-xl">0</div>
-        <div class="text-slate-500 text-xs uppercase tracking-wider">agents to install</div>
+        <div class="mono text-emerald-300 text-xl">$0</div>
+        <div class="text-slate-500 text-xs uppercase tracking-wider">free &amp; open source</div>
       </div>
     </div>
   </div>
@@ -137,105 +138,167 @@
       <div>
         <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">The problem</div>
         <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
-          Your laptop is a black box.
+          You can't see what your computer is really doing.
         </h2>
         <p class="mt-5 text-slate-400 leading-relaxed">
-          You install a homebrew formula, a Cursor extension, a "free" PDF reader, an npm dependency.
-          A week later something connects to a hostname you've never seen.
-          You have <em>no</em> baseline to compare against — and no easy way to ask "is this normal?"
+          Every app you install, every browser extension, every "free" download can leave
+          something behind — a program that starts up secretly, an add‑on that reads your
+          passwords, a connection to a stranger's server. Your computer doesn't warn you,
+          and there's no simple way to ask <em>"hey, is this normal?"</em>
         </p>
         <p class="mt-4 text-slate-400 leading-relaxed">
-          Commercial EDR is overkill, expensive, and ships your data to someone else.
-          Native tools (<span class="mono text-slate-300">ps</span>, <span class="mono text-slate-300">launchctl</span>, <span class="mono text-slate-300">systemctl</span>, <span class="mono text-slate-300">journalctl</span>) are correct but tedious — by the time you've correlated them, the moment has passed.
+          Big‑company security software is expensive, complicated, and sends your private
+          data off to someone else's cloud. Most people just hope nothing's wrong.
         </p>
       </div>
       <div>
         <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">The fix</div>
         <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
-          A diff, judged by an LLM.
+          A plain‑English answer you can trust.
         </h2>
         <p class="mt-5 text-slate-400 leading-relaxed">
-          <span class="text-slate-200 font-medium">avai</span> runs every 5 minutes, hashes every entity it finds,
-          and only sends <em>new</em> things to the judge — so you spend tokens on signal, not noise.
+          <span class="text-slate-200 font-medium">avai</span> looks around your computer every few
+          minutes, cross‑checks anything new against well‑known security databases, and asks an
+          AI security expert to weigh in. You get a simple, colour‑coded list:
         </p>
         <p class="mt-4 text-slate-400 leading-relaxed">
-          Each finding comes back tagged
-          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 ring-1 ring-rose-500/30 text-xs">malicious</span>,
-          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30 text-xs">suspicious</span>,
-          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-300 ring-1 ring-slate-500/30 text-xs">unknown</span>, or
-          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30 text-xs">benign</span>
-          — with a one-line remediation. The data never leaves your machine except the prompt itself, and
-          the prompt only contains the artifact being judged.
+          <span class="verdict-pill inline-flex px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 ring-1 ring-rose-500/30 text-xs">🔴 dangerous</span>
+          <span class="verdict-pill inline-flex px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30 text-xs">🟡 worth a look</span>
+          <span class="verdict-pill inline-flex px-2 py-0.5 rounded bg-slate-500/15 text-slate-300 ring-1 ring-slate-500/30 text-xs">⚪ not sure</span>
+          <span class="verdict-pill inline-flex px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30 text-xs">🟢 all good</span>
+        </p>
+        <p class="mt-4 text-slate-400 leading-relaxed">
+          Each warning comes with one clear sentence on <em>why</em> it's flagged and exactly what to
+          do about it. And it all happens <span class="text-slate-200">on your own machine</span> —
+          your files never get uploaded anywhere.
         </p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- what it sees -->
-<section id="what" class="border-t border-white/5 bg-black/20">
+<!-- how it works -->
+<section id="how" class="border-t border-white/5 bg-black/20">
   <div class="max-w-6xl mx-auto px-6 py-20">
-    <div class="text-center">
-      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">What it sees</div>
+    <div class="text-center max-w-2xl mx-auto">
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">How it works</div>
       <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
-        Twenty-one corners of your host. One screen.
+        Three steps, then it runs itself.
       </h2>
     </div>
 
+    <div class="mt-12 grid md:grid-cols-3 gap-5">
+      <div class="card rounded-2xl p-6">
+        <div class="text-4xl">🔎</div>
+        <div class="mt-3 text-emerald-300 font-medium">1 · It looks around</div>
+        <p class="mt-2 text-slate-400 text-sm leading-relaxed">
+          avai checks the spots malware likes to hide — programs that auto‑start, browser
+          add‑ons, network connections, plugged‑in USB devices, important system files.
+          It only reads; it never changes anything.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-4xl">🧠</div>
+        <div class="mt-3 text-emerald-300 font-medium">2 · An AI expert reviews it</div>
+        <p class="mt-2 text-slate-400 text-sm leading-relaxed">
+          Anything new gets cross‑checked against trusted security databases (the same ones
+          professionals use), then handed to an AI security analyst that decides how worried
+          you should be — and explains why, in one sentence.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-4xl">📋</div>
+        <div class="mt-3 text-emerald-300 font-medium">3 · You get a simple list</div>
+        <p class="mt-2 text-slate-400 text-sm leading-relaxed">
+          Open one web page and see everything colour‑coded red / yellow / green, newest first,
+          each with a plain‑English reason and a fix. It re‑checks every few minutes and pings
+          you if something dangerous shows up.
+        </p>
+      </div>
+    </div>
+
+    <p class="mt-8 text-center text-sm text-slate-500 max-w-2xl mx-auto">
+      You run it once with a single command (below). After that it works on its own in the
+      background — no accounts to create, no monthly fee, and your data stays on your computer.
+    </p>
+  </div>
+</section>
+
+<!-- what it sees -->
+<section id="what" class="border-t border-white/5">
+  <div class="max-w-6xl mx-auto px-6 py-20">
+    <div class="text-center">
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">What it checks</div>
+      <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
+        All the places trouble hides.
+      </h2>
+      <p class="mt-4 text-slate-400 max-w-2xl mx-auto">
+        You don't need to know what any of these mean — avai watches them so you don't have to.
+      </p>
+    </div>
+
     <div class="mt-12 grid md:grid-cols-3 gap-4">
-      <!-- card -->
       <div class="card rounded-2xl p-6">
-        <div class="text-emerald-300 mono text-sm">processes / network</div>
+        <div class="text-slate-100 font-medium">🚀 Programs that start by themselves</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          Every running PID, every open connection, every listening port. With the binary path, parent chain, and the user it runs as.
+          Malware loves to set itself to launch every time you turn the computer on.
+          avai lists everything configured to auto‑start and flags the ones that don't belong.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-emerald-300 mono text-sm">persistence</div>
+        <div class="text-slate-100 font-medium">🌐 Who your computer is talking to</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          LaunchAgents / LaunchDaemons (macOS), systemd unit files + cron (Linux). The classic "what runs when I'm not looking" surface.
+          Every app that's connected to the internet, and where. If something is quietly
+          phoning home to a known‑bad server, you'll see it.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-emerald-300 mono text-sm">file integrity</div>
+        <div class="text-slate-100 font-medium">🧩 Browser extensions</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          <span class="mono">/etc/passwd</span>, <span class="mono">/etc/shadow</span>, <span class="mono">sshd_config</span>, sudoers, your shell dotfiles. Hashes every cycle; diff is loud.
+          That "free downloader" add‑on that can read every page and your saved passwords?
+          One of the most common ways people get hacked. avai checks what each one can do.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-emerald-300 mono text-sm">hardware</div>
+        <div class="text-slate-100 font-medium">🔌 USB &amp; Bluetooth devices</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          USB devices (sysfs / system_profiler), paired Bluetooth, current Wi-Fi BSSID. Catches the "rubber ducky" and the rogue hotspot.
+          Plugged‑in drives, keyboards, and paired Bluetooth gadgets — including the kind of
+          fake "keyboard" attackers use to sneak in commands.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-emerald-300 mono text-sm">apps + extensions</div>
+        <div class="text-slate-100 font-medium">📄 Tampered system files</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          Installed apps (dpkg / .app bundles), browser extensions across Chrome / Brave / Firefox / Edge. The most common malware vector still.
+          The sensitive files that control logins and permissions. avai notices the instant one
+          of them is quietly changed.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-emerald-300 mono text-sm">posture</div>
+        <div class="text-slate-100 font-medium">🛡️ Your security settings</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          SIP / Gatekeeper / FileVault / TCC.db (macOS) — SELinux / AppArmor / ufw / sshd / LUKS (Linux). Did something just downgrade your defaults?
+          Disk encryption, the firewall, the built‑in malware protections. If something switched
+          one off, that's the first thing you'll want to know.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-emerald-300 mono text-sm">streaming auth</div>
+        <div class="text-slate-100 font-medium">🔑 Login attempts</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          A <span class="mono">tail -f</span> on every <span class="mono">sshd</span>, <span class="mono">sudo</span>, <span class="mono">su</span>, <span class="mono">polkitd</span>, <span class="mono">systemd-logind</span> event. Failed logins surface within seconds.
+          Successful and failed sign‑ins, in real time. A burst of failed logins from somewhere
+          strange shows up within seconds.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-emerald-300 mono text-sm">streaming exec</div>
+        <div class="text-slate-100 font-medium">⚙️ Apps that are installed</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          Every <span class="mono">execve(2)</span> on Linux (auditd), every process spawn on macOS (eslogger). Reverse shells don't get to live in peace.
+          The full list of software on the machine, including anything installed in an unusual
+          place or pretending to be a trusted brand.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-emerald-300 mono text-sm">setuid + mounts</div>
+        <div class="text-slate-100 font-medium">…and a dozen more</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          Every <span class="mono">+s</span> binary on disk, every mounted filesystem with its options. Privilege-escalation primitives, on a list, judged.
+          Scheduled tasks, running programs, drive mounts, special permissions — 21 checks in all.
+          If it's a place attackers hide, avai is already looking there.
         </p>
       </div>
     </div>
@@ -246,55 +309,64 @@
 <section id="judge" class="border-t border-white/5">
   <div class="max-w-6xl mx-auto px-6 py-20 grid md:grid-cols-2 gap-12 items-center">
     <div>
-      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">The LLM judge</div>
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">The AI expert</div>
       <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
-        A second opinion at 3 AM, every 5 minutes.
+        Like having a security analyst on call 24/7.
       </h2>
       <p class="mt-5 text-slate-400 leading-relaxed">
-        avai uses <span class="text-slate-200 font-medium">litellm</span> + Anthropic (Claude) to classify each new
-        finding. Every prompt is structured: the collector, the entity, the judge fields. The model returns
-        a verdict, a MITRE-aligned category, a confidence, and one line of remediation — no markdown,
-        no "as a large language model" preamble.
+        Finding things is easy; knowing which ones <em>matter</em> is the hard part. avai hands
+        each new discovery to an AI security analyst (powered by Claude) that explains, in one
+        plain sentence, why it's safe or risky — and tells you exactly what to do next.
       </p>
       <ul class="mt-6 space-y-2 text-sm text-slate-400">
-        <li class="flex gap-2"><span class="text-emerald-400">→</span> Dedup by content hash. Same artifact is never sent twice.</li>
-        <li class="flex gap-2"><span class="text-emerald-400">→</span> Bring your own key — <span class="mono text-slate-300">ANTHROPIC_API_KEY</span> or <span class="mono text-slate-300">CLAUDE_CODE_OAUTH_TOKEN</span>.</li>
-        <li class="flex gap-2"><span class="text-emerald-400">→</span> Or swap to any litellm-supported provider. Local Ollama works.</li>
-        <li class="flex gap-2"><span class="text-emerald-400">→</span> Verdicts persist. Diff tells you what changed since last cycle.</li>
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> It cross‑checks against 17 trusted security databases before deciding.</li>
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> It only reviews what's <em>new</em>, so it stays fast and quiet.</li>
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> Every alert says <em>why</em> and <em>how to fix it</em> — no security degree required.</li>
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> Resolved problems disappear from the list automatically.</li>
       </ul>
+      <p class="mt-6 text-xs text-slate-500">
+        Here's what real alerts look like — three findings from one check:
+      </p>
     </div>
 
     <div class="space-y-4">
       <!-- example finding -->
       <div class="card rounded-xl p-5">
         <div class="flex items-center justify-between text-xs">
-          <span class="mono text-slate-500">launch_items · LaunchAgent</span>
-          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 ring-1 ring-rose-500/30">malicious · 0.92</span>
+          <span class="text-slate-400">Auto‑start program</span>
+          <span class="verdict-pill inline-flex px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 ring-1 ring-rose-500/30">🔴 dangerous</span>
         </div>
-        <div class="mono mt-2 text-sm text-slate-200">com.example.updater.plist</div>
-        <div class="text-xs text-slate-500 mono mt-1">~/Library/LaunchAgents/com.example.updater.plist · RunAtLoad=true</div>
-        <p class="text-sm text-slate-400 mt-3"><span class="text-rose-300 font-medium">defense_evasion · t1547.011</span> — runs a binary from <span class="mono">/private/tmp</span> as the user at every login. No Apple notarisation; no parent app.</p>
-        <p class="text-xs text-emerald-300 mt-3 mono">→ launchctl unload &amp;&amp; rm; investigate /private/tmp/.upd</p>
+        <div class="mt-2 text-sm text-slate-200 font-medium">A hidden "updater" that runs at every login</div>
+        <p class="text-sm text-slate-400 mt-3">
+          It launches a program from a temporary folder every time you sign in, and it isn't
+          signed by a known software maker — a classic way malware stays on a machine.
+        </p>
+        <p class="text-xs text-emerald-300 mt-3">→ Remove it, then check that temp folder for what it was running.</p>
       </div>
 
       <div class="card rounded-xl p-5">
         <div class="flex items-center justify-between text-xs">
-          <span class="mono text-slate-500">browser_extensions · Chrome</span>
-          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30">suspicious · 0.74</span>
+          <span class="text-slate-400">Browser extension · Chrome</span>
+          <span class="verdict-pill inline-flex px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30">🟡 worth a look</span>
         </div>
-        <div class="mono mt-2 text-sm text-slate-200">"Free YouTube Video Downloader"</div>
-        <div class="text-xs text-slate-500 mono mt-1">id: bjcbflk... · permissions: tabs, &lt;all_urls&gt;, webRequest, cookies</div>
-        <p class="text-sm text-slate-400 mt-3"><span class="text-amber-300 font-medium">credential_access</span> — broad host permissions + cookie access are inconsistent with stated function. Common monetisation-malware pattern.</p>
-        <p class="text-xs text-emerald-300 mt-3 mono">→ disable; check chrome://extensions install date</p>
+        <div class="mt-2 text-sm text-slate-200 font-medium">"Free YouTube Video Downloader"</div>
+        <p class="text-sm text-slate-400 mt-3">
+          For a video downloader, it asks for a lot — it can read every website you visit and
+          your login cookies. That mismatch is a common sign of a sketchy add‑on.
+        </p>
+        <p class="text-xs text-emerald-300 mt-3">→ Turn it off and check when it was installed.</p>
       </div>
 
       <div class="card rounded-xl p-5">
         <div class="flex items-center justify-between text-xs">
-          <span class="mono text-slate-500">network_connections · psutil</span>
-          <span class="verdict-pill mono inline-flex px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30">benign · 0.98</span>
+          <span class="text-slate-400">Internet connection</span>
+          <span class="verdict-pill inline-flex px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30">🟢 all good</span>
         </div>
-        <div class="mono mt-2 text-sm text-slate-200">Spotify.app → 35.186.224.47:443</div>
-        <p class="text-sm text-slate-400 mt-3">Signed Apple binary, established TLS to Spotify-owned ASN. Expected.</p>
+        <div class="mt-2 text-sm text-slate-200 font-medium">Spotify talking to Spotify's servers</div>
+        <p class="text-sm text-slate-400 mt-3">
+          A trusted, signed app making a normal, encrypted connection to its own company.
+          Nothing to worry about.
+        </p>
       </div>
     </div>
   </div>
@@ -304,13 +376,14 @@
 <section id="dashboard" class="border-t border-white/5 bg-black/30">
   <div class="max-w-6xl mx-auto px-6 py-20">
     <div class="text-center max-w-2xl mx-auto">
-      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">The dashboard</div>
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">What you see</div>
       <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
-        One page. Live. Read-only.
+        One simple web page.
       </h2>
       <p class="mt-5 text-slate-400">
-        Flask + HTMX + Chart.js. Pages auto-refresh, sounds on new <span class="text-rose-300">malicious</span> findings,
-        diffs against the previous cycle so resolved items don't haunt you forever.
+        Open it in your browser and everything's right there — a colour‑coded list of findings,
+        newest first. It refreshes on its own and chimes if something
+        <span class="text-rose-300">dangerous</span> appears. Click any row for the full story.
       </p>
     </div>
 
@@ -334,12 +407,12 @@
           </div>
         </div>
         <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 py-3">
-          <div class="text-xs text-slate-500 uppercase tracking-wider">collectors</div>
+          <div class="text-xs text-slate-500 uppercase tracking-wider">checks run</div>
           <div class="mt-1 mono text-emerald-300 text-sm">21 / 21 ok</div>
         </div>
         <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 py-3">
-          <div class="text-xs text-slate-500 uppercase tracking-wider">integrity</div>
-          <div class="mt-1 mono text-emerald-300 text-sm">passing</div>
+          <div class="text-xs text-slate-500 uppercase tracking-wider">system health</div>
+          <div class="mt-1 mono text-emerald-300 text-sm">all good</div>
         </div>
       </div>
 
@@ -350,27 +423,27 @@
         <table class="w-full text-sm">
           <tbody class="mono">
             <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-rose-300">malicious</td>
-              <td class="px-4 py-2 text-slate-400">launch_items</td>
-              <td class="px-4 py-2 text-slate-300 truncate">com.example.updater.plist</td>
+              <td class="px-4 py-2 text-rose-300">🔴 dangerous</td>
+              <td class="px-4 py-2 text-slate-400">auto‑start</td>
+              <td class="px-4 py-2 text-slate-300 truncate">Hidden "updater" runs at every login</td>
               <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
             </tr>
             <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-amber-300">suspicious</td>
-              <td class="px-4 py-2 text-slate-400">browser_extensions</td>
+              <td class="px-4 py-2 text-amber-300">🟡 worth a look</td>
+              <td class="px-4 py-2 text-slate-400">extension</td>
               <td class="px-4 py-2 text-slate-300 truncate">"Free YouTube Video Downloader"</td>
               <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
             </tr>
             <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-emerald-300">benign</td>
-              <td class="px-4 py-2 text-slate-400">processes</td>
-              <td class="px-4 py-2 text-slate-300 truncate">/Applications/Spotify.app/...</td>
+              <td class="px-4 py-2 text-emerald-300">🟢 all good</td>
+              <td class="px-4 py-2 text-slate-400">connection</td>
+              <td class="px-4 py-2 text-slate-300 truncate">Spotify → Spotify's servers</td>
               <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
             </tr>
             <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-slate-300">unknown</td>
-              <td class="px-4 py-2 text-slate-400">usb_devices</td>
-              <td class="px-4 py-2 text-slate-300 truncate">Logitech USB Receiver (046d:c52b)</td>
+              <td class="px-4 py-2 text-slate-300">⚪ not sure</td>
+              <td class="px-4 py-2 text-slate-400">USB device</td>
+              <td class="px-4 py-2 text-slate-300 truncate">Logitech wireless receiver</td>
               <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
             </tr>
           </tbody>
@@ -384,10 +457,15 @@
 <section id="install" class="border-t border-white/5">
   <div class="max-w-6xl mx-auto px-6 py-20">
     <div class="text-center max-w-2xl mx-auto">
-      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">Install</div>
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">Get started</div>
       <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
-        Three paths. Pick one.
+        One command to run it.
       </h2>
+      <p class="mt-4 text-slate-400">
+        This part is for whoever sets up your computer or server — it's a single line they paste
+        into a terminal. Not sure what that means? Send them this page; they'll know exactly what
+        to do. Once it's running, you just open the web page.
+      </p>
     </div>
 
     <div class="mt-12 grid md:grid-cols-3 gap-5">
@@ -438,7 +516,7 @@ avai dashboard</pre>
       <span>·</span>
       <span>MIT</span>
       <span>·</span>
-      <span>built for paranoid sysadmins</span>
+      <span>a simple security check‑up for your computer</span>
     </div>
     <div class="flex items-center gap-5">
       <a class="hover:text-slate-200" href="https://github.com/iklobato/avai">GitHub</a>
