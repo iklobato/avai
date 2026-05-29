@@ -24,7 +24,7 @@ MITRE-aligned category, a confidence, and a one-line remediation.
 - BYO key (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`), or swap to any litellm-supported provider.
 
 → Marketing site & screenshots: **<https://getavai.com>**
-→ Source: <https://github.com/iklob1/avai>
+→ Source: <https://github.com/iklobato/avai>
 
 ---
 
