@@ -3,6 +3,17 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.3.2] — 2026-05-29
+
+### Changed
+- **Dashboard runs on a production WSGI server (waitress).** `avai
+  dashboard` previously used Flask's development server and printed
+  "This is a development server. Do not use it in a production
+  deployment." It now serves on waitress (pure-Python, cross-platform);
+  `--debug` still uses the Werkzeug reloader/debugger, and a missing
+  waitress degrades to the dev server rather than failing. Adds
+  `waitress>=3.0` as a dependency.
+
 ## [0.3.1] — 2026-05-29
 
 ### Changed

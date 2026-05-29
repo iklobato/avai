@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 # differs, because the canonical `avai` slot is blocked by PyPI's
 # name-similarity policy.
 name = "avai-monitor"
-version = "0.3.1"
+version = "0.3.2"
 description = "macOS / Linux host-security telemetry collector with an LLM threat judge and a single-page web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
