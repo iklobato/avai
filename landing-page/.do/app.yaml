@@ -9,15 +9,14 @@ static_sites:
       branch: release/0.1.0
       deploy_on_push: true
     index_document: index.html
-    error_document: index.html
+    # SPA shell: serve index.html for any unmatched path. (error_document
+    # and catchall_document are mutually exclusive — catchall wins for a
+    # single-page marketing site.)
     catchall_document: index.html
     routes:
       - path: /
 
-domains:
-  - domain: getavai.com
-    type: PRIMARY
-    zone: getavai.com
-  - domain: www.getavai.com
-    type: ALIAS
-    zone: getavai.com
+# Custom domain is attached after the first deploy (see deploy notes):
+# getavai.com's DNS zone lives at GoDaddy, not DigitalOcean, so DO can't
+# manage the zone here. Instead we add the domain to the app and point a
+# CNAME at the app's *.ondigitalocean.app ingress from GoDaddy.
