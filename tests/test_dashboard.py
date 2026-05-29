@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import _engine, _ensure_db_exists, app, system_integrity
+from avai.dashboard import _engine, _ensure_db_exists, app, latest_run, system_integrity
 from avai.host_monitor import Sink, SystemIntegrityRow
 
 # ---------------------------------------------------------------------------
@@ -277,3 +277,42 @@ class TestWalVisibility:
             assert n == 1
         finally:
             w.close()
+
+
+class TestLatestRunFallback:
+    """latest_run shows a completed run when one exists, else the most
+    recent in-progress run — so the dashboard isn't empty for the whole
+    first cycle (the recurring 'no run yet' complaint)."""
+
+    def _sink(self, tmp_path):
+        engine = create_engine(
+            f"sqlite:///{tmp_path/'r.db'}", connect_args={"check_same_thread": False}
+        )
+        s = Sink(engine)
+        s.setup()
+        return s
+
+    def test_in_progress_run_shown_when_none_completed(self, tmp_path):
+        sink = self._sink(tmp_path)
+        sink.start_run("h", 5)  # in-progress, finished_at is NULL
+        with Session(sink.engine) as s:
+            run = latest_run(s)
+        assert run is not None  # not None → dashboard shows it
+        assert run.finished_at is None
+
+    def test_prefers_completed_over_newer_in_progress(self, tmp_path):
+        sink = self._sink(tmp_path)
+        done_id, _ = sink.start_run("h", 5)
+        sink.end_run(ok=3, failed=0)  # completed (older)
+        sink.run_id = None
+        sink.start_run("h", 5)  # newer, in-progress
+        with Session(sink.engine) as s:
+            run = latest_run(s)
+        # Steady state: show the stable completed run, not the empty new one.
+        assert run.run_id == done_id
+        assert run.finished_at is not None
+
+    def test_none_when_no_runs_at_all(self, tmp_path):
+        sink = self._sink(tmp_path)
+        with Session(sink.engine) as s:
+            assert latest_run(s) is None

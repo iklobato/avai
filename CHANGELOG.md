@@ -3,6 +3,18 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.2.6] — 2026-05-29
+
+### Fixed
+- **Dashboard showed "no run yet" for the entire first cycle.**
+  `latest_run()` only returned *completed* runs, so while the monitor
+  ground through its first cycle (minutes of collecting + LLM judging)
+  every panel sat empty — and if the monitor was killed/restarted
+  mid-cycle, it stayed empty forever. Now it prefers the latest
+  completed run but **falls back to the most recent in-progress run**,
+  so the dashboard shows live, partial data immediately. Steady state
+  is unchanged (a completed run is still preferred → no flicker).
+
 ## [0.2.5] — 2026-05-29
 
 ### Fixed

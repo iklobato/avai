@@ -211,19 +211,28 @@ def _session() -> Session:
 
 
 def latest_run(session: Session):
-    """Most recent *completed* snapshot run.
+    """The run the dashboard should display.
 
-    Aborted runs (the process was killed before ``end_run`` updated the
-    counts) are excluded — they would show as 0/0 collectors and zero
-    rows, which is misleading for "latest" displays. The full
-    chronological list, including aborts, is still shown by
-    ``recent_runs()``.
+    Prefer the most recent *completed* run (a consistent, fully
+    populated snapshot — and no flicker to empty when the next cycle
+    starts). But if nothing has completed yet — the common first-run
+    case, where the monitor is still grinding through its first cycle
+    (collectors + LLM judging take minutes) — fall back to the most
+    recent in-progress run so the dashboard shows live, partial data
+    instead of "no run yet". Otherwise the user stares at an empty
+    page for the entire first cycle.
     """
-    return session.execute(
+    completed = session.execute(
         select(CollectionRun)
         .where(CollectionRun.finished_at.is_not(None))
         .order_by(desc(CollectionRun.started_at))
         .limit(1)
+    ).scalar_one_or_none()
+    if completed is not None:
+        return completed
+    # No completed run yet → show the latest in-progress one.
+    return session.execute(
+        select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(1)
     ).scalar_one_or_none()
 
 
