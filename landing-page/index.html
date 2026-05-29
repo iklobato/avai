@@ -493,11 +493,53 @@ docker compose up -d</pre>
       <!-- pip -->
       <div class="card rounded-2xl p-6">
         <div class="text-slate-100 font-medium">pip</div>
-        <p class="mt-2 text-sm text-slate-400">Full macOS coverage needs the native install + sudo.</p>
-        <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">pip install 'avai[judge]'
+        <p class="mt-2 text-sm text-slate-400">Best on a Linux server — full visibility with sudo.</p>
+        <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">pip install 'avai-monitor[judge]'
 sudo avai monitor &
 avai dashboard</pre>
       </div>
+    </div>
+
+    <!-- common recipes -->
+    <div class="mt-12 max-w-3xl mx-auto">
+      <div class="text-center text-emerald-400 text-xs uppercase tracking-widest font-medium">Common recipes</div>
+      <div class="mt-6 space-y-4">
+
+        <div class="card rounded-xl p-5">
+          <div class="text-sm text-slate-200 font-medium">🔑 Turn on the AI verdicts</div>
+          <p class="mt-1 text-xs text-slate-500">Add an API key; everything else stays the same.</p>
+          <pre class="mono text-xs mt-3 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">docker run -p 8765:8765 -v "$PWD":/data \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  iklob1/avai avai monitor --db /data/avai.db</pre>
+        </div>
+
+        <div class="card rounded-xl p-5">
+          <div class="text-sm text-slate-200 font-medium">🖥️ Watch a Linux server, keep it running</div>
+          <p class="mt-1 text-xs text-slate-500">Install once; it re-checks every 5 minutes on its own.</p>
+          <pre class="mono text-xs mt-3 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">pip install 'avai-monitor[judge]'
+sudo -E avai monitor --db /var/lib/avai/avai.db --interval 300 &
+avai dashboard --db /var/lib/avai/avai.db --host 0.0.0.0</pre>
+        </div>
+
+        <div class="card rounded-xl p-5">
+          <div class="text-sm text-slate-200 font-medium">📟 See the alerts without opening a browser</div>
+          <p class="mt-1 text-xs text-slate-500">It's one file — ask it for the things worth worrying about.</p>
+          <pre class="mono text-xs mt-3 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">sqlite3 -box avai.db "SELECT verdict, collector, reasoning
+  FROM judgements
+  WHERE verdict IN ('malicious','suspicious');"</pre>
+        </div>
+
+        <div class="card rounded-xl p-5">
+          <div class="text-sm text-slate-200 font-medium">👀 Already have a scan? Just view it</div>
+          <p class="mt-1 text-xs text-slate-500">Point the dashboard at any avai.db, on any computer.</p>
+          <pre class="mono text-xs mt-3 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">docker run --rm -p 8765:8765 -v "$PWD":/data iklob1/avai</pre>
+        </div>
+
+      </div>
+      <p class="mt-6 text-center text-xs text-slate-500">
+        Full guide &amp; more examples in the
+        <a class="text-emerald-300 hover:underline" href="https://github.com/iklobato/avai#readme">README</a>.
+      </p>
     </div>
 
     <p class="mt-10 text-center text-sm text-slate-500">

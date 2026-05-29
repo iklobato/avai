@@ -343,6 +343,139 @@ docker pull iklob1/avai
 
 ---
 
+## 7 — Recipes
+
+Practical, copy‑paste scenarios beyond the basics above.
+
+### Native install on a Linux server (full host visibility)
+
+Inside a container on a real Linux host the monitor already works, but
+the simplest way to watch a server is to install it natively and let
+it see everything directly:
+
+```sh
+pip install 'avai-monitor[judge]'          # [judge] pulls litellm + anthropic
+export ANTHROPIC_API_KEY=sk-ant-...         # or CLAUDE_CODE_OAUTH_TOKEN
+export ABUSE_CH_AUTH_KEY=...                # optional, free — adds 3 sources
+
+sudo -E avai monitor --db /var/lib/avai/avai.db --interval 300 &
+avai dashboard --db /var/lib/avai/avai.db --host 0.0.0.0 --port 8765
+```
+
+`sudo` lets the collectors read root‑owned state (`/etc/shadow`,
+other users' crontabs, every process). `-E` preserves your API keys
+across the sudo boundary.
+
+### Keep it running with systemd
+
+`/etc/systemd/system/avai.service`:
+
+```ini
+[Unit]
+Description=avai host monitor
+After=network-online.target
+
+[Service]
+Environment=ANTHROPIC_API_KEY=sk-ant-...
+Environment=ABUSE_CH_AUTH_KEY=...
+ExecStart=/usr/local/bin/avai monitor --db /var/lib/avai/avai.db --interval 300
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl enable --now avai
+journalctl -u avai -f          # watch cycles
+```
+
+### Read findings straight from the command line (no dashboard)
+
+Everything lives in one SQLite file, so you can query it directly —
+handy for scripting, cron mail, or a server with no browser:
+
+```sh
+# The active dangerous + suspicious findings, newest first
+sqlite3 -box /var/lib/avai/avai.db "
+  SELECT verdict, collector, substr(reasoning,1,60) AS why
+  FROM judgements
+  WHERE verdict IN ('malicious','suspicious')
+  ORDER BY created_at DESC LIMIT 20;"
+
+# Count by verdict
+sqlite3 /var/lib/avai/avai.db \
+  "SELECT verdict, count(*) FROM judgements GROUP BY verdict;"
+
+# What did the threat-intel sources say?
+sqlite3 -box /var/lib/avai/avai.db "
+  SELECT source, verdict_hint, substr(summary,1,70)
+  FROM enrichment_evidence
+  WHERE verdict_hint IN ('malicious','suspicious');"
+```
+
+### Run a one‑shot scan from cron (instead of the always‑on daemon)
+
+```sh
+# /etc/cron.d/avai — scan once an hour, no streaming
+0 * * * * root ANTHROPIC_API_KEY=sk-ant-... \
+  avai monitor --once --no-streaming --db /var/lib/avai/avai.db
+```
+
+### Split setup: monitor on the server, dashboard on your laptop
+
+The monitor writes the DB; the dashboard only reads it. Sync the file
+(rsync/scp/NFS) and view it anywhere:
+
+```sh
+# on the server (writer)
+avai monitor --db /var/lib/avai/avai.db --interval 300
+
+# pull it to your laptop and view (reader — any OS, no privileges)
+scp server:/var/lib/avai/avai.db ./avai.db
+docker run --rm -p 8765:8765 -v "$PWD":/data iklob1/avai
+```
+
+### Keep LLM cost low
+
+```sh
+avai monitor \
+  --judge-model claude-haiku-4-5-20251001 \   # cheapest tier (default)
+  --judge-max-per-collector 20 \              # cap new items judged per cycle
+  --judge-batch-size 20                        # entries per API call
+```
+
+Cost is near‑zero in steady state anyway — only *new* artifacts are
+judged, and threat‑intel verdicts are cached, so quiet hosts make
+almost no API calls after the first cycle.
+
+### Turn enrichment on/off and debug one source
+
+```sh
+avai monitor --no-enrich                       # collectors + judge only
+avai monitor --enrich-only cisa_kev            # just this source (repeatable)
+avai monitor --enrich-only virustotal --enrich-only abuseipdb
+```
+
+Source names: `malware_bazaar` `urlhaus` `threatfox` `circl_hashlookup`
+`shodan_internetdb` `feodo_tracker` `osv` `cisa_kev` `nvd` `endoflife`
+`crtsh` `virustotal` `abuseipdb` `greynoise` `safe_browsing`
+`phishtank` `github_advisory`.
+
+### Bring your own LLM provider
+
+`--judge-model` is a [litellm](https://docs.litellm.ai/docs/providers)
+model id, so any supported provider works:
+
+```sh
+avai monitor --judge-model gpt-4o-mini            # OpenAI (OPENAI_API_KEY)
+avai monitor --judge-model ollama/llama3.1        # local, free, offline
+avai monitor --judge-model gemini/gemini-1.5-pro  # Google
+```
+
+---
+
 ## What's collected (one-line summary)
 
 Snapshot collectors (run every cycle, default 300s):
