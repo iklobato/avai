@@ -204,6 +204,126 @@ class TestNetworkFlowsAggregation:
         assert "tcpdump aggregator" in html
 
 
+def _seed_intel(engine, evidence: list[dict]) -> None:
+    """Insert enrichment_evidence rows through the ORM model the dashboard
+    queries (so the test exercises the same path)."""
+    from avai.enrichers.cache import register_schema
+    from avai.host_monitor import Base
+
+    model = register_schema(Base)
+    with Session(engine) as s:
+        for e in evidence:
+            s.add(
+                model(
+                    source=e["source"],
+                    indicator_type="ipv4",
+                    indicator_value=e["ip"],
+                    verdict_hint=e["hint"],
+                    confidence=e.get("confidence", 0.8),
+                    summary=e.get("summary", ""),
+                    details_json="{}",
+                    fetched_at="2026-05-29T00:00:00",
+                )
+            )
+        s.commit()
+
+
+class TestThreatIntelColumn:
+    def test_evidence_attached_and_worst_source_first(self, seeded):
+        engine, run_id = seeded
+        _seed_intel(
+            engine,
+            [
+                {
+                    "source": "GreyNoise",
+                    "ip": "203.0.113.9",
+                    "hint": "benign",
+                    "summary": "scanner",
+                },
+                {
+                    "source": "Feodo Tracker",
+                    "ip": "203.0.113.9",
+                    "hint": "malicious",
+                    "summary": "known C2",
+                },
+            ],
+        )
+        with Session(engine) as s:
+            rows = network_flows(s, run_id)["rows"]
+        bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
+        sources = [e["source"] for e in bad["intel"]]
+        assert set(sources) == {"Feodo Tracker", "GreyNoise"}
+        # malicious source sorts ahead of the benign one
+        assert bad["intel"][0]["source"] == "Feodo Tracker"
+        assert bad["intel"][0]["summary"] == "known C2"
+
+    def test_destination_without_evidence_has_empty_intel(self, seeded):
+        engine, run_id = seeded
+        _seed_intel(
+            engine,
+            [{"source": "Feodo Tracker", "ip": "203.0.113.9", "hint": "malicious"}],
+        )
+        with Session(engine) as s:
+            rows = network_flows(s, run_id)["rows"]
+        benign = next(r for r in rows if r["dst_ip"] == "142.250.80.46")
+        assert benign["intel"] == []
+
+    def test_fragment_renders_intel_pills_and_header(self, seeded):
+        engine, run_id = seeded
+        _seed_intel(
+            engine,
+            [
+                {
+                    "source": "AbuseIPDB",
+                    "ip": "203.0.113.9",
+                    "hint": "malicious",
+                    "summary": "reported 40x",
+                }
+            ],
+        )
+        db = str(engine.url).replace("sqlite:///", "")
+        app.config.update(TESTING=True, DB_PATH=db)
+        with app.test_client() as c:
+            html = c.get("/fragments/network-flows").data.decode()
+        assert "threat intel" in html  # new column header
+        assert "AbuseIPDB" in html  # evidence pill
+        assert "no intel" in html  # benign destination has none
+
+    def test_no_intel_when_evidence_table_absent(self, tmp_path):
+        """Older DB lacking enrichment_evidence must not 500 — intel empty."""
+        from sqlalchemy import text
+
+        db = tmp_path / "noev.db"
+        engine = create_engine(
+            f"sqlite:///{db}", connect_args={"check_same_thread": False}
+        )
+        sink = Sink(engine)
+        sink.setup()
+        run_id, ts = sink.start_run("h", 5)
+        from avai.host_monitor import content_hash
+
+        fields = ("iface", "proto", "dst_ip", "dst_port")
+        row = {
+            "iface": "en0",
+            "proto": "tcp",
+            "dst_ip": "8.8.8.8",
+            "dst_port": 53,
+            "service": "domain",
+            "packets": 3,
+            "first_seen": ts,
+            "last_seen": ts,
+            "run_id": run_id,
+            "collected_at": ts,
+        }
+        row["content_hash"] = content_hash(row, fields)
+        sink.write(NetworkFlowRow, [row])
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE enrichment_evidence"))
+        with Session(engine) as s:
+            rows = network_flows(s, run_id)["rows"]
+        assert rows[0]["intel"] == []
+
+
 class TestMissingTableGraceful:
     """Simulate a DB written by an older monitor that predates this
     collector: full schema, then drop network_flows. The dashboard must
@@ -258,23 +378,28 @@ class TestMissingColumnGraceful:
 
     def test_handles_table_without_iface_column(self, tmp_path):
         from sqlalchemy import text
+
         db = tmp_path / "noiface.db"
-        engine = create_engine(f"sqlite:///{db}",
-                               connect_args={"check_same_thread": False})
+        engine = create_engine(
+            f"sqlite:///{db}", connect_args={"check_same_thread": False}
+        )
         sink = Sink(engine)
         sink.setup()
         run_id, ts = sink.start_run("h", 5)
         # simulate the pre-iface schema: drop the column
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE network_flows DROP COLUMN iface"))
-            conn.execute(text(
-                "INSERT INTO network_flows "
-                "(run_id, collected_at, content_hash, proto, dst_ip, dst_port, "
-                " service, packets) "
-                "VALUES (:r, :t, 'h1', 'tcp', '8.8.8.8', 443, 'https', 5)"
-            ), {"r": run_id, "t": ts})
+            conn.execute(
+                text(
+                    "INSERT INTO network_flows "
+                    "(run_id, collected_at, content_hash, proto, dst_ip, dst_port, "
+                    " service, packets) "
+                    "VALUES (:r, :t, 'h1', 'tcp', '8.8.8.8', 443, 'https', 5)"
+                ),
+                {"r": run_id, "t": ts},
+            )
         with Session(engine) as s:
             data = network_flows(s, run_id)
         assert data["summary"]["destinations"] == 1
         assert data["rows"][0]["dst_ip"] == "8.8.8.8"
-        assert data["rows"][0]["iface"] == "—"   # NULL → rendered placeholder
+        assert data["rows"][0]["iface"] == "—"  # NULL → rendered placeholder

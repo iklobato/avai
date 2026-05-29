@@ -7,6 +7,13 @@
   'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
 } %}
 
+{% set intel_cls = {
+  'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
+  'suspicious': 'bg-amber-900/40 text-amber-300 border border-amber-900/60',
+  'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
+  'unknown':    'bg-slate-800 text-slate-400 border border-slate-700',
+} %}
+
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
   {{ card_header("network flows — tcpdump aggregator (by destination)") }}
 
@@ -42,6 +49,7 @@
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
           <th class="text-left  font-semibold pb-2">verdict</th>
           <th class="text-left  font-semibold pb-2">destination</th>
+          <th class="text-left  font-semibold pb-2">threat intel</th>
           <th class="text-left  font-semibold pb-2">interface</th>
           <th class="text-left  font-semibold pb-2">proto</th>
           <th class="text-left  font-semibold pb-2">ports</th>
@@ -67,6 +75,21 @@
               {% endif %}
             </td>
             <td class="py-2 text-slate-200 font-mono">{{ f.dst_ip }}</td>
+            <td class="py-2">
+              {% if f.intel %}
+                <div class="flex flex-wrap gap-1">
+                  {% for e in f.intel %}
+                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px]
+                                 font-medium {{ intel_cls.get(e.hint, intel_cls['unknown']) }}"
+                          title="{{ e.source }}{% if e.summary %} — {{ e.summary }}{% endif %}">
+                      {{ e.source }}{% if e.hint %} · {{ e.hint }}{% endif %}
+                    </span>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <span class="text-slate-600 text-[10px]">no intel</span>
+              {% endif %}
+            </td>
             <td class="py-2 text-sky-300 font-mono">{{ f.iface }}</td>
             <td class="py-2 text-slate-400 font-mono">{{ f.proto }}</td>
             <td class="py-2 text-slate-400 font-mono">{{ f.ports }}</td>

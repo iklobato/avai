@@ -628,8 +628,16 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
                 "verdict": g["verdict"],
                 "confidence": g["confidence"],
                 "reasoning": g["reasoning"],
+                "intel": [],  # filled below from the enrichment cache
             }
         )
+
+    # Attach threat-intel evidence per destination IP — what Feodo
+    # Tracker / AbuseIPDB / GreyNoise / Shodan / VirusTotal said about
+    # each address — pulled from the enrichment_evidence cache the
+    # monitor already populated.
+    _attach_ip_intel(session, rows)
+
     rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -r["packets"]))
 
     summary = {
@@ -646,6 +654,47 @@ def _port_sort_key(p: str):
     """Sort '443/https' or '4444' numerically by the leading port."""
     head = p.split("/", 1)[0]
     return int(head) if head.isdigit() else 0
+
+
+# Hint severity for ordering the per-IP evidence (worst source first).
+_HINT_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3}
+
+
+def _attach_ip_intel(session: Session, rows: list[dict]) -> None:
+    """Populate each row's ``intel`` with the threat-intel evidence cached
+    for its destination IP (one entry per source: Feodo, AbuseIPDB,
+    GreyNoise, Shodan, VirusTotal, …). No-op if the enrichment cache
+    table doesn't exist or there are no rows."""
+    if not rows or "enrichment_evidence" not in _existing_tables(session):
+        return
+    ips = [r["dst_ip"] for r in rows if r.get("dst_ip")]
+    if not ips:
+        return
+    # Register the enrichment ORM model against the dashboard's Base
+    # (idempotent — no-op if the monitor's startup already did it) so we
+    # can query the cache through the ORM rather than raw SQL.
+    from avai.enrichers import IndicatorType
+    from avai.enrichers.cache import register_schema
+
+    model = register_schema(Base)
+    stmt = select(
+        model.indicator_value,
+        model.source,
+        model.verdict_hint,
+        model.summary,
+    ).where(
+        model.indicator_type == str(IndicatorType.IPV4),
+        model.indicator_value.in_(ips),
+    )
+    by_ip: dict[str, list[dict]] = {}
+    for ip, source, hint, summary in session.execute(stmt).all():
+        by_ip.setdefault(ip, []).append(
+            {"source": source, "hint": hint, "summary": summary or ""}
+        )
+    for r in rows:
+        ev = by_ip.get(r["dst_ip"], [])
+        ev.sort(key=lambda e: _HINT_SEV.get(e["hint"], 9))
+        r["intel"] = ev
 
 
 def system_integrity(session: Session, run_id: str):
