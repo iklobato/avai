@@ -3,6 +3,17 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.3.1] — 2026-05-29
+
+### Changed
+- **CLI defaults so the bare commands "just work".** `avai monitor` now
+  defaults to `--db ~/.avai/avai.db --interval 300
+  --judge-max-per-collector 25`, and `avai dashboard` to
+  `--db ~/.avai/avai.db --port 8765` — the monitor and dashboard share
+  one per-user DB with no flags. (`DEFAULT_DB_PATH` moved from the cwd to
+  `~/.avai/avai.db`; `--judge-max-per-collector` default 200 → 25.) Use
+  `sudo -E` so `~` resolves to your home, not root's.
+
 ## [0.3.0] — 2026-05-29
 
 ### Added
