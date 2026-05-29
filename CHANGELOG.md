@@ -3,7 +3,7 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
-## [Unreleased]
+## [0.2.2] — 2026-05-28
 
 ### Fixed
 - **`launch_items` collector crashed in container mode.**
