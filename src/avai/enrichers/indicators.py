@@ -155,6 +155,40 @@ class NetworkFlowExtractor(IndicatorExtractor):
         )
 
 
+class DnsQueryExtractor(IndicatorExtractor):
+    """DNS questions — enrich the queried domain so the judge sees
+    PhishTank / URLhaus / threat-feed verdicts before deciding. DoH rows
+    carry a provider name (not a domain) and are skipped here."""
+
+    def extract(self, row):
+        qname = row.get("qname")
+        if isinstance(qname, str) and _is_domain(qname):
+            yield Indicator(
+                IndicatorType.DOMAIN,
+                qname,
+                context={"qtype": str(row.get("qtype") or "")},
+            )
+
+
+class HostsFileExtractor(IndicatorExtractor):
+    """/etc/hosts mappings — enrich the target IP (if public) and each
+    real domain on the line, so a hijack entry (e.g. a bank domain
+    pointed at an attacker IP) gets threat-intel."""
+
+    def extract(self, row):
+        ip = row.get("ip")
+        if isinstance(ip, str) and not _is_private_ip(ip):
+            if _is_ipv4(ip):
+                yield Indicator(IndicatorType.IPV4, ip)
+            elif _is_ipv6(ip):
+                yield Indicator(IndicatorType.IPV6, ip)
+        names = row.get("hostnames")
+        if isinstance(names, str):
+            for host in names.split():
+                if _is_domain(host):
+                    yield Indicator(IndicatorType.DOMAIN, host)
+
+
 class ListeningPortExtractor(IndicatorExtractor):
     def extract(self, row):
         # listening_ports has laddr (bind ip) — only flag publicly bound.
@@ -281,6 +315,8 @@ EXTRACTORS: dict[str, IndicatorExtractor] = {
     "processes": ProcessExtractor(),
     "network_connections": NetworkConnectionExtractor(),
     "network_flows": NetworkFlowExtractor(),
+    "dns_queries": DnsQueryExtractor(),
+    "hosts_file": HostsFileExtractor(),
     "listening_ports": ListeningPortExtractor(),
     "launch_items": LaunchItemExtractor(),
     "setuid_files": SetuidFileExtractor(),

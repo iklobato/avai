@@ -96,6 +96,44 @@ exfiltration). Benign: flows to well-known CDNs / cloud providers on \
 443/80, local/RFC1918 destinations, OS update servers.\
 """
 
+dns_queries = """\
+Each row is a DNS question (qname) the host asked a resolver, with a \
+count, or a detected DoH endpoint (qtype=DoH). If an `evidence` array is \
+present it holds threat-intel for the domain — trust it. Flag: lookups of \
+domains flagged malicious (PhishTank, URLhaus, ThreatFox); algorithmically \
+generated / high-entropy domains (DGA); long base32/hex labels suggesting \
+DNS tunneling/exfiltration; typosquats of banks / brands / the local org; \
+DoH to a resolver that isn't the configured one (bypasses DNS visibility). \
+Benign: common CDNs, OS/app update domains, well-known services.\
+"""
+
+ssh_authorized_keys = """\
+Each row is a public key authorized to log in over SSH as `owner`. Flag: \
+keys with permissive or missing `from=`/`command=` restrictions on \
+privileged accounts; unfamiliar or generic comments (e.g. blank, \
+"root@kali", attacker-style handles); keys on service/system accounts that \
+shouldn't allow interactive login; sudden new keys. Benign: keys with \
+recognizable user@host comments matching known admins.\
+"""
+
+hosts_file = """\
+Each row is an /etc/hosts mapping (ip -> hostnames). If an `evidence` \
+array is present, trust its verdict on the ip/domain. Flag: real public \
+domains (banks, OS/app update servers, security vendors) pointed at \
+private/attacker IPs (hijack/MITM); security or telemetry domains \
+sinkholed to 0.0.0.0/127.0.0.1 (tamper to disable protection); mappings \
+to known-bad IPs. Benign: standard localhost/loopback entries.\
+"""
+
+privilege_config = """\
+Each row is a privilege-granting fact: a sudoers rule (kind=sudoers), a \
+member list of admin/wheel/sudo (kind=group), or a uid-0 account \
+(kind=account). Flag: NOPASSWD/ALL=(ALL) rules for non-admin or service \
+users; unexpected members in privileged groups; uid-0 accounts other than \
+root; sudoers rules added under /etc/sudoers.d with unfamiliar names. \
+Benign: the expected admin user(s), distro defaults.\
+"""
+
 usb_devices = """\
 Flag: unknown HID (keyboard/mouse) devices that could inject keystrokes \
 (BadUSB / Rubber Ducky); unknown mass-storage; devices with vendor IDs \

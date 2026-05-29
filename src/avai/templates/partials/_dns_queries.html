@@ -1,0 +1,90 @@
+{% from "partials/_macros.html" import card_header %}
+
+{% set verdict_cls = {
+  'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
+  'suspicious': 'bg-amber-900/40 text-amber-300 border border-amber-900/60',
+  'unknown':    'bg-slate-700/40 text-slate-300 border border-slate-600',
+  'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
+} %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("DNS queries — what your host is resolving") }}
+
+  {% if dns and dns.rows %}
+    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
+      {% set s = dns.summary %}
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ s.domains }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">domains</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ "{:,}".format(s.queries) }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">queries</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-sky-900/40 px-3 py-2">
+        <div class="mono text-sky-300 text-lg">{{ s.doh }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">DoH endpoints</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
+        <div class="mono text-red-300 text-lg">{{ s.malicious }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">malicious</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-amber-900/40 px-3 py-2">
+        <div class="mono text-amber-300 text-lg">{{ s.suspicious }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">suspicious</div>
+      </div>
+    </div>
+
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+          <th class="text-left  font-semibold pb-2">verdict</th>
+          <th class="text-left  font-semibold pb-2">domain</th>
+          <th class="text-left  font-semibold pb-2">type</th>
+          <th class="text-left  font-semibold pb-2">resolver</th>
+          <th class="text-left  font-semibold pb-2">process</th>
+          <th class="text-right font-semibold pb-2">queries</th>
+          <th class="text-left  font-semibold pb-2 w-1/4">why</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for q in dns.rows %}
+          <tr class="hover:bg-slate-800/40 transition-colors">
+            <td class="py-2">
+              {% if q.verdict %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px]
+                             font-semibold uppercase tracking-wider
+                             {{ verdict_cls.get(q.verdict, verdict_cls['unknown']) }}">
+                  {{ q.verdict }}{% if q.confidence is not none %}
+                    <span class="ml-1 opacity-70">{{ "%.0f"|format(q.confidence * 100) }}%</span>
+                  {% endif %}
+                </span>
+              {% else %}
+                <span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>
+              {% endif %}
+            </td>
+            <td class="py-2 text-slate-200 font-mono break-all">
+              {{ q.qname }}
+              {% if q.qtype == 'DoH' %}
+                <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px]
+                             bg-sky-900/40 text-sky-300 border border-sky-900/60">DoH</span>
+              {% endif %}
+            </td>
+            <td class="py-2 text-slate-400 font-mono">{{ q.qtype or "—" }}</td>
+            <td class="py-2 text-slate-400 font-mono">{{ q.server_ip or "—" }}</td>
+            <td class="py-2 font-mono {{ 'text-slate-200' if q.process else 'text-slate-600' }}">{{ q.process or "—" }}</td>
+            <td class="py-2 text-right text-slate-300 font-mono">{{ "{:,}".format(q.count or 0) }}</td>
+            <td class="py-2 text-slate-400 line-clamp-2">{{ q.reasoning }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="text-slate-500 italic">
+      no DNS queries captured yet — the collector needs root (run the
+      monitor with <span class="font-mono">sudo</span>) and a capture window to elapse.
+      Plaintext DNS (port 53) is shown here; encrypted DoH appears as a
+      <span class="font-mono">DoH</span> endpoint when detected.
+    </div>
+  {% endif %}
+</div>

@@ -53,7 +53,9 @@ from avai.host_monitor import (
     BrowserExtensionRow,
     CollectionRun,
     CollectorErrorRow,
+    DnsQueryRow,
     FileIntegrityRow,
+    HostsFileRow,
     InstalledAppRow,
     Judgement,
     KernelExtensionRow,
@@ -64,10 +66,12 @@ from avai.host_monitor import (
     NetworkConnectionRow,
     NetworkFlowRow,
     NetworkInterfaceRow,
+    PrivilegeConfigRow,
     ProcessExecRow,
     ProcessRow,
     QuarantineEventRow,
     SetuidFileRow,
+    SshAuthorizedKeyRow,
     SystemExtensionRow,
     SystemIntegrityRow,
     TccPermissionRow,
@@ -79,6 +83,10 @@ COLLECTOR_MODELS = {
     "processes": ProcessRow,
     "network_connections": NetworkConnectionRow,
     "network_flows": NetworkFlowRow,
+    "dns_queries": DnsQueryRow,
+    "ssh_authorized_keys": SshAuthorizedKeyRow,
+    "hosts_file": HostsFileRow,
+    "privilege_config": PrivilegeConfigRow,
     "listening_ports": ListeningPortRow,
     "network_interfaces": NetworkInterfaceRow,
     "usb_devices": UsbDeviceRow,
@@ -104,6 +112,10 @@ COLLECTOR_MODELS = {
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "processes": ("name", "exe"),
     "network_flows": ("dst_ip", "dst_port"),
+    "dns_queries": ("qname", "qtype"),
+    "ssh_authorized_keys": ("owner", "fingerprint"),
+    "hosts_file": ("ip", "hostnames"),
+    "privilege_config": ("kind", "subject"),
     "listening_ports": ("process_name", "laddr_port"),
     "usb_devices": ("name", "manufacturer"),
     "bluetooth_devices": ("name",),
@@ -552,6 +564,9 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
     service_sel = (
         NetworkFlowRow.service if "service" in cols else literal(None).label("service")
     )
+    process_sel = (
+        NetworkFlowRow.process if "process" in cols else literal(None).label("process")
+    )
 
     stmt = (
         select(
@@ -561,6 +576,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
             NetworkFlowRow.dst_port,
             service_sel,
             NetworkFlowRow.packets,
+            process_sel,
             Judgement.verdict,
             Judgement.confidence,
             Judgement.reasoning,
@@ -584,6 +600,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
         dst_port,
         service,
         packets,
+        process,
         verdict,
         conf,
         reason,
@@ -597,6 +614,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
                 "_ifaces": set(),
                 "_protos": set(),
                 "_ports": set(),
+                "_procs": set(),
                 "verdict": None,
                 "confidence": None,
                 "reasoning": "",
@@ -607,6 +625,8 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
             g["_ifaces"].add(iface)
         if proto:
             g["_protos"].add(proto)
+        if process:
+            g["_procs"].add(process)
         if dst_port is not None:
             g["_ports"].add(f"{dst_port}/{service}" if service else str(dst_port))
         # Keep the worst (lowest-severity-number) verdict + its reasoning.
@@ -623,6 +643,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
                 "iface": ", ".join(sorted(g["_ifaces"])) or "—",
                 "proto": ", ".join(sorted(g["_protos"])).upper(),
                 "ports": ", ".join(sorted(g["_ports"], key=_port_sort_key)),
+                "process": ", ".join(sorted(g["_procs"])) or "—",
                 "packets": g["packets"],
                 "flows": g["flows"],
                 "verdict": g["verdict"],
@@ -755,6 +776,127 @@ def _attach_ip_enrichment(session: Session, rows: list[dict]) -> None:
         hosts = host_by_ip.get(r["dst_ip"])
         # Deterministic pick when several sources name different hosts.
         r["hostname"] = sorted(hosts)[0] if hosts else None
+
+
+def _collector_rows_with_verdict(
+    session: Session,
+    run_id: str,
+    model,
+    collector: str,
+    fields: tuple[str, ...],
+    limit: int = 500,
+) -> list[dict]:
+    """Generic: every ``collector`` row for ``run_id``, each annotated
+    with its LLM verdict (LEFT JOIN Judgement on content_hash). ``fields``
+    are the model attributes to return; a missing newer column degrades
+    to NULL (older DB) and a missing table returns ``[]``. Worst verdict
+    first. Shared by the DNS and persistence dashboard sections so they
+    don't each re-implement the join."""
+    if model.__tablename__ not in _existing_tables(session):
+        return []
+    present = _existing_columns(session, model.__tablename__)
+    selected = [
+        getattr(model, f) if f in present else literal(None).label(f) for f in fields
+    ]
+    stmt = (
+        select(
+            *selected,
+            Judgement.verdict,
+            Judgement.confidence,
+            Judgement.reasoning,
+        )
+        .outerjoin(
+            Judgement,
+            and_(
+                Judgement.content_hash == model.content_hash,
+                Judgement.collector == collector,
+            ),
+        )
+        .where(model.run_id == run_id)
+        .limit(limit)
+    )
+    out: list[dict] = []
+    n = len(fields)
+    for row in session.execute(stmt).all():
+        d = {f: row[i] for i, f in enumerate(fields)}
+        d["verdict"] = row[n]
+        d["confidence"] = row[n + 1]
+        d["reasoning"] = row[n + 2]
+        out.append(d)
+    out.sort(key=lambda r: _FLOW_SEV.get(r["verdict"], 4))
+    return out
+
+
+def dns_queries(session: Session, run_id: str, limit: int = 1000):
+    """DNS questions seen this run (+ detected DoH endpoints), each with
+    its LLM verdict. Returns ``{"summary": {...}, "rows": [...]}`` sorted
+    worst-verdict then most-queried."""
+    rows = _collector_rows_with_verdict(
+        session,
+        run_id,
+        DnsQueryRow,
+        "dns_queries",
+        ("qname", "qtype", "server_ip", "process", "count"),
+        limit=limit,
+    )
+    rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -(r["count"] or 0)))
+    summary = {
+        "domains": len({r["qname"] for r in rows}),
+        "queries": sum(r["count"] or 0 for r in rows),
+        "doh": sum(1 for r in rows if r["qtype"] == "DoH"),
+        "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
+        "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
+    }
+    return {"summary": summary, "rows": rows}
+
+
+def persistence_tampering(session: Session, run_id: str, limit: int = 500):
+    """The persistence & tampering posture for ``run_id``: SSH authorized
+    keys, /etc/hosts mappings, and privilege config — each list annotated
+    with LLM verdicts, plus per-table counts for the section header."""
+    ssh = _collector_rows_with_verdict(
+        session,
+        run_id,
+        SshAuthorizedKeyRow,
+        "ssh_authorized_keys",
+        ("owner", "key_type", "fingerprint", "comment", "options", "path"),
+        limit,
+    )
+    hosts = _collector_rows_with_verdict(
+        session,
+        run_id,
+        HostsFileRow,
+        "hosts_file",
+        ("ip", "hostnames", "source_path"),
+        limit,
+    )
+    priv = _collector_rows_with_verdict(
+        session,
+        run_id,
+        PrivilegeConfigRow,
+        "privilege_config",
+        ("kind", "subject", "detail", "source_path"),
+        limit,
+    )
+
+    def _counts(rs: list[dict]) -> dict:
+        return {
+            "total": len(rs),
+            "malicious": sum(1 for r in rs if r["verdict"] == "malicious"),
+            "suspicious": sum(1 for r in rs if r["verdict"] == "suspicious"),
+        }
+
+    return {
+        "ssh_keys": ssh,
+        "hosts": hosts,
+        "privilege": priv,
+        "counts": {
+            "ssh_keys": _counts(ssh),
+            "hosts": _counts(hosts),
+            "privilege": _counts(priv),
+        },
+        "any": bool(ssh or hosts or priv),
+    }
 
 
 def system_integrity(session: Session, run_id: str):
@@ -931,6 +1073,26 @@ def fragment_network_flows():
         return render_template(
             "partials/_network_flows.html",
             flows=(network_flows(s, latest.run_id) if latest else []),
+        )
+
+
+@app.route("/fragments/dns-queries")
+def fragment_dns_queries():
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_dns_queries.html",
+            dns=(dns_queries(s, latest.run_id) if latest else None),
+        )
+
+
+@app.route("/fragments/persistence")
+def fragment_persistence():
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_persistence.html",
+            data=(persistence_tampering(s, latest.run_id) if latest else None),
         )
 
 

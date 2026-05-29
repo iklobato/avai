@@ -149,6 +149,18 @@
              hx-trigger="load, every 30s"
              hx-swap="innerHTML"></section>
 
+    {# ---------- DNS queries (tcpdump port 53 + DoH) ---------- #}
+    <section id="dns-queries"
+             hx-get="/fragments/dns-queries"
+             hx-trigger="load, every 30s"
+             hx-swap="innerHTML"></section>
+
+    {# ---------- persistence & tampering (ssh keys / hosts / privileges) ---------- #}
+    <section id="persistence"
+             hx-get="/fragments/persistence"
+             hx-trigger="load, every 60s"
+             hx-swap="innerHTML"></section>
+
   </main>
 
   <script>

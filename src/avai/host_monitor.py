@@ -38,6 +38,8 @@ recommended) litellm + a provider API key (``ANTHROPIC_API_KEY``).
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import configparser
 import hashlib
 import json
@@ -969,6 +971,8 @@ class NetworkFlowRow(_RowBase):
     dst_port: Mapped[Optional[int]]
     service: Mapped[Optional[str]]  # well-known name for dst_port, if any
     packets: Mapped[Optional[int]]
+    process: Mapped[Optional[str]]  # owning process name, if resolvable
+    pid: Mapped[Optional[int]]  # owning process pid, if resolvable
     first_seen: Mapped[Optional[str]]
     last_seen: Mapped[Optional[str]]
 
@@ -1198,6 +1202,58 @@ class SystemExtensionRow(_RowBase):
     state: Mapped[Optional[str]]
     categories: Mapped[Optional[str]]
     raw_json: Mapped[Optional[str]]
+
+
+class DnsQueryRow(_RowBase):
+    """One distinct DNS question observed during the capture window
+    (port-53 plaintext), or a detected DoH endpoint. ``qname`` is the
+    queried domain — enriched against the domain threat feeds."""
+
+    __tablename__ = "dns_queries"
+    iface: Mapped[Optional[str]]
+    qname: Mapped[Optional[str]] = mapped_column(index=True)
+    qtype: Mapped[Optional[str]]  # A, AAAA, … or "DoH"
+    server_ip: Mapped[Optional[str]]  # resolver the query went to
+    process: Mapped[Optional[str]]
+    count: Mapped[Optional[int]]
+    first_seen: Mapped[Optional[str]]
+    last_seen: Mapped[Optional[str]]
+
+
+class SshAuthorizedKeyRow(_RowBase):
+    """One entry in an ``authorized_keys`` file — a credential that grants
+    SSH login. A *new* key is a classic persistence backdoor."""
+
+    __tablename__ = "ssh_authorized_keys"
+    path: Mapped[Optional[str]] = mapped_column(index=True)
+    owner: Mapped[Optional[str]]  # the account this key authorizes
+    key_type: Mapped[Optional[str]]  # ssh-ed25519, ssh-rsa, …
+    fingerprint: Mapped[Optional[str]] = mapped_column(index=True)  # sha256
+    comment: Mapped[Optional[str]]
+    options: Mapped[Optional[str]]  # forced-command / from= restrictions
+
+
+class HostsFileRow(_RowBase):
+    """One mapping in ``/etc/hosts``. Hijacking entries (pointing a real
+    domain at an attacker IP, or 0.0.0.0-ing a security domain) are a
+    cheap, high-impact tampering technique."""
+
+    __tablename__ = "hosts_file"
+    source_path: Mapped[Optional[str]]
+    ip: Mapped[Optional[str]] = mapped_column(index=True)
+    hostnames: Mapped[Optional[str]]  # space-joined names on the line
+
+
+class PrivilegeConfigRow(_RowBase):
+    """One privilege-granting fact: a sudoers rule, an admin/wheel/sudo
+    group member, or a login-capable / UID-0 account. New entries here
+    are privilege-escalation persistence."""
+
+    __tablename__ = "privilege_config"
+    kind: Mapped[Optional[str]] = mapped_column(index=True)  # sudoers|group|account
+    subject: Mapped[Optional[str]]  # user / group / rule owner
+    detail: Mapped[Optional[str]]  # the rule, member list, uid/shell
+    source_path: Mapped[Optional[str]]
 
 
 # ============================================================================
@@ -2133,6 +2189,44 @@ class ListeningPortsCollector(SnapshotCollector):
             }
 
 
+class ProcessConnectionResolver:
+    """Resolves which local process owns a socket to a remote endpoint by
+    snapshotting the kernel connection table (psutil).
+
+    Injected into :class:`NetworkFlowsCollector` (and reused by the DNS
+    collector) so it's swappable in tests. tcpdump sees packets but not
+    the owning PID, so we correlate each flow's ``(dst_ip, dst_port)``
+    against the live connection table to name the process behind it.
+    Best-effort: a short-lived connection may already be gone by snapshot
+    time, in which case the flow simply carries no process.
+    """
+
+    def snapshot(self) -> dict[tuple[str, int], tuple[str, int]]:
+        """Map remote ``(ip, port)`` → ``(process_name, pid)`` for every
+        inet socket that has a remote peer and a resolvable owner."""
+        out: dict[tuple[str, int], tuple[str, int]] = {}
+        try:
+            conns = psutil.net_connections(kind="inet")
+        except (psutil.AccessDenied, PermissionError, OSError):
+            return out
+        for c in conns:
+            raddr = c.raddr
+            if not raddr or c.pid is None:
+                continue
+            key = (raddr.ip, raddr.port)
+            if key in out:
+                continue
+            out[key] = (self._proc_name(c.pid), c.pid)
+        return out
+
+    @staticmethod
+    def _proc_name(pid: int) -> str:
+        try:
+            return psutil.Process(pid).name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            return f"pid {pid}"
+
+
 class NetworkFlowsCollector(SnapshotCollector):
     """tcpdump-based flow aggregator.
 
@@ -2162,11 +2256,27 @@ class NetworkFlowsCollector(SnapshotCollector):
     MAX_PACKETS = 2000  # stop after this many packets
     MAX_FLOWS = 200  # emit only the top-N flows by packet count
 
+    def __init__(
+        self,
+        judge_hints: str = "",
+        resolver: Optional["ProcessConnectionResolver"] = None,
+    ):
+        super().__init__(judge_hints)
+        self._resolver = resolver or ProcessConnectionResolver()
+
     def collect(self):
         stdout, default_iface = self._capture()
         flows = self._aggregate(stdout, default_iface)
+        proc_map = self._resolver.snapshot()
         ranked = sorted(flows.values(), key=lambda f: f["packets"], reverse=True)
-        yield from ranked[: self.MAX_FLOWS]
+        for f in ranked[: self.MAX_FLOWS]:
+            owner = proc_map.get((f["dst_ip"], f["dst_port"]))
+            # Set both unconditionally (None when unresolved) so every
+            # emitted row carries the same keys — Sink.write does a
+            # uniform-column executemany insert.
+            f["process"] = owner[0] if owner else None
+            f["pid"] = owner[1] if owner else None
+            yield f
 
     def _capture(self) -> tuple[str, Optional[str]]:
         """Return (stdout, default_iface). default_iface is the interface
@@ -2295,6 +2405,182 @@ class NetworkFlowsCollector(SnapshotCollector):
             )
         except (OSError, OverflowError, TypeError):
             return None
+
+
+class DnsQueriesCollector(SnapshotCollector):
+    """tcpdump-based DNS visibility.
+
+    Captures plaintext DNS questions (port 53) for a bounded window and
+    aggregates them by ``(qname, qtype, resolver)`` with a count. Each
+    queried domain is enriched against the domain threat feeds
+    (PhishTank, URLhaus, …) and judged by the LLM, so lookups of
+    known-bad / DGA / typosquat domains surface as findings.
+
+    DoH (DNS-over-HTTPS) deliberately *can't* be seen on the wire, so we
+    also flag connections to well-known DoH resolver endpoints on :443 —
+    a host using those is bypassing local DNS visibility.
+
+    Parsing is split-based (no regex): without ``-q`` tcpdump decodes the
+    DNS payload as ``… 1234+ A? example.com. (29)`` — we pull the qtype
+    (the token ending in ``?``) and the qname (the token after it).
+    Requires root to capture.
+    """
+
+    name = "dns_queries"
+    model = DnsQueryRow
+    judge_fields = ("qname", "qtype", "server_ip")
+
+    CAPTURE_SECONDS = 8
+    MAX_PACKETS = 2000
+    MAX_QUERIES = 200
+
+    # Well-known DoH resolver endpoints. Plaintext DNS (53) is visible to
+    # us; DoH (TLS/443) isn't — so a host talking to one of these on 443
+    # is resolving names out of our sight.
+    _DOH_IPS = {
+        "1.1.1.1": "Cloudflare",
+        "1.0.0.1": "Cloudflare",
+        "8.8.8.8": "Google",
+        "8.8.4.4": "Google",
+        "9.9.9.9": "Quad9",
+        "149.112.112.112": "Quad9",
+        "208.67.222.222": "OpenDNS",
+        "208.67.220.220": "OpenDNS",
+        "2606:4700:4700::1111": "Cloudflare",
+        "2001:4860:4860::8888": "Google",
+    }
+
+    def __init__(
+        self,
+        judge_hints: str = "",
+        resolver: Optional["ProcessConnectionResolver"] = None,
+    ):
+        super().__init__(judge_hints)
+        self._resolver = resolver or ProcessConnectionResolver()
+
+    def collect(self):
+        stdout, default_iface = self._capture()
+        proc_map = self._resolver.snapshot()
+        queries = self._aggregate(stdout, default_iface, proc_map)
+        # DoH: connections to known DoH endpoints on :443 bypass plaintext
+        # DNS visibility entirely — surface them alongside the queries.
+        for (ip, port), (name, _pid) in proc_map.items():
+            if port != 443 or ip not in self._DOH_IPS:
+                continue
+            provider = self._DOH_IPS[ip]
+            key = (provider, "DoH", ip)
+            if key not in queries:
+                now = utcnow()
+                queries[key] = {
+                    "iface": None,
+                    "qname": provider,
+                    "qtype": "DoH",
+                    "server_ip": ip,
+                    "process": name,
+                    "count": 1,
+                    "first_seen": now,
+                    "last_seen": now,
+                }
+        ranked = sorted(queries.values(), key=lambda q: q["count"], reverse=True)
+        yield from ranked[: self.MAX_QUERIES]
+
+    def _capture(self) -> tuple[str, Optional[str]]:
+        """Capture port-53 traffic *without* ``-q`` so tcpdump decodes the
+        DNS question. Reuses the flow collector's interface helpers."""
+        if shutil.which("tcpdump") is None:
+            raise RuntimeError("tcpdump not found on PATH")
+        cmd = ["tcpdump", "-n", "-l", "-t", "-c", str(self.MAX_PACKETS)]
+        if IS_LINUX:
+            cmd += ["-i", "any"]
+        else:
+            cmd += ["-k", "I"]
+        cmd += ["udp", "port", "53", "or", "tcp", "port", "53"]
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=self.CAPTURE_SECONDS
+            )
+            stdout, stderr = r.stdout or "", r.stderr or ""
+        except subprocess.TimeoutExpired as e:
+
+            def _txt(b):
+                return (
+                    b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or "")
+                )
+
+            stdout, stderr = _txt(e.stdout), _txt(e.stderr)
+        iface = NetworkFlowsCollector._normalize_default_iface(
+            NetworkFlowsCollector._iface_from_banner(stderr)
+        )
+        return stdout, iface
+
+    def _aggregate(self, output: str, default_iface: Optional[str], proc_map: dict):
+        now = utcnow()
+        queries: dict[tuple, dict] = {}
+        for line in output.splitlines():
+            parsed = self._parse_dns_line(line)
+            if parsed is None:
+                continue
+            iface, qname, qtype, server_ip = parsed
+            iface = iface or default_iface
+            key = (qname, qtype, server_ip)
+            g = queries.get(key)
+            if g is None:
+                owner = proc_map.get((server_ip, 53))
+                queries[key] = {
+                    "iface": iface,
+                    "qname": qname,
+                    "qtype": qtype,
+                    "server_ip": server_ip,
+                    "process": owner[0] if owner else None,
+                    "count": 1,
+                    "first_seen": now,
+                    "last_seen": now,
+                }
+            else:
+                g["count"] += 1
+                g["last_seen"] = now
+        return queries
+
+    @staticmethod
+    def _parse_dns_line(line: str):
+        """Return (iface, qname, qtype, server_ip) from one decoded
+        tcpdump DNS line, or None if it isn't an outbound query.
+
+        Example (macOS '-k I'):
+            ``(en6) IP 10.0.0.5.51000 > 8.8.8.8.53: 1234+ A? example.com. (29)``
+        Only questions *to* port 53 are kept (a response has src port 53
+        and no ``A?``-style token).
+        """
+        parts = line.split()
+        if ">" not in parts:
+            return None
+        if "IP" in parts:
+            ip_idx = parts.index("IP")
+        elif "IP6" in parts:
+            ip_idx = parts.index("IP6")
+        else:
+            return None
+        iface = parts[0].strip("()") if ip_idx >= 1 else None
+        gt = parts.index(">")
+        if gt + 1 >= len(parts):
+            return None
+        server = parts[gt + 1].rstrip(":")
+        server_ip, _, server_port = server.rpartition(".")
+        if server_port != "53" or not server_ip:
+            return None
+        qtype = qname = None
+        payload = parts[gt + 2 :]
+        for i, tok in enumerate(payload):
+            # The question type is the token ending in '?' (A?, AAAA?,
+            # PTR?, …); the queried name is the token right after it.
+            if len(tok) > 1 and tok.endswith("?"):
+                qtype = tok[:-1]
+                if i + 1 < len(payload):
+                    qname = payload[i + 1].rstrip(".")
+                break
+        if not qname:
+            return None
+        return iface, qname, qtype, server_ip
 
 
 class NetworkInterfacesCollector(SnapshotCollector):
@@ -3797,6 +4083,302 @@ class SetuidFilesCollector(SnapshotCollector):
 
 
 # ----------------------------------------------------------------------------
+# Persistence & tampering — SSH keys, /etc/hosts, privilege config
+# (cross-platform; parsing kept pure + IO thin for testability)
+# ----------------------------------------------------------------------------
+
+
+def _ssh_fingerprint(b64key: str) -> Optional[str]:
+    """SHA256 fingerprint of an SSH public key blob, OpenSSH-style
+    (``SHA256:<base64 of sha256(raw key), unpadded>``)."""
+    try:
+        raw = base64.b64decode(b64key, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    digest = hashlib.sha256(raw).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+class SshAuthorizedKeysCollector(SnapshotCollector):
+    """Enumerate every key in every user's ``authorized_keys`` — each one
+    is a credential that grants SSH login. A *new* key (especially with a
+    permissive ``from=``/forced-command, or an unfamiliar comment) is a
+    classic, quiet persistence backdoor invisible to process/network
+    collectors."""
+
+    name = "ssh_authorized_keys"
+    model = SshAuthorizedKeyRow
+    judge_fields = ("path", "owner", "key_type", "fingerprint")
+
+    _KEY_TYPES = frozenset(
+        {
+            "ssh-rsa",
+            "ssh-dss",
+            "ssh-ed25519",
+            "ecdsa-sha2-nistp256",
+            "ecdsa-sha2-nistp384",
+            "ecdsa-sha2-nistp521",
+            "sk-ssh-ed25519@openssh.com",
+            "sk-ecdsa-sha2-nistp256@openssh.com",
+        }
+    )
+
+    def collect(self):
+        for home in self._home_dirs():
+            owner = home.name
+            for fname in ("authorized_keys", "authorized_keys2"):
+                path = home / ".ssh" / fname
+                try:
+                    content = path.read_text(errors="replace")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                for row in self._parse_authorized_keys(content, str(path), owner):
+                    yield row
+
+    def _home_dirs(self) -> list[Path]:
+        homes: list[Path] = []
+        if IS_LINUX:
+            base = host_path("/home")
+            if base.is_dir():
+                try:
+                    homes += [d for d in base.iterdir() if d.is_dir()]
+                except OSError:
+                    pass
+            root = host_path("/root")
+            if root.is_dir():
+                homes.append(root)
+        else:
+            users = Path("/Users")
+            if users.is_dir():
+                try:
+                    homes += [
+                        d
+                        for d in users.iterdir()
+                        if d.is_dir() and not d.name.startswith(".")
+                    ]
+                except OSError:
+                    pass
+            root = Path("/var/root")
+            if root.is_dir():
+                homes.append(root)
+        return homes
+
+    @classmethod
+    def _parse_authorized_keys(cls, content: str, path: str, owner: str):
+        """Pure parser: one row dict per key line. Tolerates leading
+        option fields (``from=...,command=...``) before the key type."""
+        rows = []
+        for line in content.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            idx = next((i for i, t in enumerate(parts) if t in cls._KEY_TYPES), None)
+            if idx is None or idx + 1 >= len(parts):
+                continue
+            rows.append(
+                {
+                    "path": path,
+                    "owner": owner,
+                    "key_type": parts[idx],
+                    "fingerprint": _ssh_fingerprint(parts[idx + 1]),
+                    "comment": " ".join(parts[idx + 2 :]) or None,
+                    "options": " ".join(parts[:idx]) or None,
+                }
+            )
+        return rows
+
+
+class HostsFileCollector(SnapshotCollector):
+    """Snapshot ``/etc/hosts``. A mapping that points a real domain at an
+    attacker IP (phishing / update hijack) or sinkholes a security domain
+    to 0.0.0.0 is a cheap, high-impact tamper that nothing else catches."""
+
+    name = "hosts_file"
+    model = HostsFileRow
+    judge_fields = ("ip", "hostnames")
+
+    def collect(self):
+        path = host_path("/etc/hosts") if IS_LINUX else Path("/etc/hosts")
+        try:
+            content = path.read_text(errors="replace")
+        except (OSError, UnicodeDecodeError):
+            return
+        yield from self._parse_hosts(content, str(path))
+
+    @staticmethod
+    def _parse_hosts(content: str, path: str):
+        """Pure parser: one row per ``<ip> <name...>`` mapping."""
+        rows = []
+        for line in content.splitlines():
+            s = line.split("#", 1)[0].strip()
+            if not s:
+                continue
+            parts = s.split()
+            if len(parts) < 2:
+                continue
+            rows.append(
+                {
+                    "source_path": path,
+                    "ip": parts[0],
+                    "hostnames": " ".join(parts[1:]),
+                }
+            )
+        return rows
+
+
+class PrivilegeConfigCollector(SnapshotCollector):
+    """Enumerate the host's privilege-granting configuration: sudoers
+    rules, members of the admin/wheel/sudo groups, and UID-0 accounts.
+    New entries here are privilege-escalation persistence."""
+
+    name = "privilege_config"
+    model = PrivilegeConfigRow
+    judge_fields = ("kind", "subject", "detail")
+
+    _PRIV_GROUPS = frozenset({"sudo", "wheel", "admin"})
+
+    def collect(self):
+        yield from self._sudoers()
+        yield from self._priv_groups()
+        yield from self._uid0_accounts()
+
+    # -- sudoers (both platforms) ----------------------------------------
+
+    def _sudoers(self):
+        files = [host_path("/etc/sudoers") if IS_LINUX else Path("/etc/sudoers")]
+        sudoers_d = host_path("/etc/sudoers.d") if IS_LINUX else Path("/etc/sudoers.d")
+        if sudoers_d.is_dir():
+            try:
+                files += sorted(p for p in sudoers_d.iterdir() if p.is_file())
+            except OSError:
+                pass
+        for path in files:
+            try:
+                content = path.read_text(errors="replace")
+            except (OSError, UnicodeDecodeError):
+                continue
+            yield from self._parse_sudoers(content, str(path))
+
+    @staticmethod
+    def _parse_sudoers(content: str, path: str):
+        """Pure parser: keep privilege-granting rules, drop Defaults /
+        includes / comments."""
+        rows = []
+        for line in content.splitlines():
+            s = line.split("#", 1)[0].strip()
+            if not s or s.startswith(("Defaults", "@includedir", "@include")):
+                continue
+            rows.append(
+                {
+                    "kind": "sudoers",
+                    "subject": s.split()[0],
+                    "detail": s,
+                    "source_path": path,
+                }
+            )
+        return rows
+
+    # -- privileged group membership -------------------------------------
+
+    def _priv_groups(self):
+        if IS_LINUX:
+            path = host_path("/etc/group")
+            try:
+                content = path.read_text(errors="replace")
+            except (OSError, UnicodeDecodeError):
+                return
+            yield from self._parse_groups(content, str(path), self._PRIV_GROUPS)
+        else:
+            for gname in ("admin", "wheel"):
+                out = self._dscl(["-read", f"/Groups/{gname}", "GroupMembership"])
+                members = out.split(":", 1)[1].strip() if ":" in out else out.strip()
+                if members:
+                    yield {
+                        "kind": "group",
+                        "subject": gname,
+                        "detail": members,
+                        "source_path": "dscl:/Groups",
+                    }
+
+    @staticmethod
+    def _parse_groups(content: str, path: str, priv_groups):
+        """Pure parser for /etc/group: members of privileged groups."""
+        rows = []
+        for line in content.splitlines():
+            parts = line.strip().split(":")
+            if len(parts) < 4:
+                continue
+            gname, members = parts[0], parts[3]
+            if gname in priv_groups and members:
+                rows.append(
+                    {
+                        "kind": "group",
+                        "subject": gname,
+                        "detail": members,
+                        "source_path": path,
+                    }
+                )
+        return rows
+
+    # -- UID-0 accounts --------------------------------------------------
+
+    def _uid0_accounts(self):
+        if IS_LINUX:
+            path = host_path("/etc/passwd")
+            try:
+                content = path.read_text(errors="replace")
+            except (OSError, UnicodeDecodeError):
+                return
+            yield from self._parse_passwd_uid0(content, str(path))
+        else:
+            out = self._dscl(["-list", "/Users", "UniqueID"])
+            for line in out.splitlines():
+                cols = line.split()
+                if len(cols) >= 2 and cols[-1] == "0":
+                    yield {
+                        "kind": "account",
+                        "subject": cols[0],
+                        "detail": "uid=0",
+                        "source_path": "dscl:/Users",
+                    }
+
+    @staticmethod
+    def _parse_passwd_uid0(content: str, path: str):
+        """Pure parser for /etc/passwd: accounts with uid 0."""
+        rows = []
+        for line in content.splitlines():
+            parts = line.strip().split(":")
+            if len(parts) < 7:
+                continue
+            user, uid, shell = parts[0], parts[2], parts[6]
+            if uid == "0":
+                rows.append(
+                    {
+                        "kind": "account",
+                        "subject": user,
+                        "detail": f"uid=0 shell={shell}",
+                        "source_path": path,
+                    }
+                )
+        return rows
+
+    @staticmethod
+    def _dscl(args: list[str]) -> str:
+        try:
+            r = subprocess.run(
+                ["dscl", ".", *args],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            return r.stdout or "" if r.returncode == 0 else ""
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return ""
+
+
+# ----------------------------------------------------------------------------
 # Phase 4 — macOS-specific: MDM profiles, kernel + system extensions
 # ----------------------------------------------------------------------------
 
@@ -4177,6 +4759,7 @@ def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         NetworkConnectionsCollector(judge_hints=h("network_connections")),
         ListeningPortsCollector(judge_hints=h("listening_ports")),
         NetworkFlowsCollector(judge_hints=h("network_flows")),
+        DnsQueriesCollector(judge_hints=h("dns_queries")),
         NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
         UsbDevicesCollector(judge_hints=h("usb_devices")),
         BluetoothCollector(judge_hints=h("bluetooth_devices")),
@@ -4194,6 +4777,10 @@ def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         MdmProfilesCollector(judge_hints=h("mdm_profiles")),
         KernelExtensionsCollector(judge_hints=h("kernel_extensions")),
         SystemExtensionsCollector(judge_hints=h("system_extensions")),
+        # Persistence & tampering
+        SshAuthorizedKeysCollector(judge_hints=h("ssh_authorized_keys")),
+        HostsFileCollector(judge_hints=h("hosts_file")),
+        PrivilegeConfigCollector(judge_hints=h("privilege_config")),
     ]
 
 
@@ -4245,6 +4832,7 @@ def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         NetworkConnectionsCollector(judge_hints=h("network_connections")),
         ListeningPortsCollector(judge_hints=h("listening_ports")),
         NetworkFlowsCollector(judge_hints=h("network_flows")),
+        DnsQueriesCollector(judge_hints=h("dns_queries")),
         NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
         LinuxUsbDevicesCollector(judge_hints=h("usb_devices")),
         LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),
@@ -4263,6 +4851,10 @@ def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         # Phase 4 additions — cross-platform
         MountsCollector(judge_hints=h("mounts")),
         SetuidFilesCollector(judge_hints=h("setuid_files")),
+        # Persistence & tampering
+        SshAuthorizedKeysCollector(judge_hints=h("ssh_authorized_keys")),
+        HostsFileCollector(judge_hints=h("hosts_file")),
+        PrivilegeConfigCollector(judge_hints=h("privilege_config")),
     ]
 
 

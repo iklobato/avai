@@ -3,6 +3,34 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.3.0] — 2026-05-29
+
+### Added
+- **Process → flow attribution.** Each network flow now names the owning
+  process (and pid) when resolvable. A new injectable
+  `ProcessConnectionResolver` snapshots the kernel connection table
+  (psutil) and correlates each flow's `(dst_ip, dst_port)` to the local
+  process behind it — surfaced as a new **process** column in the
+  flow table.
+- **DNS query collector (`dns_queries`).** A second bounded tcpdump
+  capture decodes plaintext port-53 questions (split-based, no regex)
+  and aggregates them by `(qname, qtype, resolver)`. Queried domains are
+  enriched against the domain threat feeds and LLM-judged. Connections to
+  well-known DoH resolver endpoints on :443 are flagged (`qtype=DoH`)
+  since they bypass plaintext DNS visibility. New dashboard card.
+- **Persistence & tampering collectors.** `ssh_authorized_keys` (every
+  key authorizing SSH login, with SHA256 fingerprint + from=/command=
+  restrictions), `hosts_file` (`/etc/hosts` mappings — hijack/sinkhole
+  detection), and `privilege_config` (sudoers rules, admin/wheel/sudo
+  group members, UID-0 accounts). All cross-platform, surfaced in a new
+  **persistence & tampering** dashboard section. Parsing is split into
+  pure functions (testable) with thin IO.
+- New indicator extractors wire `dns_queries` → DOMAIN and `hosts_file`
+  → DOMAIN/IP into the enrichment chain. Judge hints added for all four
+  collectors.
+
+Collector coverage: macOS 22 → 26, Linux 17 → 21.
+
 ## [0.2.11] — 2026-05-29
 
 ### Added

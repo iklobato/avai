@@ -43,6 +43,7 @@
           <th class="text-left  font-semibold pb-2">verdict</th>
           <th class="text-left  font-semibold pb-2">destination</th>
           <th class="text-left  font-semibold pb-2">location</th>
+          <th class="text-left  font-semibold pb-2">process</th>
           <th class="text-left  font-semibold pb-2">interface</th>
           <th class="text-left  font-semibold pb-2">proto</th>
           <th class="text-left  font-semibold pb-2">ports</th>
@@ -87,6 +88,7 @@
                 <span class="text-slate-600 text-[10px]">no geo</span>
               {% endif %}
             </td>
+            <td class="py-2 font-mono {{ 'text-slate-200' if f.process and f.process != '—' else 'text-slate-600' }}">{{ f.process }}</td>
             <td class="py-2 text-sky-300 font-mono">{{ f.iface }}</td>
             <td class="py-2 text-slate-400 font-mono">{{ f.proto }}</td>
             <td class="py-2 text-slate-400 font-mono">{{ f.ports }}</td>
