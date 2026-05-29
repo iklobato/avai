@@ -66,8 +66,20 @@
   </header>
 
   {# ----- toast notification stack ----- #}
+  {# "Dismiss all" bar — shown only when ≥1 toast is on screen. #}
+  <div id="toast-controls"
+       class="fixed top-16 right-4 z-50 w-96 max-w-[calc(100vw-2rem)] hidden">
+    <button id="dismiss-all-btn" type="button"
+            class="pointer-events-auto w-full flex items-center justify-center gap-2
+                   text-xs font-semibold text-slate-200 bg-slate-800/95 hover:bg-slate-700
+                   border border-slate-700 rounded-md py-1.5 shadow-lg backdrop-blur">
+      Dismiss all <span id="toast-count"
+        class="inline-flex items-center justify-center min-w-5 px-1.5 rounded-full
+               bg-slate-600 text-slate-100 text-[10px]">0</span>
+    </button>
+  </div>
   <div id="toast-container"
-       class="fixed top-20 right-4 z-50 w-96 max-w-[calc(100vw-2rem)] space-y-2 pointer-events-none">
+       class="fixed top-28 right-4 z-50 w-96 max-w-[calc(100vw-2rem)] space-y-2 pointer-events-none">
   </div>
 
   <main class="max-w-screen-2xl mx-auto px-6 py-6 space-y-8">
@@ -349,12 +361,37 @@
       }[c]));
     }
 
+    // Track the newest alert timestamp the client has seen, so
+    // "Dismiss all" can advance the cursor past everything currently
+    // shown and they don't immediately re-appear on the next poll.
+    let _latestSeen = '';
+
+    function refreshDismissAll() {
+      const controls = document.getElementById('toast-controls');
+      const countEl  = document.getElementById('toast-count');
+      const n = document.querySelectorAll('#toast-container .js-toast').length;
+      if (countEl) countEl.textContent = String(n);
+      if (controls) controls.classList.toggle('hidden', n === 0);
+    }
+
+    function dismissAllToasts() {
+      document.querySelectorAll('#toast-container .js-toast').forEach(t => t.remove());
+      // Advance the cursor so the just-dismissed alerts aren't replayed.
+      if (_latestSeen) localStorage.setItem(ALERT_CURSOR_KEY, _latestSeen);
+      refreshDismissAll();
+    }
+
+    {
+      const btn = document.getElementById('dismiss-all-btn');
+      if (btn) btn.addEventListener('click', dismissAllToasts);
+    }
+
     function showToast(item) {
       const container = document.getElementById('toast-container');
       if (!container) return;
       const t = document.createElement('div');
       t.className = (
-        'pointer-events-auto bg-slate-900 border border-slate-800 ' +
+        'js-toast pointer-events-auto bg-slate-900 border border-slate-800 ' +
         'rounded-lg shadow-lg overflow-hidden border-l-4 ' +
         (TOAST_BORDER[item.verdict] || 'border-l-slate-500') +
         ' animate-[fadein_200ms_ease-out]'
@@ -402,15 +439,17 @@
       t.querySelector('.js-toast-close').addEventListener('click', (e) => {
         e.stopPropagation();
         t.remove();
+        refreshDismissAll();
       });
       t.querySelector('.js-toast-summary').addEventListener('click', () => {
         t.querySelector('.js-toast-detail').classList.toggle('hidden');
       });
 
       container.appendChild(t);
+      refreshDismissAll();
       // Auto-dismiss after 60s for malicious, 45s for suspicious
       const ttl = item.verdict === 'malicious' ? 60000 : 45000;
-      setTimeout(() => { if (t.isConnected) t.remove(); }, ttl);
+      setTimeout(() => { if (t.isConnected) { t.remove(); refreshDismissAll(); } }, ttl);
     }
 
     async function pollAlerts() {
@@ -423,6 +462,12 @@
         payload = await r.json();
       } catch (e) { return; }
 
+      // Remember the newest timestamp seen this poll so "Dismiss all"
+      // can advance the cursor past everything currently on screen.
+      const newestTs = (payload.items && payload.items[0]
+                        && payload.items[0].created_at) || payload.now || '';
+      if (newestTs > _latestSeen) _latestSeen = newestTs;
+
       // Items newest-first; replay oldest-first so the newest toast
       // ends up on top of the stack.
       const items = (payload.items || []).slice().reverse();
@@ -434,7 +479,8 @@
       if (!since && payload.now) {
         localStorage.setItem(ALERT_CURSOR_KEY, payload.now);
         // Clear any toasts we just rendered, since they're history.
-        document.querySelectorAll('#toast-container > div').forEach(t => t.remove());
+        document.querySelectorAll('#toast-container .js-toast').forEach(t => t.remove());
+        refreshDismissAll();
         return;
       }
       if (items.length > 0) {

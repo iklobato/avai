@@ -3,6 +3,16 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.2.7] — 2026-05-29
+
+### Added
+- **"Dismiss all" button on the dashboard toast stack.** When the
+  monitor is actively judging, malicious/suspicious alerts pile up;
+  previously each had to be closed individually. A "Dismiss all (N)"
+  bar now appears above the stack — one click clears every toast and
+  advances the alert cursor so they don't immediately re-appear on the
+  next poll.
+
 ## [0.2.6] — 2026-05-29
 
 ### Fixed
