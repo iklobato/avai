@@ -51,6 +51,9 @@ dependencies = [
     "sqlalchemy>=2.0",
     "flask>=3.0",
     "requests>=2.31",
+    # Production WSGI server for the dashboard (pure-Python, cross-platform)
+    # so `avai dashboard` doesn't run on Werkzeug's dev server.
+    "waitress>=3.0",
 ]
 
 [project.optional-dependencies]

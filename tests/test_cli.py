@@ -98,3 +98,24 @@ class TestDefaultArgs:
         ns = _build_parser().parse_args([])
         assert ns.db == str(Path.home() / ".avai" / "avai.db")
         assert ns.port == 8765
+
+
+class TestDashboardServer:
+    """The dashboard runs on the waitress production server by default
+    (no Werkzeug 'development server' warning); --debug uses app.run."""
+
+    def test_default_serves_via_waitress(self):
+        import avai.dashboard as d
+
+        with patch("waitress.serve") as wserve, patch.object(d.app, "run") as arun:
+            d._serve("127.0.0.1", 8765, debug=False)
+        wserve.assert_called_once()
+        arun.assert_not_called()
+
+    def test_debug_uses_dev_server(self):
+        import avai.dashboard as d
+
+        with patch("waitress.serve") as wserve, patch.object(d.app, "run") as arun:
+            d._serve("127.0.0.1", 8765, debug=True)
+        arun.assert_called_once()
+        wserve.assert_not_called()

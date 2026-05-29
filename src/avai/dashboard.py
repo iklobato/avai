@@ -1303,8 +1303,32 @@ def main() -> int:
 
     app.config["DB_PATH"] = args.db
     _ensure_db_exists(args.db)
-    app.run(host=args.host, port=args.port, debug=args.debug)
+    _serve(args.host, args.port, args.debug)
     return 0
+
+
+def _serve(host: str, port: int, debug: bool) -> None:
+    """Serve the dashboard. In normal use we run on waitress, a real
+    (pure-Python, cross-platform) WSGI server, so there's no "this is a
+    development server" warning. ``--debug`` falls back to Werkzeug's
+    reloader/debugger (dev only), and if waitress somehow isn't installed
+    we degrade to the dev server rather than failing to start."""
+    if not debug:
+        try:
+            from waitress import serve
+
+            print(
+                f" * avai dashboard on http://{host}:{port}  (Ctrl-C to quit)",
+                flush=True,
+            )
+            serve(app, host=host, port=port)
+            return
+        except ImportError:
+            print(
+                " * waitress not installed — falling back to the dev server",
+                file=sys.stderr,
+            )
+    app.run(host=host, port=port, debug=debug)
 
 
 def _ensure_db_exists(db_path: str) -> None:
