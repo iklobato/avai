@@ -1,5 +1,6 @@
 """Tests for the enricher registry — the env-gated factory that
 materialises the default chain."""
+
 from __future__ import annotations
 
 import pytest
@@ -18,9 +19,14 @@ def _clear_all_tokens(monkeypatch):
     """Start each test from a known no-token state so a stale env var
     in the dev shell can't flip a keyed source on."""
     for var in (
-        "ABUSE_CH_AUTH_KEY", "VT_API_KEY", "ABUSEIPDB_API_KEY",
-        "GREYNOISE_API_KEY", "GOOGLE_SAFE_BROWSING_API_KEY",
-        "PHISHTANK_API_KEY", "GITHUB_TOKEN", "NVD_API_KEY",
+        "ABUSE_CH_AUTH_KEY",
+        "VT_API_KEY",
+        "ABUSEIPDB_API_KEY",
+        "GREYNOISE_API_KEY",
+        "GOOGLE_SAFE_BROWSING_API_KEY",
+        "PHISHTANK_API_KEY",
+        "GITHUB_TOKEN",
+        "NVD_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
     yield
@@ -34,13 +40,16 @@ def engine():
 class TestDiscoverEnricherClasses:
     def test_returns_all_known_sources(self):
         names = {c.name for c in discover_enricher_classes()}
-        # Expected total: 8 keyless + 3 abuse.ch + 6 keyed = 17.
-        assert len(names) == 17
+        # Expected total: 9 keyless + 3 abuse.ch + 6 keyed = 18.
+        assert len(names) == 18
         # Spot-check membership.
-        assert {"malware_bazaar", "virustotal", "cisa_kev"}.issubset(names)
+        assert {"malware_bazaar", "virustotal", "cisa_kev", "ipwhois_geo"}.issubset(
+            names
+        )
 
     def test_classes_are_concrete_subclasses_of_enricher(self):
         from avai.enrichers.base import Enricher
+
         for cls in discover_enricher_classes():
             assert issubclass(cls, Enricher)
             # No abstract __abstractmethods__ left.
@@ -50,11 +59,20 @@ class TestDiscoverEnricherClasses:
 class TestBuildDefaultChain:
     def test_with_no_tokens_only_keyless_sources_register(self, engine):
         chain = build_default_chain(engine, _Base)
-        # 8 keyless enrichers; the rest are gated.
-        assert sorted(chain.sources) == sorted([
-            "circl_hashlookup", "shodan_internetdb", "feodo_tracker",
-            "osv", "cisa_kev", "nvd", "endoflife", "crtsh",
-        ])
+        # 9 keyless enrichers; the rest are gated.
+        assert sorted(chain.sources) == sorted(
+            [
+                "circl_hashlookup",
+                "shodan_internetdb",
+                "feodo_tracker",
+                "osv",
+                "cisa_kev",
+                "nvd",
+                "endoflife",
+                "crtsh",
+                "ipwhois_geo",
+            ]
+        )
 
     def test_abuse_ch_key_enables_three_sources(self, engine, monkeypatch):
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "x")
@@ -78,8 +96,7 @@ class TestBuildDefaultChain:
         assert "greynoise" not in chain.sources
 
     def test_enable_allowlist_filters_to_subset(self, engine):
-        chain = build_default_chain(engine, _Base,
-                                    enable=["cisa_kev", "osv"])
+        chain = build_default_chain(engine, _Base, enable=["cisa_kev", "osv"])
         assert sorted(chain.sources) == ["cisa_kev", "osv"]
 
     def test_enable_allowlist_with_invalid_name_yields_empty(self, engine):
@@ -93,10 +110,14 @@ class TestBuildDefaultChain:
 
     def test_all_tokens_set_enables_all_sources(self, engine, monkeypatch):
         for var in (
-            "ABUSE_CH_AUTH_KEY", "VT_API_KEY", "ABUSEIPDB_API_KEY",
-            "GREYNOISE_API_KEY", "GOOGLE_SAFE_BROWSING_API_KEY",
-            "PHISHTANK_API_KEY", "GITHUB_TOKEN",
+            "ABUSE_CH_AUTH_KEY",
+            "VT_API_KEY",
+            "ABUSEIPDB_API_KEY",
+            "GREYNOISE_API_KEY",
+            "GOOGLE_SAFE_BROWSING_API_KEY",
+            "PHISHTANK_API_KEY",
+            "GITHUB_TOKEN",
         ):
             monkeypatch.setenv(var, "fake")
         chain = build_default_chain(engine, _Base)
-        assert len(chain.sources) == 17
+        assert len(chain.sources) == 18

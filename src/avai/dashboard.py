@@ -628,15 +628,14 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
                 "verdict": g["verdict"],
                 "confidence": g["confidence"],
                 "reasoning": g["reasoning"],
-                "intel": [],  # filled below from the enrichment cache
+                "geo": None,  # filled below from the enrichment cache
             }
         )
 
-    # Attach threat-intel evidence per destination IP — what Feodo
-    # Tracker / AbuseIPDB / GreyNoise / Shodan / VirusTotal said about
-    # each address — pulled from the enrichment_evidence cache the
-    # monitor already populated.
-    _attach_ip_intel(session, rows)
+    # Attach geolocation per destination IP — country / city / region /
+    # org / ASN — pulled from the enrichment_evidence cache the monitor
+    # already populated (ipwho.is, plus AbuseIPDB / Feodo fallbacks).
+    _attach_ip_geo(session, rows)
 
     rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -r["packets"]))
 
@@ -656,15 +655,44 @@ def _port_sort_key(p: str):
     return int(head) if head.isdigit() else 0
 
 
-# Hint severity for ordering the per-IP evidence (worst source first).
-_HINT_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3}
+def _geo_from_details(details: dict) -> dict | None:
+    """Extract a normalised geolocation from one evidence row's details,
+    tolerating each source's own key names: ipwho.is
+    (country/city/region/asn/org), AbuseIPDB (countryCode/isp), Feodo
+    (country/as_name/as_number). Returns ``None`` when the row carries no
+    geo at all."""
+    country = (
+        details.get("country")
+        or details.get("country_code")
+        or details.get("countryCode")
+    )
+    city = details.get("city")
+    region = details.get("region")
+    org = details.get("org") or details.get("as_name") or details.get("isp")
+    asn = details.get("asn") or details.get("as_number")
+    if not any((country, city, org, asn)):
+        return None
+    return {"country": country, "city": city, "region": region, "org": org, "asn": asn}
 
 
-def _attach_ip_intel(session: Session, rows: list[dict]) -> None:
-    """Populate each row's ``intel`` with the threat-intel evidence cached
-    for its destination IP (one entry per source: Feodo, AbuseIPDB,
-    GreyNoise, Shodan, VirusTotal, …). No-op if the enrichment cache
-    table doesn't exist or there are no rows."""
+def _geo_richness(g: dict) -> int:
+    """Count how many fields a geo candidate fills — used to keep the
+    most detailed geolocation when several sources disagree."""
+    return sum(
+        1 for v in (g["city"], g["region"], g["country"], g["org"], g["asn"]) if v
+    )
+
+
+def _attach_ip_geo(session: Session, rows: list[dict]) -> None:
+    """Populate each flow row's ``geo`` with the richest geolocation
+    (country / city / region / org / ASN) found across any cached
+    enrichment source for its destination IP — ipwho.is primarily, with
+    fallback to the country / ISP / ASN that AbuseIPDB and Feodo already
+    carry. ``None`` when nothing is cached. No-op if the enrichment cache
+    table doesn't exist or there are no rows.
+    """
+    for r in rows:
+        r["geo"] = None
     if not rows or "enrichment_evidence" not in _existing_tables(session):
         return
     ips = [r["dst_ip"] for r in rows if r.get("dst_ip")]
@@ -679,22 +707,25 @@ def _attach_ip_intel(session: Session, rows: list[dict]) -> None:
     model = register_schema(Base)
     stmt = select(
         model.indicator_value,
-        model.source,
-        model.verdict_hint,
-        model.summary,
+        model.details_json,
     ).where(
         model.indicator_type == str(IndicatorType.IPV4),
         model.indicator_value.in_(ips),
     )
-    by_ip: dict[str, list[dict]] = {}
-    for ip, source, hint, summary in session.execute(stmt).all():
-        by_ip.setdefault(ip, []).append(
-            {"source": source, "hint": hint, "summary": summary or ""}
-        )
+    geo_by_ip: dict[str, dict] = {}
+    for ip, details_json in session.execute(stmt).all():
+        try:
+            details = json.loads(details_json) if details_json else {}
+        except (TypeError, ValueError):
+            details = {}
+        geo = _geo_from_details(details)
+        if geo is None:
+            continue
+        best = geo_by_ip.get(ip)
+        if best is None or _geo_richness(geo) > _geo_richness(best):
+            geo_by_ip[ip] = geo
     for r in rows:
-        ev = by_ip.get(r["dst_ip"], [])
-        ev.sort(key=lambda e: _HINT_SEV.get(e["hint"], 9))
-        r["intel"] = ev
+        r["geo"] = geo_by_ip.get(r["dst_ip"])
 
 
 def system_integrity(session: Session, run_id: str):

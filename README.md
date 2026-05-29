@@ -576,7 +576,7 @@ python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -e . pytest
 /tmp/venv/bin/python -m pytest tests/ -q       # 320+ unit tests
 ```
 
-Coverage spans the enrichment framework and all 17 sources, the
+Coverage spans the enrichment framework and all 18 sources, the
 indicator extractors, the HTTP client (rate limit / backoff / 429),
 the CLI dispatcher, the SQLAlchemy repository + DB rotation, the LLM
 judge's parsing, the dashboard endpoints, and the Linux collectors'

@@ -6,15 +6,19 @@ All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 ## [0.2.11] — 2026-05-29
 
 ### Added
-- **network_flows: threat-intel column per destination.** The
-  by-destination flow table now shows what the enrichment sources
-  (Feodo Tracker, AbuseIPDB, GreyNoise, Shodan, VirusTotal, …) said
-  about each destination IP, rendered as one colour-coded pill per
-  source (hint + summary tooltip). Evidence is read from the
-  `enrichment_evidence` cache the monitor already populates, via the
-  ORM model (`_attach_ip_intel`), and degrades to "no intel" when a
+- **network_flows: geolocation column per destination.** The
+  by-destination flow table now shows where each destination IP sits —
+  city / region / country plus the network owner (org / ASN). The data
+  comes from the `enrichment_evidence` cache the monitor already
+  populates, read through the ORM model (`_attach_ip_geo`); when several
+  sources carry geo, the richest wins. Degrades to "no geo" when a
   destination has no cached evidence or the cache table is absent
   (older DBs).
+- **New enricher: `ipwhois_geo` (ipwho.is).** Free, keyless, HTTPS IP
+  geolocation so *every* public destination gets a location, not just
+  threat-flagged ones. Purely informational — it never raises a threat
+  verdict. AbuseIPDB (countryCode/isp) and Feodo (country/as_name) still
+  serve as fallbacks for the column when present.
 
 ## [0.2.10] — 2026-05-29
 

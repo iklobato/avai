@@ -16,7 +16,7 @@
 #   0 — pytest in a fresh venv (22 unit tests)
 #   1 — Docker CLI surface: --version, --help, --no-enrich present
 #   2 — Cold smoke: monitor --once --no-judge --no-enrich --no-streaming
-#   3 — Keyless enrichment smoke: registry gates 8 keyless / 9 keyed
+#   3 — Keyless enrichment smoke: registry gates 9 keyless / 9 keyed
 #
 # Exits non-zero on any failure (CI-friendly).
 
@@ -221,14 +221,14 @@ phase_3() {
   fi
 
   local expected_keyless=(circl_hashlookup shodan_internetdb feodo_tracker
-                          osv cisa_kev nvd endoflife crtsh)
+                          osv cisa_kev nvd endoflife crtsh ipwhois_geo)
   local missing=()
   local src
   for src in "${expected_keyless[@]}"; do
     grep -q "enricher enabled: $src" <<< "$out" || missing+=("$src")
   done
   if (( ${#missing[@]} == 0 )); then
-    ok "Phase 3b: all 8 keyless enrichers reported enabled"
+    ok "Phase 3b: all 9 keyless enrichers reported enabled"
   else
     bad "Phase 3b: missing enrichers: ${missing[*]}"
   fi

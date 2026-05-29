@@ -204,9 +204,12 @@ class TestNetworkFlowsAggregation:
         assert "tcpdump aggregator" in html
 
 
-def _seed_intel(engine, evidence: list[dict]) -> None:
+def _seed_geo(engine, evidence: list[dict]) -> None:
     """Insert enrichment_evidence rows through the ORM model the dashboard
-    queries (so the test exercises the same path)."""
+    queries — each entry's ``details`` dict becomes details_json, so the
+    geolocation extraction runs over the same path production uses."""
+    import json
+
     from avai.enrichers.cache import register_schema
     from avai.host_monitor import Base
 
@@ -215,69 +218,107 @@ def _seed_intel(engine, evidence: list[dict]) -> None:
         for e in evidence:
             s.add(
                 model(
-                    source=e["source"],
+                    source=e.get("source", "ipwhois_geo"),
                     indicator_type="ipv4",
                     indicator_value=e["ip"],
-                    verdict_hint=e["hint"],
-                    confidence=e.get("confidence", 0.8),
+                    verdict_hint=e.get("hint", "unknown"),
+                    confidence=e.get("confidence", 0.0),
                     summary=e.get("summary", ""),
-                    details_json="{}",
+                    details_json=json.dumps(e.get("details", {})),
                     fetched_at="2026-05-29T00:00:00",
                 )
             )
         s.commit()
 
 
-class TestThreatIntelColumn:
-    def test_evidence_attached_and_worst_source_first(self, seeded):
+class TestGeolocationColumn:
+    def test_geo_attached_and_richest_source_wins(self, seeded):
         engine, run_id = seeded
-        _seed_intel(
+        # AbuseIPDB only knows country+isp; ipwho.is knows city/region/asn —
+        # the richer one must win.
+        _seed_geo(
             engine,
             [
                 {
-                    "source": "GreyNoise",
-                    "ip": "203.0.113.9",
-                    "hint": "benign",
-                    "summary": "scanner",
-                },
-                {
-                    "source": "Feodo Tracker",
+                    "source": "abuseipdb",
                     "ip": "203.0.113.9",
                     "hint": "malicious",
-                    "summary": "known C2",
+                    "details": {"countryCode": "US", "isp": "Comcast"},
+                },
+                {
+                    "source": "ipwhois_geo",
+                    "ip": "203.0.113.9",
+                    "details": {
+                        "country": "United States",
+                        "region": "California",
+                        "city": "San Jose",
+                        "asn": 7922,
+                        "org": "Comcast Cable",
+                    },
                 },
             ],
         )
         with Session(engine) as s:
             rows = network_flows(s, run_id)["rows"]
-        bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
-        sources = [e["source"] for e in bad["intel"]]
-        assert set(sources) == {"Feodo Tracker", "GreyNoise"}
-        # malicious source sorts ahead of the benign one
-        assert bad["intel"][0]["source"] == "Feodo Tracker"
-        assert bad["intel"][0]["summary"] == "known C2"
+        geo = next(r for r in rows if r["dst_ip"] == "203.0.113.9")["geo"]
+        assert geo is not None
+        assert geo["city"] == "San Jose"
+        assert geo["country"] == "United States"
+        assert geo["asn"] == 7922
 
-    def test_destination_without_evidence_has_empty_intel(self, seeded):
+    def test_geo_falls_back_to_abuseipdb_fields(self, seeded):
+        # No dedicated geo source — country/org still come from AbuseIPDB's
+        # own details (the "use the enrich ip info" fallback).
         engine, run_id = seeded
-        _seed_intel(
+        _seed_geo(
             engine,
-            [{"source": "Feodo Tracker", "ip": "203.0.113.9", "hint": "malicious"}],
+            [
+                {
+                    "source": "abuseipdb",
+                    "ip": "203.0.113.9",
+                    "hint": "malicious",
+                    "details": {"countryCode": "DE", "isp": "Hetzner"},
+                }
+            ],
+        )
+        with Session(engine) as s:
+            rows = network_flows(s, run_id)["rows"]
+        geo = next(r for r in rows if r["dst_ip"] == "203.0.113.9")["geo"]
+        assert geo["country"] == "DE"
+        assert geo["org"] == "Hetzner"
+        assert geo["city"] is None
+
+    def test_destination_without_evidence_has_no_geo(self, seeded):
+        engine, run_id = seeded
+        _seed_geo(
+            engine,
+            [
+                {
+                    "source": "ipwhois_geo",
+                    "ip": "203.0.113.9",
+                    "details": {"country": "US", "city": "Ashburn"},
+                }
+            ],
         )
         with Session(engine) as s:
             rows = network_flows(s, run_id)["rows"]
         benign = next(r for r in rows if r["dst_ip"] == "142.250.80.46")
-        assert benign["intel"] == []
+        assert benign["geo"] is None
 
-    def test_fragment_renders_intel_pills_and_header(self, seeded):
+    def test_fragment_renders_location_column(self, seeded):
         engine, run_id = seeded
-        _seed_intel(
+        _seed_geo(
             engine,
             [
                 {
-                    "source": "AbuseIPDB",
+                    "source": "ipwhois_geo",
                     "ip": "203.0.113.9",
-                    "hint": "malicious",
-                    "summary": "reported 40x",
+                    "details": {
+                        "country": "United States",
+                        "city": "Ashburn",
+                        "asn": 14618,
+                        "org": "Amazon",
+                    },
                 }
             ],
         )
@@ -285,12 +326,14 @@ class TestThreatIntelColumn:
         app.config.update(TESTING=True, DB_PATH=db)
         with app.test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
-        assert "threat intel" in html  # new column header
-        assert "AbuseIPDB" in html  # evidence pill
-        assert "no intel" in html  # benign destination has none
+        assert "location" in html  # new column header
+        assert "Ashburn" in html  # city rendered
+        assert "AS14618" in html  # ASN rendered
+        assert "no geo" in html  # benign destination has none
+        assert "threat intel" not in html  # threat-intel column removed
 
-    def test_no_intel_when_evidence_table_absent(self, tmp_path):
-        """Older DB lacking enrichment_evidence must not 500 — intel empty."""
+    def test_no_geo_when_evidence_table_absent(self, tmp_path):
+        """Older DB lacking enrichment_evidence must not 500 — geo None."""
         from sqlalchemy import text
 
         db = tmp_path / "noev.db"
@@ -321,7 +364,7 @@ class TestThreatIntelColumn:
             conn.execute(text("DROP TABLE enrichment_evidence"))
         with Session(engine) as s:
             rows = network_flows(s, run_id)["rows"]
-        assert rows[0]["intel"] == []
+        assert rows[0]["geo"] is None
 
 
 class TestMissingTableGraceful:
