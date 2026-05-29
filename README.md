@@ -433,6 +433,35 @@ path not documented here.
 
 ---
 
+## Development & tests
+
+The suite is network-free and runs in seconds. The repo's dev Python
+may carry plugin conflicts, so run it in a throwaway venv:
+
+```sh
+python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -e . pytest
+/tmp/venv/bin/python -m pytest tests/ -q       # 320+ unit tests
+```
+
+Coverage spans the enrichment framework and all 17 sources, the
+indicator extractors, the HTTP client (rate limit / backoff / 429),
+the CLI dispatcher, the SQLAlchemy repository + DB rotation, the LLM
+judge's parsing, the dashboard endpoints, and the Linux collectors'
+file parsing (systemd / cron / `.desktop` / BlueZ). Tests are written
+to fail when the implementation breaks — verified by mutation testing,
+not just coverage percentage.
+
+Unattended Docker smoke test (builds the image, runs the CLI surface,
+a cold collector pass, and the keyless-enrichment registry check):
+
+```sh
+tests/local.sh            # all phases; exits non-zero on any failure
+```
+
+See [`CHANGELOG.md`](CHANGELOG.md) for version history.
+
+---
+
 ## License
 
 MIT — see `LICENSE`.

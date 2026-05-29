@@ -1,0 +1,71 @@
+# Changelog
+
+All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
+`iklob1/avai`). Versions follow semantic versioning.
+
+## [Unreleased]
+
+### Fixed
+- **`launch_items` collector crashed in container mode.**
+  `host_paths_for_home()` returned an empty list when `HOST_PREFIX`
+  was set but neither `<prefix>/home/*` nor `<prefix>/root` were
+  mounted; the caller indexed `[0]` → `IndexError` killed the whole
+  collector every cycle. Now iterates the returned paths (also fixes a
+  latent bug where only the first user home was ever scanned).
+- **CamelCase config keys were silently dropped (3 collectors).**
+  Python's `configparser` lowercases keys by default, so every
+  `.get("ExecStart")` / `.get("Name")` / `.get("Alias")` missed:
+  - systemd units lost `program` / `keep_alive` / `user_name` /
+    `run_at_load` / schedule — the LLM judge was effectively blind on
+    the persistence surface.
+  - `.desktop` apps lost name / version / exec.
+  - BlueZ devices lost name / class.
+  Fixed with `optionxform = str` on all three parsers.
+
+### Testing
+- Added `tests/test_collectors.py` and expanded the suite to 320+
+  network-free unit tests across the enrichment framework, all 17
+  sources, indicator extractors, HTTP client, CLI, repository + DB
+  rotation, LLM-judge parsing, dashboard endpoints, and Linux
+  collector file parsing. Mutation-verified: tests fail when the
+  implementation breaks.
+
+## [0.2.1] — 2026-05-28
+
+### Fixed
+- `_is_domain()` matched IPv4 literals as domains, routing IP‑host
+  URLs to the wrong enrichers.
+- Dashboard `_ensure_db_exists()` didn't register the enrichment
+  model, so dashboard‑only containers 500'd on the
+  `enrichment_evidence` table.
+- `Enricher.env_token()` treated an empty‑string env var (`-e VAR=`)
+  as a present token, registering keyed enrichers with no key.
+
+## [0.2.0] — 2026-05-28
+
+### Added
+- **Threat‑intel enrichment layer** (`avai.enrichers`). Before each
+  finding reaches the LLM, avai extracts indicators (SHA256, IPv4,
+  domain, URL, CVE, package, OS version) and cross‑checks them against
+  up to **17 external sources**, attaching the evidence to the judge's
+  prompt. Results cached in SQLite with per‑source TTLs.
+  - Keyless: CIRCL hashlookup, Shodan InternetDB, Feodo Tracker,
+    OSV.dev, CISA KEV, NVD, endoflife.date, crt.sh.
+  - One free abuse.ch key (`ABUSE_CH_AUTH_KEY`): MalwareBazaar,
+    URLhaus, ThreatFox.
+  - Per‑service keys: VirusTotal, AbuseIPDB, GreyNoise, Google Safe
+    Browsing, PhishTank, GitHub Advisory.
+- `avai monitor` flags `--no-enrich` and `--enrich-only NAME`.
+- `.env.example` documenting every credential; missing keys disable a
+  source cleanly.
+
+## [0.1.0] — 2026-05-27
+
+### Added
+- Initial release: host‑security telemetry collector (21 collectors on
+  macOS, 16 on Linux), LLM threat judge (litellm + Anthropic, OAuth or
+  API key), and a read‑only Flask + HTMX + Chart.js dashboard.
+- Single Docker image (`iklob1/avai`) with two roles — dashboard
+  (default) and monitor — plus `pip install avai-monitor`.
+- SQLite storage with size‑based rotation; streaming collectors for
+  auth and process‑exec events.
