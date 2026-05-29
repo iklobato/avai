@@ -971,6 +971,7 @@ class NetworkFlowRow(_RowBase):
     dst_port: Mapped[Optional[int]]
     service: Mapped[Optional[str]]  # well-known name for dst_port, if any
     packets: Mapped[Optional[int]]
+    byte_count: Mapped[Optional[int]]  # summed payload bytes (tcpdump length)
     process: Mapped[Optional[str]]  # owning process name, if resolvable
     pid: Mapped[Optional[int]]  # owning process pid, if resolvable
     first_seen: Mapped[Optional[str]]
@@ -2189,6 +2190,22 @@ class ListeningPortsCollector(SnapshotCollector):
             }
 
 
+def _payload_bytes(parts: list[str]) -> int:
+    """Pull the payload length tcpdump prints for one packet (so flows
+    can report data volume, not just a packet count): TCP shows it as the
+    trailing token (``tcp 1380``), UDP/ICMP as ``length <n>``. Returns 0
+    when absent or unparseable."""
+    if "length" in parts:
+        i = parts.index("length")
+        if i + 1 < len(parts):
+            tok = parts[i + 1].rstrip(".,")
+            if tok.isdigit():
+                return int(tok)
+        return 0
+    tail = parts[-1].rstrip(".,") if parts else ""
+    return int(tail) if tail.isdigit() else 0
+
+
 class ProcessConnectionResolver:
     """Resolves which local process owns a socket to a remote endpoint by
     snapshotting the kernel connection table (psutil).
@@ -2340,7 +2357,7 @@ class NetworkFlowsCollector(SnapshotCollector):
             parsed = self._parse_line(line)
             if parsed is None:
                 continue
-            iface, proto, dst_ip, dst_port = parsed
+            iface, proto, dst_ip, dst_port, nbytes = parsed
             iface = iface or default_iface
             key = (iface, proto, dst_ip, dst_port)
             f = flows.get(key)
@@ -2352,25 +2369,28 @@ class NetworkFlowsCollector(SnapshotCollector):
                     "dst_port": dst_port,
                     "service": self._service(dst_port, proto),
                     "packets": 1,
+                    "byte_count": nbytes,
                     "first_seen": now,
                     "last_seen": now,
                 }
             else:
                 f["packets"] += 1
+                f["byte_count"] += nbytes
                 f["last_seen"] = now
         return flows
 
     @staticmethod
     def _parse_line(line: str):
-        """Return (iface, proto, dst_ip, dst_port) from one tcpdump -t -q
-        line, or None if it isn't a parseable TCP/UDP packet.
+        """Return (iface, proto, dst_ip, dst_port, nbytes) from one tcpdump
+        -t -q line, or None if it isn't a parseable TCP/UDP packet.
+        ``nbytes`` is the payload length tcpdump prints (0 when absent).
 
         Handles both IPv4 (``IP``) and IPv6 (``IP6``) — tcpdump appends
         the port after a final ``.`` for both families, so the trailing
         ``.<port>`` splits off the destination address either way.
 
-        macOS '-k I':   ``(en6) IP src.port > dst.port: proto len``
-        Linux -i any:   ``eth0 Out IP6 src.port > dst.port: proto len``
+        macOS '-k I':   ``(en6) IP src.port > dst.port: tcp 1380``
+        Linux -i any:   ``eth0 Out IP6 src.port > dst.port: UDP, length 45``
         """
         parts = line.split()
         if ">" not in parts:
@@ -2395,7 +2415,7 @@ class NetworkFlowsCollector(SnapshotCollector):
         proto = "ip"
         if gt + 2 < len(parts):
             proto = parts[gt + 2].rstrip(",").lower()
-        return iface, proto, ip, int(port_s)
+        return iface, proto, ip, int(port_s), _payload_bytes(parts)
 
     @staticmethod
     def _service(port: int, proto: str):

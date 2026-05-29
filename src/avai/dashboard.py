@@ -198,6 +198,25 @@ def _pretty_json(value) -> str:
         return str(value)
 
 
+def _human_bytes(n) -> str:
+    """Human-readable data volume (e.g. 927 -> '927 B', 12345 -> '12.1 KB',
+    5e6 -> '4.8 MB'). Returns '' for 0/None/unknown so the template can
+    fall back to a packet count."""
+    if not isinstance(n, (int, float)) or n <= 0:
+        return ""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return ""
+
+
+app.add_template_filter(_human_bytes, "human_bytes")
+
+
 def _flag_emoji(cc) -> str:
     """Render a 2-letter ISO country code as its flag emoji (regional
     indicator symbols), e.g. 'US' -> 🇺🇸. Empty string for anything that
@@ -580,6 +599,11 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
     process_sel = (
         NetworkFlowRow.process if "process" in cols else literal(None).label("process")
     )
+    bytes_sel = (
+        NetworkFlowRow.byte_count
+        if "byte_count" in cols
+        else literal(None).label("byte_count")
+    )
 
     stmt = (
         select(
@@ -589,6 +613,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
             NetworkFlowRow.dst_port,
             service_sel,
             NetworkFlowRow.packets,
+            bytes_sel,
             process_sel,
             Judgement.verdict,
             Judgement.confidence,
@@ -613,6 +638,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
         dst_port,
         service,
         packets,
+        byte_count,
         process,
         verdict,
         conf,
@@ -623,6 +649,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
             g = groups[dst_ip] = {
                 "dst_ip": dst_ip,
                 "packets": 0,
+                "bytes": 0,
                 "flows": 0,
                 "_ifaces": set(),
                 "_protos": set(),
@@ -633,6 +660,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
                 "reasoning": "",
             }
         g["packets"] += packets or 0
+        g["bytes"] += byte_count or 0
         g["flows"] += 1
         if iface:
             g["_ifaces"].add(iface)
@@ -658,6 +686,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
                 "ports": sorted(g["_ports"], key=_port_sort_key),
                 "process": ", ".join(sorted(g["_procs"])) or "—",
                 "packets": g["packets"],
+                "bytes": g["bytes"],
                 "flows": g["flows"],
                 "verdict": g["verdict"],
                 "confidence": g["confidence"],
@@ -678,6 +707,7 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
         "destinations": len(rows),
         "flows": sum(r["flows"] for r in rows),
         "packets": sum(r["packets"] for r in rows),
+        "bytes": sum(r["bytes"] for r in rows),
         "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
         "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
     }

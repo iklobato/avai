@@ -6,6 +6,13 @@ All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 ## [0.3.0] — 2026-05-29
 
 ### Added
+- **network_flows: data volume (payload bytes).** tcpdump already prints
+  a per-packet payload length we were discarding — now summed per flow
+  (`byte_count`) and shown as the headline traffic metric (e.g. `4.8 MB`),
+  with packets/flows demoted to a detail line. Volume distinguishes a
+  chatty small-packet beacon from a bulk transfer / exfil in a way a raw
+  packet count can't. The summary card leads with total volume; falls
+  back to packet count when bytes are unknown (older rows).
 - **Process → flow attribution.** Each network flow now names the owning
   process (and pid) when resolvable. A new injectable
   `ProcessConnectionResolver` snapshots the kernel connection table

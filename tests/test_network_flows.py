@@ -36,20 +36,22 @@ wlan0 Out IP 10.0.0.5.51000 > 1.2.3.4.443: tcp 52
 
 class TestParseLine:
     def test_macos_tcp_line_no_iface(self):
+        # 5-tuple now includes the payload byte count (trailing 'tcp 0' → 0)
         assert NetworkFlowsCollector._parse_line(
             "IP 10.0.0.5.54321 > 142.250.80.46.443: tcp 0"
-        ) == (None, "tcp", "142.250.80.46", 443)
+        ) == (None, "tcp", "142.250.80.46", 443, 0)
 
     def test_udp_line_with_comma(self):
+        # 'UDP, length 45' → 45 payload bytes
         assert NetworkFlowsCollector._parse_line(
             "IP 10.0.0.5.5353 > 224.0.0.251.5353: UDP, length 45"
-        ) == (None, "udp", "224.0.0.251", 5353)
+        ) == (None, "udp", "224.0.0.251", 5353, 45)
 
     def test_linux_any_line_has_interface(self):
         # 'eth0 Out IP ...' → interface is the leading token
         assert NetworkFlowsCollector._parse_line(
             "eth0 Out IP 10.0.0.5.54321 > 1.2.3.4.443: tcp 0"
-        ) == ("eth0", "tcp", "1.2.3.4", 443)
+        ) == ("eth0", "tcp", "1.2.3.4", 443, 0)
 
     def test_arp_and_blank_skipped(self):
         assert NetworkFlowsCollector._parse_line("ARP, Request who-has x") is None
@@ -66,12 +68,12 @@ class TestParseLine:
         # IPv4, so the trailing .443 splits off the v6 destination.
         assert NetworkFlowsCollector._parse_line(
             "IP6 2600:1f18::1.50000 > 2606:4700:4700::1111.443: tcp 0"
-        ) == (None, "tcp", "2606:4700:4700::1111", 443)
+        ) == (None, "tcp", "2606:4700:4700::1111", 443, 0)
 
     def test_ipv6_line_linux_any(self):
         assert NetworkFlowsCollector._parse_line(
             "eth0 Out IP6 fe80::1.5353 > 2001:4860:4860::8888.443: tcp 52"
-        ) == ("eth0", "tcp", "2001:4860:4860::8888", 443)
+        ) == ("eth0", "tcp", "2001:4860:4860::8888", 443, 52)
 
     def test_macos_k_interface_prefix(self):
         # macOS '-k I' prefixes the real interface in parentheses (verified
@@ -79,7 +81,7 @@ class TestParseLine:
         # en6/en0/… instead of the 'pktap' pseudo-device.
         assert NetworkFlowsCollector._parse_line(
             "(en6) IP 192.168.1.209.56258 > 18.190.38.130.443: tcp 0"
-        ) == ("en6", "tcp", "18.190.38.130", 443)
+        ) == ("en6", "tcp", "18.190.38.130", 443, 0)
 
     def test_macos_k_ipv6_expanded_address(self):
         # Real macOS capture: '-k I' + IP6 + a fully-expanded v6 address
@@ -87,7 +89,26 @@ class TestParseLine:
         assert NetworkFlowsCollector._parse_line(
             "(en6) IP6 2803:9810:469f:7108:f5ff:a108:be74:f78a.55987 "
             "> 2a03:2880:f205:2c6:face:b00c:0:7260.443: tcp 1380"
-        ) == ("en6", "tcp", "2a03:2880:f205:2c6:face:b00c:0:7260", 443)
+        ) == ("en6", "tcp", "2a03:2880:f205:2c6:face:b00c:0:7260", 443, 1380)
+
+
+class TestPayloadBytes:
+    def test_tcp_trailing_length(self):
+        from avai.host_monitor import _payload_bytes
+
+        assert _payload_bytes("IP a > b: tcp 1380".split()) == 1380
+        assert _payload_bytes("IP a > b: tcp 0".split()) == 0
+
+    def test_udp_length_token(self):
+        from avai.host_monitor import _payload_bytes
+
+        assert _payload_bytes("IP a > b: UDP, length 45".split()) == 45
+
+    def test_absent_returns_zero(self):
+        from avai.host_monitor import _payload_bytes
+
+        assert _payload_bytes("IP a > b: Flags [S]".split()) == 0
+        assert _payload_bytes([]) == 0
 
 
 class TestIfaceFromBanner:
@@ -118,6 +139,7 @@ class TestAggregate:
         assert len(flows) == 3  # google:443 (x2), mdns, dns
         g = flows[("en0", "tcp", "142.250.80.46", 443)]
         assert g["packets"] == 2
+        assert g["byte_count"] == 52  # tcp 0 + tcp 52 summed
         assert g["iface"] == "en0"
 
     def test_linux_per_line_interface(self):
@@ -255,6 +277,65 @@ class TestNetworkFlowsAggregation:
         assert "en0" in html  # interface column
         assert "malicious" in html
         assert "tcpdump aggregator" in html
+
+
+class TestTrafficVolume:
+    """The traffic cell leads with data volume (summed payload bytes),
+    falling back to a packet count when bytes are unknown."""
+
+    def _seed_flow(self, tmp_path, byte_count):
+        from avai.host_monitor import content_hash
+
+        engine = create_engine(
+            f"sqlite:///{tmp_path / 'v.db'}",
+            connect_args={"check_same_thread": False},
+        )
+        sink = Sink(engine)
+        sink.setup()
+        run_id, ts = sink.start_run("h", 5)
+        fields = ("iface", "proto", "dst_ip", "dst_port")
+        row = {
+            "iface": "en6",
+            "proto": "tcp",
+            "dst_ip": "203.0.113.5",
+            "dst_port": 443,
+            "service": "https",
+            "packets": 8,
+            "byte_count": byte_count,
+            "process": None,
+            "pid": None,
+            "first_seen": ts,
+            "last_seen": ts,
+            "run_id": run_id,
+            "collected_at": ts,
+        }
+        row["content_hash"] = content_hash(row, fields)
+        sink.write(NetworkFlowRow, [row])
+        return engine, run_id
+
+    def test_bytes_summed_and_in_summary(self, tmp_path):
+        engine, run_id = self._seed_flow(tmp_path, 1_200_000)
+        with Session(engine) as s:
+            data = network_flows(s, run_id)
+        assert data["rows"][0]["bytes"] == 1_200_000
+        assert data["summary"]["bytes"] == 1_200_000
+
+    def test_fragment_shows_human_volume(self, tmp_path):
+        engine, run_id = self._seed_flow(tmp_path, 1_200_000)
+        db = str(engine.url).replace("sqlite:///", "")
+        app.config.update(TESTING=True, DB_PATH=db)
+        with app.test_client() as c:
+            html = c.get("/fragments/network-flows").data.decode()
+        assert "1.1 MB" in html  # volume headline
+        assert "8 pkts" in html  # packets demoted to detail line
+
+    def test_zero_bytes_falls_back_to_packets(self, tmp_path):
+        engine, run_id = self._seed_flow(tmp_path, 0)
+        db = str(engine.url).replace("sqlite:///", "")
+        app.config.update(TESTING=True, DB_PATH=db)
+        with app.test_client() as c:
+            html = c.get("/fragments/network-flows").data.decode()
+        assert "8 " in html and "pkts" in html  # packet count as headline
 
 
 def _seed_geo(engine, evidence: list[dict]) -> None:
@@ -490,6 +571,23 @@ class TestFlagEmoji:
         assert _flag_emoji(None) == ""
         assert _flag_emoji("U1") == ""
         assert _flag_emoji("") == ""
+
+
+class TestHumanBytes:
+    def test_scales(self):
+        from avai.dashboard import _human_bytes
+
+        assert _human_bytes(927) == "927 B"
+        assert _human_bytes(12345) == "12.1 KB"
+        assert _human_bytes(5_000_000) == "4.8 MB"
+        assert _human_bytes(3_000_000_000) == "2.8 GB"
+
+    def test_zero_or_none_empty(self):
+        from avai.dashboard import _human_bytes
+
+        assert _human_bytes(0) == ""
+        assert _human_bytes(None) == ""
+        assert _human_bytes(-5) == ""
 
 
 class TestDestinationHostname:

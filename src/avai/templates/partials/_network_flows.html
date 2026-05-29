@@ -23,8 +23,10 @@
         <div class="text-[10px] uppercase tracking-wider text-slate-500">flows</div>
       </div>
       <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
-        <div class="mono text-slate-200 text-lg">{{ "{:,}".format(s.packets) }}</div>
-        <div class="text-[10px] uppercase tracking-wider text-slate-500">packets</div>
+        {% set tv = s.bytes | human_bytes %}
+        <div class="mono text-slate-200 text-lg"
+             title="{{ "{:,}".format(s.packets) }} packets">{{ tv if tv else "{:,}".format(s.packets) }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">{{ "volume" if tv else "packets" }}</div>
       </div>
       <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
         <div class="mono text-red-300 text-lg">{{ s.malicious }}</div>
@@ -123,8 +125,14 @@
               </div>
             </td>
             <td class="py-2 text-right whitespace-nowrap">
-              <div class="text-slate-200 font-mono">{{ "{:,}".format(f.packets) }} <span class="text-[10px] text-slate-500">pkts</span></div>
-              <div class="text-[10px] text-slate-500 font-mono">{{ f.flows }} flow{{ '' if f.flows == 1 else 's' }}</div>
+              {% set vol = f.bytes | human_bytes %}
+              {% if vol %}
+                <div class="text-slate-200 font-mono" title="{{ "{:,}".format(f.bytes) }} bytes of payload">{{ vol }}</div>
+                <div class="text-[10px] text-slate-500 font-mono">{{ "{:,}".format(f.packets) }} pkts · {{ f.flows }} flow{{ '' if f.flows == 1 else 's' }}</div>
+              {% else %}
+                <div class="text-slate-200 font-mono">{{ "{:,}".format(f.packets) }} <span class="text-[10px] text-slate-500">pkts</span></div>
+                <div class="text-[10px] text-slate-500 font-mono">{{ f.flows }} flow{{ '' if f.flows == 1 else 's' }}</div>
+              {% endif %}
             </td>
             <td class="py-2 text-slate-400 text-[11px] leading-snug line-clamp-3">{{ f.reasoning }}</td>
           </tr>
