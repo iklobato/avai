@@ -4,6 +4,7 @@ Covers the subcommand routing in :mod:`avai.cli` and the version /
 help short-circuits — without touching ``host_monitor`` or
 ``dashboard`` (their ``main`` functions are mocked).
 """
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -73,3 +74,27 @@ class TestUnknownCommand:
         assert rc == 2
         assert "unknown command" in err
         assert "avai monitor" in err  # usage echoed on stderr
+
+
+class TestDefaultArgs:
+    """Bare `avai monitor` / `avai dashboard` must apply the canonical
+    defaults (~/.avai/avai.db etc.) with no flags."""
+
+    def test_monitor_defaults(self):
+        from pathlib import Path
+
+        from avai.host_monitor import _build_parser
+
+        ns = _build_parser().parse_args([])
+        assert ns.db == str(Path.home() / ".avai" / "avai.db")
+        assert ns.interval == 300
+        assert ns.judge_max_per_collector == 25
+
+    def test_dashboard_defaults(self):
+        from pathlib import Path
+
+        from avai.dashboard import _build_parser
+
+        ns = _build_parser().parse_args([])
+        assert ns.db == str(Path.home() / ".avai" / "avai.db")
+        assert ns.port == 8765

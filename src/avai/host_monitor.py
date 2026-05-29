@@ -117,17 +117,18 @@ IS_LINUX = _platform.system() == "Linux"
 
 _PKG_DIR = Path(__file__).resolve().parent
 
-# Default database location: user's current working directory so the
-# pip-installed `avai monitor` doesn't try to write into the read-only
-# site-packages dir. Containerised invocations override via --db
-# (compose passes --db /data/avai.db).
-DEFAULT_DB_PATH = Path.cwd() / "avai.db"
+# Default database location: ~/.avai/avai.db, a stable per-user path so
+# `avai monitor` and `avai dashboard` agree on the same DB without flags.
+# (Under `sudo -E` HOME is preserved, so this resolves to the invoking
+# user's home.) Containerised invocations override via --db (compose
+# passes --db /data/avai.db).
+DEFAULT_DB_PATH = Path.home() / ".avai" / "avai.db"
 DEFAULT_INTERVAL = 300
 DEFAULT_LOOKBACK_MIN = 6
 
 DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_JUDGE_BATCH = 20
-DEFAULT_JUDGE_MAX_PER_COLLECTOR = 200
+DEFAULT_JUDGE_MAX_PER_COLLECTOR = 25
 # Per-LLM-call timeout. Without it, one stalled API request blocks the
 # whole cycle forever — the run never finishes, so the dashboard (which
 # only shows completed runs) stays empty. On timeout the batch is
@@ -4932,10 +4933,12 @@ def build_judge(args, prompts: Prompts) -> Judge:
     return judge
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="avai — host security telemetry + LLM threat judge"
     )
+    # Bare `avai monitor` uses ~/.avai/avai.db, a 300s interval, and a
+    # 25-per-collector judge cap — no flags needed.
     parser.add_argument(
         "--db",
         default=str(DEFAULT_DB_PATH),
@@ -5014,7 +5017,11 @@ def main() -> int:
         "Pass once per source. Useful for debugging.",
     )
     parser.add_argument("--verbose", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

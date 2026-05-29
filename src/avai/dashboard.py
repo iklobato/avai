@@ -142,10 +142,10 @@ VERDICTS = ("malicious", "suspicious", "unknown", "benign")
 PER_PAGE_OPTIONS = (10, 25, 50, 100)
 DEFAULT_PER_PAGE = 10
 
-# Default DB lives in the current working directory so the pip-
-# installed `avai dashboard` doesn't try to read from site-packages.
-# Override at runtime with --db or by setting app.config["DB_PATH"].
-DEFAULT_DB_PATH = Path.cwd() / "avai.db"
+# Default DB is ~/.avai/avai.db — the same stable per-user path the
+# monitor writes to, so `avai dashboard` finds the monitor's data with
+# no flags. Override at runtime with --db or app.config["DB_PATH"].
+DEFAULT_DB_PATH = Path.home() / ".avai" / "avai.db"
 
 # Templates and static assets ship inside the installed package
 # (src/avai/templates/, src/avai/static/). Flask defaults to looking
@@ -1285,15 +1285,21 @@ def api_notifications_new():
 # ============================================================================
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="avai — read-only Flask + HTMX dashboard for the host monitor DB"
     )
+    # Bare `avai dashboard` reads ~/.avai/avai.db on :8765 (the monitor's
+    # defaults) so it Just Works without flags.
     parser.add_argument("--db", default=str(DEFAULT_DB_PATH))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = _build_parser().parse_args()
 
     app.config["DB_PATH"] = args.db
     _ensure_db_exists(args.db)
