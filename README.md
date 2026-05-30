@@ -92,6 +92,82 @@ suspicious AirWatch/MDM persistence surfaced for review.
 
 ---
 
+## Features
+
+**Host telemetry — 26 collectors on macOS, 21 on Linux**, snapshotting every place
+malware hides, persists, and phones home:
+
+- **Processes & execution** — running processes, and `execve` exec events as they fire.
+- **Network** — active connections, listening ports, a tcpdump **flow aggregator**
+  (grouped by destination, tied to the owning process), DNS queries, interfaces, Wi‑Fi state.
+- **Persistence** — launch items (LaunchDaemons/Agents, systemd units, cron),
+  kernel & system extensions, MDM/configuration profiles, installed apps.
+- **Access & identity** — auth events (unified log / `journalctl`), SSH
+  `authorized_keys`, TCC privacy grants (camera/mic/location/screen/full‑disk),
+  privilege config, setuid binaries.
+- **Integrity & posture** — system integrity (FileVault, Firewall, Gatekeeper, SIP,
+  SELinux/AppArmor/ufw…), file integrity (passwd/shadow/sudoers/SSH/dotfiles),
+  `/etc/hosts`, quarantine events, mounts.
+- **Hardware** — USB and Bluetooth devices.
+- **Browser** — installed browser extensions.
+
+**LLM threat classifier** — a Claude‑class model labels every new artifact
+**malicious / suspicious / unknown / benign** with a **MITRE‑aligned category**, a
+**confidence**, and a **one‑line remediation**. Bring your own key
+(`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`) or any litellm‑supported provider.
+
+**17 threat‑intel sources behind every verdict** — indicators (hash, IP, domain,
+URL, CVE, package, OS version) are enriched *before* the model sees them:
+VirusTotal · MalwareBazaar · URLhaus · ThreatFox · Feodo Tracker · AbuseIPDB ·
+GreyNoise · Shodan InternetDB · CISA KEV · NVD · OSV · GitHub Advisory ·
+CIRCL hashlookup · crt.sh · PhishTank · Google Safe Browsing · endoflife.date
+(plus IP geolocation). Keyless sources always run; keyed ones enable when you add
+the key, and a missing key disables that source cleanly. Results are cached in
+SQLite with per‑source TTLs.
+
+**Read‑only dashboard** (Flask + HTMX + Chart.js on `:8765`) — verdict‑totals donut,
+macOS system‑integrity panel, collector errors, a 12‑hour verdict chart, and a
+findings table with search / filter / sort / pagination on every section. Expand any
+finding for the model's reasoning, the fix, and the raw collected data.
+Auto‑refreshes every 30–60 s with toast **+ audio alerts** on new
+malicious/suspicious findings.
+
+**Built to stay out of your way**
+
+- **One `docker run`** — the same image is both the dashboard and the monitor.
+- **No agent contract, no SIEM, no cloud control plane** — it runs on your host.
+- **Dedup by content hash** — the same artifact is never sent to the LLM twice.
+- **Just a SQLite file** — point the dashboard at any `avai.db`, on any OS.
+- **Native install** too: `pip install avai-monitor`.
+
+Full reference below: [What's collected](#whats-collected-one-line-summary) ·
+[Dashboard](#dashboard) · [Threat‑intel enrichment](#threat-intel-enrichment).
+
+---
+
+## Why avai — the pros
+
+- **Answers, not logs.** Every finding comes back in plain English with a verdict,
+  a confidence, a MITRE category, and a concrete fix — no query language, no triage
+  spreadsheet.
+- **Zero infrastructure.** One container. No SIEM, no agents to enroll, no control
+  plane to run or pay for.
+- **Private by default.** Everything runs on your machine; you bring your own model
+  key, and only *new* findings ever leave — for a threat‑intel lookup or the LLM call
+  you opted into.
+- **Cheap to run.** Content‑hash dedup means each artifact is judged once — a busy
+  host doesn't mean a big bill — and cached intel hits skip the network entirely.
+- **Genuinely broad.** 26 host surfaces × 17 intel sources behind a single verdict —
+  the breadth of an EDR without the agent.
+- **Cross‑platform.** macOS and Linux from the same tool.
+- **Open and yours.** MIT‑licensed, auditable, and model‑agnostic — swap to any
+  litellm provider with one env var.
+- **Safe to point at production.** Collectors only *read*; the dashboard is read‑only.
+- **Portable history.** The whole state is a single SQLite file — scan on a server,
+  view on your laptop, archive a snapshot, diff over time.
+
+---
+
 ## One image, two roles
 
 | Run | Command | Where it makes sense |
