@@ -1,4 +1,4 @@
-{% from "partials/_macros.html" import card_header %}
+{% from "partials/_macros.html" import card_header, pagination_bar %}
 
 {% set verdict_cls = {
   'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
@@ -33,6 +33,55 @@
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
   {{ card_header("persistence & tampering — SSH keys · hosts file · privileges") }}
 
+  {% if data %}
+  {# ----- filter bar ----- #}
+  <form id="persistence-filters"
+        class="mb-4 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="hidden" name="ssh_page"   value="{{ data.pagination.ssh.page }}">
+    <input type="hidden" name="hosts_page" value="{{ data.pagination.hosts.page }}">
+    <input type="hidden" name="priv_page"  value="{{ data.pagination.priv.page }}">
+
+    <input type="search"
+           name="q"
+           value="{{ data.q }}"
+           placeholder="search keys / hosts / rules"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-48 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/persistence"
+           hx-target="#persistence"
+           hx-include="#persistence-filters"
+           hx-trigger="keyup changed delay:300ms, search"
+           hx-vals='{"ssh_page": 1, "hosts_page": 1, "priv_page": 1}'>
+
+    <select name="verdict"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/persistence"
+            hx-target="#persistence"
+            hx-include="#persistence-filters"
+            hx-trigger="change"
+            hx-vals='{"ssh_page": 1, "hosts_page": 1, "priv_page": 1}'>
+      <option value=""           {% if data.verdict == "" %}selected{% endif %}>all non-benign</option>
+      <option value="malicious"  {% if data.verdict == "malicious" %}selected{% endif %}>malicious</option>
+      <option value="suspicious" {% if data.verdict == "suspicious" %}selected{% endif %}>suspicious</option>
+      <option value="unknown"    {% if data.verdict == "unknown" %}selected{% endif %}>unknown</option>
+      <option value="benign"     {% if data.verdict == "benign" %}selected{% endif %}>benign (all)</option>
+    </select>
+
+    <select name="per_page"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/persistence"
+            hx-target="#persistence"
+            hx-include="#persistence-filters"
+            hx-trigger="change"
+            hx-vals='{"ssh_page": 1, "hosts_page": 1, "priv_page": 1}'>
+      {% for n in per_page_options %}
+        <option value="{{ n }}" {% if n == data.per_page %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+  </form>
+  {% endif %}
+
   {% if data and data.any %}
 
     {# ---------- SSH authorized keys ---------- #}
@@ -62,6 +111,26 @@
           {% endfor %}
         </tbody>
       </table>
+      {% if data.pagination.ssh.total_pages > 1 %}
+      <div class="flex items-center gap-3 mt-2 text-xs">
+        <button type="button"
+                class="px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 transition-colors text-[10px]"
+                {% if data.pagination.ssh.page <= 1 %}disabled{% endif %}
+                hx-get="/fragments/persistence"
+                hx-target="#persistence"
+                hx-include="#persistence-filters"
+                hx-vals='{"ssh_page": {{ data.pagination.ssh.page - 1 }}}'>← prev</button>
+        <span class="text-slate-500 font-mono">{{ data.pagination.ssh.page }} / {{ data.pagination.ssh.total_pages }}</span>
+        <button type="button"
+                class="px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 transition-colors text-[10px]"
+                {% if data.pagination.ssh.page >= data.pagination.ssh.total_pages %}disabled{% endif %}
+                hx-get="/fragments/persistence"
+                hx-target="#persistence"
+                hx-include="#persistence-filters"
+                hx-vals='{"ssh_page": {{ data.pagination.ssh.page + 1 }}}'>next →</button>
+        <span class="text-slate-500">{{ data.pagination.ssh.total }} total</span>
+      </div>
+      {% endif %}
     {% else %}
       <div class="text-slate-600 text-xs italic">no authorized keys found</div>
     {% endif %}
@@ -89,6 +158,26 @@
           {% endfor %}
         </tbody>
       </table>
+      {% if data.pagination.hosts.total_pages > 1 %}
+      <div class="flex items-center gap-3 mt-2 text-xs">
+        <button type="button"
+                class="px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 transition-colors text-[10px]"
+                {% if data.pagination.hosts.page <= 1 %}disabled{% endif %}
+                hx-get="/fragments/persistence"
+                hx-target="#persistence"
+                hx-include="#persistence-filters"
+                hx-vals='{"hosts_page": {{ data.pagination.hosts.page - 1 }}}'>← prev</button>
+        <span class="text-slate-500 font-mono">{{ data.pagination.hosts.page }} / {{ data.pagination.hosts.total_pages }}</span>
+        <button type="button"
+                class="px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 transition-colors text-[10px]"
+                {% if data.pagination.hosts.page >= data.pagination.hosts.total_pages %}disabled{% endif %}
+                hx-get="/fragments/persistence"
+                hx-target="#persistence"
+                hx-include="#persistence-filters"
+                hx-vals='{"hosts_page": {{ data.pagination.hosts.page + 1 }}}'>next →</button>
+        <span class="text-slate-500">{{ data.pagination.hosts.total }} total</span>
+      </div>
+      {% endif %}
     {% else %}
       <div class="text-slate-600 text-xs italic">no host mappings found</div>
     {% endif %}
@@ -118,6 +207,26 @@
           {% endfor %}
         </tbody>
       </table>
+      {% if data.pagination.priv.total_pages > 1 %}
+      <div class="flex items-center gap-3 mt-2 text-xs">
+        <button type="button"
+                class="px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 transition-colors text-[10px]"
+                {% if data.pagination.priv.page <= 1 %}disabled{% endif %}
+                hx-get="/fragments/persistence"
+                hx-target="#persistence"
+                hx-include="#persistence-filters"
+                hx-vals='{"priv_page": {{ data.pagination.priv.page - 1 }}}'>← prev</button>
+        <span class="text-slate-500 font-mono">{{ data.pagination.priv.page }} / {{ data.pagination.priv.total_pages }}</span>
+        <button type="button"
+                class="px-2 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 transition-colors text-[10px]"
+                {% if data.pagination.priv.page >= data.pagination.priv.total_pages %}disabled{% endif %}
+                hx-get="/fragments/persistence"
+                hx-target="#persistence"
+                hx-include="#persistence-filters"
+                hx-vals='{"priv_page": {{ data.pagination.priv.page + 1 }}}'>next →</button>
+        <span class="text-slate-500">{{ data.pagination.priv.total }} total</span>
+      </div>
+      {% endif %}
     {% else %}
       <div class="text-slate-600 text-xs italic">no privilege entries found</div>
     {% endif %}

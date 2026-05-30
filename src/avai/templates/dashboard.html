@@ -143,6 +143,12 @@
            hx-swap="innerHTML"></div>
     </section>
 
+    {# ---------- listening ports (open sockets by process) — full-width ---------- #}
+    <section id="listening-ports"
+             hx-get="/fragments/listening-ports"
+             hx-trigger="load, every 30s"
+             hx-swap="innerHTML"></section>
+
     {# ---------- network flows (tcpdump aggregator) — full-width, end of page ---------- #}
     <section id="network-flows"
              hx-get="/fragments/network-flows"
@@ -159,6 +165,18 @@
     <section id="persistence"
              hx-get="/fragments/persistence"
              hx-trigger="load, every 60s"
+             hx-swap="innerHTML"></section>
+
+    {# ---------- TCC privacy permissions ---------- #}
+    <section id="tcc"
+             hx-get="/fragments/tcc"
+             hx-trigger="load, every 60s"
+             hx-swap="innerHTML"></section>
+
+    {# ---------- auth events (unified log stream) ---------- #}
+    <section id="auth-events"
+             hx-get="/fragments/auth-events"
+             hx-trigger="load, every 30s"
              hx-swap="innerHTML"></section>
 
   </main>

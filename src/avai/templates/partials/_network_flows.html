@@ -1,4 +1,4 @@
-{% from "partials/_macros.html" import card_header %}
+{% from "partials/_macros.html" import card_header, pagination_bar %}
 
 {% set verdict_cls = {
   'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
@@ -10,7 +10,56 @@
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
   {{ card_header("network flows — tcpdump aggregator (by destination)") }}
 
-  {% if flows.rows %}
+  {% if flows %}
+  {# ----- filter bar ----- #}
+  <form id="network-flows-filters"
+        class="mb-4 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="hidden" name="page" value="{{ flows.page }}">
+
+    <input type="search"
+           name="q"
+           value="{{ flows.q }}"
+           placeholder="search IP / host / process"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-48 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/network-flows"
+           hx-target="#network-flows"
+           hx-include="#network-flows-filters"
+           hx-trigger="keyup changed delay:300ms, search"
+           hx-vals='{"page": 1}'>
+
+    <select name="verdict"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/network-flows"
+            hx-target="#network-flows"
+            hx-include="#network-flows-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value=""           {% if flows.verdict == "" %}selected{% endif %}>all non-benign</option>
+      <option value="malicious"  {% if flows.verdict == "malicious" %}selected{% endif %}>malicious</option>
+      <option value="suspicious" {% if flows.verdict == "suspicious" %}selected{% endif %}>suspicious</option>
+      <option value="unknown"    {% if flows.verdict == "unknown" %}selected{% endif %}>unknown</option>
+      <option value="benign"     {% if flows.verdict == "benign" %}selected{% endif %}>benign (all)</option>
+    </select>
+
+    <select name="per_page"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/network-flows"
+            hx-target="#network-flows"
+            hx-include="#network-flows-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      {% for n in per_page_options %}
+        <option value="{{ n }}" {% if n == flows.per_page %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+
+    <div class="ml-auto text-slate-500 font-mono tabular-nums">{{ flows.total }} destinations</div>
+  </form>
+  {% endif %}
+
+  {% if flows and flows.rows %}
     {# ----- aggregate summary: sum + counts ----- #}
     <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
       {% set s = flows.summary %}
@@ -139,6 +188,12 @@
         {% endfor %}
       </tbody>
     </table>
+
+    {{ pagination_bar("network-flows", flows.page, flows.total_pages, flows.total, flows.rows|length, flows.per_page, per_page_options) }}
+  {% elif flows %}
+    <div class="text-slate-500 italic">
+      no network flows match the current filters.
+    </div>
   {% else %}
     <div class="text-slate-500 italic">
       no network flows yet — the tcpdump aggregator needs root (run the

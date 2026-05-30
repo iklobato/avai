@@ -424,6 +424,17 @@ def service_loaded(label: str) -> Optional[int]:
     return None if code is None else int(code == 0)
 
 
+def process_running(name: str) -> Optional[int]:
+    """Return 1 if a process named *name* is running, 0 if not, None on error.
+
+    Uses pgrep -x (exact match) so it works for system-domain services
+    (sshd, screensharingd, ARDAgent) that launchctl list misses from the
+    user session.
+    """
+    code = exit_code(["pgrep", "-x", name])
+    return None if code is None else int(code == 0)
+
+
 def sha256_file(path: Path, chunk: int = 65536) -> Optional[str]:
     h = hashlib.sha256()
     try:
@@ -2918,19 +2929,36 @@ class SystemIntegrityCollector(SnapshotCollector):
 
     def collect(self):
         fv = exit_code(["fdesetup", "isactive"])
-        gk = exit_code(["spctl", "--status"])
         alf = read_plist(Path("/Library/Preferences/com.apple.alf.plist")) or {}
+        # spctl --status always exits 0; the state is in its stdout text.
+        try:
+            _gk = subprocess.run(
+                ["spctl", "--status"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            _gk_out = (_gk.stdout + _gk.stderr).lower()
+            if "assessments enabled" in _gk_out:
+                gk: Optional[int] = 1
+            elif "assessments disabled" in _gk_out:
+                gk = 0
+            else:
+                gk = None
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            gk = None
         yield {
             "filevault_active": None if fv is None else int(fv == 0),
             "firewall_global_state": alf.get("globalstate"),
             "firewall_stealth": int(bool(alf.get("stealthenabled"))) if alf else None,
             "firewall_logging": int(bool(alf.get("loggingenabled"))) if alf else None,
-            "gatekeeper_assessments_enabled": None if gk is None else int(gk == 0),
-            "remote_login_enabled": service_loaded("com.openssh.sshd"),
-            "screen_sharing_enabled": service_loaded("com.apple.screensharing"),
-            "remote_management_enabled": service_loaded(
-                "com.apple.RemoteDesktop.agent"
-            ),
+            "gatekeeper_assessments_enabled": gk,
+            # launchctl list only covers the user domain; sshd/screensharingd/
+            # ARDAgent are system-domain services — use pgrep instead.
+            "remote_login_enabled": process_running("sshd"),
+            "screen_sharing_enabled": process_running("screensharingd"),
+            "remote_management_enabled": process_running("ARDAgent"),
             "raw_json": json.dumps({"alf": jsonable(alf)}),
         }
 
@@ -2941,7 +2969,8 @@ class AuthEventsCollector(StreamingCollector):
 
     name = "auth_events"
     model = AuthEventRow
-    # judge_enabled is False by default for StreamingCollector
+    judge_enabled = True
+    judge_fields = ("process", "subsystem", "event_message")
 
     def __init__(self, predicate: str = AUTH_LOG_PREDICATE, judge_hints: str = ""):
         super().__init__(judge_hints=judge_hints)
@@ -3519,6 +3548,8 @@ class LinuxAuthEventsCollector(StreamingCollector):
 
     name = "auth_events"
     model = AuthEventRow
+    judge_enabled = True
+    judge_fields = ("process", "subsystem", "event_message")
 
     _MATCH_GROUPS = [
         ["SYSLOG_FACILITY=4", "SYSLOG_FACILITY=10"],  # auth + authpriv

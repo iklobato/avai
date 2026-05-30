@@ -1,0 +1,193 @@
+{% from "partials/_macros.html" import card_header, pagination_bar %}
+
+{% set verdict_cls = {
+  'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
+  'suspicious': 'bg-amber-900/40 text-amber-300 border border-amber-900/60',
+  'unknown':    'bg-slate-700/40 text-slate-300 border border-slate-600',
+  'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
+} %}
+
+{% set sub_cls = {
+  'TCC':           'bg-sky-900/40 text-sky-300 border-sky-900/60',
+  'securityd':     'bg-red-900/30 text-red-300 border-red-900/50',
+  'syspolicy':     'bg-amber-900/30 text-amber-300 border-amber-900/50',
+  'Authorization': 'bg-violet-900/40 text-violet-300 border-violet-900/60',
+  'loginwindow':   'bg-emerald-900/30 text-emerald-300 border-emerald-900/50',
+  'launchservices':'bg-slate-700/60 text-slate-300 border-slate-600',
+  'opendirectoryd':'bg-slate-800 text-slate-400 border-slate-700',
+} %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("auth events — aggregated patterns") }}
+
+  {% if events and events.summary %}
+    {# ----- summary cards ----- #}
+    <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-4">
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="font-mono text-slate-200 text-base">{{ "{:,}".format(events.total_events) }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">total events</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="font-mono text-slate-200 text-base">{{ "{:,}".format(events.total) }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">unique patterns</div>
+      </div>
+      {% for label, cnt in events.summary.items() %}
+        <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+          <div class="font-mono text-slate-200 text-base">{{ "{:,}".format(cnt) }}</div>
+          <div class="text-[10px] uppercase tracking-wider text-slate-500 truncate">{{ label }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {# ----- filter bar ----- #}
+  <form id="auth-events-filters"
+        class="mb-4 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="hidden" name="page"  value="{{ events.page if events else 1 }}">
+    <input type="hidden" name="sort"  value="{{ events.sort if events else 'count' }}">
+
+    <input type="search"
+           name="q"
+           value="{{ events.q if events else '' }}"
+           placeholder="search process / message"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-56 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/auth-events"
+           hx-target="#auth-events"
+           hx-include="#auth-events-filters"
+           hx-trigger="keyup changed delay:300ms, search"
+           hx-vals='{"page": 1}'>
+
+    <select name="subsystem"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/auth-events"
+            hx-target="#auth-events"
+            hx-include="#auth-events-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      {% if events %}
+        {% for label, val in events.subsystem_options %}
+          <option value="{{ val }}" {% if val == events.subsystem %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      {% endif %}
+    </select>
+
+    <select name="verdict"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/auth-events"
+            hx-target="#auth-events"
+            hx-include="#auth-events-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value=""          {% if not events or events.verdict == '' %}selected{% endif %}>all verdicts</option>
+      <option value="malicious" {% if events and events.verdict == 'malicious' %}selected{% endif %}>malicious</option>
+      <option value="suspicious"{% if events and events.verdict == 'suspicious' %}selected{% endif %}>suspicious</option>
+      <option value="unknown"   {% if events and events.verdict == 'unknown' %}selected{% endif %}>unknown</option>
+      <option value="benign"    {% if events and events.verdict == 'benign' %}selected{% endif %}>benign</option>
+      <option value="unjudged"  {% if events and events.verdict == 'unjudged' %}selected{% endif %}>not yet judged</option>
+    </select>
+
+    {# sort toggle — verdict severity vs count #}
+    {% set cur_sort = events.sort if events else 'count' %}
+    <button type="button"
+            class="px-2 py-1 rounded border text-[11px] transition-colors
+                   {% if cur_sort == 'verdict' %}border-sky-600 bg-sky-900/30 text-sky-300{% else %}border-slate-700 text-slate-400 hover:text-slate-200{% endif %}"
+            hx-get="/fragments/auth-events"
+            hx-target="#auth-events"
+            hx-include="#auth-events-filters"
+            hx-vals='{"sort": "{% if cur_sort == "verdict" %}count{% else %}verdict{% endif %}", "page": 1}'>
+      {% if cur_sort == 'verdict' %}sort: verdict ↓{% else %}sort: count ↓{% endif %}
+    </button>
+
+    <select name="per_page"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/auth-events"
+            hx-target="#auth-events"
+            hx-include="#auth-events-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      {% for n in per_page_options %}
+        <option value="{{ n }}" {% if events and n == events.per_page %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+
+    <span class="ml-auto text-slate-500 font-mono tabular-nums text-[11px]">
+      {% if events %}{{ "{:,}".format(events.total) }} pattern{{ 's' if events.total != 1 else '' }}{% endif %}
+    </span>
+  </form>
+
+  {% if events and events.rows %}
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+          <th class="text-left  font-semibold pb-2 w-24">verdict</th>
+          <th class="text-right font-semibold pb-2 w-16">count</th>
+          <th class="text-left  font-semibold pb-2">process</th>
+          <th class="text-left  font-semibold pb-2">subsystem</th>
+          <th class="text-left  font-semibold pb-2 w-1/2">message</th>
+          <th class="text-left  font-semibold pb-2 whitespace-nowrap">last seen</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for e in events.rows %}
+          {% set detail_id = "ae-detail-" ~ loop.index %}
+          <tr class="js-expandable-row cursor-pointer hover:bg-slate-800/40 transition-colors"
+              data-detail-id="{{ detail_id }}">
+            <td class="py-2">
+              {% if e.verdict %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px]
+                             font-semibold uppercase tracking-wider
+                             {{ verdict_cls.get(e.verdict, verdict_cls['unknown']) }}">
+                  {{ e.verdict }}
+                  {% if e.confidence is not none %}
+                    <span class="ml-1 opacity-70">{{ "%.0f"|format(e.confidence * 100) }}%</span>
+                  {% endif %}
+                </span>
+              {% else %}
+                <span class="text-slate-600 text-[10px] uppercase tracking-wider">pending</span>
+              {% endif %}
+            </td>
+            <td class="py-2 text-right font-mono font-semibold text-slate-200 tabular-nums">
+              {{ "{:,}".format(e.count) }}
+            </td>
+            <td class="py-2 text-slate-200 font-mono font-semibold">{{ e.process }}</td>
+            <td class="py-2">
+              {% if e.subsystem_short and e.subsystem_short != '—' %}
+                <span class="inline-flex px-1.5 py-0.5 rounded border text-[10px] font-semibold uppercase tracking-wider
+                             {{ sub_cls.get(e.subsystem_short, 'bg-slate-800 text-slate-400 border-slate-700') }}">
+                  {{ e.subsystem_short }}
+                </span>
+              {% else %}
+                <span class="text-slate-600 text-[10px]">—</span>
+              {% endif %}
+            </td>
+            <td class="py-2 text-slate-300 font-mono break-all line-clamp-2" title="{{ e.message }}">{{ e.message }}</td>
+            <td class="py-2 text-slate-500 font-mono whitespace-nowrap">{{ e.last_seen }}</td>
+          </tr>
+          {# expandable reasoning row #}
+          {% if e.reasoning %}
+            <tr id="{{ detail_id }}" class="hidden bg-slate-950/60">
+              <td colspan="6" class="py-3 pl-4 pr-6">
+                <div class="border-l-2 pl-3
+                            {% if e.verdict == 'malicious' %}border-red-700/70
+                            {% elif e.verdict == 'suspicious' %}border-amber-700/70
+                            {% else %}border-slate-700{% endif %}">
+                  <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">reasoning</div>
+                  <div class="text-xs text-slate-300 leading-relaxed">{{ e.reasoning }}</div>
+                </div>
+              </td>
+            </tr>
+          {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {{ pagination_bar("auth-events", events.page, events.total_pages, events.total, events.rows|length, events.per_page, per_page_options) }}
+
+  {% elif events %}
+    <div class="text-slate-500 italic">no patterns match — try clearing the filters</div>
+  {% else %}
+    <div class="text-slate-500 italic">no auth events yet — the monitor tails the macOS unified log; events appear as they occur</div>
+  {% endif %}
+</div>

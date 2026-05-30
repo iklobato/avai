@@ -23,3 +23,29 @@
 {% macro card_header(title) %}
   <h3 class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">{{ title }}</h3>
 {% endmacro %}
+
+{% macro pagination_bar(section, page, total_pages, total, count, per_page, per_page_options) %}
+<div class="flex items-center justify-between gap-3 mt-3 pt-3 border-t border-slate-800 text-xs">
+  <button type="button"
+          class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          {% if page <= 1 %}disabled{% endif %}
+          hx-get="/fragments/{{ section }}"
+          hx-target="#{{ section }}"
+          hx-include="#{{ section }}-filters"
+          hx-vals='{"page": {{ page - 1 }}}'>← prev</button>
+  <div class="flex items-center gap-3 text-slate-400">
+    <span class="font-mono tabular-nums">
+      {%- if total -%}{{ (page - 1) * per_page + 1 }}–{{ (page - 1) * per_page + count }} of {{ total }}{%- else -%}0{%- endif -%}
+    </span>
+    <span class="text-slate-600">·</span>
+    <span class="text-slate-500">page {{ page }} / {{ total_pages }}</span>
+  </div>
+  <button type="button"
+          class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          {% if page >= total_pages %}disabled{% endif %}
+          hx-get="/fragments/{{ section }}"
+          hx-target="#{{ section }}"
+          hx-include="#{{ section }}-filters"
+          hx-vals='{"page": {{ page + 1 }}}'>next →</button>
+</div>
+{% endmacro %}

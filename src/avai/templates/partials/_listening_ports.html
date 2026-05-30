@@ -1,0 +1,225 @@
+{% from "partials/_macros.html" import card_header, pagination_bar %}
+
+{% set verdict_cls = {
+  'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
+  'suspicious': 'bg-amber-900/40 text-amber-300 border border-amber-900/60',
+  'unknown':    'bg-slate-700/40 text-slate-300 border border-slate-600',
+  'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
+} %}
+
+{# bind-scope badge: how reachable the listener is — the key threat signal #}
+{% set scope_cls = {
+  'all':      'bg-red-900/30 text-red-300 border border-red-900/50',
+  'specific': 'bg-amber-900/30 text-amber-300 border border-amber-900/50',
+  'loopback': 'bg-slate-800 text-slate-400 border border-slate-700',
+  'unknown':  'bg-slate-800 text-slate-500 border border-slate-700',
+} %}
+{% set scope_label = {
+  'all': 'all interfaces', 'specific': 'routable', 'loopback': 'loopback', 'unknown': '—',
+} %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("listening ports — open sockets by process") }}
+
+  {% if ports %}
+  {# ----- filter bar ----- #}
+  <form id="listening-ports-filters"
+        class="mb-4 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="hidden" name="page" value="{{ ports.page }}">
+
+    <input type="search"
+           name="q"
+           value="{{ ports.q }}"
+           placeholder="search process / port"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-48 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/listening-ports"
+           hx-target="#listening-ports"
+           hx-include="#listening-ports-filters"
+           hx-trigger="keyup changed delay:300ms, search"
+           hx-vals='{"page": 1}'>
+
+    <select name="verdict"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/listening-ports"
+            hx-target="#listening-ports"
+            hx-include="#listening-ports-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value=""           {% if ports.verdict == "" %}selected{% endif %}>all non-benign</option>
+      <option value="malicious"  {% if ports.verdict == "malicious" %}selected{% endif %}>malicious</option>
+      <option value="suspicious" {% if ports.verdict == "suspicious" %}selected{% endif %}>suspicious</option>
+      <option value="unknown"    {% if ports.verdict == "unknown" %}selected{% endif %}>unknown</option>
+      <option value="benign"     {% if ports.verdict == "benign" %}selected{% endif %}>benign (all)</option>
+    </select>
+
+    <select name="scope_filter"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/listening-ports"
+            hx-target="#listening-ports"
+            hx-include="#listening-ports-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value=""         {% if ports.scope_filter == "" %}selected{% endif %}>all scopes</option>
+      <option value="all"      {% if ports.scope_filter == "all" %}selected{% endif %}>all interfaces (exposed)</option>
+      <option value="specific" {% if ports.scope_filter == "specific" %}selected{% endif %}>routable</option>
+      <option value="loopback" {% if ports.scope_filter == "loopback" %}selected{% endif %}>loopback only</option>
+    </select>
+
+    <select name="per_page"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/listening-ports"
+            hx-target="#listening-ports"
+            hx-include="#listening-ports-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      {% for n in per_page_options %}
+        <option value="{{ n }}" {% if n == ports.per_page %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+  </form>
+  {% endif %}
+
+  {% if ports and ports.rows %}
+    {# ----- summary strip ----- #}
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+      {% set s = ports.summary %}
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ s.ports }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">listeners</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
+        <div class="mono text-red-300 text-lg">{{ s.exposed }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">exposed</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
+        <div class="mono text-red-300 text-lg">{{ s.malicious }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">malicious</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-amber-900/40 px-3 py-2">
+        <div class="mono text-amber-300 text-lg">{{ s.suspicious }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">suspicious</div>
+      </div>
+    </div>
+
+    {# ----- one row per (port, process) listening socket ----- #}
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+          <th class="text-left  font-semibold pb-2">verdict</th>
+          <th class="text-left  font-semibold pb-2">port</th>
+          <th class="text-left  font-semibold pb-2 w-1/4">process</th>
+          <th class="text-left  font-semibold pb-2">user</th>
+          <th class="text-left  font-semibold pb-2 w-1/3">path / command</th>
+          <th class="text-left  font-semibold pb-2">proto</th>
+          <th class="text-left  font-semibold pb-2">bind</th>
+          <th class="text-right font-semibold pb-2">conns</th>
+          <th class="text-right font-semibold pb-2">resources</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for p in ports.rows %}
+          <tr class="hover:bg-slate-800/40 transition-colors [&>td]:align-top">
+            {# verdict #}
+            <td class="py-2">
+              {% if p.verdict %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px]
+                             font-semibold uppercase tracking-wider
+                             {{ verdict_cls.get(p.verdict, verdict_cls['unknown']) }}">
+                  {{ p.verdict }}{% if p.confidence is not none %}
+                    <span class="ml-1 opacity-70">{{ "%.0f"|format(p.confidence * 100) }}%</span>
+                  {% endif %}
+                </span>
+              {% else %}
+                <span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>
+              {% endif %}
+            </td>
+            {# port #}
+            <td class="py-2 mono text-slate-200 whitespace-nowrap">:{{ p.port if p.port is not none else "—" }}</td>
+            {# process + pid (+ ppid) #}
+            <td class="py-2">
+              <div class="leading-snug">
+                <span class="text-slate-200 mono">{{ p.process }}</span>
+                {% if p.pid is not none %}
+                  <span class="text-[10px] text-slate-500 mono ml-1">pid {{ p.pid }}{% if p.proc and p.proc.ppid is not none %} · ppid {{ p.proc.ppid }}{% endif %}</span>
+                {% endif %}
+                {% if p.proc and p.proc.status %}
+                  <div class="text-[10px] text-slate-600 mono">{{ p.proc.status }}</div>
+                {% endif %}
+              </div>
+            </td>
+            {# user #}
+            <td class="py-2 mono {{ 'text-slate-300' if p.proc and p.proc.username else 'text-slate-600' }}">
+              {%- if p.proc and p.proc.username -%}
+                {{ p.proc.username }}{% if p.proc.uid is not none %}<span class="text-[10px] text-slate-500"> ({{ p.proc.uid }})</span>{% endif %}
+              {%- else -%}—{%- endif -%}
+            </td>
+            {# exe path + cmdline #}
+            <td class="py-2">
+              {% if p.proc and (p.proc.exe or p.proc.cmdline) %}
+                <div class="leading-snug space-y-0.5">
+                  {% if p.proc.exe %}
+                    <div class="text-[11px] text-slate-400 mono break-all">{{ p.proc.exe }}</div>
+                  {% endif %}
+                  {% if p.proc.cmdline and p.proc.cmdline != p.proc.exe %}
+                    <div class="text-[10px] text-slate-600 mono break-all line-clamp-2">{{ p.proc.cmdline }}</div>
+                  {% endif %}
+                </div>
+              {% else %}
+                <span class="text-slate-600">—</span>
+              {% endif %}
+            </td>
+            {# proto + family #}
+            <td class="py-2">
+              <div class="flex flex-wrap gap-1">
+                {% for pr in p.proto %}
+                  <span class="px-1.5 py-0.5 rounded text-[10px] mono
+                               bg-slate-800 text-slate-300 border border-slate-700">{{ pr }}</span>
+                {% endfor %}
+                {% for fam in p.family %}
+                  <span class="px-1.5 py-0.5 rounded text-[10px] mono
+                               bg-slate-800/60 text-slate-500 border border-slate-700/60">{{ fam }}</span>
+                {% endfor %}
+              </div>
+            </td>
+            {# bind scope + addresses #}
+            <td class="py-2">
+              <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold
+                           {{ scope_cls.get(p.scope, scope_cls['unknown']) }}">{{ scope_label.get(p.scope, p.scope) }}</span>
+              {% if p.addrs %}
+                <div class="text-[10px] text-slate-500 mono break-all mt-0.5">{{ p.addrs | join(", ") }}</div>
+              {% endif %}
+            </td>
+            {# established connections #}
+            <td class="py-2 text-right mono {{ 'text-slate-200' if p.conns else 'text-slate-600' }}">{{ p.conns }}</td>
+            {# cpu / mem / fds #}
+            <td class="py-2 text-right whitespace-nowrap">
+              {% if p.proc %}
+                <div class="text-[11px] text-slate-400 mono">
+                  {%- if p.proc.cpu_percent is not none %}{{ "%.1f"|format(p.proc.cpu_percent) }}% cpu{% endif -%}
+                </div>
+                <div class="text-[10px] text-slate-600 mono">
+                  {%- set mem = p.proc.memory_rss | human_bytes -%}
+                  {%- if mem %}{{ mem }}{% endif -%}
+                  {%- if p.proc.num_fds is not none %} · {{ p.proc.num_fds }} fds{% endif -%}
+                </div>
+              {% else %}
+                <span class="text-slate-600">—</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {{ pagination_bar("listening-ports", ports.page, ports.total_pages, ports.total, ports.rows|length, ports.per_page, per_page_options) }}
+  {% elif ports %}
+    <div class="text-slate-500 italic">
+      no listening sockets match the current filters — or none in the latest run.
+      Full socket→process visibility needs the monitor run with <span class="mono">sudo</span>.
+    </div>
+  {% else %}
+    <div class="text-slate-500 italic">no run yet.</div>
+  {% endif %}
+</div>

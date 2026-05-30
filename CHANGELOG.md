@@ -3,6 +3,18 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.3.3] — 2026-05-30
+
+### Fixed
+- **System integrity booleans corrected (SSH, Screen Sharing, ARD, Gatekeeper).** `launchctl list <label>` only searches the user session domain; system-domain services (`sshd`, `screensharingd`, `ARDAgent`) always returned "not found" → always OFF. `pgrep -x <process>` is now used instead, correctly reflecting the running state. The ARD agent was also registered as an `OnDemand` stub in the user session (exit 0) even when Remote Management was disabled, making it always show ON. Fixed. Gatekeeper's `spctl --status` always exits 0 regardless of state — now parses stdout for `assessments enabled` / `assessments disabled` instead of using the exit code.
+- **Waitress task queue depth warnings eliminated.** Dashboard's waitress thread count raised from 6 → 16 to absorb the burst of ~10 concurrent HTMX fragment requests that fire on every page load/poll.
+
+### Added
+- **TCC privacy permissions section.** New `/fragments/tcc` dashboard card shows every app's camera, microphone, location, screen recording, and full disk access grant/denial — with LLM verdict, allowed/denied/limited status, and scope badge. Filterable by verdict, auth status, and app name.
+- **Auth events section — aggregated view.** New `/fragments/auth-events` collapses the raw streaming log (500k+ rows) into unique `(process, subsystem, message)` patterns sorted by frequency. Summary cards show totals per subsystem (TCC, securityd, syspolicy, opendirectoryd, loginwindow). Filterable by subsystem, verdict, and free-text search.
+- **LLM judging for auth events.** `AuthEventsCollector` (macOS and Linux) now has `judge_enabled = True` with `judge_fields = ("process", "subsystem", "event_message")` — each unique event pattern is judged once, verdict persists across all occurrences. New `auth_events` prompt hint guides the LLM to flag auth failures, unexpected TCC grants, Gatekeeper denials, and keychain access by rogue processes. Patterns can be sorted by verdict severity in the dashboard.
+- **Filter + pagination for all dashboard tables.** Every table now has: free-text search, relevant dropdowns (verdict, scope, subsystem, resolution level, auth status), per-page selector (10/25/50/100), and prev/next pagination. Auth events pagination is fully DB-side (avoids loading 500k rows into memory). Persistence section has independent per-sub-table paginators (SSH keys, /etc/hosts, privilege config).
+
 ## [0.3.2] — 2026-05-29
 
 ### Changed

@@ -241,3 +241,20 @@ docker); unsigned binaries on macOS (missing signing_id); execs \
 running as a user other than the one who logged in; rapid bursts of \
 the same binary (possible enumeration or loop).\
 """
+
+auth_events = """\
+Each entry is a recurring macOS/Linux auth-subsystem log pattern \
+(process + subsystem + message template, with a count showing how many \
+times it fired). Flag: authentication failures or repeated sudo/su \
+attempts (brute-force signal); TCC access grants to sensitive services \
+(Camera, Microphone, Location, FullDiskAccess, ScreenCapture, \
+Accessibility) by unexpected apps; Gatekeeper or notarization denials \
+for newly-seen binaries; keychain access by processes that shouldn't \
+touch it; login/logout events at unusual hours; Authorization framework \
+right-grants that escalate privilege; any pattern whose process path \
+is outside /usr, /System, /Library, or standard app locations. \
+Mark noisy OS housekeeping (opendirectoryd lookups, repeated MacOS \
+error -67062 from system_profiler/syspolicyd, mDNSResponder probes) \
+as benign unless accompanied by an unusual message. \
+Provide a one-sentence remediation for suspicious/malicious patterns.\
+"""

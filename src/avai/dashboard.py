@@ -28,6 +28,7 @@ import argparse
 import ipaddress
 import json
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -235,28 +236,44 @@ app.add_template_filter(_pretty_json, "pretty_json")
 _HIDDEN_SOURCE_FIELDS = {"id", "run_id"}
 
 
+_engine_cache: dict[str, object] = {}
+_engine_cache_lock = threading.Lock()
+
+
 def _engine():
-    """Open the SQLite database read-only (``mode=ro``).
+    """Return a process-wide, thread-safe read-only engine for the
+    configured DB, built once per path and reused thereafter.
 
-    The dashboard never writes; the monitor maintains the WAL.
+    This used to build a *new* engine (and connection pool) on every
+    request and never dispose it. Under the dashboard's ~dozen HTMX
+    fragments — which all poll concurrently — that leaked SQLite
+    connections/file handles and saturated the WSGI worker threads
+    (waitress "task queue depth" warnings). Caching one engine per path
+    reuses a pooled set of connections instead, so requests return fast
+    and threads free up promptly.
 
-    We deliberately do NOT pass ``immutable=1``. ``immutable=1`` tells
-    SQLite the file is a frozen snapshot and to ignore the ``-wal``
-    file — which means the reader sees only data already checkpointed
-    into the main ``.db``. On a live database that the monitor is
-    actively writing (and especially in the first seconds before the
-    very first WAL checkpoint), the schema + rows live in the ``-wal``,
-    so ``immutable=1`` reads an empty/incomplete database and every
-    query 500s with "no such table". ``mode=ro`` reads the WAL
-    correctly, so the dashboard sees live data immediately.
-
-    ``_engine()`` is called fresh per request, so each refresh sees the
-    latest committed state.
+    We open read-only (``mode=ro``) and deliberately do NOT pass
+    ``immutable=1``: ``immutable=1`` tells SQLite to ignore the ``-wal``
+    file, so on a live DB the monitor is writing (especially before the
+    first WAL checkpoint) the reader would see an empty/incomplete
+    database and every query would 500 with "no such table". ``mode=ro``
+    reads the WAL correctly, so the dashboard sees live data immediately;
+    a fresh read transaction per query still picks up newly committed
+    rows. ``check_same_thread=False`` is required because waitress hands
+    pooled connections to different worker threads.
     """
     db_path = current_app.config["DB_PATH"]
-    return create_engine(
-        f"sqlite:///file:{db_path}?mode=ro&uri=true",
-    )
+    eng = _engine_cache.get(db_path)
+    if eng is None:
+        with _engine_cache_lock:
+            eng = _engine_cache.get(db_path)
+            if eng is None:
+                eng = create_engine(
+                    f"sqlite:///file:{db_path}?mode=ro&uri=true",
+                    connect_args={"check_same_thread": False},
+                )
+                _engine_cache[db_path] = eng
+    return eng
 
 
 def _session() -> Session:
@@ -560,7 +577,25 @@ def collector_errors(session: Session, run_id: str) -> list[CollectorErrorRow]:
 _FLOW_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3, None: 4}
 
 
-def network_flows(session: Session, run_id: str, limit: int = 1000):
+def _paginate(rows: list, page: int, per_page: int) -> tuple[list, int, int]:
+    """Slice *rows* for the requested page. Returns (page_rows, total, total_pages)."""
+    total = len(rows)
+    per_page = max(1, min(per_page, 200))
+    page = max(1, page)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = min(page, total_pages)
+    return rows[(page - 1) * per_page : page * per_page], total, total_pages
+
+
+def network_flows(
+    session: Session,
+    run_id: str,
+    limit: int = 1000,
+    verdict: str = "",
+    q: str = "",
+    page: int = 1,
+    per_page: int = DEFAULT_PER_PAGE,
+):
     """Tcpdump flows for ``run_id``, **aggregated by destination IP** for
     a compact, glanceable table.
 
@@ -703,6 +738,19 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
 
     rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -r["packets"]))
 
+    # Apply filters
+    if verdict:
+        rows = [r for r in rows if r.get("verdict") == verdict]
+    if q:
+        ql = q.lower()
+        rows = [
+            r
+            for r in rows
+            if ql in (r.get("dst_ip") or "").lower()
+            or ql in (r.get("hostname") or "").lower()
+            or ql in (r.get("process") or "").lower()
+        ]
+
     summary = {
         "destinations": len(rows),
         "flows": sum(r["flows"] for r in rows),
@@ -711,7 +759,18 @@ def network_flows(session: Session, run_id: str, limit: int = 1000):
         "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
         "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
     }
-    return {"summary": summary, "rows": rows}
+
+    page_rows, total, total_pages = _paginate(rows, page, per_page)
+    return {
+        "summary": summary,
+        "rows": page_rows,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "q": q,
+        "verdict": verdict,
+    }
 
 
 def _port_sort_key(p: str):
@@ -874,6 +933,240 @@ def _collector_rows_with_verdict(
     return out
 
 
+_PROTO_BY_SOCK = {"SOCK_STREAM": "TCP", "SOCK_DGRAM": "UDP"}
+_FAMILY_LABEL = {"AF_INET": "IPv4", "AF_INET6": "IPv6"}
+
+
+def _addr_scope(ip) -> str:
+    """Classify a listening bind address — the dominant threat signal:
+    ``all`` (0.0.0.0 / ::, reachable from any interface), ``loopback``
+    (127.0.0.0/8 / ::1, local-only), ``specific`` (a routable/LAN IP), or
+    ``unknown``."""
+    if not ip:
+        return "unknown"
+    if ip in ("0.0.0.0", "::"):
+        return "all"
+    try:
+        if ipaddress.ip_address(ip).is_loopback:
+            return "loopback"
+    except ValueError:
+        return "unknown"
+    return "specific"
+
+
+# Worst-first ordering of bind scopes for the per-port rollup.
+_SCOPE_SEV = {"all": 0, "specific": 1, "unknown": 2, "loopback": 3}
+
+
+def _cmdline_str(raw) -> str | None:
+    """ProcessRow.cmdline_json is a JSON-encoded argv list; render it as a
+    single command string, or None when absent/unparseable."""
+    if not raw:
+        return None
+    try:
+        parts = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parts, list) and parts:
+        return " ".join(str(x) for x in parts)
+    return None
+
+
+def listening_ports(
+    session: Session,
+    run_id: str,
+    limit: int = 1000,
+    verdict: str = "",
+    scope_filter: str = "",
+    q: str = "",
+    page: int = 1,
+    per_page: int = DEFAULT_PER_PAGE,
+):
+    """Listening sockets for ``run_id`` as a glanceable table: one row per
+    (port, pid) socket, annotated with its LLM verdict (LEFT JOIN
+    Judgement, same as :func:`network_flows`) and enriched with
+    owning-process detail (user, exe, cmdline, cpu/mem, ppid) from the
+    ``processes`` snapshot plus a count of established connections to that
+    local port from ``network_connections``.
+
+    Wildcard binds (0.0.0.0 + :: on the same port/pid) merge into one row
+    carrying the worst bind scope, so the table reads as "what is this
+    process exposing, and to whom". Worst-verdict-first, then by port.
+    Returns ``{"summary": {...}, "rows": [...]}``; degrades to empty when
+    the table predates this collector."""
+    empty = {
+        "summary": {"ports": 0, "exposed": 0, "malicious": 0, "suspicious": 0},
+        "rows": [],
+    }
+    if "listening_ports" not in _existing_tables(session):
+        return empty
+
+    # Owning-process detail, keyed by pid, from the same run's snapshot.
+    proc_by_pid: dict[int, dict] = {}
+    if "processes" in _existing_tables(session):
+        for p in session.execute(
+            select(
+                ProcessRow.pid,
+                ProcessRow.ppid,
+                ProcessRow.exe,
+                ProcessRow.cmdline_json,
+                ProcessRow.username,
+                ProcessRow.uid,
+                ProcessRow.status,
+                ProcessRow.cpu_percent,
+                ProcessRow.memory_rss,
+                ProcessRow.num_fds,
+                ProcessRow.num_threads,
+            ).where(ProcessRow.run_id == run_id)
+        ).all():
+            if p.pid is None:
+                continue
+            proc_by_pid[p.pid] = {
+                "ppid": p.ppid,
+                "exe": p.exe,
+                "cmdline": _cmdline_str(p.cmdline_json),
+                "username": p.username,
+                "uid": p.uid,
+                "status": p.status,
+                "cpu_percent": p.cpu_percent,
+                "memory_rss": p.memory_rss,
+                "num_fds": p.num_fds,
+                "num_threads": p.num_threads,
+            }
+
+    # Established connections terminating on each local port — "is anyone
+    # actually talking to this listener right now".
+    conn_count: dict[int, int] = {}
+    if "network_connections" in _existing_tables(session):
+        for port, n in session.execute(
+            select(NetworkConnectionRow.laddr_port, func.count())
+            .where(
+                NetworkConnectionRow.run_id == run_id,
+                NetworkConnectionRow.status == "ESTABLISHED",
+            )
+            .group_by(NetworkConnectionRow.laddr_port)
+        ).all():
+            if port is not None:
+                conn_count[port] = n
+
+    stmt = (
+        select(
+            ListeningPortRow.pid,
+            ListeningPortRow.process_name,
+            ListeningPortRow.family,
+            ListeningPortRow.type,
+            ListeningPortRow.laddr_ip,
+            ListeningPortRow.laddr_port,
+            Judgement.verdict,
+            Judgement.confidence,
+            Judgement.reasoning,
+        )
+        .outerjoin(
+            Judgement,
+            and_(
+                Judgement.content_hash == ListeningPortRow.content_hash,
+                Judgement.collector == "listening_ports",
+            ),
+        )
+        .where(ListeningPortRow.run_id == run_id)
+        .limit(limit)
+    )
+
+    groups: dict[tuple, dict] = {}
+    for (
+        pid,
+        process_name,
+        family,
+        type_,
+        laddr_ip,
+        laddr_port,
+        verdict,
+        conf,
+        reason,
+    ) in session.execute(stmt).all():
+        key = (laddr_port, pid)
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {
+                "port": laddr_port,
+                "pid": pid,
+                "process": process_name,
+                "_addrs": set(),
+                "_protos": set(),
+                "_families": set(),
+                "verdict": None,
+                "confidence": None,
+                "reasoning": "",
+            }
+        if laddr_ip:
+            g["_addrs"].add(laddr_ip)
+        if type_:
+            g["_protos"].add(_PROTO_BY_SOCK.get(type_, type_))
+        if family:
+            g["_families"].add(_FAMILY_LABEL.get(family, family))
+        if _FLOW_SEV.get(verdict, 4) < _FLOW_SEV.get(g["verdict"], 4):
+            g["verdict"] = verdict
+            g["confidence"] = conf
+            g["reasoning"] = reason or ""
+
+    rows = []
+    for g in groups.values():
+        scopes = {_addr_scope(a) for a in g["_addrs"]} or {"unknown"}
+        scope = min(scopes, key=lambda s: _SCOPE_SEV.get(s, 2))
+        rows.append(
+            {
+                "port": g["port"],
+                "pid": g["pid"],
+                "process": g["process"] or "—",
+                "addrs": sorted(g["_addrs"]),
+                "scope": scope,
+                "exposed": scope in ("all", "specific"),
+                "proto": sorted(g["_protos"]),
+                "family": sorted(g["_families"]),
+                "conns": conn_count.get(g["port"], 0),
+                "proc": proc_by_pid.get(g["pid"]),
+                "verdict": g["verdict"],
+                "confidence": g["confidence"],
+                "reasoning": g["reasoning"],
+            }
+        )
+
+    rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), r["port"] or 0))
+
+    # Apply filters
+    if verdict:
+        rows = [r for r in rows if r.get("verdict") == verdict]
+    if scope_filter:
+        rows = [r for r in rows if r.get("scope") == scope_filter]
+    if q:
+        ql = q.lower()
+        rows = [
+            r
+            for r in rows
+            if ql in (r.get("process") or "").lower() or ql in str(r.get("port") or "")
+        ]
+
+    summary = {
+        "ports": len(rows),
+        "exposed": sum(1 for r in rows if r["exposed"]),
+        "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
+        "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
+    }
+
+    page_rows, total, total_pages = _paginate(rows, page, per_page)
+    return {
+        "summary": summary,
+        "rows": page_rows,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "q": q,
+        "verdict": verdict,
+        "scope_filter": scope_filter,
+    }
+
+
 def _dns_resolution_level(server_ip, qtype) -> str:
     """Classify *how/where* a name resolved, from the resolver it was
     asked and the transport:
@@ -901,7 +1194,16 @@ def _dns_resolution_level(server_ip, qtype) -> str:
     return "external DNS"
 
 
-def dns_queries(session: Session, run_id: str, limit: int = 1000):
+def dns_queries(
+    session: Session,
+    run_id: str,
+    limit: int = 1000,
+    verdict: str = "",
+    level: str = "",
+    q: str = "",
+    page: int = 1,
+    per_page: int = DEFAULT_PER_PAGE,
+):
     """DNS questions seen this run (+ detected DoH endpoints), each with
     its LLM verdict and the resolution level (where/how it resolved).
     Returns ``{"summary": {...}, "rows": [...]}`` sorted worst-verdict
@@ -917,6 +1219,21 @@ def dns_queries(session: Session, run_id: str, limit: int = 1000):
     for r in rows:
         r["level"] = _dns_resolution_level(r["server_ip"], r["qtype"])
     rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -(r["count"] or 0)))
+
+    # Apply filters
+    if verdict:
+        rows = [r for r in rows if r.get("verdict") == verdict]
+    if level:
+        rows = [r for r in rows if r.get("level") == level]
+    if q:
+        ql = q.lower()
+        rows = [
+            r
+            for r in rows
+            if ql in (r.get("qname") or "").lower()
+            or ql in (r.get("process") or "").lower()
+        ]
+
     summary = {
         "domains": len({r["qname"] for r in rows}),
         "queries": sum(r["count"] or 0 for r in rows),
@@ -924,10 +1241,32 @@ def dns_queries(session: Session, run_id: str, limit: int = 1000):
         "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
         "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
     }
-    return {"summary": summary, "rows": rows}
+
+    page_rows, total, total_pages = _paginate(rows, page, per_page)
+    return {
+        "summary": summary,
+        "rows": page_rows,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "q": q,
+        "verdict": verdict,
+        "level": level,
+    }
 
 
-def persistence_tampering(session: Session, run_id: str, limit: int = 500):
+def persistence_tampering(
+    session: Session,
+    run_id: str,
+    limit: int = 500,
+    verdict: str = "",
+    q: str = "",
+    ssh_page: int = 1,
+    hosts_page: int = 1,
+    priv_page: int = 1,
+    per_page: int = DEFAULT_PER_PAGE,
+):
     """The persistence & tampering posture for ``run_id``: SSH authorized
     keys, /etc/hosts mappings, and privilege config — each list annotated
     with LLM verdicts, plus per-table counts for the section header."""
@@ -963,16 +1302,308 @@ def persistence_tampering(session: Session, run_id: str, limit: int = 500):
             "suspicious": sum(1 for r in rs if r["verdict"] == "suspicious"),
         }
 
+    def _filter_rows(rs, fields):
+        if verdict:
+            rs = [r for r in rs if r.get("verdict") == verdict]
+        if q:
+            ql = q.lower()
+            rs = [
+                r for r in rs if any(ql in str(r.get(f) or "").lower() for f in fields)
+            ]
+        return rs
+
+    ssh = _filter_rows(ssh, ("owner", "key_type", "fingerprint", "comment"))
+    hosts = _filter_rows(hosts, ("ip", "hostnames"))
+    priv = _filter_rows(priv, ("kind", "subject", "detail"))
+
+    ssh_rows, ssh_total, ssh_pages = _paginate(ssh, ssh_page, per_page)
+    hosts_rows, hosts_total, hosts_pages = _paginate(hosts, hosts_page, per_page)
+    priv_rows, priv_total, priv_pages = _paginate(priv, priv_page, per_page)
+
     return {
-        "ssh_keys": ssh,
-        "hosts": hosts,
-        "privilege": priv,
+        "ssh_keys": ssh_rows,
+        "hosts": hosts_rows,
+        "privilege": priv_rows,
         "counts": {
             "ssh_keys": _counts(ssh),
             "hosts": _counts(hosts),
             "privilege": _counts(priv),
         },
+        "pagination": {
+            "ssh": {"page": ssh_page, "total": ssh_total, "total_pages": ssh_pages},
+            "hosts": {
+                "page": hosts_page,
+                "total": hosts_total,
+                "total_pages": hosts_pages,
+            },
+            "priv": {"page": priv_page, "total": priv_total, "total_pages": priv_pages},
+        },
+        "per_page": per_page,
+        "verdict": verdict,
+        "q": q,
         "any": bool(ssh or hosts or priv),
+    }
+
+
+_TCC_AUTH = {0: "denied", 1: "unknown", 2: "allowed", 3: "limited"}
+
+
+def tcc_permissions(
+    session: Session,
+    run_id: str,
+    limit: int = 500,
+    verdict: str = "",
+    auth: str = "",
+    q: str = "",
+    page: int = 1,
+    per_page: int = DEFAULT_PER_PAGE,
+):
+    """TCC privacy permissions for *run_id*, annotated with LLM verdicts."""
+    rows = _collector_rows_with_verdict(
+        session,
+        run_id,
+        TccPermissionRow,
+        "tcc_permissions",
+        ("scope", "service", "client", "auth_value"),
+        limit,
+    )
+    for r in rows:
+        svc = r.get("service") or ""
+        r["service_short"] = svc.removeprefix("kTCCService") or svc
+        r["auth_label"] = _TCC_AUTH.get(r.get("auth_value"), "unknown")
+    rows.sort(
+        key=lambda r: (
+            r.get("auth_value") != 2,  # allowed rows first
+            r["service_short"],
+            r.get("client") or "",
+        )
+    )
+
+    # Apply filters
+    if verdict:
+        rows = [r for r in rows if r.get("verdict") == verdict]
+    if auth:
+        rows = [r for r in rows if r.get("auth_label") == auth]
+    if q:
+        ql = q.lower()
+        rows = [
+            r
+            for r in rows
+            if ql in (r.get("service_short") or "").lower()
+            or ql in (r.get("client") or "").lower()
+        ]
+
+    counts = {
+        "total": len(rows),
+        "allowed": sum(1 for r in rows if r.get("auth_value") == 2),
+        "denied": sum(1 for r in rows if r.get("auth_value") == 0),
+        "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
+        "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
+    }
+
+    page_rows, total, total_pages = _paginate(rows, page, per_page)
+    return {
+        "rows": page_rows,
+        "counts": counts,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "q": q,
+        "verdict": verdict,
+        "auth": auth,
+    }
+
+
+_AUTH_SUBSYSTEM_LABELS = {
+    "com.apple.securityd": "securityd",
+    "com.apple.TCC": "TCC",
+    "com.apple.opendirectoryd": "opendirectoryd",
+    "com.apple.syspolicy": "syspolicy",
+    "com.apple.loginwindow.logging": "loginwindow",
+    "com.apple.launchservices": "launchservices",
+    "com.apple.Authorization": "Authorization",
+    "com.apple.xpc": "xpc",
+    "com.apple.CFPasteboard": "CFPasteboard",
+    "com.apple.BezelServices": "BezelServices",
+    "com.apple.ManagedClient": "ManagedClient",
+}
+
+# Subsystem filter options shown in the dropdown (label, subsystem value).
+AUTH_SUBSYSTEM_OPTIONS = [
+    ("all subsystems", ""),
+    ("TCC (privacy access)", "com.apple.TCC"),
+    ("securityd", "com.apple.securityd"),
+    ("syspolicy (Gatekeeper)", "com.apple.syspolicy"),
+    ("opendirectoryd", "com.apple.opendirectoryd"),
+    ("loginwindow", "com.apple.loginwindow.logging"),
+    ("Authorization", "com.apple.Authorization"),
+    ("launchservices", "com.apple.launchservices"),
+]
+
+
+_AUTH_VERDICT_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3}
+
+
+def auth_events_aggregated(
+    session: Session,
+    q: str = "",
+    subsystem: str = "",
+    verdict: str = "",
+    sort: str = "count",
+    page: int = 1,
+    per_page: int = DEFAULT_PER_PAGE,
+):
+    """Auth events grouped by (content_hash, process, subsystem, event_message),
+    joined with LLM verdicts.  Collapses raw log lines into patterns; each
+    pattern gets one judgment from the LLM judge.  Supports filtering by
+    subsystem, verdict, and free-text search, and sorting by count or verdict
+    severity."""
+    empty = {
+        "rows": [],
+        "summary": {},
+        "subsystem_options": AUTH_SUBSYSTEM_OPTIONS,
+        "total": 0,
+        "total_events": 0,
+        "page": 1,
+        "per_page": per_page,
+        "total_pages": 1,
+        "q": q,
+        "subsystem": subsystem,
+        "verdict": verdict,
+        "sort": sort,
+    }
+    if AuthEventRow.__tablename__ not in _existing_tables(session):
+        return empty
+
+    # --- summary counts per subsystem (all rows, unfiltered) ---
+    summary_rows = session.execute(
+        select(AuthEventRow.subsystem, func.count().label("cnt"))
+        .group_by(AuthEventRow.subsystem)
+        .order_by(func.count().desc())
+        .limit(12)
+    ).all()
+    summary = {
+        _AUTH_SUBSYSTEM_LABELS.get(s, (s or "(none)").split(".")[-1]): c
+        for s, c in summary_rows
+    }
+    total_events = sum(summary.values())
+
+    # --- aggregation: one row per unique (content_hash) pattern ---
+    conds = []
+    if q:
+        like = f"%{q}%"
+        conds.append(
+            or_(
+                AuthEventRow.process.ilike(like),
+                AuthEventRow.event_message.ilike(like),
+            )
+        )
+    if subsystem:
+        conds.append(AuthEventRow.subsystem == subsystem)
+
+    group_cols = (
+        AuthEventRow.content_hash,
+        AuthEventRow.process,
+        AuthEventRow.subsystem,
+        AuthEventRow.event_message,
+    )
+    agg_sub = (
+        select(
+            *group_cols,
+            func.count().label("cnt"),
+            func.max(AuthEventRow.event_timestamp).label("last_seen"),
+        )
+        .group_by(*group_cols)
+        .where(*conds)
+        if conds
+        else select(
+            *group_cols,
+            func.count().label("cnt"),
+            func.max(AuthEventRow.event_timestamp).label("last_seen"),
+        ).group_by(*group_cols)
+    ).subquery("agg")
+
+    # Join with Judgement so each pattern carries its LLM verdict.
+    outer = select(
+        agg_sub.c.content_hash,
+        agg_sub.c.process,
+        agg_sub.c.subsystem,
+        agg_sub.c.event_message,
+        agg_sub.c.cnt,
+        agg_sub.c.last_seen,
+        Judgement.verdict,
+        Judgement.confidence,
+        Judgement.reasoning,
+    ).outerjoin(
+        Judgement,
+        and_(
+            Judgement.content_hash == agg_sub.c.content_hash,
+            Judgement.collector == "auth_events",
+        ),
+    )
+
+    if verdict:
+        if verdict == "unjudged":
+            outer = outer.where(Judgement.verdict.is_(None))
+        else:
+            outer = outer.where(Judgement.verdict == verdict)
+
+    total = (
+        session.execute(select(func.count()).select_from(outer.subquery())).scalar()
+        or 0
+    )
+
+    per_page = max(1, min(per_page, 200))
+    page = max(1, page)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = min(page, total_pages)
+
+    if sort == "verdict":
+        sev_case = case(
+            _AUTH_VERDICT_SEV,
+            value=Judgement.verdict,
+            else_=99,
+        )
+        order_by = (sev_case.asc(), agg_sub.c.cnt.desc())
+    else:
+        order_by = (agg_sub.c.cnt.desc(),)
+
+    page_stmt = outer.order_by(*order_by).offset((page - 1) * per_page).limit(per_page)
+
+    rows = []
+    for ch, proc, sub, msg, cnt, last, verd, conf, reason in session.execute(
+        page_stmt
+    ).all():
+        rows.append(
+            {
+                "process": Path(proc).name if proc else "—",
+                "subsystem": sub or "",
+                "subsystem_short": _AUTH_SUBSYSTEM_LABELS.get(
+                    sub, (sub or "").split(".")[-1] or "—"
+                ),
+                "message": msg or "",
+                "count": cnt,
+                "last_seen": (last or "")[:16].replace("T", " "),
+                "verdict": verd,
+                "confidence": conf,
+                "reasoning": reason,
+            }
+        )
+
+    return {
+        "rows": rows,
+        "summary": summary,
+        "total_events": total_events,
+        "subsystem_options": AUTH_SUBSYSTEM_OPTIONS,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "q": q,
+        "subsystem": subsystem,
+        "verdict": verdict,
+        "sort": sort,
     }
 
 
@@ -1145,31 +1776,160 @@ def fragment_sysint():
 
 @app.route("/fragments/network-flows")
 def fragment_network_flows():
+    verdict = request.args.get("verdict", "")
+    q = request.args.get("q", "")
+    page = _int_arg("page", 1)
+    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
     with _session() as s:
         latest = latest_run(s)
         return render_template(
             "partials/_network_flows.html",
-            flows=(network_flows(s, latest.run_id) if latest else []),
+            flows=(
+                network_flows(
+                    s, latest.run_id, verdict=verdict, q=q, page=page, per_page=per_page
+                )
+                if latest
+                else None
+            ),
+            per_page_options=PER_PAGE_OPTIONS,
+        )
+
+
+@app.route("/fragments/listening-ports")
+def fragment_listening_ports():
+    verdict = request.args.get("verdict", "")
+    scope_filter = request.args.get("scope_filter", "")
+    q = request.args.get("q", "")
+    page = _int_arg("page", 1)
+    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_listening_ports.html",
+            ports=(
+                listening_ports(
+                    s,
+                    latest.run_id,
+                    verdict=verdict,
+                    scope_filter=scope_filter,
+                    q=q,
+                    page=page,
+                    per_page=per_page,
+                )
+                if latest
+                else None
+            ),
+            per_page_options=PER_PAGE_OPTIONS,
         )
 
 
 @app.route("/fragments/dns-queries")
 def fragment_dns_queries():
+    verdict = request.args.get("verdict", "")
+    level = request.args.get("level", "")
+    q = request.args.get("q", "")
+    page = _int_arg("page", 1)
+    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
     with _session() as s:
         latest = latest_run(s)
         return render_template(
             "partials/_dns_queries.html",
-            dns=(dns_queries(s, latest.run_id) if latest else None),
+            dns=(
+                dns_queries(
+                    s,
+                    latest.run_id,
+                    verdict=verdict,
+                    level=level,
+                    q=q,
+                    page=page,
+                    per_page=per_page,
+                )
+                if latest
+                else None
+            ),
+            per_page_options=PER_PAGE_OPTIONS,
         )
 
 
 @app.route("/fragments/persistence")
 def fragment_persistence():
+    verdict = request.args.get("verdict", "")
+    q = request.args.get("q", "")
+    ssh_page = _int_arg("ssh_page", 1)
+    hosts_page = _int_arg("hosts_page", 1)
+    priv_page = _int_arg("priv_page", 1)
+    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
     with _session() as s:
         latest = latest_run(s)
         return render_template(
             "partials/_persistence.html",
-            data=(persistence_tampering(s, latest.run_id) if latest else None),
+            data=(
+                persistence_tampering(
+                    s,
+                    latest.run_id,
+                    verdict=verdict,
+                    q=q,
+                    ssh_page=ssh_page,
+                    hosts_page=hosts_page,
+                    priv_page=priv_page,
+                    per_page=per_page,
+                )
+                if latest
+                else None
+            ),
+            per_page_options=PER_PAGE_OPTIONS,
+        )
+
+
+@app.route("/fragments/tcc")
+def fragment_tcc():
+    verdict = request.args.get("verdict", "")
+    auth = request.args.get("auth", "")
+    q = request.args.get("q", "")
+    page = _int_arg("page", 1)
+    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_tcc.html",
+            data=(
+                tcc_permissions(
+                    s,
+                    latest.run_id,
+                    verdict=verdict,
+                    auth=auth,
+                    q=q,
+                    page=page,
+                    per_page=per_page,
+                )
+                if latest
+                else None
+            ),
+            per_page_options=PER_PAGE_OPTIONS,
+        )
+
+
+@app.route("/fragments/auth-events")
+def fragment_auth_events():
+    q = request.args.get("q", "")
+    subsystem = request.args.get("subsystem", "")
+    verdict = request.args.get("verdict", "")
+    sort = request.args.get("sort", "count")
+    page = _int_arg("page", 1)
+    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    with _session() as s:
+        return render_template(
+            "partials/_auth_events.html",
+            events=auth_events_aggregated(
+                s,
+                q=q,
+                subsystem=subsystem,
+                verdict=verdict,
+                sort=sort,
+                page=page,
+                per_page=per_page,
+            ),
+            per_page_options=PER_PAGE_OPTIONS,
         )
 
 
@@ -1321,7 +2081,10 @@ def _serve(host: str, port: int, debug: bool) -> None:
                 f" * avai dashboard on http://{host}:{port}  (Ctrl-C to quit)",
                 flush=True,
             )
-            serve(app, host=host, port=port)
+            # ~10 HTMX fragments fire in parallel on every page load/poll
+            # (7 × every-30s + 3 × every-60s + JS alerts). 16 threads absorbs
+            # that burst without queuing; extras sit idle otherwise.
+            serve(app, host=host, port=port, threads=16)
             return
         except ImportError:
             print(
