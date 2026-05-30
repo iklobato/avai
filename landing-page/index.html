@@ -77,7 +77,7 @@
   <div class="max-w-6xl mx-auto px-6 pt-14 pb-24 text-center">
     <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900/70 ring-1 ring-white/10 text-xs text-slate-400">
       <span class="pulse-dot"></span>
-      <span>v0.2.10 — open source, MIT licensed</span>
+      <span>v0.3.3 — open source, MIT licensed</span>
     </div>
 
     <h1 class="mt-7 text-5xl md:text-6xl font-semibold tracking-tight">
@@ -112,7 +112,7 @@
     <!-- ticker -->
     <div class="mt-14 grid grid-cols-2 md:grid-cols-4 gap-3 max-w-3xl mx-auto text-sm">
       <div class="card rounded-xl px-4 py-3">
-        <div class="mono text-emerald-300 text-xl">22</div>
+        <div class="mono text-emerald-300 text-xl">26</div>
         <div class="text-slate-500 text-xs uppercase tracking-wider">places it checks</div>
       </div>
       <div class="card rounded-xl px-4 py-3">
@@ -193,7 +193,8 @@
         <div class="mt-3 text-emerald-300 font-medium">1 · It looks around</div>
         <p class="mt-2 text-slate-400 text-sm leading-relaxed">
           avai checks the spots malware likes to hide — programs that auto‑start, browser
-          add‑ons, network connections, plugged‑in USB devices, important system files.
+          add‑ons, network connections, plugged‑in USB devices, important system files,
+          app privacy permissions, and live authentication events.
           It only reads; it never changes anything.
         </p>
       </div>
@@ -203,16 +204,17 @@
         <p class="mt-2 text-slate-400 text-sm leading-relaxed">
           Anything new gets cross‑checked against trusted security databases (the same ones
           professionals use), then handed to an AI security analyst that decides how worried
-          you should be — and explains why, in one sentence.
+          you should be — and explains why, in one sentence. The same artifact is never
+          analysed twice.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
         <div class="text-4xl">📋</div>
         <div class="mt-3 text-emerald-300 font-medium">3 · You get a simple list</div>
         <p class="mt-2 text-slate-400 text-sm leading-relaxed">
-          Open one web page and see everything colour‑coded red / yellow / green, newest first,
-          each with a plain‑English reason and a fix. It re‑checks every few minutes and pings
-          you if something dangerous shows up.
+          Open one web page and see everything colour‑coded red / yellow / green. Filter,
+          sort, and search every table. It re‑checks every few minutes and chimes
+          if something dangerous shows up.
         </p>
       </div>
     </div>
@@ -249,7 +251,8 @@
         <div class="text-slate-100 font-medium">🌐 Who your computer is talking to</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
           Every app that's connected to the internet, and where. If something is quietly
-          phoning home to a known‑bad server, you'll see it.
+          phoning home to a known‑bad server, you'll see it — with traffic volume and
+          geo‑location of the remote address.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
@@ -257,6 +260,14 @@
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
           That "free downloader" add‑on that can read every page and your saved passwords?
           One of the most common ways people get hacked. avai checks what each one can do.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">🔒 App privacy permissions</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          Which apps have access to your camera, microphone, location, screen recording, or
+          full disk? avai reads the macOS privacy database (TCC) and flags unexpected grants —
+          the kind a spy tool quietly requests.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
@@ -269,36 +280,33 @@
       <div class="card rounded-2xl p-6">
         <div class="text-slate-100 font-medium">📄 Tampered system files</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          The sensitive files that control logins and permissions. avai notices the instant one
-          of them is quietly changed.
+          The sensitive files that control logins and permissions — SSH keys, sudoers rules,
+          <code>/etc/hosts</code> redirects. avai notices the instant one of them is quietly changed.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
         <div class="text-slate-100 font-medium">🛡️ Your security settings</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          Disk encryption, the firewall, the built‑in malware protections. If something switched
-          one off, that's the first thing you'll want to know.
+          Disk encryption, the firewall, Gatekeeper, SSH remote login, Screen Sharing, and
+          Remote Desktop — with correct live detection on macOS. If something switched one
+          off, that's the first thing you'll see.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-slate-100 font-medium">🔑 Login attempts</div>
+        <div class="text-slate-100 font-medium">🔑 Authentication events</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          Successful and failed sign‑ins, in real time. A burst of failed logins from somewhere
-          strange shows up within seconds.
+          Logins, sudo usage, Gatekeeper checks, TCC access grants — aggregated by pattern
+          so thousands of repetitive log lines collapse into a handful of meaningful rows,
+          each AI-classified for severity.
         </p>
       </div>
       <div class="card rounded-2xl p-6">
-        <div class="text-slate-100 font-medium">⚙️ Apps that are installed</div>
+        <div class="text-slate-100 font-medium">…and 18 more checks</div>
         <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          The full list of software on the machine, including anything installed in an unusual
-          place or pretending to be a trusted brand.
-        </p>
-      </div>
-      <div class="card rounded-2xl p-6">
-        <div class="text-slate-100 font-medium">…and a dozen more</div>
-        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
-          Scheduled tasks, running programs, live network traffic, DNS lookups, SSH keys, drive mounts, special permissions — 26 checks in all.
-          If it's a place attackers hide, avai is already looking there.
+          Running processes, open ports, DNS lookups, installed apps, scheduled tasks,
+          kernel extensions, quarantined downloads, MDM profiles, Wi‑Fi security, drive
+          mounts, setuid files — 26 checks in all. If it's a place attackers hide, avai is
+          already looking there.
         </p>
       </div>
     </div>
@@ -320,9 +328,10 @@
       </p>
       <ul class="mt-6 space-y-2 text-sm text-slate-400">
         <li class="flex gap-2"><span class="text-emerald-400">→</span> It cross‑checks against 17 trusted security databases before deciding.</li>
-        <li class="flex gap-2"><span class="text-emerald-400">→</span> It only reviews what's <em>new</em>, so it stays fast and quiet.</li>
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> It only reviews what's <em>new</em> — the same finding is never sent twice.</li>
         <li class="flex gap-2"><span class="text-emerald-400">→</span> Every alert says <em>why</em> and <em>how to fix it</em> — no security degree required.</li>
         <li class="flex gap-2"><span class="text-emerald-400">→</span> Resolved problems disappear from the list automatically.</li>
+        <li class="flex gap-2"><span class="text-emerald-400">→</span> Auth events are classified by recurring pattern, not individual log lines — so noisy housekeeping is marked benign once and never surfaced again.</li>
       </ul>
       <p class="mt-6 text-xs text-slate-500">
         Here's what real alerts look like — three findings from one check:
@@ -381,13 +390,14 @@
         One simple web page.
       </h2>
       <p class="mt-5 text-slate-400">
-        Open it in your browser and everything's right there — a colour‑coded list of findings,
-        newest first. It refreshes on its own and chimes if something
-        <span class="text-rose-300">dangerous</span> appears. Click any row for the full story.
+        Open it in your browser and everything's right there — colour‑coded findings, live
+        network flows, DNS queries, open ports, auth events, privacy permissions and more.
+        Every table has search, filters, and pagination. It refreshes itself and chimes if
+        something <span class="text-rose-300">dangerous</span> appears.
       </p>
     </div>
 
-    <!-- ascii dashboard mock -->
+    <!-- dashboard mock -->
     <div class="mt-12 mx-auto max-w-4xl card rounded-2xl p-5 md:p-8 shadow-2xl shadow-black/40">
       <div class="flex items-center gap-2 mb-4">
         <span class="w-3 h-3 rounded-full bg-rose-400/80"></span>
@@ -411,14 +421,23 @@
           <div class="mt-1 mono text-emerald-300 text-sm">26 / 26 ok</div>
         </div>
         <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 py-3">
-          <div class="text-xs text-slate-500 uppercase tracking-wider">system health</div>
-          <div class="mt-1 mono text-emerald-300 text-sm">all good</div>
+          <div class="text-xs text-slate-500 uppercase tracking-wider">system integrity</div>
+          <div class="mt-1 mono text-emerald-300 text-sm">FileVault · FW · GK on</div>
         </div>
       </div>
 
-      <div class="mt-4 rounded-lg bg-slate-950/60 ring-1 ring-white/5 overflow-hidden">
+      <!-- filter bar hint -->
+      <div class="mt-3 rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-4 py-2 flex flex-wrap gap-2 items-center text-xs text-slate-500">
+        <span class="mono bg-slate-800 px-2 py-0.5 rounded border border-slate-700 text-slate-400">search…</span>
+        <span class="mono bg-slate-800 px-2 py-0.5 rounded border border-slate-700 text-slate-400">verdict ▾</span>
+        <span class="mono bg-slate-800 px-2 py-0.5 rounded border border-slate-700 text-slate-400">collector ▾</span>
+        <span class="mono bg-slate-800 px-2 py-0.5 rounded border border-slate-700 text-slate-400">25 / page ▾</span>
+        <span class="ml-auto">734 findings · page 1 / 30</span>
+      </div>
+
+      <div class="mt-3 rounded-lg bg-slate-950/60 ring-1 ring-white/5 overflow-hidden">
         <div class="px-4 py-2 text-xs text-slate-500 uppercase tracking-wider flex justify-between">
-          <span>recent findings</span><span>10 / page · filter, sort, click for raw</span>
+          <span>recent findings</span><span>click any row for reasoning + fix</span>
         </div>
         <table class="w-full text-sm">
           <tbody class="mono">
@@ -429,25 +448,36 @@
               <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
             </tr>
             <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-amber-300">🟡 worth a look</td>
-              <td class="px-4 py-2 text-slate-400">extension</td>
-              <td class="px-4 py-2 text-slate-300 truncate">"Free YouTube Video Downloader"</td>
-              <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
+              <td class="px-4 py-2 text-amber-300">🟡 suspicious</td>
+              <td class="px-4 py-2 text-slate-400">TCC · Microphone</td>
+              <td class="px-4 py-2 text-slate-300 truncate">com.unknown.helper — mic access granted</td>
+              <td class="px-4 py-2 text-slate-500 text-right">5m ago</td>
             </tr>
             <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-emerald-300">🟢 all good</td>
-              <td class="px-4 py-2 text-slate-400">connection</td>
-              <td class="px-4 py-2 text-slate-300 truncate">Spotify → Spotify's servers</td>
-              <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
+              <td class="px-4 py-2 text-emerald-300">🟢 benign</td>
+              <td class="px-4 py-2 text-slate-400">auth events</td>
+              <td class="px-4 py-2 text-slate-300 truncate">syspolicyd — notarization lookup (9,430×)</td>
+              <td class="px-4 py-2 text-slate-500 text-right">8m ago</td>
             </tr>
             <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-slate-300">⚪ not sure</td>
+              <td class="px-4 py-2 text-slate-300">⚪ unknown</td>
               <td class="px-4 py-2 text-slate-400">USB device</td>
               <td class="px-4 py-2 text-slate-300 truncate">Logitech wireless receiver</td>
-              <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
+              <td class="px-4 py-2 text-slate-500 text-right">12m ago</td>
             </tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- section tabs hint -->
+      <div class="mt-3 flex flex-wrap gap-2 text-[11px]">
+        <span class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">findings</span>
+        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">network flows</span>
+        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">DNS queries</span>
+        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">open ports</span>
+        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">auth events</span>
+        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">TCC permissions</span>
+        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">persistence</span>
       </div>
     </div>
   </div>
@@ -492,8 +522,8 @@ docker compose up -d</pre>
 
       <!-- pip -->
       <div class="card rounded-2xl p-6">
-        <div class="text-slate-100 font-medium">pip</div>
-        <p class="mt-2 text-sm text-slate-400">Best on a Linux server — full visibility with sudo.</p>
+        <div class="text-slate-100 font-medium">pip (macOS or Linux)</div>
+        <p class="mt-2 text-sm text-slate-400">Full visibility — including TCC, Gatekeeper, auth events — with sudo on macOS or Linux.</p>
         <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">pip install 'avai-monitor[judge]'
 sudo avai monitor &
 avai dashboard</pre>
@@ -519,6 +549,15 @@ avai dashboard</pre>
           <pre class="mono text-xs mt-3 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">pip install 'avai-monitor[judge]'
 sudo -E avai monitor --db /var/lib/avai/avai.db --interval 300 &
 avai dashboard --db /var/lib/avai/avai.db --host 0.0.0.0</pre>
+        </div>
+
+        <div class="card rounded-xl p-5">
+          <div class="text-sm text-slate-200 font-medium">🍎 Full macOS coverage (TCC, Gatekeeper, auth events)</div>
+          <p class="mt-1 text-xs text-slate-500">Native install with sudo for complete visibility — including privacy permissions and system integrity.</p>
+          <pre class="mono text-xs mt-3 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">pip install 'avai-monitor[judge]'
+export ANTHROPIC_API_KEY=sk-ant-...
+sudo -E avai monitor &
+avai dashboard</pre>
         </div>
 
         <div class="card rounded-xl p-5">

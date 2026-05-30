@@ -220,7 +220,7 @@ Defaults baked into `avai monitor`:
 | `--max-db-mb` | `1024` | rotation cap (0 disables); oldest runs are pruned + `VACUUM`'d after each cycle |
 | `--judge-model` | `claude-haiku-4-5-20251001` | any litellm model id |
 | `--judge-batch-size` | `20` | entries per LLM call |
-| `--judge-max-per-collector` | unlimited | per-cycle cap of new entries judged |
+| `--judge-max-per-collector` | `25` | per-cycle cap of new entries judged per collector |
 | `--no-streaming` | (off) | disables `auth_events` + `process_exec_events` tailers |
 | `--no-judge` | (off) | runs collectors but stores no verdicts |
 | `--no-enrich` | (off) | skips the whole threat-intel layer; collectors → judge directly |
@@ -488,12 +488,13 @@ Snapshot collectors (run every cycle, default 300s):
 | Files | `file_integrity` (passwd / shadow / sudoers / SSH config / dotfiles), `setuid_files`, `mounts` |
 | Apps | `installed_apps` (dpkg-query + XDG `.desktop`), `browser_extensions` |
 | Posture | `system_integrity` (SELinux / AppArmor / ufw / sshd / vnc / LUKS) |
+| Posture (macOS only) | `tcc_permissions` (camera/mic/location/screen grants), `quarantine_events`, `mdm_profiles`, `kernel_extensions`, `system_extensions` |
 
 Streaming collectors (events as they happen):
 
 | Collector | Source |
 |---|---|
-| `auth_events` | `journalctl -f` filtered to auth / authpriv / sshd / systemd-logind / sudo / su / polkitd |
+| `auth_events` | `journalctl -f` (Linux) / macOS unified log (macOS), filtered to security-relevant subsystems. LLM-judged by unique `(process, subsystem, message)` pattern — each event template is classified once regardless of how many times it fires. |
 | `process_exec_events` | `journalctl -f _AUDIT_TYPE_NAME=EXECVE` (needs auditd `auditctl -a always,exit -F arch=b64 -S execve` rule) |
 
 For every entity collected (deduped by a content hash over the
@@ -501,6 +502,22 @@ collector's "judge fields"), the LLM judge classifies it as
 `malicious` / `suspicious` / `unknown` / `benign` with a confidence,
 MITRE-aligned category, and one-line remediation. Judgments are
 persisted; the same artifact is never sent twice.
+
+---
+
+## Dashboard
+
+The Flask + HTMX dashboard at `:8765` has full filter and pagination on every table:
+
+- **Findings** — filter by verdict, collector, category, status (active/resolved), free-text search; sortable columns; configurable page size (10/25/50/100).
+- **Network flows** — filter by verdict and IP/host/process search; summary stats (destinations, volume, malicious count).
+- **Listening ports** — filter by verdict and bind scope (all interfaces / routable / loopback); process search.
+- **DNS queries** — filter by verdict, resolution level (DoH / external DNS / local resolver), domain search.
+- **Persistence** — SSH authorized keys, `/etc/hosts` mappings, and privilege config each with independent pagination.
+- **Auth events** — aggregated by unique `(process, subsystem, message)` pattern with occurrence counts and last-seen timestamps. Filter by subsystem (TCC, securityd, syspolicy, loginwindow, Authorization) or verdict. Sort by count or verdict severity. LLM verdicts appear as patterns are classified.
+- **TCC permissions** (macOS) — every app's camera, microphone, location, screen-recording, and full-disk-access grant/denial, with LLM verdict and auth-status filter.
+
+All sections auto-refresh (30–60 s). Toast notifications + audio alert fire for new malicious/suspicious judgments.
 
 ---
 
