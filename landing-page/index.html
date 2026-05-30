@@ -66,6 +66,8 @@
     <nav class="hidden md:flex items-center gap-7 text-sm text-slate-400">
       <a href="#how" class="hover:text-slate-100 transition">How it works</a>
       <a href="#what" class="hover:text-slate-100 transition">What it checks</a>
+      <a href="#features" class="hover:text-slate-100 transition">Features</a>
+      <a href="#why" class="hover:text-slate-100 transition">Why avai</a>
       <a href="#install" class="hover:text-slate-100 transition">Get started</a>
       <a href="/docs/" class="hover:text-slate-100 transition">Docs</a>
       <a href="https://github.com/iklobato/avai" class="hover:text-slate-100 transition">GitHub →</a>
@@ -313,6 +315,209 @@
           kernel extensions, quarantined downloads, MDM profiles, Wi‑Fi security, drive
           mounts, setuid files — 26 checks in all. If it's a place attackers hide, avai is
           already looking there.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- full feature list -->
+<section id="features" class="border-t border-white/5 bg-black/20">
+  <div class="max-w-6xl mx-auto px-6 py-20">
+    <div class="text-center max-w-2xl mx-auto">
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">Features</div>
+      <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
+        Everything avai watches — and does.
+      </h2>
+      <p class="mt-4 text-slate-400">
+        26 collectors on macOS (21 on Linux), 17 threat‑intel sources, and a
+        Claude‑class model that turns it all into plain‑English verdicts.
+      </p>
+    </div>
+
+    <!-- collectors -->
+    <div class="mt-12 grid md:grid-cols-3 gap-4">
+      <div class="card rounded-xl p-5">
+        <div class="text-slate-100 font-medium text-sm">⚙️ Processes &amp; execution</div>
+        <div class="mt-3 flex flex-wrap gap-1.5 mono text-[11px] text-slate-400">
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">processes</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">process_exec_events</span>
+        </div>
+      </div>
+      <div class="card rounded-xl p-5">
+        <div class="text-slate-100 font-medium text-sm">🌐 Network</div>
+        <div class="mt-3 flex flex-wrap gap-1.5 mono text-[11px] text-slate-400">
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">network_connections</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">listening_ports</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">network_flows</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">dns_queries</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">network_interfaces</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">wifi_state</span>
+        </div>
+      </div>
+      <div class="card rounded-xl p-5">
+        <div class="text-slate-100 font-medium text-sm">📌 Persistence</div>
+        <div class="mt-3 flex flex-wrap gap-1.5 mono text-[11px] text-slate-400">
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">launch_items</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">kernel_extensions</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">system_extensions</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">mdm_profiles</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">installed_apps</span>
+        </div>
+      </div>
+      <div class="card rounded-xl p-5">
+        <div class="text-slate-100 font-medium text-sm">🔑 Access &amp; identity</div>
+        <div class="mt-3 flex flex-wrap gap-1.5 mono text-[11px] text-slate-400">
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">auth_events</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">ssh_authorized_keys</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">tcc_permissions</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">privilege_config</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">setuid_files</span>
+        </div>
+      </div>
+      <div class="card rounded-xl p-5">
+        <div class="text-slate-100 font-medium text-sm">🛡️ Integrity &amp; posture</div>
+        <div class="mt-3 flex flex-wrap gap-1.5 mono text-[11px] text-slate-400">
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">system_integrity</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">file_integrity</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">hosts_file</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">quarantine_events</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">mounts</span>
+        </div>
+      </div>
+      <div class="card rounded-xl p-5">
+        <div class="text-slate-100 font-medium text-sm">🔌 Hardware &amp; browser</div>
+        <div class="mt-3 flex flex-wrap gap-1.5 mono text-[11px] text-slate-400">
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">usb_devices</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">bluetooth_devices</span>
+          <span class="px-2 py-0.5 rounded bg-slate-800/70 ring-1 ring-white/5">browser_extensions</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- intel + brain -->
+    <div class="mt-4 grid md:grid-cols-3 gap-4">
+      <div class="card rounded-xl p-5 md:col-span-2">
+        <div class="text-slate-100 font-medium text-sm">🛰️ 17 threat‑intel sources behind every verdict</div>
+        <p class="mt-1 text-slate-500 text-xs">Hashes, IPs, domains, URLs, CVEs, packages and OS versions are enriched before the model ever sees them.</p>
+        <div class="mt-3 flex flex-wrap gap-1.5 text-[11px] text-slate-300">
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">VirusTotal</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">MalwareBazaar</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">URLhaus</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">ThreatFox</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">Feodo Tracker</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">AbuseIPDB</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">GreyNoise</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">Shodan InternetDB</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">CISA KEV</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">NVD</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">OSV</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">GitHub Advisory</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">CIRCL hashlookup</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">crt.sh</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">PhishTank</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">Safe Browsing</span>
+          <span class="px-2 py-0.5 rounded bg-emerald-400/10 ring-1 ring-emerald-400/20">endoflife.date</span>
+        </div>
+      </div>
+      <div class="card rounded-xl p-5">
+        <div class="text-slate-100 font-medium text-sm">🧠 AI verdicts</div>
+        <p class="mt-2 text-slate-400 text-sm leading-relaxed">
+          Every new finding is labelled
+          <span class="text-rose-300">malicious</span> /
+          <span class="text-amber-300">suspicious</span> /
+          <span class="text-slate-300">unknown</span> /
+          <span class="text-emerald-300">benign</span> — with a MITRE category, a
+          confidence, and a one‑line fix. Bring your own key (Anthropic or any litellm provider).
+        </p>
+      </div>
+    </div>
+
+    <!-- capabilities -->
+    <div class="mt-4 grid sm:grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+      <div class="card rounded-xl p-4"><span class="text-slate-100 font-medium">One <span class="mono">docker run</span></span><p class="mt-1 text-slate-400 text-xs">Same image is both dashboard and monitor.</p></div>
+      <div class="card rounded-xl p-4"><span class="text-slate-100 font-medium">No SIEM · no agent · no cloud</span><p class="mt-1 text-slate-400 text-xs">Runs entirely on your host.</p></div>
+      <div class="card rounded-xl p-4"><span class="text-slate-100 font-medium">Dedup by content hash</span><p class="mt-1 text-slate-400 text-xs">The same artifact is never judged twice.</p></div>
+      <div class="card rounded-xl p-4"><span class="text-slate-100 font-medium">Read‑only dashboard</span><p class="mt-1 text-slate-400 text-xs">Search, filter, sort, paginate, audio alerts.</p></div>
+      <div class="card rounded-xl p-4"><span class="text-slate-100 font-medium">Just a SQLite file</span><p class="mt-1 text-slate-400 text-xs">Point the dashboard at any <span class="mono">avai.db</span>.</p></div>
+      <div class="card rounded-xl p-4"><span class="text-slate-100 font-medium">macOS &amp; Linux</span><p class="mt-1 text-slate-400 text-xs">One tool, both platforms.</p></div>
+      <div class="card rounded-xl p-4"><span class="text-slate-100 font-medium">Native install</span><p class="mt-1 text-slate-400 text-xs"><span class="mono">pip install avai-monitor</span>.</p></div>
+      <div class="card rounded-xl p-4"><span class="text-slate-100 font-medium">Open source · MIT</span><p class="mt-1 text-slate-400 text-xs">Auditable, model‑agnostic.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- why avai / pros -->
+<section id="why" class="border-t border-white/5">
+  <div class="max-w-6xl mx-auto px-6 py-20">
+    <div class="text-center max-w-2xl mx-auto">
+      <div class="text-emerald-400 text-xs uppercase tracking-widest font-medium">Why avai</div>
+      <h2 class="mt-3 text-3xl md:text-4xl font-semibold text-slate-100 tracking-tight">
+        The pros, in plain terms.
+      </h2>
+      <p class="mt-4 text-slate-400">What you get for one <span class="mono">docker run</span>.</p>
+    </div>
+
+    <div class="mt-12 grid md:grid-cols-3 gap-4">
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">✅ Answers, not logs</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          Every finding comes back in plain English with a verdict, a confidence, a
+          MITRE category, and a concrete fix — no query language, no triage spreadsheet.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">📦 Zero infrastructure</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          One container. No SIEM, no agents to enroll, no control plane to run or pay for.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">🔐 Private by default</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          Everything runs on your machine; you bring your own model key, and only
+          <em>new</em> findings ever leave — for a lookup or the LLM call you opted into.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">💸 Cheap to run</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          Content‑hash dedup judges each artifact once — a busy host doesn't mean a big
+          bill — and cached intel hits skip the network entirely.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">🔭 EDR breadth, no agent</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          26 host surfaces × 17 intel sources behind a single verdict — the coverage of an
+          endpoint product without anything to install on every machine.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">🖥️ Cross‑platform</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          macOS and Linux from the same tool, with platform‑correct live detection.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">🧰 Open and yours</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          MIT‑licensed, auditable, and model‑agnostic — swap to any litellm provider with
+          one env var.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">🟢 Safe for production</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          Collectors only <em>read</em>; the dashboard is read‑only. Point it at a server
+          without touching it.
+        </p>
+      </div>
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">📤 Portable history</div>
+        <p class="mt-3 text-slate-400 text-sm leading-relaxed">
+          The whole state is a single SQLite file — scan on a server, view on your laptop,
+          archive a snapshot, diff over time.
         </p>
       </div>
     </div>
