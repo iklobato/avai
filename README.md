@@ -1,4 +1,8 @@
-# avai
+<p align="center">
+  <img src="docs/images/logo.png" alt="avai logo" width="180">
+</p>
+
+<h1 align="center">avai</h1>
 
 > **Know what's actually running on your machines.**
 > Open-source host telemetry + LLM threat classifier. One `docker run`.
@@ -25,6 +29,66 @@ MITRE-aligned category, a confidence, and a one-line remediation.
 
 → Marketing site & screenshots: **<https://getavai.com>**
 → Source: <https://github.com/iklobato/avai>
+
+---
+
+## Screenshots
+
+A read-only Flask + HTMX + Chart.js dashboard on `:8765`. Every panel renders
+from the same SQLite snapshot the monitor writes — no separate control plane.
+
+### Dashboard — overview
+
+At-a-glance health: runs stored, collectors in the latest cycle (with any
+failures), judgments since the last run, and the verdict-totals donut
+(malicious / suspicious / unknown / benign). The macOS **System Integrity** panel
+surfaces FileVault, Firewall, Gatekeeper and remote-access toggles; **Collector
+Errors** shows what failed (e.g. a TCC permission); and the 12-hour chart tracks
+verdicts over time. The findings table below streams the active, non-benign
+results.
+
+![avai dashboard overview](docs/images/dashboard-overview.png)
+
+### Findings, collectors & runs
+
+The findings table is filterable by status, verdict, collector and category.
+Beneath it, **Rows per collector** shows how much each collector pulled in the
+latest run, and **Recent runs** lists run history with ok/failed counts and the
+look-back window.
+
+![avai findings, collectors and runs](docs/images/findings-collectors-runs.png)
+
+### Finding detail
+
+Expand any finding to see the LLM's **reasoning**, a concrete **remediation**
+step, and the exact **collected data** behind the verdict — for a process that
+means pid/ppid, the full `cmdline`, the running user/uid, status, the content
+hash used for dedup, and when it was first judged vs. last seen.
+
+![avai finding detail](docs/images/finding-detail.png)
+
+### Network flows
+
+The tcpdump aggregator groups traffic by destination so the classifier can reason
+about it: here an IPv6 connection to an unusual high port is flagged
+**suspicious** as a possible C2 beacon, while CDN, mDNS and LAN traffic come back
+**benign** — each with a one-line "why".
+
+![avai network flows](docs/images/network-flows.png)
+
+### Network flows — enriched
+
+The same view enriched per destination with the owning **process**, ASN/geo,
+traffic volume, and the rationale for each verdict.
+
+![avai enriched network flows](docs/images/network-flows-enriched.png)
+
+### The same dashboard, another host
+
+Run against a different host/cycle — 61 runs and 3,426 verdicts here — with
+suspicious AirWatch/MDM persistence surfaced for review.
+
+![avai dashboard on another host](docs/images/dashboard-host.png)
 
 ---
 

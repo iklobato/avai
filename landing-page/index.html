@@ -9,8 +9,13 @@
 <meta property="og:description" content="A tiny security guard for your laptop or server. It checks where malware hides and an AI tells you, in plain English, what's safe and what's not." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://getavai.com" />
+<meta property="og:image" content="https://getavai.com/assets/dashboard-overview.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="avai — is anything shady running on your computer?" />
+<meta name="twitter:description" content="Open-source host telemetry + an LLM threat classifier. One docker run." />
+<meta name="twitter:image" content="https://getavai.com/assets/dashboard-overview.png" />
 <meta name="theme-color" content="#0b0d10" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111418'/%3E%3Ctext x='50%25' y='58%25' font-family='ui-monospace,Menlo,monospace' font-size='17' font-weight='700' text-anchor='middle' fill='%2364ffda'%3Ea%3C/text%3E%3C/svg%3E" />
+<link rel="icon" href="/assets/logo.png" />
 <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
 <style>
   :root { color-scheme: dark; }
@@ -54,7 +59,7 @@
 <header class="relative z-10">
   <div class="max-w-6xl mx-auto px-6 py-5 flex items-center justify-between">
     <a href="#" class="flex items-center gap-2">
-      <span class="mono inline-flex items-center justify-center w-8 h-8 rounded-lg bg-slate-900 ring-1 ring-emerald-400/30 text-emerald-300 font-bold">a</span>
+      <img src="/assets/logo.png" alt="avai logo" class="w-9 h-9 rounded-lg ring-1 ring-white/10 object-cover" />
       <span class="mono text-slate-100 font-semibold tracking-tight">avai</span>
       <span class="ml-2 text-[11px] uppercase tracking-widest text-slate-500">host telemetry</span>
     </a>
@@ -404,89 +409,82 @@
       </p>
     </div>
 
-    <!-- dashboard mock -->
-    <div class="mt-12 mx-auto max-w-4xl card rounded-2xl p-5 md:p-8 shadow-2xl shadow-black/40">
-      <div class="flex items-center gap-2 mb-4">
-        <span class="w-3 h-3 rounded-full bg-rose-400/80"></span>
-        <span class="w-3 h-3 rounded-full bg-amber-400/80"></span>
-        <span class="w-3 h-3 rounded-full bg-emerald-400/80"></span>
-        <span class="ml-3 mono text-xs text-slate-500">localhost:8765 — avai dashboard</span>
-      </div>
-
-      <div class="grid grid-cols-3 gap-3 text-center">
-        <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 py-3">
-          <div class="text-xs text-slate-500 uppercase tracking-wider">verdicts</div>
-          <div class="mt-1 mono text-slate-200 text-sm">
-            <span class="text-rose-300">2 ●</span>
-            <span class="text-amber-300">11 ●</span>
-            <span class="text-slate-300">37 ●</span>
-            <span class="text-emerald-300">684 ●</span>
-          </div>
+    <!-- real screenshots -->
+    <figure class="mt-12 mx-auto max-w-5xl">
+      <div class="rounded-2xl ring-1 ring-white/10 overflow-hidden shadow-2xl shadow-black/40 bg-black/40">
+        <div class="flex items-center gap-2 px-4 py-3 border-b border-white/5">
+          <span class="w-3 h-3 rounded-full bg-rose-400/80"></span>
+          <span class="w-3 h-3 rounded-full bg-amber-400/80"></span>
+          <span class="w-3 h-3 rounded-full bg-emerald-400/80"></span>
+          <span class="ml-3 mono text-xs text-slate-500">localhost:8765 — avai dashboard</span>
         </div>
-        <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 py-3">
-          <div class="text-xs text-slate-500 uppercase tracking-wider">checks run</div>
-          <div class="mt-1 mono text-emerald-300 text-sm">26 / 26 ok</div>
-        </div>
-        <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 py-3">
-          <div class="text-xs text-slate-500 uppercase tracking-wider">system integrity</div>
-          <div class="mt-1 mono text-emerald-300 text-sm">FileVault · FW · GK on</div>
-        </div>
+        <img src="/assets/dashboard-overview.png"
+             alt="avai dashboard overview: run and collector counts, verdict-totals donut, macOS system integrity, collector errors, a 12-hour verdict chart, and the live findings table"
+             class="w-full block" loading="lazy" />
       </div>
+      <figcaption class="mt-4 text-center text-sm text-slate-500">
+        The overview — run &amp; collector counts, the verdict‑totals donut, macOS
+        system‑integrity toggles, collector errors, a 12‑hour verdict chart, and the
+        live findings table.
+      </figcaption>
+    </figure>
 
-      <!-- filter bar hint -->
-      <div class="mt-3 rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-4 py-2 flex flex-wrap gap-2 items-center text-xs text-slate-500">
-        <span class="mono bg-slate-800 px-2 py-0.5 rounded border border-slate-700 text-slate-400">search…</span>
-        <span class="mono bg-slate-800 px-2 py-0.5 rounded border border-slate-700 text-slate-400">verdict ▾</span>
-        <span class="mono bg-slate-800 px-2 py-0.5 rounded border border-slate-700 text-slate-400">collector ▾</span>
-        <span class="mono bg-slate-800 px-2 py-0.5 rounded border border-slate-700 text-slate-400">25 / page ▾</span>
-        <span class="ml-auto">734 findings · page 1 / 30</span>
-      </div>
+    <!-- screenshot gallery -->
+    <div class="mt-12 grid gap-6 md:grid-cols-2">
+      <figure class="card rounded-xl overflow-hidden">
+        <img src="/assets/finding-detail.png"
+             alt="A single finding expanded showing the LLM reasoning, remediation, and the raw collected process data"
+             class="w-full block border-b border-white/5" loading="lazy" />
+        <figcaption class="p-4 text-sm text-slate-400">
+          <span class="text-slate-200 font-medium">Finding detail.</span> Expand any row for
+          the LLM's reasoning, a one‑line remediation, and the raw collected data
+          (pid, <span class="mono">cmdline</span>, user, content hash) behind the verdict.
+        </figcaption>
+      </figure>
 
-      <div class="mt-3 rounded-lg bg-slate-950/60 ring-1 ring-white/5 overflow-hidden">
-        <div class="px-4 py-2 text-xs text-slate-500 uppercase tracking-wider flex justify-between">
-          <span>recent findings</span><span>click any row for reasoning + fix</span>
-        </div>
-        <table class="w-full text-sm">
-          <tbody class="mono">
-            <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-rose-300">🔴 dangerous</td>
-              <td class="px-4 py-2 text-slate-400">auto‑start</td>
-              <td class="px-4 py-2 text-slate-300 truncate">Hidden "updater" runs at every login</td>
-              <td class="px-4 py-2 text-slate-500 text-right">3m ago</td>
-            </tr>
-            <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-amber-300">🟡 suspicious</td>
-              <td class="px-4 py-2 text-slate-400">TCC · Microphone</td>
-              <td class="px-4 py-2 text-slate-300 truncate">com.unknown.helper — mic access granted</td>
-              <td class="px-4 py-2 text-slate-500 text-right">5m ago</td>
-            </tr>
-            <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-emerald-300">🟢 benign</td>
-              <td class="px-4 py-2 text-slate-400">auth events</td>
-              <td class="px-4 py-2 text-slate-300 truncate">syspolicyd — notarization lookup (9,430×)</td>
-              <td class="px-4 py-2 text-slate-500 text-right">8m ago</td>
-            </tr>
-            <tr class="border-t border-white/5">
-              <td class="px-4 py-2 text-slate-300">⚪ unknown</td>
-              <td class="px-4 py-2 text-slate-400">USB device</td>
-              <td class="px-4 py-2 text-slate-300 truncate">Logitech wireless receiver</td>
-              <td class="px-4 py-2 text-slate-500 text-right">12m ago</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <figure class="card rounded-xl overflow-hidden">
+        <img src="/assets/network-flows.png"
+             alt="Network flows aggregated by destination, with an IPv6 high-port connection flagged as a suspicious C2 beacon"
+             class="w-full block border-b border-white/5" loading="lazy" />
+        <figcaption class="p-4 text-sm text-slate-400">
+          <span class="text-slate-200 font-medium">Network flows.</span> The tcpdump
+          aggregator flags an IPv6 high‑port C2‑beacon candidate as
+          <span class="text-amber-300">suspicious</span> while CDN, mDNS and LAN traffic
+          stay <span class="text-emerald-300">benign</span>.
+        </figcaption>
+      </figure>
 
-      <!-- section tabs hint -->
-      <div class="mt-3 flex flex-wrap gap-2 text-[11px]">
-        <span class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">findings</span>
-        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">network flows</span>
-        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">DNS queries</span>
-        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">open ports</span>
-        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">auth events</span>
-        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">TCC permissions</span>
-        <span class="px-2 py-0.5 rounded bg-slate-800/50 text-slate-500 border border-slate-700/50">persistence</span>
-      </div>
+      <figure class="card rounded-xl overflow-hidden">
+        <img src="/assets/network-flows-enriched.png"
+             alt="Per-destination network flows enriched with the owning process, ASN, geo, traffic volume, and a rationale"
+             class="w-full block border-b border-white/5" loading="lazy" />
+        <figcaption class="p-4 text-sm text-slate-400">
+          <span class="text-slate-200 font-medium">Enriched flows.</span> Every destination
+          tied to its owning <span class="text-slate-200">process</span>, ASN/geo, traffic
+          volume, and a one‑line “why”.
+        </figcaption>
+      </figure>
+
+      <figure class="card rounded-xl overflow-hidden">
+        <img src="/assets/findings-collectors-runs.png"
+             alt="Findings table with filters, plus rows-per-collector volume and recent-run history"
+             class="w-full block border-b border-white/5" loading="lazy" />
+        <figcaption class="p-4 text-sm text-slate-400">
+          <span class="text-slate-200 font-medium">Findings, collectors &amp; runs.</span>
+          Filterable findings, plus how much each collector pulled and the recent‑run history.
+        </figcaption>
+      </figure>
     </div>
+
+    <figure class="mt-6 mx-auto max-w-5xl card rounded-xl overflow-hidden">
+      <img src="/assets/dashboard-host.png"
+           alt="The same dashboard against a different host and cycle, with 3,426 verdicts and suspicious AirWatch persistence"
+           class="w-full block border-b border-white/5" loading="lazy" />
+      <figcaption class="p-4 text-center text-sm text-slate-400">
+        <span class="text-slate-200 font-medium">The same dashboard, another host</span> — a
+        different cycle with 3,426 verdicts and suspicious AirWatch/MDM persistence surfaced for review.
+      </figcaption>
+    </figure>
   </div>
 </section>
 
