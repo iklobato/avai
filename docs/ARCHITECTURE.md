@@ -17,8 +17,16 @@ runtime flows that connect them. Diagrams are [Mermaid](https://mermaid.js.org/)
 src/avai/
 ├── __init__.py            # __version__
 ├── cli.py                 # subcommand dispatcher (monitor | dashboard | migrate)
-├── host_monitor.py        # THE ENGINE: collectors, ORM, Sink, Judge, Runner  (6k LOC)
-├── dashboard.py           # Flask + HTMX read-only UI + query layer            (2.6k LOC)
+├── host_monitor/          # THE ENGINE (package): collectors, ORM, Sink, Judge, Runner
+│   ├── __init__.py        #   facade — re-exports the full public API (see §3)
+│   ├── constants.py · enums.py · shell.py · prompts.py · models.py
+│   ├── risk.py · judge.py · narrator.py · sink.py
+│   └── collectors.py · streaming.py · runner.py · main.py
+├── dashboard/             # Flask + HTMX read-only UI (package)
+│   ├── __init__.py        #   facade — re-exports app, query fns, CLI, Base
+│   ├── queries.py         #   read-only DB query layer
+│   ├── app.py             #   Flask app + config + Jinja filters + routes
+│   └── serve.py           #   CLI launcher (waitress / dev server)
 ├── db_migrate.py          # programmatic Alembic runner
 ├── migrations/            # Alembic env + versioned migrations
 └── enrichers/             # threat-intel enrichment subsystem
@@ -36,8 +44,8 @@ src/avai/
 ```mermaid
 graph TD
     cli[cli.py<br/>dispatcher]
-    hm[host_monitor.py<br/>engine]
-    dash[dashboard.py<br/>Flask UI]
+    hm[host_monitor/<br/>engine package]
+    dash[dashboard/<br/>Flask UI package]
     mig[db_migrate.py<br/>Alembic]
 
     subgraph enr[enrichers/]
@@ -84,6 +92,7 @@ graph TD
 - `chain` and `registry` are the *only* things that know about every enricher.
 - `dashboard` imports the ORM `Base` + models from `host_monitor` (single source of schema truth) but never runs collectors.
 - `host_monitor` imports the enrichment chain **lazily** so `requests` stays out of the `--no-enrich` startup path.
+- Within each package, submodule imports flow **one way only** (a strict layering), so there are no import cycles. Each package's `__init__.py` is a thin **facade** that re-exports the public API — callers still write `from avai.host_monitor import X` / `from avai.dashboard import Y` unchanged.
 
 ---
 
@@ -108,9 +117,29 @@ Each subcommand rewrites `sys.argv` and hands the *remaining* argv to the target
 
 ---
 
-## 3. `host_monitor.py` — the engine
+## 3. `host_monitor/` — the engine
 
-This single module holds the entire collection/judging pipeline. Grouped by responsibility below.
+This package holds the entire collection/judging pipeline, split into focused
+modules behind a facade `__init__.py`. The class diagrams and flows below are
+organised by responsibility; the table maps each responsibility to its module.
+
+| Module | Holds | §ref |
+|---|---|---|
+| `enums.py` | `Verdict`, `ThreatCategory`, `LaunchScope`, `Browser` | 3.2 |
+| `constants.py` | defaults, pricing tables, `WATCHED_FILES`, `HOST_PREFIX`, … | 3.2 |
+| `shell.py` | `run_json`/`run_ndjson`/`host_path`/`content_hash`/… helpers | 3.7 |
+| `prompts.py` | `Prompts` (per-collector judge hints) | 3.2 |
+| `models.py` | `Base`, `_RowBase`, all ORM row models | 3.5 |
+| `risk.py` | `compute_risk_score`, `_risk_grade` | 3.4 |
+| `judge.py` | `Judge`/`LlmJudge`/`CompletionClient`/`build_*`/`estimate_cost` | 3.3 |
+| `narrator.py` | `IncidentNarrator`, `build_narrator` | 3.3 |
+| `sink.py` | `Sink` (the DB gateway) | 3.6 |
+| `collectors.py` | `Collector` bases, all collectors, browser readers, builders | 3.7 |
+| `streaming.py` | `StreamingWorker` | 3.8 |
+| `runner.py` | `Runner` (the orchestrator) | 3.9 |
+| `main.py` | `main`, `_build_parser` | 3.10 |
+
+Import layering (one-way, no cycles): `enums/constants/shell → prompts/models → risk/judge → narrator → sink → collectors → streaming → runner → main`.
 
 ### 3.1 Class hierarchy overview
 
@@ -522,22 +551,32 @@ Adding a source = drop a file in `sources/` subclassing `Enricher`; the registry
 
 ---
 
-## 6. Dashboard (`dashboard.py`)
+## 6. Dashboard (`dashboard/`)
 
-A **read-only** Flask + HTMX app. It opens the same SQLite DB, runs query functions, and renders Jinja partials. It never writes telemetry.
+A **read-only** Flask + HTMX app. It opens the same SQLite DB, runs query functions, and renders Jinja partials. It never writes telemetry. Split into three modules behind a facade `__init__.py`:
+
+| Module | Holds |
+|---|---|
+| `queries.py` | the read-only DB query layer + data-shaping helpers (`_engine`/`_session`, `latest_run`, `findings`, `network_flows`, …). Uses `current_app` for config — **no** dependency on the Flask `app` object or routing. |
+| `app.py` | the Flask `app`, its config, Jinja template filters (`render_markdown`, `_relative_time`, …), and every `@app.route` handler. |
+| `serve.py` | `main`, `_build_parser`, `_serve` (waitress/dev), `_ensure_db_exists`. |
+| `__init__.py` | facade re-exporting `app`, the query functions, the CLI, and `Base`. |
+
+Layering (one-way): `queries → app → serve`.
 
 ### 6.1 Structure
 
 ```mermaid
 graph TD
-    subgraph flask[Flask app]
+    subgraph appmod[app.py — Flask app + routes + filters]
         idx[" / → dashboard.html"]
         frags["/fragments/* → HTMX partials"]
         api["/api/* → JSON"]
     end
-    frags --> Q[query layer]
+    serve[serve.py<br/>CLI launcher] --> appmod
+    frags --> Q[queries.py<br/>query layer]
     api --> Q
-    Q --> SESS[(_session / _engine)]
+    Q --> SESS[(_session / _engine<br/>via current_app config)]
     SESS --> DB[(SQLite avai.db)]
     Q -.imports ORM.-> HM[host_monitor.Base + models]
     Q -.enrichment cache schema.-> CACHE[cache.register_schema]
@@ -656,12 +695,12 @@ SQLite runs in **WAL mode** with `check_same_thread=False` so streaming-worker t
 
 | I want to… | Go to |
 |---|---|
-| Add a new telemetry collector | subclass `SnapshotCollector`/`StreamingCollector` in `host_monitor.py`, add an ORM row model, register in a `_build_*_collectors` fn |
+| Add a new telemetry collector | subclass `SnapshotCollector`/`StreamingCollector` in `host_monitor/collectors.py`, add an ORM row model in `models.py`, register in a `_build_*_collectors` fn |
 | Add a new threat-intel source | drop a file in `enrichers/sources/` subclassing `Enricher` (auto-discovered) |
 | Add indicators from a collector | add an `IndicatorExtractor` + entry in `indicators.py` dispatch |
 | Change how findings are scored | `compute_risk_score` (deterministic) or `LlmJudge`/`prompts.toml` (LLM) |
-| Add a dashboard panel | new query fn + `/fragments/*` route + Jinja partial in `templates/partials/` |
-| Change the DB schema | edit ORM model in `host_monitor.py` + add an Alembic migration in `migrations/versions/` |
+| Add a dashboard panel | query fn in `dashboard/queries.py` + `/fragments/*` route in `dashboard/app.py` + Jinja partial in `templates/partials/` |
+| Change the DB schema | edit ORM model in `host_monitor/models.py` + add an Alembic migration in `migrations/versions/` |
 | Tune rate limits / timeouts | `HttpClient` in `enrichers/http.py` (per-host `set_rate`) |
 | Understand one collection cycle | `Runner.run_once()` (§4) |
 ```
