@@ -1,491 +1,757 @@
-# avai/host_monitor
+<p align="center">
+  <img src="docs/images/logo.png" alt="avai logo" width="180">
+</p>
 
-macOS host security telemetry collector with an optional LLM threat judge.
+<h1 align="center">avai</h1>
 
-Captures structured snapshots of host state — processes, network sockets,
-USB / Bluetooth / Wi-Fi, launch agents, TCC permissions, quarantine
-events, browser extensions, system integrity, auth events, file
-integrity, installed apps — into a local SQLite database (SQLAlchemy
-ORM). An optional LLM layer (via [litellm](https://github.com/BerriAI/litellm))
-classifies each unique entity once with a verdict and MITRE-aligned
-threat category.
+> **Know what's actually running on your machines.**
+> Open-source host telemetry + LLM threat classifier. One `docker run`.
 
-No regex, no text-parsing — every source is consumed in its structured
-form (JSON, plist, reflected SQLite). All LLM prompts live in an
-external TOML file so you can tune them without touching code.
+[![PyPI](https://img.shields.io/pypi/v/avai-monitor?color=10b981&label=pypi)](https://pypi.org/project/avai-monitor/)
+[![Docker](https://img.shields.io/docker/pulls/iklob1/avai?color=10b981&label=docker%20pulls)](https://hub.docker.com/r/iklob1/avai)
+[![License](https://img.shields.io/github/license/iklobato/avai?color=10b981)](LICENSE)
+[![Site](https://img.shields.io/badge/site-getavai.com-10b981)](https://getavai.com)
 
+`avai` snapshots 26 corners of your host on macOS (21 on Linux) —
+processes, USB, persistence, file integrity, browser extensions, exec
+events — enriches each new finding with up to **17 threat-intel
+sources** (VirusTotal, MalwareBazaar, URLhaus, CISA KEV, Shodan,
+AbuseIPDB, OSV, NVD, …), and lets a Claude-class LLM tell you which
+ones are worth caring about. Verdicts come back as
+**malicious** / **suspicious** / **unknown** / **benign** with a
+MITRE-aligned category, a confidence, and a one-line remediation.
 
-## Requirements
+- No agent contract, no SIEM, no cloud control plane.
+- Dedup by content hash — the same artifact is never sent to the LLM twice.
+- 17 plug-and-play threat-intel sources behind the LLM — see [`.env.example`](.env.example); missing keys disable a source cleanly.
+- Read-only Flask + HTMX + Chart.js dashboard on `:8765`.
+- BYO key (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`), or swap to any litellm-supported provider.
 
-- macOS 12+ (Monterey or newer — `log show --style ndjson` and
-  `system_profiler -json` are required)
-- Python 3.11+ (for `tomllib`, `StrEnum`)
-- `psutil` (required)
-- `sqlalchemy >= 2.0` (required)
-- `litellm` (optional — only needed if you want LLM threat judging)
-- A provider API key (e.g. `ANTHROPIC_API_KEY`) — optional, only for
-  the LLM judge
+→ Marketing site & screenshots: **<https://getavai.com>**
+→ Source: <https://github.com/iklobato/avai>
 
-```sh
-pip install psutil 'sqlalchemy>=2.0' litellm
-```
+---
 
+## Screenshots
 
-## Quick start
+A read-only Flask + HTMX + Chart.js dashboard on `:8765`. Every panel renders
+from the same SQLite snapshot the monitor writes — no separate control plane.
 
-```sh
-cd ~/scripts/avai
+### Dashboard — overview
 
-# one-shot collection, no LLM judge
-python3 host_monitor.py --once --no-judge
+At-a-glance health: runs stored, collectors in the latest cycle (with any
+failures), judgments since the last run, and the verdict-totals donut
+(malicious / suspicious / unknown / benign). The macOS **System Integrity** panel
+surfaces FileVault, Firewall, Gatekeeper and remote-access toggles; **Collector
+Errors** shows what failed (e.g. a TCC permission); and the 12-hour chart tracks
+verdicts over time. The findings table below streams the active, non-benign
+results.
 
-# continuous collection every 5 minutes, with LLM judge
-export ANTHROPIC_API_KEY=sk-ant-...
-python3 host_monitor.py --interval 300
+![avai dashboard overview](docs/images/dashboard-overview.png)
 
-# full visibility (root, plus grant the Terminal Full Disk Access)
-sudo -E python3 host_monitor.py --interval 300
-```
+### Findings, collectors & runs
 
+The findings table is filterable by status, verdict, collector and category.
+Beneath it, **Rows per collector** shows how much each collector pulled in the
+latest run, and **Recent runs** lists run history with ok/failed counts and the
+look-back window.
 
-## Docker
+![avai findings, collectors and runs](docs/images/findings-collectors-runs.png)
 
-Only the **dashboard** is containerised. The collector (`host_monitor.py`)
-runs natively on the macOS host — its data sources are
-macOS-host-only userland (`system_profiler`, `log stream`, `launchctl`,
-`TCC.db`, native `psutil` process visibility) and a Linux container
-running inside Docker Desktop's VM cannot reach them. Even with
-`--privileged --pid=host --network=host`, the container sees the
-Linux VM rather than your Mac.
+### Finding detail
 
-So the topology is:
+Expand any finding to see the LLM's **reasoning**, a concrete **remediation**
+step, and the exact **collected data** behind the verdict — for a process that
+means pid/ppid, the full `cmdline`, the running user/uid, status, the content
+hash used for dedup, and when it was first judged vs. last seen.
 
-```
-  macOS host                      |  docker (linux container)
-  ─────────────────────────────── | ─────────────────────────────
-  host_monitor.py (sudo)          |
-       ↓                          |
-  ./host_monitor.db  ⇐ bind mount ⇒  dashboard.py (Flask, read-only)
-                                  |       ↓
-                                  |  http://localhost:8765
-```
+![avai finding detail](docs/images/finding-detail.png)
 
-### Run the dashboard in Docker
+### Network flows
 
-```sh
-cd ~/scripts/avai
-docker compose up -d --build
-open http://localhost:8765
-```
+The tcpdump aggregator groups traffic by destination so the classifier can reason
+about it: here an IPv6 connection to an unusual high port is flagged
+**suspicious** as a possible C2 beacon, while CDN, mDNS and LAN traffic come back
+**benign** — each with a one-line "why".
 
-That builds `avai-dashboard:latest`, bind-mounts the current directory
-to `/data` inside the container, exposes the dashboard on host port
-8765, and runs a healthcheck against `/api/notifications/new`.
+![avai network flows](docs/images/network-flows.png)
 
-The default `docker compose up` runs **only the dashboard** — the
-monitor service is opt-in via the `linux` profile (next section).
+### Network flows — enriched
 
-### Run BOTH services in Docker (Linux hosts only)
+The same view enriched per destination with the owning **process**, ASN/geo,
+traffic volume, and the rationale for each verdict.
 
-On a Linux host (bare metal, KVM, or a real Linux server — *not*
-macOS Docker Desktop), bring up both the monitor and the dashboard:
+![avai enriched network flows](docs/images/network-flows-enriched.png)
 
-```sh
-# from a real Linux host, with credentials in the environment
-export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # or ANTHROPIC_API_KEY
-docker compose --profile linux up -d --build
-```
+### The same dashboard, another host
 
-The `--profile linux` flag activates the `monitor` service, which:
+Run against a different host/cycle — 61 runs and 3,426 verdicts here — with
+suspicious AirWatch/MDM persistence surfaced for review.
 
-- runs as root (needed for `psutil.net_connections` cross-process socket
-  visibility);
-- shares the host's PID and network namespaces (`pid: host`,
-  `network_mode: host`) so it observes host processes/sockets;
-- adds `SYS_PTRACE`, `NET_ADMIN`, `NET_RAW` capabilities;
-- bind-mounts `/proc`, `/sys`, `/etc`, `/var/log`, `/home` read-only;
-- writes to the same SQLite DB the dashboard reads.
+![avai dashboard on another host](docs/images/dashboard-host.png)
 
-Collector coverage on Linux (Phases 1 + 2 + 3 + 4):
+---
 
-| Collector | Linux |
-|---|---|
-| processes, network_connections, listening_ports, network_interfaces | ✓ (psutil) |
-| file_integrity | ✓ (Linux paths: `/etc/{passwd,shadow,sudoers,crontab}`, `~/.bashrc`, SSH config, …) |
-| browser_extensions | ✓ (XDG paths: `~/.config/google-chrome`, `~/.mozilla/firefox`, …) |
-| installed_apps | ✓ (`dpkg-query -W` + `/usr/share/applications/*.desktop`) |
-| launch_items | ✓ (systemd unit / timer files + `/etc/crontab` + `/etc/cron.d` + `/var/spool/cron`) |
-| auth_events (streaming) | ✓ (`journalctl -f --output=json`, filtered to auth/authpriv + sshd / systemd-logind / sudo / su / polkitd) |
-| usb_devices | ✓ (`/sys/bus/usb/devices` sysfs walk, reading vendor/product/serial/manufacturer attribute files) |
-| bluetooth_devices | ✓ (`/var/lib/bluetooth/<adapter>/<mac>/info` INI files via configparser) |
-| wifi_state | ✓ (sysfs `/sys/class/net/<iface>/wireless` + `iw dev <iface> link` for SSID/BSSID/freq) |
-| system_integrity | ✓ (LUKS dm-crypt mappings → FileVault-equivalent; SELinux+AppArmor → Gatekeeper-equivalent; ufw OR firewalld → firewall; sshd / x11vnc systemctl states) |
-| **mounts** | ✓ (psutil.disk_partitions(all=True) — tmpfs-over-/etc rootkit detection) |
-| **setuid_files** | ✓ (walk /bin, /sbin, /usr/bin, /usr/sbin, /usr/local/{bin,sbin}, /usr/libexec, /opt looking for st_mode & 04000/02000) |
-| **process_exec_events (streaming)** | ✓ (`journalctl -f --output=json _AUDIT_TYPE_NAME=EXECVE + SYSCALL` — requires auditd execve rule on host) |
-| tcc_permissions, quarantine_events | ✗ (no Linux equivalents) |
-| mdm_profiles, kernel_extensions, system_extensions | ✗ (macOS-only concepts) |
+## Features
 
-The mapping uses the existing `system_integrity` row schema — its
-macOS-named columns (`filevault_active`, `gatekeeper_assessments_enabled`,
-`remote_login_enabled`, etc.) keep their semantic intent on Linux:
+**Host telemetry — 26 collectors on macOS, 21 on Linux**, snapshotting every place
+malware hides, persists, and phones home:
 
-| macOS column | Linux semantic |
-|---|---|
-| `filevault_active` | any active dm-crypt mapping |
-| `firewall_global_state` | ufw OR firewalld running |
-| `gatekeeper_assessments_enabled` | SELinux Enforcing OR AppArmor enabled |
-| `remote_login_enabled` | `ssh.service` / `sshd.service` active |
-| `screen_sharing_enabled`, `remote_management_enabled` | `x11vnc` / `vncserver` / `xrdp` active |
+- **Processes & execution** — running processes, and `execve` exec events as they fire.
+- **Network** — active connections, listening ports, a tcpdump **flow aggregator**
+  (grouped by destination, tied to the owning process), DNS queries, interfaces, Wi‑Fi state.
+- **Persistence** — launch items (LaunchDaemons/Agents, systemd units, cron),
+  kernel & system extensions, MDM/configuration profiles, installed apps.
+- **Access & identity** — auth events (unified log / `journalctl`), SSH
+  `authorized_keys`, TCC privacy grants (camera/mic/location/screen/full‑disk),
+  privilege config, setuid binaries.
+- **Integrity & posture** — system integrity (FileVault, Firewall, Gatekeeper, SIP,
+  SELinux/AppArmor/ufw…), file integrity (passwd/shadow/sudoers/SSH/dotfiles),
+  `/etc/hosts`, quarantine events, mounts.
+- **Hardware** — USB and Bluetooth devices.
+- **Browser** — installed browser extensions.
 
-### Container permissions reference
+**LLM threat classifier** — a Claude‑class model labels every new artifact
+**malicious / suspicious / unknown / benign** with a **MITRE‑aligned category**, a
+**confidence**, and a **one‑line remediation**. Bring your own key
+(`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`) or any litellm‑supported provider.
 
-The monitor container needs to read the host's filesystem and call
-host-level CLI tools (`systemctl`, `journalctl`, `dpkg-query`,
-`dmsetup`, `iw`). Two coordinated mechanisms make that work:
+**17 threat‑intel sources behind every verdict** — indicators (hash, IP, domain,
+URL, CVE, package, OS version) are enriched *before* the model sees them:
+VirusTotal · MalwareBazaar · URLhaus · ThreatFox · Feodo Tracker · AbuseIPDB ·
+GreyNoise · Shodan InternetDB · CISA KEV · NVD · OSV · GitHub Advisory ·
+CIRCL hashlookup · crt.sh · PhishTank · Google Safe Browsing · endoflife.date
+(plus IP geolocation). Keyless sources always run; keyed ones enable when you add
+the key, and a missing key disables that source cleanly. Results are cached in
+SQLite with per‑source TTLs.
 
-1. **`HOST_PREFIX` env var** — collectors translate every absolute
-   host path they read through a `host_path()` helper. With
-   `HOST_PREFIX=/host`, `/etc/passwd` becomes `/host/etc/passwd`;
-   `~/.config/google-chrome` expands to one entry per user home
-   discovered under `/host/home/*`.
+**Read‑only dashboard** (Flask + HTMX + Chart.js on `:8765`) — verdict‑totals donut,
+macOS system‑integrity panel, collector errors, a 12‑hour verdict chart, and a
+findings table with search / filter / sort / pagination on every section. Expand any
+finding for the model's reasoning, the fix, and the raw collected data.
+Auto‑refreshes every 30–60 s with toast **+ audio alerts** on new
+malicious/suspicious findings.
 
-2. **Native-path mounts for CLI tools** — `systemctl` (D-Bus to
-   `/run/systemd/private`) and `dmsetup` (ioctl on
-   `/dev/mapper/control`) hardcode their lookup paths. Those get
-   bind-mounted at the same path inside the container, not under
-   `/host`.
+**Built to stay out of your way**
 
-Bind-mount matrix:
+- **One `docker run`** — the same image is both the dashboard and the monitor.
+- **No agent contract, no SIEM, no cloud control plane** — it runs on your host.
+- **Dedup by content hash** — the same artifact is never sent to the LLM twice.
+- **Just a SQLite file** — point the dashboard at any `avai.db`, on any OS.
+- **Native install** too: `pip install avai-monitor`.
 
-| Mount | Used by | Path inside container |
+Full reference below: [What's collected](#whats-collected-one-line-summary) ·
+[Dashboard](#dashboard) · [Threat‑intel enrichment](#threat-intel-enrichment).
+
+---
+
+## Why avai — the pros
+
+- **Answers, not logs.** Every finding comes back in plain English with a verdict,
+  a confidence, a MITRE category, and a concrete fix — no query language, no triage
+  spreadsheet.
+- **Zero infrastructure.** One container. No SIEM, no agents to enroll, no control
+  plane to run or pay for.
+- **Private by default.** Everything runs on your machine; you bring your own model
+  key, and only *new* findings ever leave — for a threat‑intel lookup or the LLM call
+  you opted into.
+- **Cheap to run.** Content‑hash dedup means each artifact is judged once — a busy
+  host doesn't mean a big bill — and cached intel hits skip the network entirely.
+- **Genuinely broad.** 26 host surfaces × 17 intel sources behind a single verdict —
+  the breadth of an EDR without the agent.
+- **Cross‑platform.** macOS and Linux from the same tool.
+- **Open and yours.** MIT‑licensed, auditable, and model‑agnostic — swap to any
+  litellm provider with one env var.
+- **Safe to point at production.** Collectors only *read*; the dashboard is read‑only.
+- **Portable history.** The whole state is a single SQLite file — scan on a server,
+  view on your laptop, archive a snapshot, diff over time.
+
+---
+
+## One image, two roles
+
+| Run | Command | Where it makes sense |
 |---|---|---|
-| `/sys` | `LinuxUsbDevicesCollector`, `LinuxWifiCollector`, `LinuxSystemIntegrityCollector` (SELinux + AppArmor) | `/host/sys` |
-| `/etc` | `LinuxLaunchItemsCollector` (systemd unit overrides + cron), `LinuxSystemIntegrityCollector` (ufw.conf), `FileIntegrityCollector` (passwd / shadow / sudoers / ssh config) | `/host/etc` |
-| `/var/lib/bluetooth` | `LinuxBluetoothCollector` | `/host/var/lib/bluetooth` |
-| `/var/lib/dpkg` | `LinuxInstalledAppsCollector` (`dpkg-query --admindir`) | `/host/var/lib/dpkg` |
-| `/usr/share/applications` + `/usr/local/share/applications` + `/var/lib/flatpak/exports/share/applications` | `LinuxInstalledAppsCollector` (.desktop entries) | `/host/usr/...` |
-| `/lib/systemd`, `/usr/lib/systemd` | `LinuxLaunchItemsCollector` (vendor unit files) | `/host/lib/systemd`, `/host/usr/lib/systemd` |
-| `/var/log/journal`, `/run/log/journal` | `LinuxAuthEventsCollector` (`journalctl --directory`) | `/host/var/log/journal` etc. |
-| `/var/spool/cron` | `LinuxLaunchItemsCollector` (per-user crontabs) | `/host/var/spool/cron` |
-| `/home`, `/root` | `BrowserExtensionsCollector`, `FileIntegrityCollector` (`~/.ssh`, `~/.bashrc`, browser profiles) | `/host/home`, `/host/root` |
-| `/run/systemd` | `systemctl` (CLI from `LinuxSystemIntegrityCollector`) | `/run/systemd` (native path) |
-| `/run/dbus` | `systemctl` D-Bus connection | `/run/dbus` (native path) |
-| `/etc/machine-id` | `journalctl` (needs matching machine ID) | `/etc/machine-id` (native path) |
-| `/dev/mapper` | `dmsetup` ioctl | `/dev/mapper` (native path) |
+| Dashboard (default) | `docker run iklob1/avai` | any host — read-only Flask + HTMX on :8765 |
+| Monitor | `docker run ... iklob1/avai avai monitor ...` | **Linux hosts only** — needs `pid=host`, `network=host`, and host filesystem bind-mounts |
 
-Linux capabilities added (root in a container has a *limited* default
-cap set — Docker drops several at start):
+The image's default `CMD` is the dashboard. Override the command at
+`docker run` / compose level to run the monitor instead. Native install
+is also possible (`pip install avai-monitor`, then `avai monitor` /
+`avai dashboard`) but is not the documented path.
 
-| Capability | Why |
-|---|---|
-| `SYS_PTRACE` | `psutil.net_connections()` cross-process socket visibility, `/proc/<pid>` reads for other processes |
-| `NET_ADMIN` | `iw dev <iface> link` netlink (NL80211); some sysfs read permissions |
-| `NET_RAW` | Auxiliary network introspection |
-| `DAC_READ_SEARCH` | Read files owned by other users (e.g. `/etc/shadow`, root-only `/var/lib/bluetooth`) without depending on Linux DAC override behaviour for the root user inside a container |
+The image carries a `HEALTHCHECK` against the dashboard's
+`/api/notifications/new` endpoint — `starting → healthy` in ~10 s on
+first launch. `docker compose ps` and `docker inspect --format
+'{{.State.Health.Status}}'` will both reflect it.
 
-Namespaces shared with host:
+---
 
-| Namespace | Setting | Why |
-|---|---|---|
-| PID | `pid: host` | `psutil` sees host processes, `/proc/<pid>` reads the host's view |
-| Network | `network_mode: host` | `psutil.net_connections`, `iw dev` (NL80211), `journalctl` host log access |
+## TL;DR — 60-second test, no LLM key
 
-Mounts deliberately *not* added (kept inside the container's own
-namespace): IPC namespace, UTS namespace, user namespace,
-`/var/run/docker.sock`. The monitor doesn't need to call back into
-Docker or share IPC with the host.
-
-### Dashboard hardening
-
-Flags applied in `docker-compose.yml` for the dashboard service:
-
-- `read_only: true` — root filesystem mounted read-only (with `/tmp`
-  as tmpfs for Flask's session cache).
-- `cap_drop: [ALL]` and `security_opt: no-new-privileges:true` — the
-  dashboard doesn't need any Linux capability.
-- Non-root runtime user (`uid 1000`).
-- The bind mount is the project directory; the dashboard application
-  only issues `SELECT` queries against the SQLite DB.
-
-The host's `host_monitor.py` writes the database; SQLite's WAL mode
-permits the container to read concurrently. Refreshing the dashboard
-or letting the HTMX polling cycle run will pick up new judgements
-within seconds of the host writing them.
-
-### Why the monitor can't be containerised on macOS
-
-| Collector | Needs |
-|---|---|
-| `processes`, `network_connections`, `listening_ports`, `network_interfaces` | native `psutil` against the macOS kernel (a Linux container sees the Docker VM, not macOS) |
-| `usb_devices`, `bluetooth_devices`, `wifi_state` | `system_profiler` (macOS binary) + IOKit |
-| `launch_items` | reads `/Library/LaunchAgents`, `/Library/LaunchDaemons`, `~/Library/LaunchAgents` — bind-mountable but unhelpful without `launchctl` |
-| `tcc_permissions` | reads `TCC.db` (macOS Privacy database, plus the running terminal needs Full Disk Access) |
-| `quarantine_events` | reads `~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2` (macOS LaunchServices) |
-| `system_integrity` | `fdesetup`, `spctl`, `launchctl`, `/Library/Preferences/com.apple.alf.plist` |
-| `auth_events` (streaming) | `log stream --style ndjson` (macOS unified log, no Linux equivalent) |
-| `browser_extensions`, `file_integrity`, `installed_apps` | bind-mountable in principle, but no value without the others |
-
-If you want full coverage, run the monitor natively:
+A safe first run on any host (macOS or Linux), no privileges, no
+credentials, no host bind-mounts. Produces a populated DB and a
+green dashboard you can poke at.
 
 ```sh
-sudo -E /Users/$(whoami)/.pyenv/versions/3.11.7/bin/python3 \
-  ~/scripts/avai/host_monitor.py --interval 300 --max-db-mb 1024
+mkdir -p ~/.avai && cd ~/.avai
+
+# 1. populate the DB with one snapshot of the container's view
+docker run --rm -v "$PWD":/data iklob1/avai \
+  avai monitor --once --no-streaming --no-judge --db /data/avai.db
+
+# 2. serve it
+docker run -d --name avai -p 8765:8765 -v "$PWD":/data iklob1/avai
+
+open http://localhost:8765/      # macOS;  xdg-open on Linux
 ```
 
-…and grant your Terminal **Full Disk Access** in System Settings →
-Privacy & Security → Full Disk Access for the TCC collector.
+You'll see ~14 collectors' worth of rows (`processes`,
+`network_connections`, `listening_ports`, `network_interfaces`,
+`usb_devices`, `launch_items`, `installed_apps`, `mounts`,
+`setuid_files`, etc.) — read off the container itself rather than the
+host, since the run above doesn't bind-mount host state. To get real
+data, jump to §2 / §3 below.
 
-### Stop / rebuild / inspect
+Stop with `docker stop avai && docker rm avai`.
+
+---
+
+## 1 — Dashboard only (any host, including macOS)
+
+The dashboard reads a SQLite database written by the monitor (or by a
+previous run). It needs no privileges, no host namespace, no
+capabilities — just a directory containing `avai.db` mounted at `/data`.
 
 ```sh
-docker compose ps                       # status + healthcheck
-docker compose logs -f dashboard        # tail logs
-docker compose restart dashboard        # restart after a code change
-docker compose down                     # stop and remove
-docker compose up -d --build            # rebuild + restart
+mkdir -p ~/.avai && cd ~/.avai
+
+docker run -d \
+  --name avai-dashboard \
+  -p 8765:8765 \
+  -v "$PWD":/data \
+  iklob1/avai
+
+open http://localhost:8765/
 ```
 
-By default the database is written to `./host_monitor.db` next to the
-script. Prompts are read from `./host_monitor_prompts.toml`.
+If the database file doesn't exist yet, the dashboard creates an
+empty schema on launch and every panel renders empty until the
+monitor produces rows. Stop with `docker stop avai-dashboard &&
+docker rm avai-dashboard`.
 
-
-## CLI parameters
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--db PATH` | `./host_monitor.db` (next to the script) | Where to write the SQLite database. Parent directory is created if missing. |
-| `--once` | off | Run a single collection cycle and exit. Without this, the script loops forever on the `--interval`. |
-| `--interval N` | `300` (seconds) | Seconds between cycles when running continuously. Each cycle is one full pass over every collector. |
-| `--lookback-min N` | `6` (minutes) | How far back the `auth_events` collector reads from the unified log per cycle. Should be slightly larger than `--interval / 60` to avoid gaps; default 6 min covers a 5 min cycle plus margin. |
-| `--no-judge` | off | Disable the LLM threat judge entirely. Raw telemetry is still collected. Use this if you don't have an API key or want to avoid LLM cost. |
-| `--judge-model ID` | `claude-haiku-4-5-20251001` | litellm model identifier. Any model litellm supports works — `gpt-4o-mini`, `claude-sonnet-4-6`, `openai/gpt-4o`, etc. The corresponding provider API key must be set (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …). |
-| `--judge-batch-size N` | `20` | How many entries per LLM call. Lower = more calls but smaller prompts; higher = fewer calls but larger prompts. Tune by latency and the model's context window. |
-| `--judge-max-per-collector N` | `200` | Hard cap on how many new entries the judge will classify per collector per run. Prevents a first-time run from sending thousands of items in one go. Remaining entries are picked up by the next run. |
-| `--prompts-file PATH` | `./host_monitor_prompts.toml` (next to the script) | Path to the TOML file holding the system prompt, the user-prompt template, and the per-collector hints. See "Prompts file" below. |
-| `--verbose` | off | Enable DEBUG-level logging. |
-
-Logs go to stderr in UTC with the format `YYYY-MM-DD HH:MM:SSZ LEVEL message`.
-
-
-## Permissions
-
-Three collectors need elevated access for full coverage. Without them
-they record their failure in the `collector_errors` table and the run
-continues:
-
-| Collector | Needs | Without it |
-|---|---|---|
-| `network_connections` | `sudo` | Only sees this script's own sockets (no cross-process visibility) |
-| `listening_ports` | `sudo` | Same as above |
-| `tcc_permissions` | Terminal/agent has **Full Disk Access** | Cannot read `TCC.db` (raises `PermissionError`) |
-
-To grant Full Disk Access: System Settings → Privacy & Security →
-Full Disk Access → enable for **Terminal** (or whatever runs Python).
-
-For continuous root-mode collection, use `sudo -E` to preserve your
-API key environment variable:
+### Override port or DB path
 
 ```sh
-sudo -E python3 host_monitor.py --interval 300
+docker run --rm -p 9000:9000 \
+  -v /var/lib/avai:/data \
+  iklob1/avai \
+  avai dashboard --host 0.0.0.0 --port 9000 --db /data/custom.db
 ```
 
+The image entry point is `avai`; anything after the image name is
+passed to it.
 
-## LLM threat judge
+---
 
-When enabled, the judge:
+## 2 — Monitor: one-shot scan (Linux host)
 
-1. After each collector writes its rows, the Runner asks the Sink which
-   `content_hash` values from this run have no judgment yet.
-2. Those unjudged entries (deduped by content) are sent to the LLM in
-   batches of `--judge-batch-size`, with a per-collector cap of
-   `--judge-max-per-collector`.
-3. The LLM returns one judgment per entry: `verdict`, `category`,
-   `confidence`, `reasoning`.
-4. Judgments are stored in the `judgements` table keyed by `(content_hash,
-   collector)`. The same entity is judged exactly once across all runs.
+A single cycle on the local Linux host. No streaming, no LLM judge —
+fast smoke test that the bind mounts are wired right.
 
-### Verdicts
+```sh
+mkdir -p ~/.avai && cd ~/.avai
 
-| Verdict | Meaning |
-|---|---|
-| `benign` | Expected on a developer Mac |
-| `suspicious` | Anomaly worth review; not necessarily malicious |
-| `malicious` | Likely active threat |
-| `unknown` | Insufficient information to decide |
+docker run --rm \
+  --pid=host \
+  --network=host \
+  --user 0:0 \
+  --cap-add SYS_PTRACE --cap-add NET_ADMIN --cap-add NET_RAW --cap-add DAC_READ_SEARCH \
+  -e HOST_PREFIX=/host \
+  -v /proc:/host/proc:ro \
+  -v /sys:/host/sys:ro \
+  -v /etc:/host/etc:ro \
+  -v /var/lib/bluetooth:/host/var/lib/bluetooth:ro \
+  -v /var/lib/dpkg:/host/var/lib/dpkg:ro \
+  -v /usr/share/applications:/host/usr/share/applications:ro \
+  -v /lib/systemd:/host/lib/systemd:ro \
+  -v /usr/lib/systemd:/host/usr/lib/systemd:ro \
+  -v /run/systemd:/run/systemd:ro \
+  -v /run/dbus:/run/dbus:ro \
+  -v /etc/machine-id:/etc/machine-id:ro \
+  -v /dev/mapper:/dev/mapper:ro \
+  -v /home:/host/home:ro \
+  -v /root:/host/root:ro \
+  -v "$PWD":/data \
+  iklob1/avai \
+  avai monitor --once --no-streaming --no-judge --db /data/avai.db
+```
 
-### Categories (MITRE-ATT&CK-aligned)
+When the command exits, `~/.avai/avai.db` contains one
+`collection_runs` row plus the populated collector tables. Verify:
 
-`none`, `persistence`, `privilege_escalation`, `defense_evasion`,
-`credential_access`, `discovery`, `lateral_movement`, `collection`,
-`command_and_control`, `exfiltration`, `impact`, `initial_access`,
-`execution`, `reconnaissance`.
+```sh
+docker run --rm -v "$PWD":/data iklob1/avai python -c "
+import sqlite3
+c = sqlite3.connect('/data/avai.db')
+for n, in c.execute(\"select name from sqlite_master where type='table'\"):
+    print(f'{n:<22} {c.execute(f\"select count(*) from {n}\").fetchone()[0]}')"
+```
 
-### Which collectors are judged
+To smoke-test on macOS without the bind-mounts (no host data, but
+proves the toolchain works) see §0 above.
 
-| Collector | Judged | Why |
+---
+
+## 3 — Monitor: continuous, with LLM judge (Linux host)
+
+Same bind mounts as §2 but detached, with the LLM judge enabled. The
+judge needs one credential — either `ANTHROPIC_API_KEY` (standard
+Anthropic API) or `CLAUDE_CODE_OAUTH_TOKEN` (Claude Code OAuth) — and
+defaults to **Claude Haiku 4.5** (`claude-haiku-4-5-20251001`).
+Override with `--judge-model` to point litellm at any other provider.
+
+Threat-intel enrichment runs automatically with whatever keys are in
+the environment (`VT_API_KEY`, `ABUSE_CH_AUTH_KEY`, `ABUSEIPDB_API_KEY`,
+…). Easiest pattern is a project-local `.env`:
+
+```sh
+cp .env.example .env  &&  vi .env       # fill in only the keys you have
+docker run -d --env-file .env --name avai-monitor ... iklob1/avai
+```
+
+See **§ Threat-intel enrichment** below for the full source list and
+each source's gate condition.
+
+```sh
+mkdir -p ~/.avai && cd ~/.avai
+
+docker run -d --name avai-monitor --restart unless-stopped \
+  --pid=host --network=host --user 0:0 \
+  --cap-add SYS_PTRACE --cap-add NET_ADMIN --cap-add NET_RAW --cap-add DAC_READ_SEARCH \
+  -e HOST_PREFIX=/host \
+  -e DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket \
+  -e ANTHROPIC_API_KEY \
+  -v /proc:/host/proc:ro -v /sys:/host/sys:ro -v /etc:/host/etc:ro \
+  -v /var/lib/bluetooth:/host/var/lib/bluetooth:ro \
+  -v /var/lib/dpkg:/host/var/lib/dpkg:ro \
+  -v /usr/share/applications:/host/usr/share/applications:ro \
+  -v /lib/systemd:/host/lib/systemd:ro \
+  -v /usr/lib/systemd:/host/usr/lib/systemd:ro \
+  -v /var/log/journal:/host/var/log/journal:ro \
+  -v /var/spool/cron:/host/var/spool/cron:ro \
+  -v /run/systemd:/run/systemd:ro -v /run/dbus:/run/dbus:ro \
+  -v /etc/machine-id:/etc/machine-id:ro \
+  -v /dev/mapper:/dev/mapper:ro \
+  -v /home:/host/home:ro -v /root:/host/root:ro \
+  -v "$PWD":/data \
+  iklob1/avai \
+  avai monitor --db /data/avai.db --interval 300
+
+docker logs -f avai-monitor      # watch the cycle
+```
+
+Defaults baked into `avai monitor`:
+
+| Flag | Default | Effect |
 |---|---|---|
-| `processes` | yes | Dedup by `(name, exe, cmdline, username)` |
-| `network_connections` | **no** | Too high churn; aggregate behaviourally instead |
-| `listening_ports` | yes | Dedup by `(process_name, addr, port)` |
-| `network_interfaces` | **no** | Counters need behavioural analysis |
-| `usb_devices` | yes | Dedup by `(name, vendor_id, product_id, manufacturer)` |
-| `bluetooth_devices` | yes | Dedup by `(name, address, minor_type)` |
-| `wifi_state` | yes | Dedup by `(ssid, bssid, security)` |
-| `launch_items` | yes | Persistence is the primary signal |
-| `tcc_permissions` | yes | Dedup by `(scope, service, client, auth_value)` |
-| `quarantine_events` | yes | Dedup by `(agent_bundle_id, agent_name, urls)` |
-| `browser_extensions` | yes | Dedup by `(browser, ext_id, name, permissions)` |
-| `system_integrity` | yes | Single-row but very high signal |
-| `auth_events` | **no** | Per-event judgment is too noisy |
-| `file_integrity` | yes | Watched dotfiles + `/etc` configs |
-| `installed_apps` | yes | Dedup by `(bundle_id, name, path)` |
+| `--interval` | `300` | seconds between snapshot cycles |
+| `--lookback-min` | `6` | minutes of journal/log history per run |
+| `--max-db-mb` | `1024` | rotation cap (0 disables); oldest runs are pruned + `VACUUM`'d after each cycle |
+| `--judge-model` | `claude-haiku-4-5-20251001` | any litellm model id |
+| `--judge-batch-size` | `20` | entries per LLM call |
+| `--judge-max-per-collector` | `25` | per-cycle cap of new entries judged per collector |
+| `--no-streaming` | (off) | disables `auth_events` + `process_exec_events` tailers |
+| `--no-judge` | (off) | runs collectors but stores no verdicts |
+| `--no-enrich` | (off) | skips the whole threat-intel layer; collectors → judge directly |
+| `--enrich-only NAME` | (all) | restrict the chain to one named source (repeatable); useful for debugging |
 
+Append any flag to the `docker run … iklob1/avai avai monitor …`
+command to override. Full reference: `docker run --rm iklob1/avai
+avai monitor --help`.
 
-## Prompts file
+---
 
-`host_monitor_prompts.toml` holds **every** string sent to the LLM:
+## 4 — Both services with docker-compose (Linux host)
 
-- `[judge].system` — the system prompt. Uses `string.Template`
-  substitutions: `$verdicts` and `$categories` are filled at load time
-  from the enums defined in the script. Edit this string to change
-  the model's overall instructions.
-- `[judge].user_template` — the per-batch user-prompt template. Uses
-  substitutions: `$collector`, `$hints`, `$entries`.
-- `[collector_hints].<name>` — per-collector guidance about what to
-  flag. The keys must match each collector's `name` attribute
-  (`processes`, `launch_items`, `usb_devices`, …). To disable a hint,
-  set it to an empty string `""`.
+`docker-compose.yml`:
 
-Edit the TOML file, save, and re-run the script. No code changes
-needed.
+```yaml
+x-avai-image: &avai-image
+  image: iklob1/avai:latest
 
+services:
 
-## Database
+  monitor:
+    <<: *avai-image
+    container_name: avai-monitor
+    command: ["avai","monitor","--db","/data/avai.db","--interval","300"]
+    user: "0:0"
+    pid: host
+    network_mode: host
+    cap_add: [SYS_PTRACE, NET_ADMIN, NET_RAW, DAC_READ_SEARCH]
+    # Loads LLM-judge + every threat-intel API key from .env. Copy
+    # .env.example to .env and fill in only the keys you have.
+    env_file: [.env]
+    environment:
+      - HOST_PREFIX=/host
+      - DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/dbus/system_bus_socket
+    volumes:
+      - ./data:/data
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc:/host/etc:ro
+      - /var/lib/bluetooth:/host/var/lib/bluetooth:ro
+      - /var/lib/dpkg:/host/var/lib/dpkg:ro
+      - /usr/share/applications:/host/usr/share/applications:ro
+      - /lib/systemd:/host/lib/systemd:ro
+      - /usr/lib/systemd:/host/usr/lib/systemd:ro
+      - /var/log/journal:/host/var/log/journal:ro
+      - /var/spool/cron:/host/var/spool/cron:ro
+      - /run/systemd:/run/systemd:ro
+      - /run/dbus:/run/dbus:ro
+      - /etc/machine-id:/etc/machine-id:ro
+      - /dev/mapper:/dev/mapper:ro
+      - /home:/host/home:ro
+      - /root:/host/root:ro
+    restart: unless-stopped
 
-Single SQLite file (default `avai/host_monitor.db`). WAL mode is enabled
-so reads don't block the writer.
+  dashboard:
+    <<: *avai-image
+    container_name: avai-dashboard
+    # uses the image's default CMD
+    ports: ["8765:8765"]
+    volumes: ["./data:/data"]
+    restart: unless-stopped
+```
 
-### Core tables
+Then:
 
-| Table | What it holds |
+```sh
+mkdir -p data
+cp .env.example .env  &&  vi .env       # fill in the keys you have
+docker compose up -d
+docker compose logs -f monitor
+open http://localhost:8765/
+```
+
+---
+
+## 5 — Dashboard against an existing DB (any host)
+
+If you already have an `avai.db` (produced by the monitor on a
+different machine, dropped into the current directory, etc.):
+
+```sh
+docker run --rm -p 8765:8765 -v "$PWD":/data iklob1/avai
+```
+
+The dashboard opens the file with `?mode=ro&immutable=1`, so it never
+writes and never holds a lock — fine to point at a live database
+being written by the monitor in another container.
+
+---
+
+## 6 — Common operational commands
+
+```sh
+# Inspect the bundled CLI
+docker run --rm iklob1/avai avai --help
+docker run --rm iklob1/avai avai monitor --help
+docker run --rm iklob1/avai avai dashboard --help
+docker run --rm iklob1/avai avai --version
+
+# Healthcheck + status
+docker inspect avai-dashboard --format '{{.State.Health.Status}}'   # healthy|unhealthy|starting
+docker compose ps                                                   # if using compose
+docker logs -f avai-monitor                                         # follow monitor cycles
+
+# DB rotation in action — watch the size cap kick in
+docker exec avai-monitor du -h /data/avai.db
+
+# Stop / clean up
+docker compose down                                                  # if using compose
+docker stop avai-dashboard avai-monitor 2>/dev/null
+docker rm   avai-dashboard avai-monitor 2>/dev/null
+
+# Wipe the database (also wipes verdicts; monitor will re-judge from scratch)
+rm -f data/avai.db data/avai.db-wal data/avai.db-shm
+
+# Pull the latest image
+docker pull iklob1/avai
+```
+
+---
+
+## 7 — Recipes
+
+Practical, copy‑paste scenarios beyond the basics above.
+
+### Native install on a Linux server (full host visibility)
+
+Inside a container on a real Linux host the monitor already works, but
+the simplest way to watch a server is to install it natively and let
+it see everything directly:
+
+```sh
+pip install 'avai-monitor[judge]'          # [judge] pulls litellm + anthropic
+export ANTHROPIC_API_KEY=sk-ant-...         # or CLAUDE_CODE_OAUTH_TOKEN
+export ABUSE_CH_AUTH_KEY=...                # optional, free — adds 3 sources
+
+sudo -E avai monitor --db /var/lib/avai/avai.db --interval 300 &
+avai dashboard --db /var/lib/avai/avai.db --host 0.0.0.0 --port 8765
+```
+
+`sudo` lets the collectors read root‑owned state (`/etc/shadow`,
+other users' crontabs, every process). `-E` preserves your API keys
+across the sudo boundary.
+
+### Keep it running with systemd
+
+`/etc/systemd/system/avai.service`:
+
+```ini
+[Unit]
+Description=avai host monitor
+After=network-online.target
+
+[Service]
+Environment=ANTHROPIC_API_KEY=sk-ant-...
+Environment=ABUSE_CH_AUTH_KEY=...
+ExecStart=/usr/local/bin/avai monitor --db /var/lib/avai/avai.db --interval 300
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```sh
+sudo systemctl enable --now avai
+journalctl -u avai -f          # watch cycles
+```
+
+### Read findings straight from the command line (no dashboard)
+
+Everything lives in one SQLite file, so you can query it directly —
+handy for scripting, cron mail, or a server with no browser:
+
+```sh
+# The active dangerous + suspicious findings, newest first
+sqlite3 -box /var/lib/avai/avai.db "
+  SELECT verdict, collector, substr(reasoning,1,60) AS why
+  FROM judgements
+  WHERE verdict IN ('malicious','suspicious')
+  ORDER BY created_at DESC LIMIT 20;"
+
+# Count by verdict
+sqlite3 /var/lib/avai/avai.db \
+  "SELECT verdict, count(*) FROM judgements GROUP BY verdict;"
+
+# What did the threat-intel sources say?
+sqlite3 -box /var/lib/avai/avai.db "
+  SELECT source, verdict_hint, substr(summary,1,70)
+  FROM enrichment_evidence
+  WHERE verdict_hint IN ('malicious','suspicious');"
+```
+
+### Run a one‑shot scan from cron (instead of the always‑on daemon)
+
+```sh
+# /etc/cron.d/avai — scan once an hour, no streaming
+0 * * * * root ANTHROPIC_API_KEY=sk-ant-... \
+  avai monitor --once --no-streaming --db /var/lib/avai/avai.db
+```
+
+### Split setup: monitor on the server, dashboard on your laptop
+
+The monitor writes the DB; the dashboard only reads it. Sync the file
+(rsync/scp/NFS) and view it anywhere:
+
+```sh
+# on the server (writer)
+avai monitor --db /var/lib/avai/avai.db --interval 300
+
+# pull it to your laptop and view (reader — any OS, no privileges)
+scp server:/var/lib/avai/avai.db ./avai.db
+docker run --rm -p 8765:8765 -v "$PWD":/data iklob1/avai
+```
+
+### Keep LLM cost low
+
+```sh
+avai monitor \
+  --judge-model claude-haiku-4-5-20251001 \   # cheapest tier (default)
+  --judge-max-per-collector 20 \              # cap new items judged per cycle
+  --judge-batch-size 20                        # entries per API call
+```
+
+Cost is near‑zero in steady state anyway — only *new* artifacts are
+judged, and threat‑intel verdicts are cached, so quiet hosts make
+almost no API calls after the first cycle.
+
+### Turn enrichment on/off and debug one source
+
+```sh
+avai monitor --no-enrich                       # collectors + judge only
+avai monitor --enrich-only cisa_kev            # just this source (repeatable)
+avai monitor --enrich-only virustotal --enrich-only abuseipdb
+```
+
+Source names: `malware_bazaar` `urlhaus` `threatfox` `circl_hashlookup`
+`shodan_internetdb` `feodo_tracker` `osv` `cisa_kev` `nvd` `endoflife`
+`crtsh` `virustotal` `abuseipdb` `greynoise` `safe_browsing`
+`phishtank` `github_advisory`.
+
+### Bring your own LLM provider
+
+`--judge-model` is a [litellm](https://docs.litellm.ai/docs/providers)
+model id, so any supported provider works:
+
+```sh
+avai monitor --judge-model gpt-4o-mini            # OpenAI (OPENAI_API_KEY)
+avai monitor --judge-model ollama/llama3.1        # local, free, offline
+avai monitor --judge-model gemini/gemini-1.5-pro  # Google
+```
+
+---
+
+## What's collected (one-line summary)
+
+Snapshot collectors (run every cycle, default 300s):
+
+| Group | Sources |
 |---|---|
-| `collection_runs` | One row per cycle (run_id, started/finished, hostname, ok/failed counts, lookback). |
-| `collector_errors` | Per-cycle errors raised by individual collectors (collector name, error class, message). |
-| `judgements` | LLM judgments keyed by `(content_hash, collector)`. Stores verdict, category, confidence, reasoning, model, created_at. |
+| Processes / network | `processes`, `network_connections`, `listening_ports`, `network_interfaces` (psutil) |
+| Hardware | `usb_devices` (/sys/bus/usb), `bluetooth_devices` (/var/lib/bluetooth), `wifi_state` (sysfs + `iw`) |
+| Persistence | `launch_items` (systemd unit files + cron) |
+| Files | `file_integrity` (passwd / shadow / sudoers / SSH config / dotfiles), `setuid_files`, `mounts` |
+| Apps | `installed_apps` (dpkg-query + XDG `.desktop`), `browser_extensions` |
+| Posture | `system_integrity` (SELinux / AppArmor / ufw / sshd / vnc / LUKS) |
+| Posture (macOS only) | `tcc_permissions` (camera/mic/location/screen grants), `quarantine_events`, `mdm_profiles`, `kernel_extensions`, `system_extensions` |
 
-### Per-collector tables
+Streaming collectors (events as they happen):
 
-`processes`, `network_connections`, `listening_ports`,
-`network_interfaces`, `usb_devices`, `bluetooth_devices`, `wifi_state`,
-`launch_items`, `tcc_permissions`, `quarantine_events`,
-`browser_extensions`, `system_integrity`, `auth_events`,
-`file_integrity`, `installed_apps`.
-
-Every collector row carries:
-- `id` — autoincrement primary key
-- `run_id` — foreign key into `collection_runs`
-- `collected_at` — UTC timestamp string
-- `content_hash` — stable SHA-256 over the collector's
-  `judge_fields`. NULL when judging is disabled for that collector.
-
-Join judgments by `content_hash`:
-
-```sql
-SELECT li.label, li.path, j.verdict, j.category, j.reasoning
-FROM launch_items li
-LEFT JOIN judgements j
-       ON j.content_hash = li.content_hash
-      AND j.collector    = 'launch_items'
-WHERE li.run_id = (SELECT run_id FROM collection_runs
-                   ORDER BY started_at DESC LIMIT 1);
-```
-
-### Useful queries
-
-Latest run summary:
-
-```sql
-SELECT * FROM collection_runs ORDER BY started_at DESC LIMIT 1;
-```
-
-Anything not classified `benign` in the latest run, across all
-collectors:
-
-```sql
-SELECT collector, verdict, category, confidence, reasoning
-FROM judgements
-WHERE verdict != 'benign'
-ORDER BY confidence DESC;
-```
-
-First-seen launch items in the latest run (items whose `content_hash`
-never appeared before):
-
-```sql
-SELECT path, label
-FROM launch_items
-WHERE run_id = (SELECT run_id FROM collection_runs
-                ORDER BY started_at DESC LIMIT 1)
-  AND content_hash NOT IN (
-    SELECT content_hash FROM launch_items
-    WHERE run_id != (SELECT run_id FROM collection_runs
-                     ORDER BY started_at DESC LIMIT 1)
-  );
-```
-
-New outbound destinations seen, grouped by process:
-
-```sql
-SELECT pid, raddr_ip, raddr_port, COUNT(*) AS n
-FROM network_connections
-WHERE status = 'ESTABLISHED' AND raddr_ip IS NOT NULL
-GROUP BY pid, raddr_ip, raddr_port
-ORDER BY n DESC;
-```
-
-
-## Architecture (one-screen overview)
-
-Five abstractions:
-
-- **Collector** — one slice of host state. Owns a SQLAlchemy model and
-  declares `judge_fields` + `judge_hints`. Yields plain dict rows from
-  `collect()`. Adding a new dimension of monitoring = one new class.
-- **Model** — SQLAlchemy 2.0 ORM class per collector table. Schema
-  (columns, indexes, types) lives here.
-- **Sink** — repository over a SQLAlchemy `Engine`. Owns DDL bootstrap,
-  run lifecycle, row writes, judgment writes, and "what is unjudged"
-  lookups. No raw SQL anywhere.
-- **Judge** — `LlmJudge` calls litellm; `NullJudge` is the no-op
-  fallback. Returns `Judgment` dataclasses.
-- **Runner** — orchestrates the pipeline: per-collector transaction,
-  error capture, `content_hash` injection, judge invocation,
-  scheduling.
-
-Strategy pattern for browser extensions
-(`ChromiumExtensionReader` / `FirefoxExtensionReader`) keeps the
-Chromium-vs-Firefox layout difference pluggable.
-
-
-## Files in this folder
-
-```
-host_monitor.py             — the collector + judge + runner
-host_monitor_prompts.toml   — all LLM prompts (system, user template, per-collector hints)
-host_monitor.db             — SQLite database (gitignored; created on first run)
-host_monitor.db-shm/-wal    — SQLite WAL sidecars (gitignored)
-.gitignore                  — ignores DBs, caches, virtualenvs
-README.md                   — this file
-```
-
-
-## Troubleshooting
-
-| Symptom | Cause / fix |
+| Collector | Source |
 |---|---|
-| Many `AuthenticationError` lines in the log | `--no-judge` not set and no API key. Either `export ANTHROPIC_API_KEY=…` or pass `--no-judge`. |
-| `collector=network_connections status=failed error=PermissionError` | Expected without root. Run with `sudo -E …` for cross-process socket visibility. |
-| `collector=tcc_permissions status=failed error=PermissionError` | Grant Full Disk Access to the running terminal/agent. |
-| `database is locked` | Don't run two collectors against the same DB at once. WAL mode allows concurrent **readers** while a writer is running, but not two writers. |
-| Slow first cycle | `auth_events` and judging can dominate the first cycle. Subsequent cycles are fast because `content_hash` dedup means almost nothing new to judge. |
+| `auth_events` | `journalctl -f` (Linux) / macOS unified log (macOS), filtered to security-relevant subsystems. LLM-judged by unique `(process, subsystem, message)` pattern — each event template is classified once regardless of how many times it fires. |
+| `process_exec_events` | `journalctl -f _AUDIT_TYPE_NAME=EXECVE` (needs auditd `auditctl -a always,exit -F arch=b64 -S execve` rule) |
+
+For every entity collected (deduped by a content hash over the
+collector's "judge fields"), the LLM judge classifies it as
+`malicious` / `suspicious` / `unknown` / `benign` with a confidence,
+MITRE-aligned category, and one-line remediation. Judgments are
+persisted; the same artifact is never sent twice.
+
+---
+
+## Dashboard
+
+The Flask + HTMX dashboard at `:8765` has full filter and pagination on every table:
+
+- **Findings** — filter by verdict, collector, category, status (active/resolved), free-text search; sortable columns; configurable page size (10/25/50/100).
+- **Network flows** — filter by verdict and IP/host/process search; summary stats (destinations, volume, malicious count).
+- **Listening ports** — filter by verdict and bind scope (all interfaces / routable / loopback); process search.
+- **DNS queries** — filter by verdict, resolution level (DoH / external DNS / local resolver), domain search.
+- **Persistence** — SSH authorized keys, `/etc/hosts` mappings, and privilege config each with independent pagination.
+- **Auth events** — aggregated by unique `(process, subsystem, message)` pattern with occurrence counts and last-seen timestamps. Filter by subsystem (TCC, securityd, syspolicy, loginwindow, Authorization) or verdict. Sort by count or verdict severity. LLM verdicts appear as patterns are classified.
+- **TCC permissions** (macOS) — every app's camera, microphone, location, screen-recording, and full-disk-access grant/denial, with LLM verdict and auth-status filter.
+
+All sections auto-refresh (30–60 s). Toast notifications + audio alert fire for new malicious/suspicious judgments.
+
+---
+
+## Threat-intel enrichment
+
+Before each finding hits the LLM, avai extracts indicators (SHA256,
+IPv4, domain, URL, CVE, package, OS version) and runs them through
+external threat-intel APIs. The judge then sees the raw evidence
+inline in the prompt, which dramatically tightens verdicts.
+
+Every source is optional. Keyless ones always run. Keyed ones only
+register if the env var below is set — see [`.env.example`](.env.example)
+for a copy-paste template.
+
+| Source | Indicator | Env var | Quota | What it adds |
+|---|---|---|---|---|
+| **MalwareBazaar** (abuse.ch) | SHA256/1/MD5 | `ABUSE_CH_AUTH_KEY` | unlimited | Known-malware family |
+| **CIRCL hashlookup** (NSRL) | SHA256/1/MD5 | — | unlimited | Known-good vendor binary (whitelist) |
+| **Shodan InternetDB** | IPv4 | — | 1 rps | Open ports, CVEs, tags |
+| **URLhaus** (abuse.ch) | URL, domain | `ABUSE_CH_AUTH_KEY` | unlimited | Malware-distribution URLs |
+| **Feodo Tracker** (abuse.ch) | IPv4 | — | unlimited | Botnet C2 IPs (cached feed) |
+| **ThreatFox** (abuse.ch) | IPv4 / domain / URL / hash | `ABUSE_CH_AUTH_KEY` | unlimited | Mixed IOC search |
+| **OSV.dev** | CVE, package | — | unlimited | Open-source advisories |
+| **CISA KEV** | CVE | — | static feed | Actively-exploited CVEs |
+| **NVD** | CVE | `NVD_API_KEY` (optional) | 5 → 50 / 30 s | CVSS + description |
+| **crt.sh** | domain | — | gentle | Certificate transparency history |
+| **endoflife.date** | OS version | — | unlimited | EOL'd OS / runtime |
+| **VirusTotal** | SHA256/1/MD5, URL, domain, IPv4 | `VT_API_KEY` | 4/min, 500/day | Multi-engine reputation |
+| **AbuseIPDB** | IPv4 | `ABUSEIPDB_API_KEY` | 1000/day | Abuse confidence score |
+| **GreyNoise Community** | IPv4 | `GREYNOISE_API_KEY` | 50/day | "Is this IP just noise?" |
+| **Google Safe Browsing** | URL | `GOOGLE_SAFE_BROWSING_API_KEY` | 10k/day | Phishing / malware verdict |
+| **PhishTank** | URL | `PHISHTANK_API_KEY` | generous | Community phishing DB |
+| **GitHub Advisory** | CVE | `GITHUB_TOKEN` | high | Curated advisories + fix versions |
+
+Per-indicator results are cached in the same SQLite (`enrichment_evidence`
+table) with a per-source TTL (6 h – 14 d). Fresh cache hits skip the
+network entirely; the cache survives restarts.
+
+Toggle with:
+
+```sh
+avai monitor                              # all enabled sources, default
+avai monitor --no-enrich                  # collectors + judge, no external lookups
+avai monitor --enrich-only malware_bazaar # debugging: only this one
+```
+
+---
+
+## Why no macOS in this README
+
+The monitor relies on Linux-native facilities — `pid=host` reaching
+the host's `/proc`, sysfs at `/sys/bus/usb`, `journalctl` with
+`auditd`, `systemctl is-active`, `dpkg-query`, `dmsetup` for LUKS.
+Docker Desktop on macOS only exposes the Linux VM it ships with, not
+the macOS host, so a containerised monitor on macOS reports on the VM
+(empty/uninteresting) rather than the Mac. The dashboard role works
+fine on macOS Docker — you'd just need to write the database from
+somewhere else.
+
+If you want full macOS coverage, install natively (`pip install
+avai-monitor`) and run `avai monitor` with `sudo`. That's a separate
+path not documented here.
+
+---
+
+## Development & tests
+
+The suite is network-free and runs in seconds. The repo's dev Python
+may carry plugin conflicts, so run it in a throwaway venv:
+
+```sh
+python3 -m venv /tmp/venv && /tmp/venv/bin/pip install -e . pytest
+/tmp/venv/bin/python -m pytest tests/ -q       # 320+ unit tests
+```
+
+Coverage spans the enrichment framework and all 18 sources, the
+indicator extractors, the HTTP client (rate limit / backoff / 429),
+the CLI dispatcher, the SQLAlchemy repository + DB rotation, the LLM
+judge's parsing, the dashboard endpoints, and the Linux collectors'
+file parsing (systemd / cron / `.desktop` / BlueZ). Tests are written
+to fail when the implementation breaks — verified by mutation testing,
+not just coverage percentage.
+
+Unattended Docker smoke test (builds the image, runs the CLI surface,
+a cold collector pass, and the keyless-enrichment registry check):
+
+```sh
+tests/local.sh            # all phases; exits non-zero on any failure
+```
+
+See [`CHANGELOG.md`](CHANGELOG.md) for version history.
+
+---
+
+## License
+
+MIT — see `LICENSE`.

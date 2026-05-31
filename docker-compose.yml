@@ -1,48 +1,50 @@
 # avai — Docker Compose for the full stack (Linux deployment).
 #
-# Two services, two images (multi-stage Dockerfile):
+# Single image (iklob1/avai), two services with different commands:
 #
-#   monitor    — Linux-only. Targets the `monitor` stage which adds
-#                iw, systemd CLIs (systemctl + journalctl), dmsetup,
-#                bluez to the base image. Runs as root in the host's
-#                PID + network namespaces. Bind-mounts the host's
-#                /sys, /etc, /var/lib, /run/systemd, /var/log/journal
-#                etc. under /host so the collectors (parameterised
-#                via HOST_PREFIX=/host) read the host's state rather
-#                than the container's. Also bind-mounts /run/systemd,
-#                /run/dbus, /dev/mapper at native paths because
-#                systemctl/dmsetup don't have a "look in this prefix"
-#                flag — they hardcode the native locations.
-#                Opt-in via `docker compose --profile linux up`.
+#   monitor    — Linux-only. Runs as root in the host's PID + network
+#                namespaces with bind-mounts under /host. Opt-in via
+#                `docker compose --profile linux up`.
 #
-#   dashboard  — Slim Flask viewer on :8765. Targets the `dashboard`
-#                stage. No host-monitoring binaries. Runs non-root
-#                with all caps dropped and a read-only root filesystem.
+#   dashboard  — Flask viewer on :8765. Same image, default CMD.
 #                Always runs (default profile).
 #
-# IMPORTANT — macOS users: the `monitor` service will fail at
-# `docker compose --profile linux up` time because Docker Desktop's
-# Linux VM can't mount the macOS host's /sys, /etc, etc. Run
-# host_monitor.py natively on macOS; only `dashboard` is useful in
-# Docker on macOS.
+# IMPORTANT — macOS users: the `monitor` service can't read the macOS
+# host through Docker Desktop's Linux VM. Run `avai monitor` natively
+# on macOS; only the `dashboard` service is useful in Docker on macOS.
+
+x-avai-image: &avai-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: iklob1/avai:latest
 
 services:
 
   monitor:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: monitor
-    image: avai-monitor:latest
+    <<: *avai-image
     container_name: avai-monitor
     profiles: ["linux"]
+
+    command:
+      - avai
+      - monitor
+      - --db
+      - /data/avai.db
+      - --interval
+      - "300"
+      - --lookback-min
+      - "6"
+      - --max-db-mb
+      - "1024"
+      - --judge-max-per-collector
+      - "60"
 
     # Root + host namespaces so psutil sees host processes/sockets.
     user: "0:0"
     pid: host
     network_mode: host
 
-    # Forward credentials from the calling shell.
     environment:
       - CLAUDE_CODE_OAUTH_TOKEN
       - ANTHROPIC_API_KEY
@@ -58,8 +60,7 @@ services:
       # SQLite database — shared with the dashboard service.
       - ./:/data
 
-      # ----- /host/* mirror of the host filesystem (collector code) -----
-      # Everything below is read-only; the monitor never writes here.
+      # ----- /host/* mirror of the host filesystem -----
       - /sys:/host/sys:ro
       - /etc:/host/etc:ro
       - /var/lib/bluetooth:/host/var/lib/bluetooth:ro
@@ -77,52 +78,27 @@ services:
       - /root:/host/root:ro
 
       # ----- native-path mounts (CLI tools without prefix flags) -----
-      # systemctl looks for the private socket at /run/systemd/private;
-      # bind-mounting host's /run/systemd here lets it query the host's
-      # systemd instance instead of the container's (which doesn't run
-      # systemd at all).
       - /run/systemd:/run/systemd:ro
       - /run/dbus:/run/dbus:ro
       - /etc/machine-id:/etc/machine-id:ro
-      # dmsetup hits /dev/mapper/control ioctls — needs the device
-      # node and the broader /dev/mapper directory.
       - /dev/mapper:/dev/mapper:ro
 
-    # Capabilities. Root in a container has a *limited* default cap set
-    # (Docker drops several); these adds restore what each collector
-    # needs.
     cap_add:
-      # psutil.net_connections + cross-process /proc reads
       - SYS_PTRACE
-      # iw uses NL80211 netlink; some sysfs reads
       - NET_ADMIN
       - NET_RAW
-      # Read files owned by other users (e.g. /etc/shadow, root-owned
-      # bluetooth state) without depending on Linux DAC overrides.
       - DAC_READ_SEARCH
 
     restart: unless-stopped
 
   dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: dashboard
-    image: avai-dashboard:latest
+    <<: *avai-image
     container_name: avai-dashboard
-    # The dashboard is useful on its own — no depends_on so it starts
-    # in macOS-only mode (no `monitor` service in the default profile).
+    # Uses the image's default CMD (avai dashboard ...).
     ports:
       - "8765:8765"
     volumes:
       - ./:/data
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      - /tmp
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",

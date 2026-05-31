@@ -11,7 +11,6 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
-
 _USAGE = """avai — host security telemetry collector + dashboard
 
 usage:
@@ -43,6 +42,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if argv[0] in ("-v", "--version"):
         from . import __version__
+
         print(__version__)
         return 0
 
@@ -50,13 +50,28 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if cmd in ("monitor", "start", "scan"):
         from .host_monitor import main as monitor_main
+
         sys.argv = ["avai monitor", *rest]
         return monitor_main()
 
     if cmd in ("dashboard", "ui", "serve"):
         from .dashboard import main as dashboard_main
+
         sys.argv = ["avai dashboard", *rest]
         return dashboard_main()
+
+    if cmd == "migrate":
+        import argparse
+
+        from .db_migrate import upgrade_to_head
+        from .host_monitor import DEFAULT_DB_PATH
+
+        p = argparse.ArgumentParser(prog="avai migrate")
+        p.add_argument("--db", default=str(DEFAULT_DB_PATH))
+        a = p.parse_args(rest)
+        upgrade_to_head(f"sqlite:///{a.db}")
+        print(f"avai: migrations applied to {a.db}")
+        return 0
 
     print(f"avai: unknown command '{cmd}'\n", file=sys.stderr)
     _print_usage(sys.stderr)

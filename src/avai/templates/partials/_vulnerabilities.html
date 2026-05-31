@@ -1,0 +1,63 @@
+{% from "partials/_macros.html" import card_header %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  <div class="flex items-baseline justify-between mb-3">
+    {{ card_header("vulnerabilities — patch me (CVE / EOL)") }}
+    {% if vulns %}
+      <span class="text-[10px] font-mono text-slate-400">{{ vulns | length }} item(s)</span>
+    {% endif %}
+  </div>
+
+  {% if vulns %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-800/40 text-slate-500 uppercase tracking-wider text-[10px]">
+          <tr>
+            <th class="px-3 py-2 text-left font-semibold">software</th>
+            <th class="px-3 py-2 text-left font-semibold">vulnerabilities</th>
+            <th class="px-3 py-2 text-left font-semibold w-20">cvss</th>
+            <th class="px-3 py-2 text-left font-semibold w-20">flag</th>
+            <th class="px-3 py-2 text-left font-semibold w-24">source</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/80">
+          {% for v in vulns %}
+            <tr class="hover:bg-slate-800/40">
+              <td class="px-3 py-2 align-top font-mono text-xs text-slate-200 break-all">{{ v.software }}</td>
+              <td class="px-3 py-2 align-top text-xs text-slate-300">
+                {% if v.cves %}
+                  <div class="flex flex-wrap gap-1.5">
+                    {% for c in v.cves %}
+                      <span class="font-mono {% if c.kev %}text-red-300{% elif c.severity == 'critical' or (c.cvss and c.cvss >= 9) %}text-red-400{% elif c.severity == 'high' or (c.cvss and c.cvss >= 7) %}text-amber-400{% else %}text-slate-300{% endif %}">{{ c.id }}{% if c.cvss %} <span class="text-slate-500">({{ c.cvss }})</span>{% endif %}</span>
+                    {% endfor %}
+                  </div>
+                {% elif v.eol %}
+                  end-of-life / unsupported OS
+                {% endif %}
+                {% if v.summary %}<div class="text-slate-500 mt-0.5">{{ v.summary }}</div>{% endif %}
+              </td>
+              <td class="px-3 py-2 align-top font-mono text-xs {% if v.cvss and v.cvss >= 9 %}text-red-400{% elif v.cvss and v.cvss >= 7 %}text-amber-400{% else %}text-slate-300{% endif %} tabular-nums">{{ v.cvss if v.cvss is not none else '—' }}</td>
+              <td class="px-3 py-2 align-top">
+                {% if v.kev %}
+                  <span class="inline-flex items-center px-1.5 py-0.5 rounded-full border border-red-800 bg-red-900/40 text-red-300 text-[9px] font-semibold uppercase tracking-wider"
+                        title="On CISA Known Exploited Vulnerabilities — actively exploited in the wild">KEV</span>
+                {% elif v.eol %}
+                  <span class="inline-flex items-center px-1.5 py-0.5 rounded-full border border-amber-800 bg-amber-900/40 text-amber-300 text-[9px] font-semibold uppercase tracking-wider">EOL</span>
+                {% else %}
+                  <span class="inline-flex items-center px-1.5 py-0.5 rounded-full border border-sky-900/60 bg-sky-900/30 text-sky-300 text-[9px] font-semibold uppercase tracking-wider">CVE</span>
+                {% endif %}
+              </td>
+              <td class="px-3 py-2 align-top font-mono text-[11px] text-slate-500">{{ v.source }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="text-slate-500 italic text-sm">
+      no known vulnerabilities found yet — needs enrichment enabled and
+      installed-app / OS-version collection (OSV checks installed packages,
+      endoflife.date flags unsupported OSes).
+    </div>
+  {% endif %}
+</div>

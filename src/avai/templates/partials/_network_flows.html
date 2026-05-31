@@ -1,0 +1,203 @@
+{% from "partials/_macros.html" import card_header, pagination_bar %}
+
+{% set verdict_cls = {
+  'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
+  'suspicious': 'bg-amber-900/40 text-amber-300 border border-amber-900/60',
+  'unknown':    'bg-slate-700/40 text-slate-300 border border-slate-600',
+  'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
+} %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("network flows — tcpdump aggregator (by destination)") }}
+
+  {% if flows %}
+  {# ----- filter bar ----- #}
+  <form id="network-flows-filters"
+        class="mb-4 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="hidden" name="page" value="{{ flows.page }}">
+
+    <input type="search"
+           name="q"
+           value="{{ flows.q }}"
+           placeholder="search IP / host / process"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-48 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/network-flows"
+           hx-target="#network-flows"
+           hx-include="#network-flows-filters"
+           hx-trigger="keyup changed delay:300ms, search"
+           hx-vals='{"page": 1}'>
+
+    <select name="verdict"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/network-flows"
+            hx-target="#network-flows"
+            hx-include="#network-flows-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value=""           {% if flows.verdict == "" %}selected{% endif %}>all non-benign</option>
+      <option value="malicious"  {% if flows.verdict == "malicious" %}selected{% endif %}>malicious</option>
+      <option value="suspicious" {% if flows.verdict == "suspicious" %}selected{% endif %}>suspicious</option>
+      <option value="unknown"    {% if flows.verdict == "unknown" %}selected{% endif %}>unknown</option>
+      <option value="benign"     {% if flows.verdict == "benign" %}selected{% endif %}>benign (all)</option>
+    </select>
+
+    <select name="per_page"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/network-flows"
+            hx-target="#network-flows"
+            hx-include="#network-flows-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      {% for n in per_page_options %}
+        <option value="{{ n }}" {% if n == flows.per_page %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+
+    <div class="ml-auto text-slate-500 font-mono tabular-nums">{{ flows.total }} destinations</div>
+  </form>
+  {% endif %}
+
+  {% if flows and flows.rows %}
+    {# ----- aggregate summary: sum + counts ----- #}
+    <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
+      {% set s = flows.summary %}
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ s.destinations }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">destinations</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ s.flows }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">flows</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        {% set tv = s.bytes | human_bytes %}
+        <div class="mono text-slate-200 text-lg"
+             title="{{ "{:,}".format(s.packets) }} packets">{{ tv if tv else "{:,}".format(s.packets) }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">{{ "volume" if tv else "packets" }}</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
+        <div class="mono text-red-300 text-lg">{{ s.malicious }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">malicious</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-amber-900/40 px-3 py-2">
+        <div class="mono text-amber-300 text-lg">{{ s.suspicious }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">suspicious</div>
+      </div>
+    </div>
+
+    {# ----- one row per destination IP (grouped / summed) ----- #}
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+          <th class="text-left  font-semibold pb-2">verdict</th>
+          <th class="text-left  font-semibold pb-2 w-1/4">destination</th>
+          <th class="text-left  font-semibold pb-2">process</th>
+          <th class="text-left  font-semibold pb-2">interface</th>
+          <th class="text-left  font-semibold pb-2">proto</th>
+          <th class="text-left  font-semibold pb-2">ports</th>
+          <th class="text-right font-semibold pb-2">traffic</th>
+          <th class="text-left  font-semibold pb-2 w-1/3">why</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for f in flows.rows %}
+          <tr class="hover:bg-slate-800/40 transition-colors [&>td]:align-top">
+            <td class="py-2">
+              {% if f.verdict %}
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px]
+                             font-semibold uppercase tracking-wider
+                             {{ verdict_cls.get(f.verdict, verdict_cls['unknown']) }}">
+                  {{ f.verdict }}{% if f.confidence is not none %}
+                    <span class="ml-1 opacity-70">{{ "%.0f"|format(f.confidence * 100) }}%</span>
+                  {% endif %}
+                </span>
+              {% else %}
+                <span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>
+              {% endif %}
+            </td>
+            <td class="py-2">
+              <div class="leading-snug space-y-0.5">
+                {# IP — the anchor #}
+                <div class="text-slate-200 font-mono break-all">{{ f.dst_ip }}</div>
+                {# resolved hostname / domain #}
+                {% if f.hostname %}
+                  <div class="text-[11px] text-slate-400 font-mono break-all">{{ f.hostname }}</div>
+                {% endif %}
+                {# geolocation — city / region / country with flag #}
+                {% if f.geo %}
+                  {% set place = [f.geo.city, f.geo.region, f.geo.country] | select | join(", ") %}
+                  {% if place %}
+                    <div class="text-[10px] text-slate-500">
+                      {%- set flag = f.geo.cc | flag_emoji -%}
+                      {%- if flag %}<span class="mr-1">{{ flag }}</span>{% endif -%}
+                      {{ place }}
+                    </div>
+                  {% endif %}
+                  {# network owner — ASN / org #}
+                  {% if f.geo.org or f.geo.asn %}
+                    <div class="text-[10px] text-slate-600 font-mono break-all">
+                      {%- if f.geo.asn %}AS{{ f.geo.asn }}{% if f.geo.org %} · {% endif %}{% endif -%}
+                      {{ f.geo.org or "" }}
+                    </div>
+                  {% endif %}
+                {% endif %}
+              </div>
+            </td>
+            <td class="py-2 font-mono {{ 'text-slate-200' if f.process and f.process != '—' else 'text-slate-600' }}">{{ f.process }}</td>
+            <td class="py-2">
+              {% if f.iface and f.iface != '—' %}
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-mono
+                             bg-sky-900/30 text-sky-300 border border-sky-900/50">{{ f.iface }}</span>
+              {% else %}
+                <span class="text-slate-600 text-[10px]">—</span>
+              {% endif %}
+            </td>
+            <td class="py-2">
+              <div class="flex flex-wrap gap-1">
+                {% for p in f.proto %}
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono
+                               bg-slate-800 text-slate-300 border border-slate-700">{{ p }}</span>
+                {% endfor %}
+              </div>
+            </td>
+            <td class="py-2">
+              <div class="flex flex-wrap gap-1 max-w-[15rem]">
+                {% for p in f.ports[:12] %}
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono
+                               bg-slate-800/70 text-slate-400 border border-slate-700/60">{{ p }}</span>
+                {% endfor %}
+                {% if f.ports | length > 12 %}
+                  <span class="px-1 py-0.5 text-[10px] text-slate-500">+{{ f.ports | length - 12 }}</span>
+                {% endif %}
+              </div>
+            </td>
+            <td class="py-2 text-right whitespace-nowrap">
+              {% set vol = f.bytes | human_bytes %}
+              {% if vol %}
+                <div class="text-slate-200 font-mono" title="{{ "{:,}".format(f.bytes) }} bytes of payload">{{ vol }}</div>
+                <div class="text-[10px] text-slate-500 font-mono">{{ "{:,}".format(f.packets) }} pkts · {{ f.flows }} flow{{ '' if f.flows == 1 else 's' }}</div>
+              {% else %}
+                <div class="text-slate-200 font-mono">{{ "{:,}".format(f.packets) }} <span class="text-[10px] text-slate-500">pkts</span></div>
+                <div class="text-[10px] text-slate-500 font-mono">{{ f.flows }} flow{{ '' if f.flows == 1 else 's' }}</div>
+              {% endif %}
+            </td>
+            <td class="py-2 text-slate-400 text-[11px] leading-snug line-clamp-3">{{ f.reasoning }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    {{ pagination_bar("network-flows", flows.page, flows.total_pages, flows.total, flows.rows|length, flows.per_page, per_page_options) }}
+  {% elif flows %}
+    <div class="text-slate-500 italic">
+      no network flows match the current filters.
+    </div>
+  {% else %}
+    <div class="text-slate-500 italic">
+      no network flows yet — the tcpdump aggregator needs root (run the
+      monitor with <span class="font-mono">sudo</span>) and a capture window to elapse.
+    </div>
+  {% endif %}
+</div>

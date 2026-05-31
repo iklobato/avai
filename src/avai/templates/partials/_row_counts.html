@@ -1,32 +1,57 @@
 {% from "partials/_macros.html" import card_header %}
 
-<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
-  {{ card_header("rows per collector (since latest run)") }}
+{% set total = (row_counts | sum(attribute='rows')) if row_counts else 0 %}
+{% set maxr = (row_counts | map(attribute='rows') | max) if row_counts else 0 %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5 h-full">
+  <div class="flex items-baseline justify-between mb-3">
+    <h3 class="text-[10px] uppercase tracking-widest text-slate-500">rows per collector (since latest run)</h3>
+    {% if row_counts %}
+      <span class="text-[10px] font-mono text-slate-400">{{ "{:,}".format(total) }} total</span>
+    {% endif %}
+  </div>
+
   {% if row_counts %}
-    {% set maxr = row_counts | map(attribute='rows') | max %}
+    <div class="js-paged" data-pg="rowcounts" data-page-size="8">
     <table class="w-full text-sm">
-      <thead>
-        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
-          <th class="text-left  font-semibold pb-2">collector</th>
-          <th class="text-right font-semibold pb-2 w-20">rows</th>
-          <th class="w-40 pb-2"></th>
-        </tr>
-      </thead>
       <tbody class="divide-y divide-slate-800/80">
         {% for r in row_counts %}
-          <tr>
-            <td class="py-1.5 text-slate-300 font-mono text-xs">{{ r.name }}</td>
-            <td class="py-1.5 text-right font-mono text-slate-300 tabular-nums text-xs">{{ r.rows }}</td>
-            <td class="py-1.5 pl-3">
-              <div class="h-1.5 rounded bg-slate-800 overflow-hidden">
+          {% set empty = r.rows == 0 %}
+          <tr class="js-pg-item {% if empty %}opacity-40{% endif %}">
+            <td class="py-1.5 font-mono text-xs {{ 'text-slate-500' if empty else 'text-slate-300' }}">{{ r.name }}</td>
+
+            <td class="py-1.5 text-right font-mono tabular-nums text-xs text-slate-300 w-14">{{ r.rows }}</td>
+
+            {# change vs previous run #}
+            <td class="py-1.5 text-right w-16 whitespace-nowrap">
+              {% if empty %}
+                <span class="text-[10px] uppercase tracking-wider text-slate-600">empty</span>
+              {% elif r.is_new %}
+                <span class="text-[10px] font-semibold uppercase tracking-wider text-sky-400">new</span>
+              {% elif r.delta is not none and r.delta > 0 %}
+                <span class="text-[10px] font-mono text-emerald-400">▲ +{{ r.delta }}</span>
+              {% elif r.delta is not none and r.delta < 0 %}
+                <span class="text-[10px] font-mono text-amber-400">▼ −{{ -r.delta }}</span>
+              {% elif r.delta == 0 %}
+                <span class="text-[10px] text-slate-600">—</span>
+              {% endif %}
+            </td>
+
+            {# proportional bar; non-zero gets a minimum visible width #}
+            <td class="py-1.5 pl-3 w-28">
+              {% if not empty %}
                 {% set pct = (r.rows / maxr * 100) if maxr > 0 else 0 %}
-                <div class="h-full bg-sky-500/70" style="width: {{ pct }}%"></div>
-              </div>
+                <div class="h-1.5 rounded bg-slate-800 overflow-hidden">
+                  <div class="h-full bg-sky-500/70" style="width: {{ [pct, 4] | max }}%"></div>
+                </div>
+              {% endif %}
             </td>
           </tr>
         {% endfor %}
       </tbody>
     </table>
+    <div class="js-pager"></div>
+    </div>
   {% else %}
     <div class="text-slate-500 italic">no run yet</div>
   {% endif %}
