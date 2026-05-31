@@ -1,90 +1,18 @@
-#!/usr/bin/env python3
-"""dashboard.py — single-page web dashboard for avai/host_monitor.
-
-Architecture
-------------
-Three layers:
-
-  Service  — pure DB query functions over the host_monitor SQLAlchemy
-             models. No Flask, no templates. Each function returns a
-             plain Python value (model row, list of dicts, or scalar).
-
-  Routes   — thin Flask handlers. Each route opens a Session, calls one
-             or more service functions, and renders either the full
-             page shell or one HTML fragment (HTMX swap target). A
-             single JSON endpoint feeds the Chart.js verdict series.
-
-  Templates — full shell + per-section partials. HTMX-driven polling
-             keeps each partial fresh without full-page reloads;
-             changing the verdict filter is also an HTMX swap.
-
-UI stack: Tailwind via Play CDN + HTMX 2 + Chart.js 4. No build step,
-no npm.
-"""
-
+"""Read-only DB query layer — no Flask app, uses current_app for config."""
 from __future__ import annotations
 
-import argparse
 import ipaddress
 import json
 import os
-import re
-import sys
 import threading
 import time
-import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-from flask import Flask, current_app, jsonify, render_template, request
-from sqlalchemy import (
-    and_,
-    asc,
-    case,
-    create_engine,
-    desc,
-    func,
-    literal,
-    or_,
-    select,
-    text,
-)
+from flask import current_app, request
+from sqlalchemy import and_, asc, case, create_engine, desc, func, literal, or_, select, text
 from sqlalchemy.orm import Session
+from avai.host_monitor import AuthEventRow, Base, BluetoothDeviceRow, BrowserExtensionRow, CollectionRun, CollectorErrorRow, DnsQueryRow, FileIntegrityRow, HostsFileRow, IncidentNarrativeRow, InstalledAppRow, Judgement, KernelExtensionRow, LaunchItemRow, ListeningPortRow, MdmProfileRow, MountRow, NetworkConnectionRow, NetworkFlowRow, NetworkInterfaceRow, PrivilegeConfigRow, ProcessExecRow, ProcessRow, QuarantineEventRow, RiskScoreRow, SetuidFileRow, SshAuthorizedKeyRow, SystemExtensionRow, SystemIntegrityRow, UsbDeviceRow, WifiStateRow
 
-# Reuse models from host_monitor.py — single source of schema truth.
-from avai.host_monitor import Base  # noqa: E402
-from avai.host_monitor import (
-    AuthEventRow,
-    BluetoothDeviceRow,
-    BrowserExtensionRow,
-    CollectionRun,
-    CollectorErrorRow,
-    DnsQueryRow,
-    FileIntegrityRow,
-    HostsFileRow,
-    IncidentNarrativeRow,
-    InstalledAppRow,
-    Judgement,
-    KernelExtensionRow,
-    LaunchItemRow,
-    ListeningPortRow,
-    MdmProfileRow,
-    MountRow,
-    NetworkConnectionRow,
-    NetworkFlowRow,
-    NetworkInterfaceRow,
-    PrivilegeConfigRow,
-    ProcessExecRow,
-    ProcessRow,
-    QuarantineEventRow,
-    RiskScoreRow,
-    SetuidFileRow,
-    SshAuthorizedKeyRow,
-    SystemExtensionRow,
-    SystemIntegrityRow,
-    UsbDeviceRow,
-    WifiStateRow,
-)
 
 COLLECTOR_MODELS = {
     "processes": ProcessRow,
@@ -115,6 +43,7 @@ COLLECTOR_MODELS = {
     "system_extensions": SystemExtensionRow,
 }
 
+
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "processes": ("name", "exe"),
     "network_flows": ("dst_ip", "dst_port"),
@@ -141,215 +70,28 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "system_extensions": ("bundle_id", "team_id"),
 }
 
+
 SEVERITY_ORDER = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3}
+
+
 VERDICTS = ("malicious", "suspicious", "unknown", "benign")
+
+
 PER_PAGE_OPTIONS = (10, 25, 50, 100)
+
+
 DEFAULT_PER_PAGE = 10
 
-# Default DB is ~/.avai/avai.db — the same stable per-user path the
-# monitor writes to, so `avai dashboard` finds the monitor's data with
-# no flags. Override at runtime with --db or app.config["DB_PATH"].
+
 DEFAULT_DB_PATH = Path.home() / ".avai" / "avai.db"
 
-# Templates and static assets ship inside the installed package
-# (src/avai/templates/, src/avai/static/). Flask defaults to looking
-# in <module>/templates and <module>/static, but we set them
-# explicitly here so the path is unambiguous regardless of how the
-# module is invoked (entry-point script, `python -m avai.dashboard`,
-# Docker CMD, etc.).
-_PKG_DIR = Path(__file__).resolve().parent
 
-app = Flask(
-    __name__,
-    template_folder=str(_PKG_DIR / "templates"),
-    static_folder=str(_PKG_DIR / "static"),
-)
-app.config["DB_PATH"] = str(DEFAULT_DB_PATH)
-# Re-read templates when they change on disk. Without this, Jinja caches
-# compiled templates outside debug mode (the dashboard runs on waitress, not
-# debug), so HTML/layout edits only appear after a full process restart. The
-# per-render stat() is negligible for a single-user local dashboard.
-app.config["TEMPLATES_AUTO_RELOAD"] = True
-app.jinja_env.auto_reload = True
-
-
-# Markdown rendering for the LLM-written incident digest. Optional: if
-# `markdown`/`bleach` aren't installed we degrade to escaped plain text
-# rather than failing — the rest of the dashboard is unaffected.
-try:
-    import bleach as _bleach
-    import markdown as _markdown
-
-    _HAS_MARKDOWN = True
-except ImportError:  # pragma: no cover - depends on optional extras
-    _HAS_MARKDOWN = False
-
-# Tags the digest legitimately uses. We sanitise the rendered HTML because
-# the source is LLM-generated — an emitted <script>/<img onerror> must not
-# execute in the dashboard.
-_MD_TAGS = [
-    "p",
-    "br",
-    "strong",
-    "em",
-    "code",
-    "pre",
-    "blockquote",
-    "hr",
-    "ul",
-    "ol",
-    "li",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "table",
-    "thead",
-    "tbody",
-    "tr",
-    "th",
-    "td",
-]
-
-
-_LIST_ITEM_RE = re.compile(r"^\s*([-*+]\s+|\d+[.)]\s+)")
-
-
-def _ensure_list_blank_lines(text: str) -> str:
-    """Insert a blank line before a list that directly follows a non-list
-    text line. The narrator (like most LLMs) writes ``**Timeline:**`` then a
-    ``- item`` bullet on the very next line; python-markdown won't treat a
-    list as interrupting a paragraph without a preceding blank line, so
-    without this the bullets render as literal ``- `` text."""
-    out: list[str] = []
-    prev = ""
-    for line in text.split("\n"):
-        is_item = bool(_LIST_ITEM_RE.match(line))
-        if (
-            is_item
-            and prev.strip()
-            and not _LIST_ITEM_RE.match(prev)
-            and not prev.lstrip().startswith("```")
-        ):
-            out.append("")
-        out.append(line)
-        prev = line
-    return "\n".join(out)
-
-
-def render_markdown(text: str) -> str:
-    """LLM-written markdown → sanitised HTML. Falls back to HTML-escaped
-    text (newlines preserved via CSS) when the optional libs are missing."""
-    from markupsafe import Markup, escape
-
-    if not text:
-        return Markup("")
-    if not _HAS_MARKDOWN:
-        return Markup(f'<div class="whitespace-pre-line">{escape(text)}</div>')
-    html = _markdown.markdown(
-        _ensure_list_blank_lines(text),
-        extensions=["fenced_code", "tables", "sane_lists"],
-    )
-    clean = _bleach.clean(html, tags=_MD_TAGS, attributes={}, strip=True)
-    return Markup(clean)
-
-
-app.add_template_filter(render_markdown, "markdown")
-
-
-def _relative_time(iso_string: str) -> str:
-    """Short relative-time string like '5m ago' for an ISO timestamp."""
-    if not iso_string:
-        return ""
-    try:
-        dt = datetime.fromisoformat(iso_string)
-    except (ValueError, TypeError):
-        return str(iso_string)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    seconds = int((datetime.now(timezone.utc) - dt).total_seconds())
-    if seconds < 0:
-        return "just now"
-    if seconds < 60:
-        return f"{seconds}s ago"
-    if seconds < 3600:
-        return f"{seconds // 60}m ago"
-    if seconds < 86400:
-        return f"{seconds // 3600}h ago"
-    return f"{seconds // 86400}d ago"
-
-
-app.add_template_filter(_relative_time, "relative_time")
-
-
-def _datetime_fmt(iso_string: str) -> str:
-    """Human-readable absolute timestamp (UTC) like 'May 30, 2026 · 18:57:20
-    UTC' from a stored ISO string. Returns the input unchanged if it isn't a
-    parseable timestamp, and '' for empty input."""
-    if not iso_string:
-        return ""
-    try:
-        dt = datetime.fromisoformat(iso_string)
-    except (ValueError, TypeError):
-        return str(iso_string)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%b %d, %Y · %H:%M:%S UTC")
-
-
-app.add_template_filter(_datetime_fmt, "datetime_fmt")
-
-
-def _pretty_json(value) -> str:
-    """Re-serialize a JSON string with indentation. Pass non-JSON through."""
-    if value in (None, "", b""):
-        return ""
-    try:
-        return __import__("json").dumps(__import__("json").loads(value), indent=2)
-    except Exception:
-        return str(value)
-
-
-def _human_bytes(n) -> str:
-    """Human-readable data volume (e.g. 927 -> '927 B', 12345 -> '12.1 KB',
-    5e6 -> '4.8 MB'). Returns '' for 0/None/unknown so the template can
-    fall back to a packet count."""
-    if not isinstance(n, (int, float)) or n <= 0:
-        return ""
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            if unit == "B":
-                return f"{int(size)} {unit}"
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    return ""
-
-
-app.add_template_filter(_human_bytes, "human_bytes")
-
-
-def _flag_emoji(cc) -> str:
-    """Render a 2-letter ISO country code as its flag emoji (regional
-    indicator symbols), e.g. 'US' -> 🇺🇸. Empty string for anything that
-    isn't a clean 2-letter code."""
-    if not isinstance(cc, str) or len(cc) != 2 or not cc.isalpha():
-        return ""
-    return "".join(chr(0x1F1E6 + ord(ch) - ord("A")) for ch in cc.upper())
-
-
-app.add_template_filter(_flag_emoji, "flag_emoji")
-
-
-app.add_template_filter(_pretty_json, "pretty_json")
-
-# Columns hidden from the "all info" expansion (internal SQL plumbing).
 _HIDDEN_SOURCE_FIELDS = {"id", "run_id"}
 
 
 _engine_cache: dict[str, object] = {}
+
+
 _engine_cache_lock = threading.Lock()
 
 
@@ -393,9 +135,9 @@ def _engine():
     return eng
 
 
-# Optional SQL query log. Set AVAI_QUERY_LOG=/path to record every statement
-# the dashboard runs (with the route that triggered it) for debugging.
 _QUERY_LOG_PATH = os.environ.get("AVAI_QUERY_LOG")
+
+
 _query_log_lock = threading.Lock()
 
 
@@ -427,18 +169,12 @@ def _session() -> Session:
     return Session(_engine())
 
 
-# ============================================================================
-# Service layer — pure DB queries, no Flask
-# ============================================================================
-
-
-# Schema-introspection cache. The table/column layout is static for the
-# lifetime of a dashboard process (the monitor, a separate process, is what
-# changes it), so re-running `sqlite_master` / `PRAGMA table_info` on every
-# fragment poll is pure waste. Cache per-engine with a short TTL so a
-# freshly-created table is still picked up within a few seconds.
 _SCHEMA_TTL = 30.0
+
+
 _tables_cache: dict[str, tuple[float, set]] = {}
+
+
 _columns_cache: dict[tuple[str, str], tuple[float, set]] = {}
 
 
@@ -724,6 +460,7 @@ _SEVERITY_CASE = case(
     else_=99,
 )
 
+
 _SORT_FIELDS = {
     "severity": _SEVERITY_CASE,
     "verdict": Judgement.verdict,
@@ -899,9 +636,6 @@ def findings(
     }
 
 
-# Streaming collectors accumulate across many StreamingSession run_ids, so
-# their "this run" count is a time window on the (indexed) event_timestamp,
-# not a run_id match. Everything else is a snapshot keyed by run_id.
 _STREAMING_COLLECTORS = {"auth_events", "process_exec_events"}
 
 
@@ -972,8 +706,6 @@ def collector_errors(session: Session, run_id: str) -> list[CollectorErrorRow]:
     )
 
 
-# Verdict severity for "worst-first" ordering. Unjudged flows (None)
-# sort last so judged risk floats to the top.
 _FLOW_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3, None: 4}
 
 
@@ -1334,6 +1066,8 @@ def _collector_rows_with_verdict(
 
 
 _PROTO_BY_SOCK = {"SOCK_STREAM": "TCP", "SOCK_DGRAM": "UDP"}
+
+
 _FAMILY_LABEL = {"AF_INET": "IPv4", "AF_INET6": "IPv6"}
 
 
@@ -1354,7 +1088,6 @@ def _addr_scope(ip) -> str:
     return "specific"
 
 
-# Worst-first ordering of bind scopes for the per-port rollup.
 _SCOPE_SEV = {"all": 0, "specific": 1, "unknown": 2, "loopback": 3}
 
 
@@ -1759,7 +1492,7 @@ _AUTH_SUBSYSTEM_LABELS = {
     "com.apple.ManagedClient": "ManagedClient",
 }
 
-# Subsystem filter options shown in the dropdown (label, subsystem value).
+
 AUTH_SUBSYSTEM_OPTIONS = [
     ("all subsystems", ""),
     ("TCC (privacy access)", "com.apple.TCC"),
@@ -2073,143 +1806,6 @@ def verdict_timeseries(session: Session, hours: int = 12) -> dict:
     return {"labels": labels, "datasets": datasets}
 
 
-# ============================================================================
-# Routes — full page + HTMX fragments + chart JSON
-# ============================================================================
-
-
-@app.route("/")
-def index():
-    return render_template("dashboard.html")
-
-
-@app.route("/fragments/header-meta")
-def fragment_header_meta():
-    with _session() as s:
-        return render_template(
-            "partials/_header_meta.html",
-            latest_run=latest_run(s),
-        )
-
-
-@app.route("/fragments/overview")
-def fragment_overview():
-    with _session() as s:
-        latest = latest_run(s)
-        return render_template(
-            "partials/_overview.html",
-            latest_run=latest,
-            runs_total=runs_total(s),
-            verdict_counts=verdict_counts(s),
-            judged_this_run=(judged_since(s, latest.started_at) if latest else 0),
-            cost_this_run=(cost_since(s, latest.started_at) if latest else 0.0),
-        )
-
-
-def _sparkline_points(scores: list, w: int = 140, h: int = 30, pad: int = 3) -> str:
-    """SVG polyline points for a 0-100 score series (oldest→newest)."""
-    if not scores:
-        return ""
-    pts = scores if len(scores) > 1 else scores * 2
-    n = len(pts)
-    span_x = (w - 2 * pad) / (n - 1)
-    out = []
-    for i, s in enumerate(pts):
-        x = pad + i * span_x
-        y = (h - pad) - (max(0, min(100, s)) / 100) * (h - 2 * pad)
-        out.append(f"{x:.1f},{y:.1f}")
-    return " ".join(out)
-
-
-@app.route("/fragments/risk")
-def fragment_risk():
-    with _session() as s:
-        row = latest_risk(s)
-        drivers = _parse_json_list(getattr(row, "drivers_json", None)) if row else []
-        trend = risk_trend(s)
-        return render_template(
-            "partials/_risk.html",
-            risk=row,
-            drivers=drivers,
-            spark_points=_sparkline_points(trend),
-            trend_len=len(trend),
-        )
-
-
-@app.route("/fragments/incident")
-def fragment_incident():
-    with _session() as s:
-        row = latest_narrative(s)
-        timeline = _parse_json_list(getattr(row, "timeline_json", None)) if row else []
-        actions = _parse_json_list(getattr(row, "actions_json", None)) if row else []
-        return render_template(
-            "partials/_incident.html",
-            narrative=row,
-            timeline=timeline,
-            actions=actions,
-        )
-
-
-@app.route("/fragments/verdicts")
-def fragment_verdicts():
-    """Merged verdicts panel: all-time totals donut + last-12h trend."""
-    with _session() as s:
-        return render_template(
-            "partials/_verdicts.html", verdict_counts=verdict_counts(s)
-        )
-
-
-@app.route("/fragments/posture")
-def fragment_posture():
-    """Merged posture panel: risk score + system-integrity checklist."""
-    with _session() as s:
-        latest = latest_run(s)
-        row = latest_risk(s)
-        drivers = _parse_json_list(getattr(row, "drivers_json", None)) if row else []
-        trend = risk_trend(s)
-        return render_template(
-            "partials/_posture.html",
-            risk=row,
-            drivers=drivers,
-            spark_points=_sparkline_points(trend),
-            trend_len=len(trend),
-            sysint=(system_integrity(s, latest.run_id) if latest else None),
-        )
-
-
-@app.route("/fragments/collection")
-def fragment_collection():
-    """Merged collection-health panel: row counts + recent runs + errors."""
-    with _session() as s:
-        latest = latest_run(s)
-        prid, pst = _prior_run(s, latest.started_at) if latest else (None, None)
-        return render_template(
-            "partials/_collection.html",
-            recent_runs=recent_runs(s),
-            errors=(collector_errors(s, latest.run_id) if latest else []),
-            row_counts=(
-                row_counts(s, latest.run_id, latest.started_at, prid, pst)
-                if latest
-                else []
-            ),
-        )
-
-
-@app.route("/fragments/network")
-def fragment_network():
-    """Tabbed network panel wrapper (tabs lazy-load the existing fragments)."""
-    return render_template("partials/_network.html")
-
-
-@app.route("/fragments/vulnerabilities")
-def fragment_vulnerabilities():
-    """CVE / EOL 'protect yourself' panel from collected enrichment evidence."""
-    with _session() as s:
-        return render_template(
-            "partials/_vulnerabilities.html", vulns=vulnerabilities(s)
-        )
-
-
 def _parse_json_list(raw) -> list:
     """Defensively parse a stored JSON array column; [] on any problem."""
     if not raw:
@@ -2230,370 +1826,3 @@ def _parse_json_obj(raw) -> dict:
         return val if isinstance(val, dict) else {}
     except (ValueError, TypeError):
         return {}
-
-
-@app.route("/fragments/sysint")
-def fragment_sysint():
-    with _session() as s:
-        latest = latest_run(s)
-        return render_template(
-            "partials/_sysint.html",
-            sysint=(system_integrity(s, latest.run_id) if latest else None),
-        )
-
-
-@app.route("/fragments/network-flows")
-def fragment_network_flows():
-    verdict = request.args.get("verdict", "")
-    q = request.args.get("q", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
-    with _session() as s:
-        latest = latest_run(s)
-        return render_template(
-            "partials/_network_flows.html",
-            flows=(
-                network_flows(
-                    s, latest.run_id, verdict=verdict, q=q, page=page, per_page=per_page
-                )
-                if latest
-                else None
-            ),
-            per_page_options=PER_PAGE_OPTIONS,
-        )
-
-
-@app.route("/fragments/listening-ports")
-def fragment_listening_ports():
-    verdict = request.args.get("verdict", "")
-    scope_filter = request.args.get("scope_filter", "")
-    q = request.args.get("q", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
-    with _session() as s:
-        latest = latest_run(s)
-        return render_template(
-            "partials/_listening_ports.html",
-            ports=(
-                listening_ports(
-                    s,
-                    latest.run_id,
-                    verdict=verdict,
-                    scope_filter=scope_filter,
-                    q=q,
-                    page=page,
-                    per_page=per_page,
-                )
-                if latest
-                else None
-            ),
-            per_page_options=PER_PAGE_OPTIONS,
-        )
-
-
-@app.route("/fragments/dns-queries")
-def fragment_dns_queries():
-    verdict = request.args.get("verdict", "")
-    level = request.args.get("level", "")
-    q = request.args.get("q", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
-    with _session() as s:
-        latest = latest_run(s)
-        return render_template(
-            "partials/_dns_queries.html",
-            dns=(
-                dns_queries(
-                    s,
-                    latest.run_id,
-                    verdict=verdict,
-                    level=level,
-                    q=q,
-                    page=page,
-                    per_page=per_page,
-                )
-                if latest
-                else None
-            ),
-            per_page_options=PER_PAGE_OPTIONS,
-        )
-
-
-@app.route("/fragments/persistence")
-def fragment_persistence():
-    verdict = request.args.get("verdict", "")
-    q = request.args.get("q", "")
-    ssh_page = _int_arg("ssh_page", 1)
-    hosts_page = _int_arg("hosts_page", 1)
-    priv_page = _int_arg("priv_page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
-    with _session() as s:
-        latest = latest_run(s)
-        return render_template(
-            "partials/_persistence.html",
-            data=(
-                persistence_tampering(
-                    s,
-                    latest.run_id,
-                    verdict=verdict,
-                    q=q,
-                    ssh_page=ssh_page,
-                    hosts_page=hosts_page,
-                    priv_page=priv_page,
-                    per_page=per_page,
-                )
-                if latest
-                else None
-            ),
-            per_page_options=PER_PAGE_OPTIONS,
-        )
-
-
-@app.route("/fragments/auth-events")
-def fragment_auth_events():
-    q = request.args.get("q", "")
-    subsystem = request.args.get("subsystem", "")
-    verdict = request.args.get("verdict", "")
-    sort = request.args.get("sort", "count")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
-    with _session() as s:
-        return render_template(
-            "partials/_auth_events.html",
-            events=auth_events_aggregated(
-                s,
-                q=q,
-                subsystem=subsystem,
-                verdict=verdict,
-                sort=sort,
-                page=page,
-                per_page=per_page,
-            ),
-            per_page_options=PER_PAGE_OPTIONS,
-        )
-
-
-@app.route("/fragments/errors")
-def fragment_errors():
-    with _session() as s:
-        latest = latest_run(s)
-        return render_template(
-            "partials/_errors.html",
-            errors=(collector_errors(s, latest.run_id) if latest else []),
-        )
-
-
-def _int_arg(name: str, default: int) -> int:
-    raw = request.args.get(name, "")
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-@app.route("/fragments/findings")
-def fragment_findings():
-    verdict = request.args.get("verdict", "")
-    collector = request.args.get("collector", "")
-    category = request.args.get("category", "")
-    search = request.args.get("q", "")
-    status = request.args.get("status", "active")
-    sort = request.args.get("sort", "severity")
-    order = request.args.get("order", "desc")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
-
-    with _session() as s:
-        result = findings(
-            s,
-            verdict=verdict,
-            collector=collector,
-            category=category,
-            search=search,
-            status=status,
-            sort=sort,
-            order=order,
-            page=page,
-            per_page=per_page,
-        )
-        return render_template(
-            "partials/_findings.html",
-            findings=result["items"],
-            total=result["total"],
-            page=result["page"],
-            per_page=result["per_page"],
-            total_pages=result["total_pages"],
-            verdict_filter=verdict,
-            collector_filter=collector,
-            category_filter=category,
-            status_filter=status,
-            q=search,
-            sort=sort,
-            order=order,
-            collector_options=collector_options(s),
-            category_options=category_options(s),
-            per_page_options=PER_PAGE_OPTIONS,
-        )
-
-
-@app.route("/fragments/row-counts")
-def fragment_row_counts():
-    with _session() as s:
-        latest = latest_run(s)
-        if latest is None:
-            return render_template("partials/_row_counts.html", row_counts=[])
-        prid, pst = _prior_run(s, latest.started_at)
-        return render_template(
-            "partials/_row_counts.html",
-            row_counts=row_counts(s, latest.run_id, latest.started_at, prid, pst),
-        )
-
-
-def _prior_run(session: Session, before_started: str) -> tuple[str | None, str | None]:
-    """``(run_id, started_at)`` of the run immediately before
-    ``before_started``, or ``(None, None)`` if it's the first run."""
-    row = session.execute(
-        select(CollectionRun.run_id, CollectionRun.started_at)
-        .where(CollectionRun.started_at < before_started)
-        .order_by(desc(CollectionRun.started_at))
-        .limit(1)
-    ).first()
-    return (row[0], row[1]) if row else (None, None)
-
-
-@app.route("/fragments/runs")
-def fragment_runs():
-    with _session() as s:
-        return render_template(
-            "partials/_runs.html",
-            recent_runs=recent_runs(s),
-        )
-
-
-@app.route("/api/chart/verdicts")
-def api_chart_verdicts():
-    with _session() as s:
-        return jsonify(verdict_timeseries(s, hours=12))
-
-
-@app.route("/api/notifications/new")
-def api_notifications_new():
-    """Return malicious/suspicious judgements created after ``?since``.
-    The client supplies its last-seen timestamp (persisted in
-    localStorage). The response also includes ``now`` so the client can
-    advance its cursor even when there are no new items, avoiding
-    re-alerting on the same gap if the timestamp ever changed."""
-    since = request.args.get("since", "")
-    with _session() as s:
-        items = new_alerts(s, since=since or None)
-    return jsonify(
-        {
-            "since": since,
-            "items": items,
-            "now": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
-    )
-
-
-# ============================================================================
-# Entry point
-# ============================================================================
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="avai — read-only Flask + HTMX dashboard for the host monitor DB"
-    )
-    # Bare `avai dashboard` reads ~/.avai/avai.db on :8765 (the monitor's
-    # defaults) so it Just Works without flags.
-    parser.add_argument("--db", default=str(DEFAULT_DB_PATH))
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument(
-        "--open",
-        action="store_true",
-        help="open the dashboard in your default browser once it's serving",
-    )
-    return parser
-
-
-def main() -> int:
-    args = _build_parser().parse_args()
-
-    app.config["DB_PATH"] = args.db
-    _ensure_db_exists(args.db)
-    _serve(args.host, args.port, args.debug, args.open)
-    return 0
-
-
-def _open_browser(host: str, port: int) -> None:
-    """Open the dashboard in the default browser after a short delay so the
-    server has time to bind the socket. 0.0.0.0/:: aren't routable from a
-    browser, so point at loopback instead."""
-    url_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
-    threading.Timer(1.0, lambda: webbrowser.open(f"http://{url_host}:{port}")).start()
-
-
-def _serve(host: str, port: int, debug: bool, open_browser: bool = False) -> None:
-    """Serve the dashboard. In normal use we run on waitress, a real
-    (pure-Python, cross-platform) WSGI server, so there's no "this is a
-    development server" warning. ``--debug`` falls back to Werkzeug's
-    reloader/debugger (dev only), and if waitress somehow isn't installed
-    we degrade to the dev server rather than failing to start."""
-    if open_browser:
-        _open_browser(host, port)
-    if not debug:
-        try:
-            from waitress import serve
-
-            print(
-                f" * avai dashboard on http://{host}:{port}  (Ctrl-C to quit)",
-                flush=True,
-            )
-            # ~10 HTMX fragments fire in parallel on every page load/poll
-            # (7 × every-30s + 3 × every-60s + JS alerts). 16 threads absorbs
-            # that burst without queuing; extras sit idle otherwise.
-            serve(app, host=host, port=port, threads=16)
-            return
-        except ImportError:
-            print(
-                " * waitress not installed — falling back to the dev server",
-                file=sys.stderr,
-            )
-    app.run(host=host, port=port, debug=debug)
-
-
-def _ensure_db_exists(db_path: str) -> None:
-    """Create an empty schema if the DB file doesn't exist yet.
-
-    The dashboard opens the database read-only with ``immutable=1``,
-    which SQLite *refuses* to apply to a non-existent file (the
-    immutable flag promises the file won't change — there's no file
-    to promise about). Without this, a dashboard launched before the
-    monitor has run produces 500s on every query.
-
-    Creating the schema also makes empty-state rendering work: every
-    table exists, every query returns zero rows, every panel renders
-    empty rather than erroring.
-    """
-    db_file = Path(db_path)
-    if db_file.exists() and db_file.stat().st_size > 0:
-        return
-    db_file.parent.mkdir(parents=True, exist_ok=True)
-    # Register the enrichment model on Base.metadata before create_all,
-    # so a dashboard-only deployment (no monitor co-located) still gets
-    # the enrichment_evidence table — otherwise any dashboard query
-    # against it 500s.
-    from avai.enrichers.cache import register_schema
-
-    register_schema(Base)
-    write_engine = create_engine(f"sqlite:///{db_path}")
-    try:
-        Base.metadata.create_all(write_engine)
-    finally:
-        write_engine.dispose()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
