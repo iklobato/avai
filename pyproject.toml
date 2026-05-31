@@ -54,6 +54,9 @@ dependencies = [
     # Production WSGI server for the dashboard (pure-Python, cross-platform)
     # so `avai dashboard` doesn't run on Werkzeug's dev server.
     "waitress>=3.0",
+    # Schema migrations (indexes / future changes) applied on monitor startup
+    # and via `avai migrate`.
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
