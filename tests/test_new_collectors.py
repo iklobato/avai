@@ -59,10 +59,11 @@ class TestProcessAttribution:
             SimpleNamespace(raddr=SimpleNamespace(ip="1.2.3.4", port=53), pid=None),
         ]
         monkeypatch.setattr(
-            "avai.host_monitor.psutil.net_connections", lambda kind="inet": conns
+            "avai.host_monitor.collectors.psutil.net_connections",
+            lambda kind="inet": conns,
         )
         monkeypatch.setattr(
-            "avai.host_monitor.psutil.Process",
+            "avai.host_monitor.collectors.psutil.Process",
             lambda pid: SimpleNamespace(name=lambda: "curl"),
         )
         snap = ProcessConnectionResolver().snapshot()

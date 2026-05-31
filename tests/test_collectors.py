@@ -29,15 +29,15 @@ from avai.host_monitor import LinuxLaunchItemsCollector, host_path, host_paths_f
 
 class TestHostPath:
     def test_passthrough_without_prefix(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
         assert host_path("/etc/passwd") == Path("/etc/passwd")
 
     def test_prepends_prefix_when_set(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "/host")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
         assert host_path("/etc/passwd") == Path("/host/etc/passwd")
 
     def test_relative_path_is_passthrough_even_with_prefix(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "/host")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
         assert host_path("relative/dir") == Path("relative/dir")
 
 
@@ -49,12 +49,12 @@ class TestHostPath:
 
 class TestHostPathsForHome:
     def test_absolute_template_returns_single_translated_path(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "/host")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
         out = host_paths_for_home("/etc/systemd/system")
         assert out == [Path("/host/etc/systemd/system")]
 
     def test_home_template_without_prefix_expands_user_home(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
         out = host_paths_for_home("~/.config/systemd/user")
         assert len(out) == 1
         assert str(out[0]).endswith("/.config/systemd/user")
@@ -64,7 +64,7 @@ class TestHostPathsForHome:
         self, tmp_path, monkeypatch
     ):
         # Simulate /host/home/alice and /host/home/bob + /host/root.
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         (tmp_path / "home" / "alice").mkdir(parents=True)
         (tmp_path / "home" / "bob").mkdir(parents=True)
         (tmp_path / "root").mkdir()
@@ -82,11 +82,11 @@ class TestHostPathsForHome:
         # HOST_PREFIX is set, but neither <prefix>/home nor <prefix>/root
         # exist (e.g. only /proc and /sys were bind-mounted). The
         # function must return [] — and callers must tolerate it.
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         assert host_paths_for_home("~/.config/systemd/user") == []
 
     def test_only_root_home_present(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         (tmp_path / "root").mkdir()
         out = host_paths_for_home("~/.config/systemd/user")
         assert len(out) == 1
@@ -110,7 +110,7 @@ class TestLinuxLaunchItemsCollect:
         no /host/home and no /host/root present. Pre-fix this raised
         IndexError and killed the collector; post-fix it must complete
         and still return the system units it can see."""
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         _write_unit(
             tmp_path,
             "/etc/systemd/system",
@@ -130,7 +130,7 @@ class TestLinuxLaunchItemsCollect:
         assert row["run_at_load"] == 1  # has [Install] WantedBy
 
     def test_collects_user_units_when_homes_present(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         _write_unit(
             tmp_path,
             "home/alice/.config/systemd/user",
@@ -143,11 +143,11 @@ class TestLinuxLaunchItemsCollect:
     def test_empty_prefix_tree_yields_nothing_no_crash(self, tmp_path, monkeypatch):
         # HOST_PREFIX points at an empty dir → no unit dirs exist → the
         # collector yields nothing and does not raise.
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         assert list(LinuxLaunchItemsCollector().collect()) == []
 
     def test_systemd_first_wins_dedup_across_dirs(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         # Same unit name in /etc (higher precedence) and /lib.
         _write_unit(
             tmp_path,
