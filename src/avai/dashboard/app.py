@@ -1,16 +1,60 @@
 """Flask app, config, Jinja template filters, and all HTTP routes."""
+
 from __future__ import annotations
 
+import hmac
+import os
 import re
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
-from flask import Flask, jsonify, render_template, request
+
+from flask import Flask, abort, jsonify, render_template, request
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
+
 from avai.host_monitor import CollectionRun
 
-from .queries import DEFAULT_DB_PATH, DEFAULT_PER_PAGE, PER_PAGE_OPTIONS, _parse_json_list, _session, auth_events_aggregated, category_options, collector_errors, collector_options, cost_since, dns_queries, findings, judged_since, latest_narrative, latest_risk, latest_run, listening_ports, network_flows, new_alerts, persistence_tampering, recent_runs, risk_trend, row_counts, runs_total, system_integrity, verdict_counts, verdict_timeseries, vulnerabilities
-
+from .control import (
+    bump_scan_now,
+    monitor_alive,
+    queue_command,
+    read_control_state,
+    set_collector,
+    set_paused,
+    set_settings,
+)
+from .queries import (
+    COLLECTOR_MODELS,
+    DEFAULT_DB_PATH,
+    DEFAULT_PER_PAGE,
+    PER_PAGE_OPTIONS,
+    _parse_json_list,
+    _session,
+    auth_events_aggregated,
+    category_options,
+    collector_errors,
+    collector_options,
+    cost_since,
+    dns_queries,
+    findings,
+    judged_since,
+    latest_narrative,
+    latest_risk,
+    latest_run,
+    listening_ports,
+    network_flows,
+    new_alerts,
+    persistence_tampering,
+    recent_runs,
+    risk_trend,
+    row_counts,
+    runs_total,
+    system_integrity,
+    verdict_counts,
+    verdict_timeseries,
+    vulnerabilities,
+)
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
 
@@ -592,3 +636,100 @@ def api_notifications_new():
             "now": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
     )
+
+
+# ============================================================================
+# Cooperative control plane — POST routes write the control_state row that the
+# monitor obeys. Guarded by a shared-secret token (fail closed when unset).
+# ============================================================================
+
+_MAINTENANCE_ACTIONS = {"prune", "clear", "rejudge", "renarrate", "reset_baseline"}
+
+
+def require_control_token(fn):
+    """Gate a control action behind ``AVAI_CONTROL_TOKEN``. Fails closed: if
+    the env var is unset, control is disabled entirely (403). The token is
+    read from the ``X-Avai-Token`` header — a custom header can't be set by a
+    cross-site form, so it doubles as the CSRF defence."""
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        token = os.environ.get("AVAI_CONTROL_TOKEN")
+        supplied = request.headers.get("X-Avai-Token", "")
+        if not token or not hmac.compare_digest(token, supplied):
+            abort(403)
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _control_panel():
+    state = read_control_state()
+    return render_template(
+        "partials/_control.html",
+        ctrl=state,
+        alive=monitor_alive(state),
+        collectors=sorted(COLLECTOR_MODELS),
+        control_enabled=bool(os.environ.get("AVAI_CONTROL_TOKEN")),
+    )
+
+
+@app.route("/fragments/control")
+def fragment_control():
+    return _control_panel()
+
+
+@app.route("/control/pause", methods=["POST"])
+@require_control_token
+def control_pause():
+    set_paused(True)
+    return _control_panel()
+
+
+@app.route("/control/resume", methods=["POST"])
+@require_control_token
+def control_resume():
+    set_paused(False)
+    return _control_panel()
+
+
+@app.route("/control/scan-now", methods=["POST"])
+@require_control_token
+def control_scan_now():
+    bump_scan_now()
+    return _control_panel()
+
+
+@app.route("/control/collector/<name>/<state>", methods=["POST"])
+@require_control_token
+def control_collector(name, state):
+    if name not in COLLECTOR_MODELS or state not in ("on", "off"):
+        abort(400)
+    set_collector(name, enabled=(state == "on"))
+    return _control_panel()
+
+
+@app.route("/control/settings", methods=["POST"])
+@require_control_token
+def control_settings():
+    def _int(field):
+        v = request.form.get(field, "").strip()
+        return int(v) if v.isdigit() else None
+
+    def _bool(field):
+        v = request.form.get(field)
+        return None if v is None else v in ("1", "true", "on", "yes")
+
+    set_settings(
+        interval=_int("interval"), judge=_bool("judge"), enrich=_bool("enrich")
+    )
+    return _control_panel()
+
+
+@app.route("/control/maintenance/<action>", methods=["POST"])
+@require_control_token
+def control_maintenance(action):
+    if action not in _MAINTENANCE_ACTIONS:
+        abort(400)
+    queue_command(action)
+    return _control_panel()

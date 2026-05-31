@@ -1,20 +1,22 @@
 """Orchestrator: drives collectors against the sink each cycle."""
+
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
 from typing import Optional
 
-from .enums import Verdict
-from .constants import DEFAULT_BASELINE_MIN_RUNS, LOG, _CORRELATED_COLLECTOR
-from .shell import content_hash, utcnow
-from .risk import compute_risk_score
-from .judge import Judge
-from .narrator import IncidentNarrator
-from .sink import Sink
 from .collectors import Collector, SnapshotCollector, StreamingCollector
+from .constants import _CORRELATED_COLLECTOR, DEFAULT_BASELINE_MIN_RUNS, LOG
+from .enums import Verdict
+from .judge import Judge, NullJudge
+from .narrator import IncidentNarrator
+from .risk import compute_risk_score
+from .shell import content_hash, utcnow
+from .sink import Sink
 from .streaming import StreamingWorker
 
 
@@ -52,10 +54,75 @@ class Runner:
         # so the enrichers package's `requests` dep is only needed when
         # enrichment is on.
         self._enrichment_chain = enrichment_chain
+        # Cooperative control plane (see models.ControlState). The dashboard
+        # writes intent to the control row; we refresh this cache each cycle
+        # and obey. Defaults below are what "None" (unset) in the row means.
+        self._control: dict = {}
+        self._default_judge_on = not isinstance(judge, NullJudge)
+        self._default_enrich_on = enrichment_chain is not None
 
     def request_shutdown(self) -> None:
         """Idempotent — safe to call from a signal handler."""
         self.shutdown_event.set()
+
+    # ----- cooperative control: read the row, derive effective settings -----
+
+    def _refresh_control(self) -> dict:
+        self._control = self.sink.read_control() or {}
+        return self._control
+
+    def _disabled_collectors(self) -> set[str]:
+        raw = self._control.get("disabled_collectors")
+        return {s.strip() for s in raw.split(",") if s.strip()} if raw else set()
+
+    def _judge_on(self) -> bool:
+        v = self._control.get("judge_enabled")
+        return self._default_judge_on if v is None else bool(v)
+
+    def _enrich_on(self) -> bool:
+        v = self._control.get("enrich_enabled")
+        return self._default_enrich_on if v is None else bool(v)
+
+    def _heartbeat(self, status: str, current_interval: int) -> None:
+        try:
+            self.sink.write_heartbeat(
+                pid=os.getpid(), status=status, current_interval=current_interval
+            )
+        except Exception:
+            LOG.exception("heartbeat write failed")
+
+    def _run_pending_command(self, ctrl: dict) -> None:
+        """Execute a one-shot maintenance command if a new nonce is present,
+        then acknowledge it. Best-effort: a failed command must not kill the
+        loop."""
+        nonce = ctrl.get("command_nonce", 0)
+        if nonce == ctrl.get("command_applied", 0):
+            return
+        cmd = ctrl.get("command")
+        try:
+            result = self._dispatch_command(cmd)
+        except Exception as exc:  # noqa: BLE001
+            LOG.exception("control command %s failed", cmd)
+            result = f"error: {type(exc).__name__}: {str(exc)[:120]}"
+        self.sink.ack_command(nonce, result)
+        LOG.info("control command applied: %s -> %s", cmd, result)
+
+    def _dispatch_command(self, cmd: Optional[str]) -> str:
+        if cmd == "prune":
+            stats = self.sink.prune_to_size(self.max_db_bytes or 0)
+            return (
+                f"pruned runs={stats['runs_pruned']} "
+                f"events={stats['events_pruned']}"
+            )
+        if cmd == "clear":
+            return f"cleared {self.sink.clear_data()} rows"
+        if cmd == "rejudge":
+            return f"cleared {self.sink.clear_judgements()} judgements"
+        if cmd == "renarrate":
+            return f"cleared {self.sink.clear_narratives()} narratives"
+        if cmd == "reset_baseline":
+            return f"reset baseline ({self.sink.reset_baseline()} runs dropped)"
+        return f"unknown command: {cmd}"
 
     def setup(self) -> None:
         self.sink.setup()
@@ -78,11 +145,15 @@ class Runner:
         self._streaming_workers.clear()
 
     def run_once(self) -> tuple[str, int, int]:
+        # Refresh the control cache so --once and the daemon loop both honour
+        # disabled-collector / judge / enrich toggles set from the dashboard.
+        self._refresh_control()
         run_id, started = self.sink.start_run(socket.gethostname(), self.lookback_min)
         # Snapshot the host's baseline state once: it can't change mid-cycle
         # (the current run isn't completed yet), and every collector shares
         # the same cutoff.
         host_baseline = self._host_baseline()
+        disabled = self._disabled_collectors()
         ok = failed = 0
         for c in self.snapshot_collectors:
             # Honour a shutdown request mid-cycle. The first cycle judges
@@ -92,6 +163,8 @@ class Runner:
             if self.shutdown_event.is_set():
                 LOG.info("shutdown requested — stopping collector loop early")
                 break
+            if c.name in disabled:
+                continue
             try:
                 self._run_collector(c, run_id, started, host_baseline)
                 ok += 1
@@ -283,7 +356,10 @@ class Runner:
         enriched_indicators = 0
         if c.judge_enabled and c.judge_fields:
             unjudged = self.sink.unjudged(c)
-            if unjudged:
+            # Judging (and its enrichment) is gated by the live control
+            # toggle; touch_judgments still runs below so already-recorded
+            # findings keep an accurate active/resolved status.
+            if unjudged and self._judge_on():
                 enriched_indicators = self._enrich_entries(c, unjudged, rows)
                 self._annotate_baseline(c, unjudged, host_baseline)
                 self._attach_correlation(c, unjudged, rows, run_id)
@@ -321,7 +397,7 @@ class Runner:
         for the per-collector log line.
         """
         chain = self._enrichment_chain
-        if chain is None:
+        if chain is None or not self._enrich_on():
             return 0
         from avai.enrichers import extract_indicators
 
@@ -363,8 +439,15 @@ class Runner:
         streaming collectors since the previous cycle. Uses
         ``Sink.unjudged_all`` so streaming rows (which aren't tied to
         a CollectionRun.run_id) are still classified once each."""
+        if not self._judge_on():
+            return
+        disabled = self._disabled_collectors()
         for c in self.streaming_collectors:
             if not (c.judge_enabled and c.judge_fields):
+                continue
+            # A disabled streaming collector keeps its background worker
+            # running (workers start once at boot) but is no longer judged.
+            if c.name in disabled:
                 continue
             try:
                 unjudged = self.sink.unjudged_all(c)
@@ -491,17 +574,38 @@ class Runner:
             parts.append("Resolved: " + "; ".join(sorted(removed)[:4]) + ".")
         return " ".join(parts)
 
+    # How often the loop wakes to poll the control row. Bounds the latency
+    # of pause / resume / scan-now / maintenance commands (the dashboard
+    # can't signal us directly — there is no IPC, only the shared DB).
+    _CONTROL_POLL_SECONDS = 3.0
+
     def run_forever(self, interval: int) -> None:
+        # Scan immediately on the first tick, then every effective interval.
+        next_scan = time.monotonic()
         while not self.shutdown_event.is_set():
-            t0 = time.monotonic()
-            try:
-                run_id, ok, failed = self.run_once()
-                LOG.info("run complete run_id=%s ok=%d failed=%d", run_id, ok, failed)
-            except Exception:
-                LOG.exception("run failed")
-            sleep_for = max(0.0, interval - (time.monotonic() - t0))
-            LOG.info("sleeping %.1fs", sleep_for)
-            # Event-driven sleep: returns immediately when shutdown is
-            # requested, without depending on signal-interrupting time.sleep
-            # (which is unreliable when other threads exist).
-            self.shutdown_event.wait(timeout=sleep_for)
+            ctrl = self._refresh_control()
+            self._run_pending_command(ctrl)  # one-shot maintenance, even if paused
+            effective = ctrl.get("interval_override") or interval
+            paused = bool(ctrl.get("paused"))
+            scan_now = ctrl.get("scan_now_nonce", 0) != ctrl.get("scan_now_applied", 0)
+
+            if scan_now or (time.monotonic() >= next_scan and not paused):
+                if scan_now:
+                    # Scan-now runs one cycle even while paused.
+                    self.sink.ack_scan_now(ctrl["scan_now_nonce"])
+                self._heartbeat("scanning", effective)
+                t0 = time.monotonic()
+                try:
+                    run_id, ok, failed = self.run_once()
+                    LOG.info(
+                        "run complete run_id=%s ok=%d failed=%d", run_id, ok, failed
+                    )
+                except Exception:
+                    LOG.exception("run failed")
+                next_scan = t0 + effective
+            else:
+                self._heartbeat("paused" if paused else "running", effective)
+
+            # Short poll-sleep (still backed by shutdown_event so SIGINT/SIGTERM
+            # stay responsive within one poll interval).
+            self.shutdown_event.wait(timeout=self._CONTROL_POLL_SECONDS)

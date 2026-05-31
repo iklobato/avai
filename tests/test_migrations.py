@@ -28,6 +28,17 @@ def _indexes(db: str) -> set[str]:
         con.close()
 
 
+def _tables(db: str) -> set[str]:
+    con = sqlite3.connect(db)
+    try:
+        return {
+            r[0]
+            for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    finally:
+        con.close()
+
+
 def _version(db: str) -> str | None:
     con = sqlite3.connect(db)
     try:
@@ -41,7 +52,8 @@ def test_sink_setup_applies_migrations(tmp_path):
     db = str(tmp_path / "a.db")
     Sink(create_engine(f"sqlite:///{db}")).setup()
     assert set(_IDX) <= _indexes(db)
-    assert _version(db) == "0002_perf_indexes"
+    assert "control_state" in _tables(db)
+    assert _version(db) == "0003_control_state"
 
 
 def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
@@ -62,7 +74,7 @@ def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
 
     upgrade_to_head(f"sqlite:///{db}")  # stamps baseline then adds indexes
     assert set(_IDX) <= _indexes(db)
-    assert _version(db) == "0002_perf_indexes"
+    assert _version(db) == "0003_control_state"
 
 
 def test_downgrade_then_upgrade_roundtrip(tmp_path):
@@ -77,3 +89,25 @@ def test_downgrade_then_upgrade_roundtrip(tmp_path):
 
     command.upgrade(_config(f"sqlite:///{db}"), "head")
     assert set(_IDX) <= _indexes(db)  # recreated
+
+
+def test_control_state_migration_roundtrip(tmp_path):
+    from alembic import command
+
+    db = str(tmp_path / "d.db")
+    eng = create_engine(f"sqlite:///{db}")
+    # Emulate an older DB without control_state: stamp at 0002 and drop it.
+    Base.metadata.create_all(eng)
+    con = sqlite3.connect(db)
+    con.execute("DROP TABLE IF EXISTS control_state")
+    con.commit()
+    con.close()
+    eng.dispose()
+    command.stamp(_config(f"sqlite:///{db}"), "0002_perf_indexes")
+
+    command.upgrade(_config(f"sqlite:///{db}"), "head")
+    assert "control_state" in _tables(db)
+    assert _version(db) == "0003_control_state"
+
+    command.downgrade(_config(f"sqlite:///{db}"), "0002_perf_indexes")
+    assert "control_state" not in _tables(db)

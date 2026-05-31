@@ -30,6 +30,7 @@ from .models import (
     Base,
     CollectionRun,
     CollectorErrorRow,
+    ControlState,
     DnsQueryRow,
     IncidentNarrativeRow,
     Judgement,
@@ -708,6 +709,123 @@ class Sink:
                 .values(finished_at=utcnow(), row_count=row_count)
             )
             session.commit()
+
+    # ----- cooperative control plane (see models.ControlState) -----
+
+    def ensure_control_row(
+        self, *, interval: int, judge_enabled: bool, enrich_enabled: bool
+    ) -> None:
+        """Seed the single control row (id=1) with the monitor's startup
+        settings so the dashboard reflects reality. No-op if it already
+        exists — control state persists across restarts by design."""
+        with Session(self.engine) as session:
+            session.execute(
+                sqlite_insert(ControlState)
+                .values(
+                    id=1,
+                    paused=0,
+                    interval_override=interval,
+                    judge_enabled=int(judge_enabled),
+                    enrich_enabled=int(enrich_enabled),
+                )
+                .on_conflict_do_nothing()
+            )
+            session.commit()
+
+    def read_control(self) -> Optional[dict]:
+        """Return the control row as a plain dict, or None. Best-effort: a
+        control read must never crash the monitor loop."""
+        try:
+            with Session(self.engine) as session:
+                row = session.get(ControlState, 1)
+                if row is None:
+                    return None
+                return {
+                    c.name: getattr(row, c.name) for c in ControlState.__table__.columns
+                }
+        except Exception:
+            LOG.exception("read_control failed")
+            return None
+
+    def write_heartbeat(self, *, pid: int, status: str, current_interval: int) -> None:
+        now = utcnow()
+        with Session(self.engine) as session:
+            session.execute(
+                update(ControlState)
+                .where(ControlState.id == 1)
+                .values(
+                    pid=pid,
+                    status=status,
+                    current_interval=current_interval,
+                    last_seen_at=now,
+                    applied_at=now,
+                )
+            )
+            session.commit()
+
+    def ack_scan_now(self, nonce: int) -> None:
+        with Session(self.engine) as session:
+            session.execute(
+                update(ControlState)
+                .where(ControlState.id == 1)
+                .values(scan_now_applied=nonce)
+            )
+            session.commit()
+
+    def ack_command(self, nonce: int, result: str) -> None:
+        with Session(self.engine) as session:
+            session.execute(
+                update(ControlState)
+                .where(ControlState.id == 1)
+                .values(command_applied=nonce, command_result=result)
+            )
+            session.commit()
+
+    # ----- maintenance helpers (invoked by Runner on a one-shot command) -----
+
+    def clear_data(self) -> int:
+        """Wipe all collected telemetry, runs, judgements, narratives, and
+        risk scores — a clean slate. Keeps control_state and the enrichment
+        cache. Returns the number of rows deleted."""
+        models = [
+            *_RowBase.__subclasses__(),
+            CollectionRun,
+            CollectorErrorRow,
+            StreamingSession,
+            Judgement,
+            IncidentNarrativeRow,
+            RiskScoreRow,
+        ]
+        deleted = 0
+        with Session(self.engine) as session:
+            for model in models:
+                deleted += session.execute(delete(model)).rowcount or 0
+            session.commit()
+        return deleted
+
+    def clear_judgements(self) -> int:
+        """Delete all verdicts so the next cycles re-judge from scratch
+        (the unjudged-selection logic keys off the absence of a row)."""
+        with Session(self.engine) as session:
+            n = session.execute(delete(Judgement)).rowcount or 0
+            session.commit()
+        return n
+
+    def clear_narratives(self) -> int:
+        """Delete incident digests so the narrator regenerates next cycle."""
+        with Session(self.engine) as session:
+            n = session.execute(delete(IncidentNarrativeRow)).rowcount or 0
+            session.commit()
+        return n
+
+    def reset_baseline(self) -> int:
+        """Forget the host's learned-normal: drop run history so
+        completed_run_count falls below baseline_min_runs and novelty
+        re-learns over the next runs."""
+        with Session(self.engine) as session:
+            n = session.execute(delete(CollectionRun)).rowcount or 0
+            session.commit()
+        return n
 
 
 def _set_sqlite_pragmas(dbapi_conn, _connection_record):

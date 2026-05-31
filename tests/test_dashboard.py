@@ -765,3 +765,81 @@ class TestLatestRunFallback:
         sink = self._sink(tmp_path)
         with Session(sink.engine) as s:
             assert latest_run(s) is None
+
+
+# ---------------------------------------------------------------------------
+# Cooperative control plane — token auth + control writes
+# ---------------------------------------------------------------------------
+
+
+class TestControlPlane:
+    def _state(self):
+        from avai.dashboard.control import read_control_state
+
+        with app.app_context():
+            return read_control_state()
+
+    def test_fragment_control_renders(self, client):
+        r = client.get("/fragments/control")
+        assert r.status_code == 200
+        assert b"monitor control" in r.data
+
+    def test_post_without_token_is_forbidden(self, client, monkeypatch):
+        monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
+        # Even supplying a header: fail closed when the server has no token.
+        r = client.post("/control/pause", headers={"X-Avai-Token": "x"})
+        assert r.status_code == 403
+
+    def test_post_with_wrong_token_is_forbidden(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post("/control/pause", headers={"X-Avai-Token": "nope"})
+        assert r.status_code == 403
+
+    def test_pause_resume_writes_row(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        assert client.post("/control/pause", headers=h).status_code == 200
+        assert self._state()["paused"] == 1
+        assert client.post("/control/resume", headers=h).status_code == 200
+        assert self._state()["paused"] == 0
+
+    def test_scan_now_bumps_nonce(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        before = self._state()
+        before_nonce = before["scan_now_nonce"] if before else 0
+        client.post("/control/scan-now", headers=h)
+        assert self._state()["scan_now_nonce"] == before_nonce + 1
+
+    def test_collector_toggle(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        client.post("/control/collector/network_flows/off", headers=h)
+        assert "network_flows" in (self._state()["disabled_collectors"] or "")
+        client.post("/control/collector/network_flows/on", headers=h)
+        assert "network_flows" not in (self._state()["disabled_collectors"] or "")
+
+    def test_unknown_collector_is_rejected(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post("/control/collector/bogus/off", headers={"X-Avai-Token": "secret"})
+        assert r.status_code == 400
+
+    def test_settings_update(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        client.post("/control/settings", headers=h, data={"interval": "45", "judge": "0", "enrich": "1"})
+        st = self._state()
+        assert st["interval_override"] == 45
+        assert st["judge_enabled"] == 0 and st["enrich_enabled"] == 1
+
+    def test_maintenance_queues_command(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        client.post("/control/maintenance/prune", headers=h)
+        st = self._state()
+        assert st["command"] == "prune" and st["command_nonce"] == 1
+
+    def test_unknown_maintenance_action_is_rejected(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post("/control/maintenance/bogus", headers={"X-Avai-Token": "secret"})
+        assert r.status_code == 400
