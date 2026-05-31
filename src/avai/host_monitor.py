@@ -135,6 +135,73 @@ DEFAULT_JUDGE_MAX_PER_COLLECTOR = 25
 # skipped (judge.judge swallows per-batch errors) and the cycle moves on.
 DEFAULT_JUDGE_TIMEOUT_S = 60
 
+# Number of completed snapshot runs that establish a host's behavioural
+# baseline. Until this many runs exist the host is still "being learned",
+# so the judge is told not to treat mere presence as suspicious. After it,
+# an artifact whose first appearance post-dates the baseline window is
+# flagged ``novel`` — a strong "this showed up on an established host"
+# signal. At the 300s default interval, 12 runs ≈ 1 hour.
+DEFAULT_BASELINE_MIN_RUNS = 12
+
+# The one collector whose entries get a correlated "process story" (its
+# ports / flows / connections / DNS / exec lineage) attached before judging.
+# Centred on the process because PID is the join key across those tables.
+_CORRELATED_COLLECTOR = "processes"
+
+# Incident narrative: a second-stage LLM digest that synthesises the host's
+# currently-active non-benign findings into one attack-story. Defaults to the
+# judge model; override with --narrative-model.
+DEFAULT_NARRATIVE_MODEL = DEFAULT_JUDGE_MODEL
+
+# Host risk score — a deterministic 0-100 posture grade. Each weakened
+# protection / active finding / risky privilege deducts points from 100.
+# Tuned so a hardened dev laptop with no findings scores ~100 (A) and a
+# host with disabled protections + active malicious findings lands in F.
+RISK_WEIGHTS = {
+    "filevault_off": 15,
+    "firewall_off": 15,
+    "gatekeeper_off": 12,
+    "stealth_off": 3,
+    "ssh_on": 10,
+    "screen_sharing_on": 8,
+    "remote_mgmt_on": 10,
+    "malicious_each": 20,
+    "malicious_cap": 40,
+    "suspicious_each": 8,
+    "suspicious_cap": 24,
+    "nopasswd_each": 10,
+    "nopasswd_cap": 20,
+    "uid0_each": 15,
+    "uid0_cap": 30,
+}
+# (min_score, grade) thresholds, highest first.
+RISK_GRADES = ((90, "A"), (80, "B"), (70, "C"), (60, "D"), (0, "F"))
+
+# Estimated LLM cost. OAuth (Claude Code subscription) usage carries no
+# per-token charge, so this is the *equivalent public API cost* for the
+# tokens spent — surfaced so the dashboard can show "what the judging would
+# cost at API rates". USD per 1,000,000 tokens (input, output); list prices,
+# approximate — adjust here if they change.
+MODEL_PRICING = {
+    "haiku": (1.0, 5.0),
+    "sonnet": (3.0, 15.0),
+    "opus": (15.0, 75.0),
+}
+DEFAULT_PRICING = (1.0, 5.0)
+
+
+def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Estimated USD cost for one completion given its token counts, matched
+    to a pricing tier by model-name substring (falls back to the cheapest)."""
+    in_rate, out_rate = DEFAULT_PRICING
+    m = (model or "").lower()
+    for key, rates in MODEL_PRICING.items():
+        if key in m:
+            in_rate, out_rate = rates
+            break
+    return (input_tokens / 1_000_000) * in_rate + (output_tokens / 1_000_000) * out_rate
+
+
 # Bundled inside the package — installed alongside this module.
 DEFAULT_PROMPTS_PATH = _PKG_DIR / "prompts.toml"
 
@@ -185,11 +252,6 @@ class Browser(StrEnum):
     ARC = "arc"
     VIVALDI = "vivaldi"
     FIREFOX = "firefox"
-
-
-class TccScope(StrEnum):
-    USER = "user"
-    SYSTEM = "system"
 
 
 # ============================================================================
@@ -279,11 +341,6 @@ WATCHED_FILES_LINUX = [
     "/etc/ld.so.preload",
     "/root/.ssh/authorized_keys",
     "/root/.bashrc",
-]
-
-TCC_SOURCES: list[tuple[TccScope, str]] = [
-    (TccScope.USER, "~/Library/Application Support/com.apple.TCC/TCC.db"),
-    (TccScope.SYSTEM, "/Library/Application Support/com.apple.TCC/TCC.db"),
 ]
 
 AUTH_LOG_PREDICATE = " OR ".join(
@@ -531,6 +588,8 @@ class Prompts:
     system: str
     user_template: str
     collector_hints: dict[str, str] = field(default_factory=dict)
+    narrator_system: str = ""
+    narrator_user_template: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "Prompts":
@@ -542,10 +601,16 @@ class Prompts:
             verdicts=" | ".join(str(v) for v in Verdict),
             categories=", ".join(str(c) for c in ThreatCategory),
         )
+        narrator = data.get("narrator") or {}
+        narrator_system = Template(narrator.get("system", "")).safe_substitute(
+            categories=", ".join(str(c) for c in ThreatCategory),
+        )
         return cls(
             system=system,
             user_template=judge.get("user_template", ""),
             collector_hints=dict(data.get("collector_hints") or {}),
+            narrator_system=narrator_system,
+            narrator_user_template=narrator.get("user_template", ""),
         )
 
     def hint_for(self, collector_name: str) -> str:
@@ -568,6 +633,9 @@ class Judgment:
     remediation: str
     model: str
     created_at: str
+    # Estimated USD cost attributed to this entry (its share of the batch's
+    # LLM call). 0.0 when usage/cost is unavailable (e.g. NullJudge, mocks).
+    cost_usd: float = 0.0
 
 
 class Judge(ABC):
@@ -613,10 +681,14 @@ class LitellmClient(CompletionClient):
             raise RuntimeError(
                 "litellm is required for LitellmClient — pip install litellm"
             )
+        # Token usage of the most recent call ({"input","output"}); the judge
+        # reads it to attribute cost. None when unavailable.
+        self.last_usage: Optional[dict] = None
 
     def complete_structured(
         self, *, model, system, user, max_tokens, temperature, schema, schema_name
     ):
+        self.last_usage = None
         response = litellm.completion(
             model=model,
             messages=[
@@ -628,6 +700,14 @@ class LitellmClient(CompletionClient):
             max_tokens=max_tokens,
             timeout=DEFAULT_JUDGE_TIMEOUT_S,
         )
+        try:
+            u = response.usage
+            self.last_usage = {
+                "input": int(u.prompt_tokens or 0),
+                "output": int(u.completion_tokens or 0),
+            }
+        except Exception:
+            self.last_usage = None
         return json.loads(response.choices[0].message.content)
 
 
@@ -660,6 +740,7 @@ class AnthropicOAuthClient(CompletionClient):
             timeout=DEFAULT_JUDGE_TIMEOUT_S,
             max_retries=2,
         )
+        self.last_usage: Optional[dict] = None
 
     def complete_structured(
         self, *, model, system, user, max_tokens, temperature, schema, schema_name
@@ -673,6 +754,7 @@ class AnthropicOAuthClient(CompletionClient):
             "description": f"Submit results matching the {schema_name} schema.",
             "input_schema": schema,
         }
+        self.last_usage = None
         response = self._client.messages.create(
             model=model,
             max_tokens=max_tokens,
@@ -682,6 +764,14 @@ class AnthropicOAuthClient(CompletionClient):
             tool_choice={"type": "tool", "name": schema_name},
             messages=[{"role": "user", "content": user}],
         )
+        try:
+            u = response.usage
+            self.last_usage = {
+                "input": int(u.input_tokens or 0),
+                "output": int(u.output_tokens or 0),
+            }
+        except Exception:
+            self.last_usage = None
         for block in response.content:
             if block.type == "tool_use" and block.name == schema_name:
                 return dict(block.input)
@@ -833,9 +923,19 @@ class LlmJudge(Judge):
             schema=self._schema,
             schema_name=self.SCHEMA_NAME,
         )
-        return list(self._parse(parsed, batch, collector, now))
+        # Attribute the call's estimated cost evenly across the batch's
+        # entries — one API call judges the whole batch, so each entry bears
+        # an equal share.
+        usage = getattr(self._client, "last_usage", None)
+        call_cost = (
+            estimate_cost(self.model, usage.get("input", 0), usage.get("output", 0))
+            if usage
+            else 0.0
+        )
+        per_entry = call_cost / len(batch) if batch else 0.0
+        return list(self._parse(parsed, batch, collector, now, per_entry))
 
-    def _parse(self, parsed, batch, collector, now):
+    def _parse(self, parsed, batch, collector, now, cost_usd=0.0):
         for item in parsed.get("judgments", []) or []:
             idx = item.get("index")
             if not isinstance(idx, int) or not (0 <= idx < len(batch)):
@@ -856,7 +956,246 @@ class LlmJudge(Judge):
                 remediation=str(item.get("remediation") or "")[:2000],
                 model=self.model,
                 created_at=now,
+                cost_usd=cost_usd,
             )
+
+
+class IncidentNarrator:
+    """Second-stage LLM that reads the host's currently-active non-benign
+    findings (already judged) and synthesises them into one incident
+    digest: a headline, a severity, an attack-story narrative, and
+    prioritised recommended actions. Reuses the judge's completion client
+    and structured-output path."""
+
+    SCHEMA_NAME = "submit_incident"
+    SEVERITIES = ("informational", "low", "medium", "high", "critical")
+    PRIORITIES = ("immediate", "high", "medium", "low")
+
+    @classmethod
+    def _narrative_schema(cls) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "headline": {"type": "string"},
+                "severity": {"type": "string", "enum": list(cls.SEVERITIES)},
+                "summary": {"type": "string"},
+                "timeline": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "time": {"type": "string"},
+                            "title": {"type": "string"},
+                            "category": {"type": "string"},
+                            "detail": {"type": "string"},
+                        },
+                        "required": ["title"],
+                    },
+                },
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "priority": {
+                                "type": "string",
+                                "enum": list(cls.PRIORITIES),
+                            },
+                            "title": {"type": "string"},
+                            "command": {"type": "string"},
+                            "detail": {"type": "string"},
+                        },
+                        "required": ["title"],
+                    },
+                },
+            },
+            "required": ["headline", "severity", "summary", "timeline", "actions"],
+        }
+
+    def __init__(
+        self,
+        prompts: Prompts,
+        model: str = DEFAULT_NARRATIVE_MODEL,
+        temperature: float = 0.3,
+        max_tokens: int = 2048,
+        client: Optional[CompletionClient] = None,
+    ):
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self._system = prompts.narrator_system
+        self._user_template = Template(prompts.narrator_user_template)
+        self._client = client or build_completion_client()
+        self._schema = self._narrative_schema()
+
+    @property
+    def auth_mode(self) -> str:
+        return type(self._client).__name__
+
+    def narrate(self, findings: list[dict]) -> Optional[dict]:
+        """Return a structured digest
+        ``{headline, severity, summary, timeline[], actions[]}`` or None on
+        failure/empty input. Never raises — a digest failure must not abort
+        the cycle."""
+        if not findings:
+            return None
+        user = self._user_template.safe_substitute(
+            count=len(findings),
+            findings=json.dumps(findings, ensure_ascii=False),
+        )
+        try:
+            parsed = self._client.complete_structured(
+                model=self.model,
+                system=self._system,
+                user=user,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                schema=self._schema,
+                schema_name=self.SCHEMA_NAME,
+            )
+        except Exception as exc:
+            LOG.warning(
+                "narrator failed error=%s msg=%s",
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            return None
+        severity = str(parsed.get("severity") or "").lower()
+        if severity not in self.SEVERITIES:
+            severity = "low"
+        headline = str(parsed.get("headline") or "").strip()[:200]
+        summary = str(parsed.get("summary") or "").strip()[:2000]
+        timeline = self._clean_timeline(parsed.get("timeline"))
+        actions = self._clean_actions(parsed.get("actions"))
+        if not headline or not (summary or timeline):
+            return None
+        return {
+            "headline": headline,
+            "severity": severity,
+            "summary": summary,
+            "timeline": timeline,
+            "actions": actions,
+        }
+
+    def _clean_timeline(self, raw) -> list[dict]:
+        out: list[dict] = []
+        for ev in raw or []:
+            if not isinstance(ev, dict):
+                continue
+            title = str(ev.get("title") or "").strip()
+            if not title:
+                continue
+            out.append(
+                {
+                    "time": str(ev.get("time") or "").strip()[:40],
+                    "title": title[:200],
+                    "category": str(ev.get("category") or "").strip().lower()[:40],
+                    "detail": str(ev.get("detail") or "").strip()[:500],
+                }
+            )
+        return out[:30]
+
+    def _clean_actions(self, raw) -> list[dict]:
+        out: list[dict] = []
+        for a in raw or []:
+            if not isinstance(a, dict):
+                continue
+            title = str(a.get("title") or "").strip()
+            if not title:
+                continue
+            priority = str(a.get("priority") or "").strip().lower()
+            if priority not in self.PRIORITIES:
+                priority = "medium"
+            out.append(
+                {
+                    "priority": priority,
+                    "title": title[:200],
+                    "command": str(a.get("command") or "").strip()[:1000],
+                    "detail": str(a.get("detail") or "").strip()[:600],
+                }
+            )
+        return out[:15]
+
+
+def _risk_grade(score: int) -> str:
+    for threshold, grade in RISK_GRADES:
+        if score >= threshold:
+            return grade
+    return "F"
+
+
+def compute_risk_score(
+    integrity: Optional[dict],
+    malicious: int,
+    suspicious: int,
+    nopasswd_sudoers: int,
+    extra_uid0: int,
+) -> dict:
+    """Deterministic host posture score in [0, 100] with a letter grade and
+    the list of point-costing ``drivers``. Pure function — all inputs are
+    plain values so it is trivially testable and reproducible.
+
+    Unknown integrity fields (NULL — e.g. a macOS-only field on Linux) are
+    treated as "not a known weakness" and cost nothing, so a missing signal
+    never silently tanks the score."""
+    w = RISK_WEIGHTS
+    score = 100
+    drivers: list[dict] = []
+
+    def penalise(points: int, label: str) -> None:
+        nonlocal score
+        if points > 0:
+            score -= points
+            drivers.append({"label": label, "points": points})
+
+    integ = integrity or {}
+
+    def is_off(key):  # explicitly false/0 — None means "unknown", skip
+        v = integ.get(key)
+        return v is not None and not v
+
+    def is_on(key):
+        return bool(integ.get(key))
+
+    if is_off("filevault_active"):
+        penalise(w["filevault_off"], "Disk encryption (FileVault) off")
+    if is_off("firewall_global_state"):
+        penalise(w["firewall_off"], "Firewall off")
+    if is_off("gatekeeper_assessments_enabled"):
+        penalise(w["gatekeeper_off"], "Gatekeeper off")
+    if is_off("firewall_stealth"):
+        penalise(w["stealth_off"], "Firewall stealth mode off")
+    if is_on("remote_login_enabled"):
+        penalise(w["ssh_on"], "Remote login (SSH) enabled")
+    if is_on("screen_sharing_enabled"):
+        penalise(w["screen_sharing_on"], "Screen sharing enabled")
+    if is_on("remote_management_enabled"):
+        penalise(w["remote_mgmt_on"], "Remote management enabled")
+
+    if malicious > 0:
+        penalise(
+            min(malicious * w["malicious_each"], w["malicious_cap"]),
+            f"{malicious} active malicious finding(s)",
+        )
+    if suspicious > 0:
+        penalise(
+            min(suspicious * w["suspicious_each"], w["suspicious_cap"]),
+            f"{suspicious} active suspicious finding(s)",
+        )
+    if nopasswd_sudoers > 0:
+        penalise(
+            min(nopasswd_sudoers * w["nopasswd_each"], w["nopasswd_cap"]),
+            f"{nopasswd_sudoers} NOPASSWD sudoers rule(s)",
+        )
+    if extra_uid0 > 0:
+        penalise(
+            min(extra_uid0 * w["uid0_each"], w["uid0_cap"]),
+            f"{extra_uid0} extra uid-0 account(s)",
+        )
+
+    score = max(0, min(100, score))
+    drivers.sort(key=lambda d: d["points"], reverse=True)
+    return {"score": score, "grade": _risk_grade(score), "drivers": drivers}
 
 
 # ============================================================================
@@ -871,7 +1210,9 @@ class Base(DeclarativeBase):
 class CollectionRun(Base):
     __tablename__ = "collection_runs"
     run_id: Mapped[str] = mapped_column(primary_key=True)
-    started_at: Mapped[str]
+    # Indexed: latest_run / prior_run / recent_runs all ORDER BY started_at
+    # and are called by nearly every dashboard fragment.
+    started_at: Mapped[str] = mapped_column(index=True)
     finished_at: Mapped[Optional[str]]
     hostname: Mapped[str]
     collectors_ok: Mapped[int] = mapped_column(default=0)
@@ -899,12 +1240,70 @@ class Judgement(Base):
     reasoning: Mapped[Optional[str]]
     remediation: Mapped[Optional[str]]
     model: Mapped[str]
-    created_at: Mapped[str]
+    # Indexed: overview judged/cost sums, /api/notifications/new and the
+    # verdict chart all filter judgements by created_at.
+    created_at: Mapped[str] = mapped_column(index=True)
     # Most recent snapshot run timestamp at which this content_hash was
     # observed. Compared to the latest run's started_at to derive whether
     # the underlying artifact is still present ("active") or has gone
     # away ("resolved"). NULL until the next snapshot cycle touches it.
     last_seen_at: Mapped[Optional[str]] = mapped_column(index=True)
+    # Behavioural context captured at judge time, surfaced on the finding:
+    #   novel        — 1 if the artifact first appeared after the host's
+    #                  baseline was established (per-host-baseline signal).
+    #   context_json — JSON {"baseline": {...}, "related": {...}} where
+    #                  `related` is the correlated process story (ports /
+    #                  flows / connections / DNS / exec lineage).
+    novel: Mapped[Optional[int]] = mapped_column(index=True)
+    context_json: Mapped[Optional[str]]
+    # Estimated USD cost of judging this artifact (its share of the LLM
+    # batch call). NULL for judgments written before cost tracking existed.
+    cost_usd: Mapped[Optional[float]]
+
+
+class IncidentNarrativeRow(Base):
+    """One LLM-written incident digest synthesising the host's active
+    non-benign findings into a single attack-story. The dashboard shows
+    the most recent row. ``finding_hashes`` is the sorted JSON list of the
+    finding content_hashes the narrative covered — compared cycle-to-cycle
+    so we only regenerate when the active-finding set actually changes."""
+
+    __tablename__ = "incident_narratives"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    created_at: Mapped[str] = mapped_column(index=True)
+    run_id: Mapped[Optional[str]]
+    model: Mapped[str]
+    severity: Mapped[str]
+    headline: Mapped[str]
+    # Short prose summary (1-2 sentences). The detailed story is structured.
+    summary: Mapped[Optional[str]]
+    # JSON arrays the dashboard renders as a vertical timeline + action cards:
+    #   timeline_json: [{"time","title","category","detail"}]
+    #   actions_json:  [{"priority","title","command","detail"}]
+    timeline_json: Mapped[Optional[str]]
+    actions_json: Mapped[Optional[str]]
+    # Legacy freeform fields — kept nullable for back-compat with rows
+    # written before the structured format; new rows leave them empty.
+    narrative: Mapped[Optional[str]]
+    recommended_actions: Mapped[Optional[str]]
+    finding_count: Mapped[int] = mapped_column(default=0)
+    finding_hashes: Mapped[Optional[str]]
+
+
+class RiskScoreRow(Base):
+    """One deterministic host posture score per run, for the trended grade
+    widget. ``drivers_json`` is the list of point-costing factors;
+    ``explanation`` describes the change vs the previous run."""
+
+    __tablename__ = "risk_scores"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    created_at: Mapped[str] = mapped_column(index=True)
+    run_id: Mapped[Optional[str]]
+    score: Mapped[int]
+    grade: Mapped[str]
+    prev_score: Mapped[Optional[int]]
+    drivers_json: Mapped[Optional[str]]
+    explanation: Mapped[Optional[str]]
 
 
 class StreamingSession(Base):
@@ -1055,17 +1454,6 @@ class LaunchItemRow(_RowBase):
     sha256: Mapped[Optional[str]]
     mtime: Mapped[Optional[float]]
     raw_json: Mapped[Optional[str]]
-
-
-class TccPermissionRow(_RowBase):
-    __tablename__ = "tcc_permissions"
-    scope: Mapped[str]
-    service: Mapped[Optional[str]]
-    client: Mapped[Optional[str]]
-    client_type: Mapped[Optional[int]]
-    auth_value: Mapped[Optional[int]]
-    auth_reason: Mapped[Optional[int]]
-    last_modified: Mapped[Optional[int]]
 
 
 class QuarantineEventRow(_RowBase):
@@ -1350,6 +1738,16 @@ class Sink:
             LOG.exception("enrichment schema registration failed")
         Base.metadata.create_all(self.engine)
         _migrate_add_columns(self.engine)
+        # Apply Alembic migrations (indexes / future schema changes). The DB
+        # was just built by create_all, so this stamps the baseline and runs
+        # only the incremental migrations on top. Best-effort: a migration
+        # failure must not stop the monitor from collecting.
+        try:
+            from avai.db_migrate import upgrade_to_head
+
+            upgrade_to_head(str(self.engine.url))
+        except Exception:
+            LOG.exception("alembic migration failed (continuing)")
 
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
         run_id = str(uuid.uuid4())
@@ -1440,28 +1838,347 @@ class Sink:
                 for row in session.execute(stmt).all()
             ]
 
-    def write_judgments(self, judgments: list[Judgment]) -> None:
+    # -- baseline / novelty -------------------------------------------------
+
+    def completed_run_count(self) -> int:
+        """Number of snapshot runs that have finished. The in-progress run
+        is excluded (its ``finished_at`` is still NULL), so this reflects
+        how much history the host already had *before* the current cycle."""
+        with Session(self.engine) as session:
+            return int(
+                session.execute(
+                    select(func.count())
+                    .select_from(CollectionRun)
+                    .where(CollectionRun.finished_at.is_not(None))
+                ).scalar_one()
+            )
+
+    def nth_run_started_at(self, n: int) -> Optional[str]:
+        """``started_at`` of the n-th completed run (1-indexed, oldest
+        first), or None if fewer than ``n`` completed runs exist. Marks the
+        end of the baseline-learning window."""
+        if n < 1:
+            return None
+        with Session(self.engine) as session:
+            return session.execute(
+                select(CollectionRun.started_at)
+                .where(CollectionRun.finished_at.is_not(None))
+                .order_by(CollectionRun.started_at)
+                .limit(1)
+                .offset(n - 1)
+            ).scalar_one_or_none()
+
+    def first_seen_map(
+        self, model: type[_RowBase], content_hashes: list[str]
+    ) -> dict[str, tuple[str, int]]:
+        """For each content_hash, return ``(first_seen, times_seen)``:
+        the earliest ``collected_at`` still retained and the number of
+        distinct runs it appeared in. Bounded by retention (pruned history
+        is invisible) — but only ever queried for *unjudged* hashes, which
+        are judged exactly once and never again, so the retention bound
+        cannot make an already-established artifact look novel."""
+        if not content_hashes:
+            return {}
+        stmt = (
+            select(
+                model.content_hash,
+                func.min(model.collected_at),
+                func.count(func.distinct(model.run_id)),
+            )
+            .where(model.content_hash.in_(content_hashes))
+            .group_by(model.content_hash)
+        )
+        with Session(self.engine) as session:
+            return {
+                row[0]: (row[1], int(row[2])) for row in session.execute(stmt).all()
+            }
+
+    # -- correlation (process story) ---------------------------------------
+
+    def prior_run_started_at(self, run_id: str) -> Optional[str]:
+        """``started_at`` of the run immediately preceding ``run_id``, or
+        None if it's the first run. Used to time-bound correlation so it
+        only pulls the previous cycle's behaviour for a PID — long enough
+        to be useful, short enough that PID reuse can't pollute it."""
+        with Session(self.engine) as session:
+            cur = session.execute(
+                select(CollectionRun.started_at).where(CollectionRun.run_id == run_id)
+            ).scalar_one_or_none()
+            if cur is None:
+                return None
+            return session.execute(
+                select(CollectionRun.started_at)
+                .where(CollectionRun.started_at < cur)
+                .order_by(CollectionRun.started_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+    def correlation_context(
+        self,
+        pids: list[int],
+        proc_names: list[str],
+        since: Optional[str],
+        per_pid_cap: int = 10,
+    ) -> dict:
+        """Gather a PID's recent runtime behaviour for the process judge:
+        listening ports, outbound flows, established remote connections,
+        DNS queries (joined by process *name*, which is all DNS capture
+        records), and exec lineage. ``since`` bounds every lookup to rows
+        collected at/after the previous cycle. ProcessCollector runs first
+        in a cycle, so the current run's network rows don't exist yet —
+        this deliberately surfaces the *previous* cycle's behaviour for a
+        still-running PID."""
+        out: dict[str, dict] = {
+            "ports": {},
+            "flows": {},
+            "conns": {},
+            "dns": {},
+            "exec": {},
+        }
+        pids = [p for p in pids if p is not None]
+        names = [n for n in proc_names if n]
+        if not pids and not names:
+            return out
+
+        def _bounded(stmt, model):
+            return stmt.where(model.collected_at >= since) if since else stmt
+
+        with Session(self.engine) as session:
+            if pids:
+                for pid, ip, port in session.execute(
+                    _bounded(
+                        select(
+                            ListeningPortRow.pid,
+                            ListeningPortRow.laddr_ip,
+                            ListeningPortRow.laddr_port,
+                        ).where(ListeningPortRow.pid.in_(pids)),
+                        ListeningPortRow,
+                    )
+                ).all():
+                    lst = out["ports"].setdefault(pid, [])
+                    if len(lst) < per_pid_cap:
+                        lst.append(f"{ip}:{port}")
+
+                for pid, dip, dport, svc, pkts in session.execute(
+                    _bounded(
+                        select(
+                            NetworkFlowRow.pid,
+                            NetworkFlowRow.dst_ip,
+                            NetworkFlowRow.dst_port,
+                            NetworkFlowRow.service,
+                            NetworkFlowRow.packets,
+                        ).where(NetworkFlowRow.pid.in_(pids)),
+                        NetworkFlowRow,
+                    ).order_by(NetworkFlowRow.packets.desc())
+                ).all():
+                    lst = out["flows"].setdefault(pid, [])
+                    if len(lst) < per_pid_cap:
+                        lst.append(
+                            {"dst": f"{dip}:{dport}", "service": svc, "packets": pkts}
+                        )
+
+                for pid, rip, rport, status in session.execute(
+                    _bounded(
+                        select(
+                            NetworkConnectionRow.pid,
+                            NetworkConnectionRow.raddr_ip,
+                            NetworkConnectionRow.raddr_port,
+                            NetworkConnectionRow.status,
+                        ).where(
+                            NetworkConnectionRow.pid.in_(pids),
+                            NetworkConnectionRow.raddr_ip.is_not(None),
+                        ),
+                        NetworkConnectionRow,
+                    )
+                ).all():
+                    lst = out["conns"].setdefault(pid, [])
+                    if len(lst) < per_pid_cap:
+                        lst.append(f"{rip}:{rport} {status}")
+
+                for pid, parent, signing, exe in session.execute(
+                    _bounded(
+                        select(
+                            ProcessExecRow.pid,
+                            ProcessExecRow.parent_path,
+                            ProcessExecRow.signing_id,
+                            ProcessExecRow.exe_path,
+                        ).where(ProcessExecRow.pid.in_(pids)),
+                        ProcessExecRow,
+                    ).order_by(ProcessExecRow.event_timestamp.desc())
+                ).all():
+                    # Keep the most recent exec event per PID.
+                    if pid not in out["exec"]:
+                        out["exec"][pid] = {
+                            "parent": parent,
+                            "signed": signing,
+                            "exe": exe,
+                        }
+
+            if names:
+                for proc, qname, qtype in session.execute(
+                    _bounded(
+                        select(
+                            DnsQueryRow.process,
+                            DnsQueryRow.qname,
+                            DnsQueryRow.qtype,
+                        ).where(DnsQueryRow.process.in_(names)),
+                        DnsQueryRow,
+                    )
+                ).all():
+                    lst = out["dns"].setdefault(proc, [])
+                    if len(lst) < per_pid_cap + 5:
+                        lst.append(f"{qname} ({qtype})")
+        return out
+
+    def write_judgments(
+        self, judgments: list[Judgment], context: Optional[dict] = None
+    ) -> None:
+        """Persist judgments. ``context`` maps content_hash → a dict that may
+        hold ``baseline`` and/or ``related`` (the novelty + correlated-story
+        signals computed at judge time) so the dashboard can surface them on
+        the finding."""
         if not judgments:
             return
-        rows = [
-            {
-                "content_hash": j.content_hash,
-                "collector": j.collector,
-                "verdict": str(j.verdict),
-                "category": str(j.category),
-                "confidence": j.confidence,
-                "reasoning": j.reasoning,
-                "remediation": j.remediation,
-                "model": j.model,
-                "created_at": j.created_at,
-            }
-            for j in judgments
-        ]
+        context = context or {}
+        rows = []
+        for j in judgments:
+            ctx = context.get(j.content_hash) or {}
+            baseline = ctx.get("baseline") or {}
+            rows.append(
+                {
+                    "content_hash": j.content_hash,
+                    "collector": j.collector,
+                    "verdict": str(j.verdict),
+                    "category": str(j.category),
+                    "confidence": j.confidence,
+                    "reasoning": j.reasoning,
+                    "remediation": j.remediation,
+                    "model": j.model,
+                    "created_at": j.created_at,
+                    "novel": 1 if baseline.get("novel") else (0 if baseline else None),
+                    "context_json": json.dumps(ctx) if ctx else None,
+                    "cost_usd": getattr(j, "cost_usd", 0.0) or None,
+                }
+            )
         with Session(self.engine) as session:
             session.execute(
                 sqlite_insert(Judgement).on_conflict_do_nothing(),
                 rows,
             )
+            session.commit()
+
+    # -- incident narrative -------------------------------------------------
+
+    def active_findings(self, started: str) -> list[dict]:
+        """Non-benign judgments still present as of the current run, i.e.
+        ``last_seen_at == started`` (the same active/resolved rule the
+        dashboard uses). These are what the incident narrator synthesises.
+        Ordered oldest-first so the narrative reads as a timeline."""
+        stmt = (
+            select(
+                Judgement.content_hash,
+                Judgement.collector,
+                Judgement.verdict,
+                Judgement.category,
+                Judgement.confidence,
+                Judgement.reasoning,
+                Judgement.remediation,
+                Judgement.created_at,
+            )
+            .where(
+                Judgement.verdict.in_(
+                    [str(Verdict.SUSPICIOUS), str(Verdict.MALICIOUS)]
+                ),
+                Judgement.last_seen_at == started,
+            )
+            .order_by(Judgement.created_at)
+        )
+        with Session(self.engine) as session:
+            return [
+                {
+                    "content_hash": r[0],
+                    "collector": r[1],
+                    "verdict": r[2],
+                    "category": r[3],
+                    "confidence": r[4],
+                    "reasoning": r[5],
+                    "remediation": r[6],
+                    "first_flagged": r[7],
+                }
+                for r in session.execute(stmt).all()
+            ]
+
+    def latest_narrative_finding_hashes(self) -> Optional[str]:
+        """``finding_hashes`` of the most recent narrative, or None. Used to
+        skip regeneration when the active-finding set is unchanged."""
+        with Session(self.engine) as session:
+            return session.execute(
+                select(IncidentNarrativeRow.finding_hashes)
+                .order_by(IncidentNarrativeRow.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+    def write_narrative(self, row: dict) -> None:
+        with Session(self.engine) as session:
+            session.add(IncidentNarrativeRow(**row))
+            session.commit()
+
+    # -- risk score ---------------------------------------------------------
+
+    _RISK_INTEGRITY_FIELDS = (
+        "filevault_active",
+        "firewall_global_state",
+        "firewall_stealth",
+        "gatekeeper_assessments_enabled",
+        "remote_login_enabled",
+        "screen_sharing_enabled",
+        "remote_management_enabled",
+    )
+
+    def system_integrity_row(self, run_id: str) -> Optional[dict]:
+        """The system_integrity posture for a run as a plain dict, or None."""
+        cols = [getattr(SystemIntegrityRow, f) for f in self._RISK_INTEGRITY_FIELDS]
+        with Session(self.engine) as session:
+            row = session.execute(
+                select(*cols).where(SystemIntegrityRow.run_id == run_id).limit(1)
+            ).first()
+        if row is None:
+            return None
+        return dict(zip(self._RISK_INTEGRITY_FIELDS, row))
+
+    def privilege_risk_counts(self, run_id: str) -> tuple[int, int]:
+        """``(nopasswd_sudoers, extra_uid0_accounts)`` for a run — the two
+        privilege-config facts that feed the risk score."""
+        with Session(self.engine) as session:
+            nopasswd = session.execute(
+                select(func.count())
+                .select_from(PrivilegeConfigRow)
+                .where(
+                    PrivilegeConfigRow.run_id == run_id,
+                    PrivilegeConfigRow.kind == "sudoers",
+                    PrivilegeConfigRow.detail.like("%NOPASSWD%"),
+                )
+            ).scalar_one()
+            extra_uid0 = session.execute(
+                select(func.count())
+                .select_from(PrivilegeConfigRow)
+                .where(
+                    PrivilegeConfigRow.run_id == run_id,
+                    PrivilegeConfigRow.kind == "account",
+                    PrivilegeConfigRow.subject != "root",
+                )
+            ).scalar_one()
+        return int(nopasswd), int(extra_uid0)
+
+    def latest_risk_row(self) -> Optional[RiskScoreRow]:
+        with Session(self.engine) as session:
+            return session.execute(
+                select(RiskScoreRow).order_by(RiskScoreRow.created_at.desc()).limit(1)
+            ).scalar_one_or_none()
+
+    def write_risk_score(self, row: dict) -> None:
+        with Session(self.engine) as session:
+            session.add(RiskScoreRow(**row))
             session.commit()
 
     def database_size_bytes(self) -> int:
@@ -1820,6 +2537,8 @@ class Runner:
         lookback_min: int,
         max_db_bytes: int = 0,
         enrichment_chain=None,
+        baseline_min_runs: int = DEFAULT_BASELINE_MIN_RUNS,
+        narrator: "Optional[IncidentNarrator]" = None,
     ):
         self.sink = sink
         self.snapshot_collectors = snapshot_collectors
@@ -1827,6 +2546,9 @@ class Runner:
         self.judge = judge
         self.lookback_min = lookback_min
         self.max_db_bytes = max_db_bytes  # 0 = unlimited
+        self.baseline_min_runs = baseline_min_runs
+        # Optional second-stage incident-digest LLM. None ⇒ disabled.
+        self.narrator = narrator
         self._streaming_workers: list[StreamingWorker] = []
         self.shutdown_event = threading.Event()
         # Optional threat-intel enrichment between collection and judging.
@@ -1861,6 +2583,10 @@ class Runner:
 
     def run_once(self) -> tuple[str, int, int]:
         run_id, started = self.sink.start_run(socket.gethostname(), self.lookback_min)
+        # Snapshot the host's baseline state once: it can't change mid-cycle
+        # (the current run isn't completed yet), and every collector shares
+        # the same cutoff.
+        host_baseline = self._host_baseline()
         ok = failed = 0
         for c in self.snapshot_collectors:
             # Honour a shutdown request mid-cycle. The first cycle judges
@@ -1871,7 +2597,7 @@ class Runner:
                 LOG.info("shutdown requested — stopping collector loop early")
                 break
             try:
-                self._run_collector(c, run_id, started)
+                self._run_collector(c, run_id, started, host_baseline)
                 ok += 1
             except Exception as exc:
                 failed += 1
@@ -1888,7 +2614,13 @@ class Runner:
         # since the previous cycle. Skip if we're shutting down — no
         # point starting a fresh round of LLM calls on the way out.
         if not self.shutdown_event.is_set():
-            self._judge_streaming_collectors()
+            self._judge_streaming_collectors(host_baseline)
+            # With this cycle's verdicts in and last_seen_at touched, the
+            # active-finding set is current — synthesise the incident digest.
+            if self.narrator is not None:
+                self._generate_narrative(run_id, started)
+            # Deterministic posture score — always computed (no LLM needed).
+            self._generate_risk_score(run_id, started)
         self.sink.end_run(ok, failed)
 
         # Rotation: keep the DB under the configured size cap by pruning
@@ -1908,7 +2640,140 @@ class Runner:
 
         return run_id, ok, failed
 
-    def _run_collector(self, c: SnapshotCollector, run_id: str, started: str) -> None:
+    def _host_baseline(self) -> dict:
+        """Snapshot of how 'learned' this host is, computed once per cycle.
+
+        ``established`` flips on after ``baseline_min_runs`` completed runs;
+        ``cutoff_at`` is the run timestamp that ends the learning window.
+        An artifact whose first appearance post-dates the cutoff showed up
+        on an already-baselined host — that's the novelty signal fed to the
+        judge."""
+        total = self.sink.completed_run_count()
+        established = total >= self.baseline_min_runs
+        cutoff = (
+            self.sink.nth_run_started_at(self.baseline_min_runs)
+            if established
+            else None
+        )
+        return {"total_runs": total, "established": established, "cutoff_at": cutoff}
+
+    def _annotate_baseline(
+        self, c: Collector, unjudged: list[dict], host_baseline: dict
+    ) -> None:
+        """Attach a ``baseline`` object to each unjudged entry in-place so
+        the judge can weigh novelty against this host's learned-normal
+        instead of classifying every artifact in the absolute.
+
+        Computing ``first_seen`` from the rows table (not from when the
+        artifact was first *judged*) is deliberate: the per-collector judge
+        cap defers some entries across cycles, but an artifact present since
+        run 1 still reads first_seen=run 1 and so is never mislabelled
+        novel just because the judge got to it late."""
+        if not unjudged or not c.judge_fields:
+            return
+        hashes = [e["content_hash"] for e in unjudged if e.get("content_hash")]
+        try:
+            fs_map = self.sink.first_seen_map(c.model, hashes)
+        except Exception as exc:
+            LOG.warning("baseline: first_seen_map(%s) failed: %s", c.name, exc)
+            return
+        cutoff = host_baseline["cutoff_at"]
+        established = host_baseline["established"]
+        for entry in unjudged:
+            seen = fs_map.get(entry.get("content_hash"))
+            if seen is None:
+                continue
+            first_seen, times_seen = seen
+            novel = bool(established and cutoff is not None and first_seen > cutoff)
+            entry["baseline"] = {
+                "first_seen": first_seen,
+                "times_seen": times_seen,
+                "host_runs": host_baseline["total_runs"],
+                "baseline_established": established,
+                "novel": novel,
+            }
+
+    def _attach_correlation(
+        self, c: Collector, unjudged: list[dict], rows: list[dict], run_id: str
+    ) -> None:
+        """Attach a ``related`` object to each ``processes`` entry in-place:
+        the process's listening ports, outbound flows, remote connections,
+        DNS queries and exec lineage, correlated by PID (DNS by process
+        name). This lets the judge score the process *with its behaviour*
+        instead of in isolation — a novel binary that is also beaconing to
+        a flagged IP is a far stronger signal than either row alone.
+
+        Only the ``processes`` collector is correlated; flows/DNS keep their
+        own independent verdicts. The unjudged projection has no PID (its
+        content_hash is over name/exe/cmdline/username), so we map
+        content_hash → PIDs/names via the full ``rows``, exactly as
+        ``_enrich_entries`` maps evidence."""
+        if c.name != _CORRELATED_COLLECTOR or not unjudged:
+            return
+        pids_by_hash: dict[str, set] = {}
+        names_by_hash: dict[str, set] = {}
+        for r in rows:
+            h = r.get("content_hash")
+            if not isinstance(h, str) or not h:
+                continue
+            if r.get("pid") is not None:
+                pids_by_hash.setdefault(h, set()).add(r["pid"])
+            if r.get("name"):
+                names_by_hash.setdefault(h, set()).add(r["name"])
+        all_pids = sorted({p for s in pids_by_hash.values() for p in s})
+        all_names = sorted({n for s in names_by_hash.values() for n in s})
+        try:
+            since = self.sink.prior_run_started_at(run_id)
+            ctx = self.sink.correlation_context(all_pids, all_names, since)
+        except Exception as exc:
+            LOG.warning("correlation: context(%s) failed: %s", c.name, exc)
+            return
+        for entry in unjudged:
+            h = entry.get("content_hash")
+            pids = pids_by_hash.get(h, set())
+            names = names_by_hash.get(h, set())
+            related: dict = {}
+            ports = [p for pid in pids for p in ctx["ports"].get(pid, [])]
+            flows = [f for pid in pids for f in ctx["flows"].get(pid, [])]
+            conns = [cc for pid in pids for cc in ctx["conns"].get(pid, [])]
+            dns = [d for n in names for d in ctx["dns"].get(n, [])]
+            execs = [ctx["exec"][pid] for pid in pids if pid in ctx["exec"]]
+            if ports:
+                related["listening_ports"] = ports[:10]
+            if flows:
+                related["outbound_flows"] = flows[:10]
+            if conns:
+                related["remote_connections"] = conns[:10]
+            if dns:
+                related["dns_queries"] = dns[:15]
+            if execs:
+                related["exec_lineage"] = execs[0]
+            if related:
+                entry["related"] = related
+
+    @staticmethod
+    def _judgment_context(unjudged: list[dict]) -> dict:
+        """Collect the per-hash ``baseline`` + ``related`` signals from the
+        judged entries so ``write_judgments`` can persist them alongside the
+        verdict (the dashboard then surfaces novelty + the process story on
+        each finding)."""
+        ctx: dict[str, dict] = {}
+        for e in unjudged:
+            h = e.get("content_hash")
+            if not h:
+                continue
+            parts = {}
+            if e.get("baseline"):
+                parts["baseline"] = e["baseline"]
+            if e.get("related"):
+                parts["related"] = e["related"]
+            if parts:
+                ctx[h] = parts
+        return ctx
+
+    def _run_collector(
+        self, c: SnapshotCollector, run_id: str, started: str, host_baseline: dict
+    ) -> None:
         t0 = time.monotonic()
         rows = list(c.collect())
         for r in rows:
@@ -1924,8 +2789,12 @@ class Runner:
             unjudged = self.sink.unjudged(c)
             if unjudged:
                 enriched_indicators = self._enrich_entries(c, unjudged, rows)
+                self._annotate_baseline(c, unjudged, host_baseline)
+                self._attach_correlation(c, unjudged, rows, run_id)
                 judgments = self.judge.judge(c.name, c.judge_hints, unjudged)
-                self.sink.write_judgments(judgments)
+                self.sink.write_judgments(
+                    judgments, context=self._judgment_context(unjudged)
+                )
                 judged = len(judgments)
             # Mark every judgment whose hash was observed this cycle as
             # "still present". The dashboard derives active/resolved
@@ -1993,7 +2862,7 @@ class Runner:
                 entry["evidence"] = ev_dicts
         return total
 
-    def _judge_streaming_collectors(self) -> None:
+    def _judge_streaming_collectors(self, host_baseline: dict) -> None:
         """Run the LLM judge against new content_hashes produced by
         streaming collectors since the previous cycle. Uses
         ``Sink.unjudged_all`` so streaming rows (which aren't tied to
@@ -2008,14 +2877,123 @@ class Runner:
                 continue
             if not unjudged:
                 continue
+            self._annotate_baseline(c, unjudged, host_baseline)
             try:
                 judgments = self.judge.judge(c.name, c.judge_hints, unjudged)
-                self.sink.write_judgments(judgments)
+                self.sink.write_judgments(
+                    judgments, context=self._judgment_context(unjudged)
+                )
                 LOG.info(
                     "streaming-judge collector=%s judged=%d", c.name, len(judgments)
                 )
             except Exception:
                 LOG.exception("streaming-judge failed for %s", c.name)
+
+    def _generate_narrative(self, run_id: str, started: str) -> None:
+        """Synthesise the active non-benign findings into one incident
+        digest and store it — but only when the active-finding set has
+        changed since the last narrative, so we don't re-spend tokens on
+        an unchanged picture. Never raises (best-effort, post-judge)."""
+        try:
+            findings = self.sink.active_findings(started)
+        except Exception as exc:
+            LOG.warning("narrative: active_findings failed: %s", exc)
+            return
+        if not findings:
+            return
+        digest = json.dumps(sorted(f["content_hash"] for f in findings))
+        try:
+            if self.sink.latest_narrative_finding_hashes() == digest:
+                return  # nothing changed since the last digest
+        except Exception:
+            pass  # comparison is an optimisation; fall through and generate
+        result = self.narrator.narrate(findings)
+        if not result:
+            return
+        try:
+            self.sink.write_narrative(
+                {
+                    "created_at": utcnow(),
+                    "run_id": run_id,
+                    "model": self.narrator.model,
+                    "severity": result["severity"],
+                    "headline": result["headline"],
+                    "summary": result["summary"],
+                    "timeline_json": json.dumps(result["timeline"]),
+                    "actions_json": json.dumps(result["actions"]),
+                    "finding_count": len(findings),
+                    "finding_hashes": digest,
+                }
+            )
+            LOG.info(
+                "narrative written severity=%s findings=%d timeline=%d actions=%d",
+                result["severity"],
+                len(findings),
+                len(result["timeline"]),
+                len(result["actions"]),
+            )
+        except Exception as exc:
+            LOG.warning("narrative: write failed: %s", exc)
+
+    def _generate_risk_score(self, run_id: str, started: str) -> None:
+        """Compute and store the deterministic host posture score for this
+        run, with a delta explanation vs the previous score. Best-effort —
+        never raises."""
+        try:
+            findings = self.sink.active_findings(started)
+            malicious = sum(
+                1 for f in findings if f["verdict"] == str(Verdict.MALICIOUS)
+            )
+            suspicious = sum(
+                1 for f in findings if f["verdict"] == str(Verdict.SUSPICIOUS)
+            )
+            integrity = self.sink.system_integrity_row(run_id)
+            nopasswd, extra_uid0 = self.sink.privilege_risk_counts(run_id)
+        except Exception as exc:
+            LOG.warning("risk: input gather failed: %s", exc)
+            return
+        result = compute_risk_score(
+            integrity, malicious, suspicious, nopasswd, extra_uid0
+        )
+        prev = self.sink.latest_risk_row()
+        try:
+            self.sink.write_risk_score(
+                {
+                    "created_at": utcnow(),
+                    "run_id": run_id,
+                    "score": result["score"],
+                    "grade": result["grade"],
+                    "prev_score": prev.score if prev else None,
+                    "drivers_json": json.dumps(result["drivers"]),
+                    "explanation": self._risk_explanation(result, prev),
+                }
+            )
+            LOG.info("risk score=%d grade=%s", result["score"], result["grade"])
+        except Exception as exc:
+            LOG.warning("risk: write failed: %s", exc)
+
+    @staticmethod
+    def _risk_explanation(result: dict, prev) -> str:
+        """Deterministic 'why it changed' from the driver diff vs the
+        previous run — accurate and free (no LLM paraphrase to drift)."""
+        if prev is None:
+            return "Initial posture score for this host."
+        delta = result["score"] - prev.score
+        try:
+            prev_labels = {d["label"] for d in json.loads(prev.drivers_json or "[]")}
+        except (ValueError, TypeError):
+            prev_labels = set()
+        cur_labels = {d["label"] for d in result["drivers"]}
+        added = [lbl for lbl in cur_labels if lbl not in prev_labels]
+        removed = [lbl for lbl in prev_labels if lbl not in cur_labels]
+        if delta == 0 and not added and not removed:
+            return "No change since the previous run."
+        parts = [f"Score {'up' if delta >= 0 else 'down'} {abs(delta)}."]
+        if added:
+            parts.append("New: " + "; ".join(sorted(added)[:4]) + ".")
+        if removed:
+            parts.append("Resolved: " + "; ".join(sorted(removed)[:4]) + ".")
+        return " ".join(parts)
 
     def run_forever(self, interval: int) -> None:
         while not self.shutdown_event.is_set():
@@ -2801,55 +3779,6 @@ class LaunchItemsCollector(SnapshotCollector):
             "mtime": mtime,
             "raw_json": json.dumps(jsonable(data)),
         }
-
-
-class TccCollector(SnapshotCollector):
-    name = "tcc_permissions"
-    model = TccPermissionRow
-    judge_fields = ("scope", "service", "client", "auth_value")
-    _COLUMNS = [
-        "service",
-        "client",
-        "client_type",
-        "auth_value",
-        "auth_reason",
-        "last_modified",
-    ]
-
-    def collect(self):
-        produced = False
-        denied_scopes: list[str] = []
-        other_errors: list[str] = []
-        for scope, path_str in TCC_SOURCES:
-            path = expand(path_str)
-            if not path.exists():
-                continue
-            try:
-                for row in external_sqlite_rows(path, "access", self._COLUMNS):
-                    produced = True
-                    yield {"scope": str(scope), **row}
-            except Exception as e:
-                # Use the underlying DBAPI error when SQLAlchemy wraps
-                # one; the wrapped str() carries the verbose
-                # "(Background on this error at: …)" footer that's
-                # useless to a dashboard user.
-                orig = getattr(e, "orig", e)
-                msg = str(orig)
-                if "authorization denied" in msg.lower():
-                    denied_scopes.append(scope.value)
-                else:
-                    other_errors.append(f"{scope.value}: {msg}")
-        if produced:
-            return
-        if denied_scopes:
-            raise PermissionError(
-                "TCC.db read denied for "
-                + ", ".join(denied_scopes)
-                + " — grant Full Disk Access to the running terminal/agent "
-                "in System Settings → Privacy & Security → Full Disk Access."
-            )
-        if other_errors:
-            raise PermissionError("TCC.db unreadable: " + "; ".join(other_errors))
 
 
 class QuarantineCollector(SnapshotCollector):
@@ -4817,7 +5746,6 @@ def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
         BluetoothCollector(judge_hints=h("bluetooth_devices")),
         WifiCollector(judge_hints=h("wifi_state")),
         LaunchItemsCollector(judge_hints=h("launch_items")),
-        TccCollector(judge_hints=h("tcc_permissions")),
         QuarantineCollector(judge_hints=h("quarantine_events")),
         BrowserExtensionsCollector(judge_hints=h("browser_extensions")),
         SystemIntegrityCollector(judge_hints=h("system_integrity")),
@@ -4854,8 +5782,8 @@ def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector
                 `iw dev link`), system_integrity (SELinux + AppArmor
                 + ufw / firewalld + sshd + vnc + LUKS).
 
-    Dropped on Linux: tcc_permissions and quarantine_events (macOS-only
-    concepts with no Linux analog).
+    Dropped on Linux: quarantine_events (a macOS-only concept with no Linux
+    analog).
     """
     h = prompts.hint_for
 
@@ -4964,6 +5892,32 @@ def build_judge(args, prompts: Prompts) -> Judge:
     return judge
 
 
+def build_narrator(args, prompts: Prompts) -> "Optional[IncidentNarrator]":
+    """Build the incident narrator when enabled and credentials exist.
+    Returns None (digest disabled) otherwise — the same credential rule as
+    the judge, since a digest is only meaningful when judging runs."""
+    if args.no_narrative or args.no_judge:
+        return None
+    if not prompts.narrator_system:
+        LOG.warning("narrator prompt missing from prompts file; digest disabled")
+        return None
+    has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
+    has_api_key = bool(
+        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    )
+    if not has_oauth and not has_api_key:
+        return None
+    if not has_oauth and not HAS_LITELLM:
+        return None
+    try:
+        narrator = IncidentNarrator(prompts=prompts, model=args.narrative_model)
+    except RuntimeError as exc:
+        LOG.warning("IncidentNarrator unavailable (%s); digest disabled", exc)
+        return None
+    LOG.info("narrator auth_mode=%s model=%s", narrator.auth_mode, narrator.model)
+    return narrator
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="avai — host security telemetry + LLM threat judge"
@@ -5012,6 +5966,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--prompts-file",
         default=str(DEFAULT_PROMPTS_PATH),
         help=f"Path to prompts TOML " f"(default: {DEFAULT_PROMPTS_PATH})",
+    )
+    parser.add_argument(
+        "--baseline-runs",
+        type=int,
+        default=DEFAULT_BASELINE_MIN_RUNS,
+        help="Completed runs that establish the host baseline. Until this "
+        "many runs exist the judge treats the host as still-being-learned "
+        "(won't flag mere presence); after it, artifacts first seen post-"
+        f"baseline are marked novel. Default: {DEFAULT_BASELINE_MIN_RUNS} "
+        "(≈1 hour at the 300s interval).",
+    )
+    parser.add_argument(
+        "--no-narrative",
+        action="store_true",
+        help="Disable the incident-narrative digest (the second-stage LLM "
+        "that synthesises active findings into one attack-story).",
+    )
+    parser.add_argument(
+        "--narrative-model",
+        default=DEFAULT_NARRATIVE_MODEL,
+        help=f"Model id for the incident narrator (default: "
+        f"{DEFAULT_NARRATIVE_MODEL}, i.e. the judge model).",
     )
     parser.add_argument(
         "--no-streaming",
@@ -5072,12 +6048,14 @@ def main() -> int:
     )
 
     judge = build_judge(args, prompts)
+    narrator = build_narrator(args, prompts)
     LOG.info(
-        "starting host_monitor db=%s interval=%ds lookback=%dm judge=%s",
+        "starting host_monitor db=%s interval=%ds lookback=%dm judge=%s narrator=%s",
         db_path,
         args.interval,
         args.lookback_min,
         type(judge).__name__,
+        type(narrator).__name__ if narrator else "off",
     )
 
     # check_same_thread=False allows the connection pool to hand
@@ -5114,6 +6092,8 @@ def main() -> int:
             args.lookback_min,
             max_db_bytes=max(0, args.max_db_mb) * 1024 * 1024,
             enrichment_chain=enrichment_chain,
+            baseline_min_runs=max(1, args.baseline_runs),
+            narrator=narrator,
         )
         runner.setup()
 

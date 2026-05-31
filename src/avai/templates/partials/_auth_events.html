@@ -163,7 +163,7 @@
               {% endif %}
             </td>
             <td class="py-2 text-slate-300 font-mono break-all line-clamp-2" title="{{ e.message }}">{{ e.message }}</td>
-            <td class="py-2 text-slate-500 font-mono whitespace-nowrap">{{ e.last_seen }}</td>
+            <td class="py-2 text-slate-500 font-mono whitespace-nowrap">{{ e.last_seen | datetime_fmt }}</td>
           </tr>
           {# expandable reasoning row #}
           {% if e.reasoning %}

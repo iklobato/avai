@@ -3,6 +3,7 @@
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 h-full">
   {{ card_header("collector errors (latest run)") }}
   {% if errors %}
+    <div class="js-paged" data-pg="errors" data-page-size="8">
     <table class="w-full text-xs">
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -14,7 +15,7 @@
       <tbody class="divide-y divide-slate-800/80">
         {% for e in errors %}
           {% set detail_id = "error-detail-" ~ loop.index %}
-          <tr class="js-expandable-row cursor-pointer hover:bg-slate-800/40 group transition-colors"
+          <tr class="js-pg-item js-expandable-row cursor-pointer hover:bg-slate-800/40 group transition-colors"
               data-detail-id="{{ detail_id }}">
             <td class="py-2 text-slate-300">{{ e.collector }}</td>
             <td class="py-2 text-red-400 font-mono">{{ e.error_class }}</td>
@@ -22,7 +23,7 @@
               <span class="js-toggle-arrow text-slate-500 group-hover:text-sky-400 transition-colors text-lg leading-none">▸</span>
             </td>
           </tr>
-          <tr id="{{ detail_id }}" class="hidden bg-slate-950/60">
+          <tr id="{{ detail_id }}" class="js-pg-detail hidden bg-slate-950/60">
             <td colspan="3" class="py-3">
               <div class="pl-3 border-l-2 border-red-700/70 space-y-2">
                 <div>
@@ -30,7 +31,7 @@
                   <pre class="whitespace-pre-wrap font-mono text-xs text-slate-200 bg-slate-950/60 border border-slate-800 rounded p-2 max-h-64 overflow-auto">{{ e.message or '—' }}</pre>
                 </div>
                 <div class="text-[11px] text-slate-500 font-mono leading-relaxed pt-1 border-t border-slate-800/60">
-                  occurred_at: <span class="text-slate-400">{{ e.occurred_at }} ({{ e.occurred_at | relative_time }})</span><br>
+                  occurred_at: <span class="text-slate-400">{{ e.occurred_at | datetime_fmt }} ({{ e.occurred_at | relative_time }})</span><br>
                   run_id: <span class="text-slate-400">{{ e.run_id[:12] }}…</span>
                 </div>
               </div>
@@ -39,6 +40,8 @@
         {% endfor %}
       </tbody>
     </table>
+    <div class="js-pager"></div>
+    </div>
   {% else %}
     <div class="text-slate-500 italic">no errors</div>
   {% endif %}

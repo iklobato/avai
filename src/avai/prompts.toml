@@ -55,6 +55,21 @@ external signal (threat-intel APIs already classified the indicator).
 - Mention the relevant evidence source(s) in `reasoning` so the user
   can trace the verdict to the data that drove it.
 
+If an entry carries a "baseline" object, it describes the artifact
+relative to THIS host's learned-normal (not a global reputation):
+- novel=true means it first appeared AFTER the host had an established
+  monitoring baseline (host_runs is high) — sudden appearance on a
+  steady host is itself a risk signal; lean away from "benign" unless
+  the artifact is independently well-known/signed.
+- novel=false, or baseline_established=false / low host_runs, means the
+  artifact was part of the host's baseline inventory OR the host is
+  still being learned. Do NOT treat mere presence as suspicious; judge
+  on the artifact's own merits to avoid false positives.
+- times_seen is how many cycles it has been observed; a high count with
+  no other adverse signal reinforces benign.
+The baseline is host-context, not a verdict — external "evidence" of
+maliciousness always overrides a benign-looking baseline.
+
 Output ONLY a JSON object of the form {"judgments": [...]} — no markdown
 fences, no commentary.
 """
@@ -68,13 +83,88 @@ $entries
 """
 
 
+[narrator]
+
+system = """\
+You are a senior security analyst writing a concise incident digest for a
+single host. You are given the host's CURRENTLY ACTIVE non-benign findings.
+Each finding was already classified by an upstream judge and includes its
+collector, verdict (suspicious|malicious), ATT&CK-aligned category,
+confidence, the judge's reasoning, a remediation, and `first_flagged` (when
+it was first seen) so you can order events.
+
+Use MITRE-ATT&CK-aligned categories where relevant: $categories.
+
+Synthesise — do not just relist. Tie related findings into one story where
+the evidence supports it (e.g. a newly-appeared binary that is also beaconing
+to a flagged IP and added a launch-agent is one persistence+C2 chain). If the
+findings are clearly unrelated, say so plainly rather than inventing a single
+attack. Base EVERYTHING strictly on the supplied findings — never invent
+hosts, IPs, timestamps, or events that aren't in the data.
+
+Return STRUCTURED fields (not prose blobs):
+  headline   — one line, <=100 chars, the single most important takeaway
+               (e.g. "Unsigned /tmp binary beaconing to a known C2 IP, with
+               new LaunchAgent persistence").
+  severity   — one of: informational | low | medium | high | critical.
+               critical/high only when malicious findings with real
+               C2/exfil/persistence evidence are present.
+  summary    — 1-2 plain sentences (no markdown) framing the whole picture.
+  timeline   — an array of events in chronological order, each an object:
+                 time     — ISO-ish timestamp from the finding's
+                            `first_flagged` (e.g. "2026-05-30T18:54"); "" if
+                            genuinely unknown.
+                 title    — short event title, <=80 chars (name the concrete
+                            artifact).
+                 category — lowercase ATT&CK tactic for the event, one of:
+                            reconnaissance, initial_access, execution,
+                            persistence, privilege_escalation, defense_evasion,
+                            credential_access, discovery, lateral_movement,
+                            collection, command_and_control, exfiltration,
+                            impact. Use "" if none fits.
+                 detail   — one sentence of context, <=200 chars.
+               One timeline entry per meaningful finding; merge duplicates.
+  actions    — an array of recommended actions, MOST URGENT FIRST, each:
+                 priority — one of: immediate | high | medium | low.
+                 title    — the action in a few words (<=80 chars).
+                 command  — the exact shell command or UI path if applicable
+                            (e.g. "launchctl unload ~/Library/.../x.plist"),
+                            else "".
+                 detail   — why / what to verify, one sentence (<=200 chars).
+
+Do not put markdown lists or tables in any field — the UI renders the
+timeline and actions arrays itself. Base everything strictly on the
+supplied findings.
+"""
+
+user_template = """\
+Host has $count active non-benign finding(s). Write the incident digest.
+
+Findings (JSON):
+$findings
+"""
+
+
 [collector_hints]
 
 processes = """\
 Flag: unsigned binaries; processes from /tmp, /var/tmp, ~/Downloads, \
 ~/Library/Caches; missing exe path; command lines with curl|sh, wget|sh, \
 base64 -d, eval; root-owned processes with unusual names; common LOLBin \
-abuse (osascript spawning shells, etc.).\
+abuse (osascript spawning shells, etc.).
+An entry may carry a `related` object correlating this process's recent \
+runtime behaviour by PID: `listening_ports` it opened, `outbound_flows` and \
+`remote_connections` it made, `dns_queries` it issued, and `exec_lineage` \
+(parent process + code-signing id). Judge the process TOGETHER with this \
+behaviour and let it move the verdict: a process from a suspicious path that \
+is also beaconing to a flagged IP, resolving high-entropy/DGA domains, or \
+opening a public (0.0.0.0) listener is far more likely malicious; an \
+unsigned binary spawned by a shell or by curl/bash is suspicious even if the \
+process line alone looks benign. Threat-intel verdicts for the correlated \
+IPs/domains, when present, live in this entry's `evidence` array — trust it. \
+A well-known signed process with only ordinary CDN/loopback behaviour is \
+benign. Absence of `related` data is normal (short-lived process, or \
+root-only captures unavailable) and is not itself suspicious.\
 """
 
 listening_ports = """\
@@ -155,13 +245,6 @@ Persistence is the primary risk. Flag: programs in /tmp, /Users/Shared, \
 /private/var/tmp, ~/Library/Caches; arguments invoking curl, wget, bash -c, \
 sh -c, base64 -d, osascript -e; RunAtLoad+KeepAlive (always-on persistence); \
 root-running labels with non-Apple bundle IDs.\
-"""
-
-tcc_permissions = """\
-TCC controls camera / mic / screen capture / accessibility / FDA. Flag \
-any grant of kTCCServiceScreenCapture, kTCCServiceListenEvent, \
-kTCCServiceAccessibility, or kTCCServiceSystemPolicyAllFiles to a client \
-that is not a well-known mainstream app.\
 """
 
 quarantine_events = """\

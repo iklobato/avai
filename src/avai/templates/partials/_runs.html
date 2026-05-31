@@ -1,8 +1,9 @@
 {% from "partials/_macros.html" import card_header %}
 
-<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5 h-full">
   {{ card_header("recent runs") }}
   {% if recent_runs %}
+    <div class="js-paged" data-pg="runs" data-page-size="8">
     <table class="w-full text-sm">
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -14,8 +15,8 @@
       </thead>
       <tbody class="divide-y divide-slate-800/80">
         {% for r in recent_runs %}
-          <tr>
-            <td class="py-1.5 text-slate-300 font-mono text-xs">{{ r.started_at }}</td>
+          <tr class="js-pg-item">
+            <td class="py-1.5 text-slate-300 font-mono text-xs">{{ r.started_at | datetime_fmt }}</td>
             <td class="py-1.5 text-right font-mono text-emerald-400 tabular-nums text-xs">{{ r.collectors_ok }}</td>
             <td class="py-1.5 text-right font-mono {% if r.collectors_failed %}text-red-400{% else %}text-slate-500{% endif %} tabular-nums text-xs">{{ r.collectors_failed }}</td>
             <td class="py-1.5 text-right font-mono text-slate-400 tabular-nums text-xs">{{ r.lookback_min }}m</td>
@@ -23,6 +24,8 @@
         {% endfor %}
       </tbody>
     </table>
+    <div class="js-pager"></div>
+    </div>
   {% else %}
     <div class="text-slate-500 italic">no runs</div>
   {% endif %}

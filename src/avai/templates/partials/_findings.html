@@ -161,7 +161,15 @@
             {% set resolved = f.status == 'resolved' %}
             <tr class="js-expandable-row cursor-pointer hover:bg-slate-800/40 group transition-colors {% if resolved %}opacity-60{% endif %}"
                 data-detail-id="{{ detail_id }}">
-              <td class="px-3 py-2 align-top">{{ verdict_pill(f.verdict) }}</td>
+              <td class="px-3 py-2 align-top">
+                {{ verdict_pill(f.verdict) }}
+                {% if f.novel %}
+                  <span class="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-fuchsia-800/70 bg-fuchsia-900/30 text-fuchsia-300 text-[9px] font-semibold uppercase tracking-wider"
+                        title="First appeared after this host's monitoring baseline was established">
+                    ✦ novel
+                  </span>
+                {% endif %}
+              </td>
               <td class="px-3 py-2 align-top">
                 {% if resolved %}
                   <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full border border-sky-900/60 bg-sky-900/30 text-sky-300 text-[10px] font-semibold uppercase tracking-wider">
@@ -189,7 +197,7 @@
               <td class="px-3 py-2 align-top font-mono text-slate-300 text-xs max-w-[32rem] truncate"
                   title="{{ f.artifact }}">{{ f.artifact or '—' }}</td>
               <td class="px-3 py-2 align-top text-right text-slate-500 text-xs font-mono whitespace-nowrap"
-                  title="{{ f.created_at }}">{{ f.created_at | relative_time }}</td>
+                  title="{{ f.created_at | datetime_fmt }}">{{ f.created_at | relative_time }}</td>
               <td class="px-3 py-2 align-top text-center">
                 <span class="js-toggle-arrow text-slate-500 group-hover:text-sky-400 transition-colors text-lg leading-none">▸</span>
               </td>
@@ -211,6 +219,60 @@
                         remediation{% if resolved %} (already addressed){% endif %}
                       </div>
                       <div class="text-slate-100 leading-relaxed">{{ f.remediation }}</div>
+                    </div>
+                  {% endif %}
+
+                  {# ----- behavioural context: baseline novelty + process story ----- #}
+                  {% if f.context and (f.context.baseline or f.context.related) %}
+                    {% set b = f.context.baseline %}
+                    {% set r = f.context.related %}
+                    <div>
+                      <div class="text-[10px] uppercase tracking-widest text-fuchsia-400 mb-2">behavioural context</div>
+
+                      {% if b %}
+                        <div class="text-xs text-slate-300 mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+                          {% if b.novel %}
+                            <span class="px-1.5 py-0.5 rounded-full border border-fuchsia-800/70 bg-fuchsia-900/30 text-fuchsia-300 text-[10px] font-semibold uppercase tracking-wider">✦ novel</span>
+                          {% elif b.baseline_established %}
+                            <span class="px-1.5 py-0.5 rounded-full border border-slate-700 bg-slate-800/50 text-slate-400 text-[10px] uppercase tracking-wider">part of baseline</span>
+                          {% else %}
+                            <span class="px-1.5 py-0.5 rounded-full border border-slate-700 bg-slate-800/50 text-slate-400 text-[10px] uppercase tracking-wider">baseline still learning</span>
+                          {% endif %}
+                          {% if b.first_seen %}<span class="font-mono">first seen <span class="text-slate-400">{{ b.first_seen | datetime_fmt }}</span></span>{% endif %}
+                          {% if b.times_seen %}<span class="font-mono">seen in <span class="text-slate-400">{{ b.times_seen }}</span> cycle(s)</span>{% endif %}
+                          {% if b.host_runs is not none %}<span class="font-mono">host runs <span class="text-slate-400">{{ b.host_runs }}</span></span>{% endif %}
+                        </div>
+                      {% endif %}
+
+                      {% if r %}
+                        <div class="text-xs grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 font-mono">
+                          {% if r.exec_lineage %}
+                            <span class="text-slate-500 self-start">exec lineage</span>
+                            <span class="text-slate-300 break-all">
+                              parent <span class="text-slate-400">{{ r.exec_lineage.parent or '—' }}</span>
+                              · signed <span class="text-slate-400">{{ r.exec_lineage.signed or 'unsigned' }}</span>
+                            </span>
+                          {% endif %}
+                          {% if r.listening_ports %}
+                            <span class="text-slate-500 self-start">listening</span>
+                            <span class="text-slate-300 break-all">{{ r.listening_ports | join(', ') }}</span>
+                          {% endif %}
+                          {% if r.outbound_flows %}
+                            <span class="text-slate-500 self-start">outbound flows</span>
+                            <span class="text-slate-300 break-all">
+                              {% for fl in r.outbound_flows %}{{ fl.dst }}{% if fl.service %} ({{ fl.service }}){% endif %}{% if fl.packets %} · {{ fl.packets }}pkt{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+                            </span>
+                          {% endif %}
+                          {% if r.remote_connections %}
+                            <span class="text-slate-500 self-start">connections</span>
+                            <span class="text-slate-300 break-all">{{ r.remote_connections | join(', ') }}</span>
+                          {% endif %}
+                          {% if r.dns_queries %}
+                            <span class="text-slate-500 self-start">dns</span>
+                            <span class="text-slate-300 break-all">{{ r.dns_queries | join(', ') }}</span>
+                          {% endif %}
+                        </div>
+                      {% endif %}
                     </div>
                   {% endif %}
 
@@ -240,9 +302,10 @@
                   {# ----- judgment metadata footer ----- #}
                   <div class="text-xs text-slate-500 font-mono pt-2 border-t border-slate-800/60 leading-relaxed">
                     content_hash: <span class="text-slate-400">{{ f.content_hash[:16] }}…</span><br>
-                    judged: <span class="text-slate-400">{{ f.created_at }} ({{ f.created_at | relative_time }})</span><br>
+                    judged: <span class="text-slate-400">{{ f.created_at | datetime_fmt }} ({{ f.created_at | relative_time }})</span>
+                    {% if f.cost_usd %}· est. LLM cost <span class="text-emerald-400">${{ "%.6f"|format(f.cost_usd) }}</span>{% endif %}<br>
                     {% if f.last_seen_at %}
-                      last seen: <span class="text-slate-400">{{ f.last_seen_at }} ({{ f.last_seen_at | relative_time }})</span>
+                      last seen: <span class="text-slate-400">{{ f.last_seen_at | datetime_fmt }} ({{ f.last_seen_at | relative_time }})</span>
                     {% else %}
                       last seen: <span class="text-slate-600 italic">never observed since judgement was first recorded</span>
                     {% endif %}

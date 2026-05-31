@@ -1,0 +1,113 @@
+{% from "partials/_macros.html" import card_header %}
+
+{% set sev_styles = {
+  'critical':      'bg-red-900/50 text-red-200 border-red-800',
+  'high':          'bg-red-900/40 text-red-300 border-red-900/60',
+  'medium':        'bg-amber-900/40 text-amber-300 border-amber-900/60',
+  'low':           'bg-sky-900/40 text-sky-300 border-sky-900/60',
+  'informational': 'bg-slate-700/40 text-slate-300 border-slate-600',
+} %}
+
+{# ATT&CK tactic → accent colour for timeline dots / category chips #}
+{% set cat_color = {
+  'reconnaissance':      '#64748b',
+  'initial_access':      '#f97316',
+  'execution':           '#f59e0b',
+  'persistence':         '#a855f7',
+  'privilege_escalation':'#ec4899',
+  'defense_evasion':     '#8b5cf6',
+  'credential_access':   '#ef4444',
+  'discovery':           '#0ea5e9',
+  'lateral_movement':    '#14b8a6',
+  'collection':          '#eab308',
+  'command_and_control': '#dc2626',
+  'exfiltration':        '#e11d48',
+  'impact':              '#b91c1c',
+} %}
+
+{% set prio_styles = {
+  'immediate': 'bg-red-900/50 text-red-200 border-red-800',
+  'high':      'bg-amber-900/40 text-amber-300 border-amber-900/60',
+  'medium':    'bg-sky-900/40 text-sky-300 border-sky-900/60',
+  'low':       'bg-slate-700/40 text-slate-300 border-slate-600',
+} %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  <div class="flex items-center justify-between mb-3">
+    {{ card_header("incident digest") }}
+    {% if narrative %}
+      <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider
+                   {{ sev_styles.get(narrative.severity, sev_styles['informational']) }}">
+        {{ narrative.severity }}
+      </span>
+    {% endif %}
+  </div>
+
+  {% if narrative %}
+    <h3 class="text-base font-semibold text-slate-100 leading-snug">{{ narrative.headline }}</h3>
+    <div class="mt-1 text-[11px] text-slate-500">
+      {{ narrative.finding_count }} active finding{{ '' if narrative.finding_count == 1 else 's' }}
+      · {{ narrative.created_at | datetime_fmt }} · {{ narrative.model }}
+    </div>
+
+    {% if narrative.summary %}
+      <p class="mt-3 text-sm text-slate-300 leading-relaxed">{{ narrative.summary }}</p>
+    {% endif %}
+
+    {% if timeline %}
+      <h4 class="mt-5 mb-2 text-[10px] uppercase tracking-widest text-slate-500">attack timeline</h4>
+      <ol class="timeline">
+        {% for ev in timeline %}
+          {% set color = cat_color.get(ev.category, '#475569') %}
+          <li class="tl-item">
+            <span class="tl-dot" style="background: {{ color }}; box-shadow: 0 0 0 3px {{ color }}33;"></span>
+            <div class="tl-body">
+              <div class="tl-head">
+                {% if ev.time %}<span class="tl-time">{{ ev.time | datetime_fmt }}</span>{% endif %}
+                {% if ev.category %}
+                  <span class="tl-cat" style="color: {{ color }}; border-color: {{ color }}55;">
+                    {{ ev.category.replace('_', ' ') }}
+                  </span>
+                {% endif %}
+              </div>
+              <div class="tl-title">{{ ev.title }}</div>
+              {% if ev.detail %}<div class="tl-detail">{{ ev.detail }}</div>{% endif %}
+            </div>
+          </li>
+        {% endfor %}
+      </ol>
+    {% endif %}
+
+    {% if actions %}
+      <h4 class="mt-5 mb-2 text-[10px] uppercase tracking-widest text-slate-500">recommended actions</h4>
+      <div class="space-y-2">
+        {% for a in actions %}
+          <div class="action-card">
+            <div class="flex items-center gap-2">
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[9px] font-semibold uppercase tracking-wider
+                           {{ prio_styles.get(a.priority, prio_styles['medium']) }}">
+                {{ a.priority }}
+              </span>
+              <span class="text-sm font-medium text-slate-200">{{ a.title }}</span>
+            </div>
+            {% if a.command %}<pre class="action-cmd"><code>{{ a.command }}</code></pre>{% endif %}
+            {% if a.detail %}<div class="mt-1 text-xs text-slate-400">{{ a.detail }}</div>{% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {# Back-compat: a digest written before the structured format. #}
+    {% if not timeline and not actions and narrative.narrative %}
+      <div class="md-content mt-3 text-sm text-slate-300 leading-relaxed">{{ narrative.narrative | markdown }}</div>
+      {% if narrative.recommended_actions %}
+        <div class="md-content mt-3 text-sm text-slate-300 leading-relaxed">{{ narrative.recommended_actions | markdown }}</div>
+      {% endif %}
+    {% endif %}
+  {% else %}
+    <div class="text-slate-500 italic">
+      no incident digest yet — generated once active suspicious/malicious
+      findings exist and the LLM judge is enabled.
+    </div>
+  {% endif %}
+</div>

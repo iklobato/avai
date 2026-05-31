@@ -9,6 +9,7 @@ The model lives in :mod:`avai.host_monitor`'s ``Base.metadata`` so the
 Runner's ``Base.metadata.create_all()`` picks it up — no separate
 migration story.
 """
+
 from __future__ import annotations
 
 import json
@@ -20,13 +21,7 @@ from sqlalchemy import Engine, String, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from avai.enrichers.base import (
-    Enricher,
-    Evidence,
-    Indicator,
-    IndicatorType,
-    VerdictHint,
-)
+from avai.enrichers.base import Enricher, Evidence, Indicator, VerdictHint
 
 LOG = logging.getLogger("avai.enrichers.cache")
 
@@ -40,14 +35,19 @@ def _register_model(base_cls):
         __tablename__ = "enrichment_evidence"
 
         # Composite primary key — one row per (source, indicator) pair.
-        source:           Mapped[str] = mapped_column(String, primary_key=True)
-        indicator_type:   Mapped[str] = mapped_column(String, primary_key=True)
-        indicator_value:  Mapped[str] = mapped_column(String, primary_key=True)
-        verdict_hint:     Mapped[str] = mapped_column(String)
-        confidence:       Mapped[float] = mapped_column()
-        summary:          Mapped[str] = mapped_column(String)
-        details_json:     Mapped[str] = mapped_column(String)
-        fetched_at:       Mapped[str] = mapped_column(String)  # ISO-8601 UTC
+        source: Mapped[str] = mapped_column(String, primary_key=True)
+        indicator_type: Mapped[str] = mapped_column(String, primary_key=True)
+        # Indexed: the dashboard's flow-geo lookup filters by indicator_value
+        # IN (...); the composite PK leads with `source`, so that filter can't
+        # use the autoindex.
+        indicator_value: Mapped[str] = mapped_column(
+            String, primary_key=True, index=True
+        )
+        verdict_hint: Mapped[str] = mapped_column(String)
+        confidence: Mapped[float] = mapped_column()
+        summary: Mapped[str] = mapped_column(String)
+        details_json: Mapped[str] = mapped_column(String)
+        fetched_at: Mapped[str] = mapped_column(String)  # ISO-8601 UTC
 
     return EnrichmentRow
 
@@ -96,15 +96,14 @@ class EvidenceCache:
 
     # -- core API --------------------------------------------------------
 
-    def get(self, enricher: Enricher,
-            indicator: Indicator) -> Optional[Evidence]:
+    def get(self, enricher: Enricher, indicator: Indicator) -> Optional[Evidence]:
         """Return cached evidence iff it's within ``enricher.ttl_hours``."""
         cutoff = enricher.freshness_cutoff().isoformat(timespec="seconds")
         stmt = select(self._model).where(
-            self._model.source          == enricher.name,
-            self._model.indicator_type  == str(indicator.type),
+            self._model.source == enricher.name,
+            self._model.indicator_type == str(indicator.type),
             self._model.indicator_value == indicator.value,
-            self._model.fetched_at      >= cutoff,
+            self._model.fetched_at >= cutoff,
         )
         with Session(self._engine) as session:
             row = session.execute(stmt).scalar_one_or_none()
@@ -116,21 +115,28 @@ class EvidenceCache:
         """Upsert. Conflict on the (source, type, value) PK overwrites
         the older row — we want the freshest evidence per pair."""
         payload = {
-            "source":          evidence.source,
-            "indicator_type":  str(evidence.indicator.type),
+            "source": evidence.source,
+            "indicator_type": str(evidence.indicator.type),
             "indicator_value": evidence.indicator.value,
-            "verdict_hint":    str(evidence.verdict_hint),
-            "confidence":      evidence.confidence,
-            "summary":         evidence.summary,
-            "details_json":    json.dumps(evidence.details, default=str),
-            "fetched_at":      evidence.fetched_at.isoformat(timespec="seconds"),
+            "verdict_hint": str(evidence.verdict_hint),
+            "confidence": evidence.confidence,
+            "summary": evidence.summary,
+            "details_json": json.dumps(evidence.details, default=str),
+            "fetched_at": evidence.fetched_at.isoformat(timespec="seconds"),
         }
         stmt = sqlite_insert(self._model).values(**payload)
         stmt = stmt.on_conflict_do_update(
             index_elements=["source", "indicator_type", "indicator_value"],
-            set_={k: payload[k] for k in
-                  ("verdict_hint", "confidence", "summary",
-                   "details_json", "fetched_at")},
+            set_={
+                k: payload[k]
+                for k in (
+                    "verdict_hint",
+                    "confidence",
+                    "summary",
+                    "details_json",
+                    "fetched_at",
+                )
+            },
         )
         with Session(self._engine) as session:
             session.execute(stmt)
@@ -140,7 +146,7 @@ class EvidenceCache:
         """All persisted evidence for an indicator — across every source.
         Used by the dashboard to render the per-finding evidence panel."""
         stmt = select(self._model).where(
-            self._model.indicator_type  == str(indicator.type),
+            self._model.indicator_type == str(indicator.type),
             self._model.indicator_value == indicator.value,
         )
         with Session(self._engine) as session:
@@ -154,13 +160,13 @@ def _evidence_from_row(row, indicator: Indicator) -> Evidence:
     except json.JSONDecodeError:
         details = {}
     return Evidence(
-        source       = row.source,
-        indicator    = indicator,
-        verdict_hint = VerdictHint(row.verdict_hint),
-        confidence   = float(row.confidence or 0.0),
-        summary      = row.summary or "",
-        details      = details,
-        fetched_at   = datetime.fromisoformat(row.fetched_at),
+        source=row.source,
+        indicator=indicator,
+        verdict_hint=VerdictHint(row.verdict_hint),
+        confidence=float(row.confidence or 0.0),
+        summary=row.summary or "",
+        details=details,
+        fetched_at=datetime.fromisoformat(row.fetched_at),
     )
 
 

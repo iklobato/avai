@@ -27,8 +27,12 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import os
+import re
 import sys
 import threading
+import time
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -58,6 +62,7 @@ from avai.host_monitor import (
     DnsQueryRow,
     FileIntegrityRow,
     HostsFileRow,
+    IncidentNarrativeRow,
     InstalledAppRow,
     Judgement,
     KernelExtensionRow,
@@ -72,11 +77,11 @@ from avai.host_monitor import (
     ProcessExecRow,
     ProcessRow,
     QuarantineEventRow,
+    RiskScoreRow,
     SetuidFileRow,
     SshAuthorizedKeyRow,
     SystemExtensionRow,
     SystemIntegrityRow,
-    TccPermissionRow,
     UsbDeviceRow,
     WifiStateRow,
 )
@@ -95,7 +100,6 @@ COLLECTOR_MODELS = {
     "bluetooth_devices": BluetoothDeviceRow,
     "wifi_state": WifiStateRow,
     "launch_items": LaunchItemRow,
-    "tcc_permissions": TccPermissionRow,
     "quarantine_events": QuarantineEventRow,
     "browser_extensions": BrowserExtensionRow,
     "system_integrity": SystemIntegrityRow,
@@ -123,7 +127,6 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "bluetooth_devices": ("name",),
     "wifi_state": ("ssid",),
     "launch_items": ("label", "path"),
-    "tcc_permissions": ("client", "service"),
     "quarantine_events": ("agent_name", "origin_url"),
     "browser_extensions": ("name", "browser"),
     "system_integrity": (),
@@ -162,6 +165,98 @@ app = Flask(
     static_folder=str(_PKG_DIR / "static"),
 )
 app.config["DB_PATH"] = str(DEFAULT_DB_PATH)
+# Re-read templates when they change on disk. Without this, Jinja caches
+# compiled templates outside debug mode (the dashboard runs on waitress, not
+# debug), so HTML/layout edits only appear after a full process restart. The
+# per-render stat() is negligible for a single-user local dashboard.
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.jinja_env.auto_reload = True
+
+
+# Markdown rendering for the LLM-written incident digest. Optional: if
+# `markdown`/`bleach` aren't installed we degrade to escaped plain text
+# rather than failing — the rest of the dashboard is unaffected.
+try:
+    import bleach as _bleach
+    import markdown as _markdown
+
+    _HAS_MARKDOWN = True
+except ImportError:  # pragma: no cover - depends on optional extras
+    _HAS_MARKDOWN = False
+
+# Tags the digest legitimately uses. We sanitise the rendered HTML because
+# the source is LLM-generated — an emitted <script>/<img onerror> must not
+# execute in the dashboard.
+_MD_TAGS = [
+    "p",
+    "br",
+    "strong",
+    "em",
+    "code",
+    "pre",
+    "blockquote",
+    "hr",
+    "ul",
+    "ol",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "th",
+    "td",
+]
+
+
+_LIST_ITEM_RE = re.compile(r"^\s*([-*+]\s+|\d+[.)]\s+)")
+
+
+def _ensure_list_blank_lines(text: str) -> str:
+    """Insert a blank line before a list that directly follows a non-list
+    text line. The narrator (like most LLMs) writes ``**Timeline:**`` then a
+    ``- item`` bullet on the very next line; python-markdown won't treat a
+    list as interrupting a paragraph without a preceding blank line, so
+    without this the bullets render as literal ``- `` text."""
+    out: list[str] = []
+    prev = ""
+    for line in text.split("\n"):
+        is_item = bool(_LIST_ITEM_RE.match(line))
+        if (
+            is_item
+            and prev.strip()
+            and not _LIST_ITEM_RE.match(prev)
+            and not prev.lstrip().startswith("```")
+        ):
+            out.append("")
+        out.append(line)
+        prev = line
+    return "\n".join(out)
+
+
+def render_markdown(text: str) -> str:
+    """LLM-written markdown → sanitised HTML. Falls back to HTML-escaped
+    text (newlines preserved via CSS) when the optional libs are missing."""
+    from markupsafe import Markup, escape
+
+    if not text:
+        return Markup("")
+    if not _HAS_MARKDOWN:
+        return Markup(f'<div class="whitespace-pre-line">{escape(text)}</div>')
+    html = _markdown.markdown(
+        _ensure_list_blank_lines(text),
+        extensions=["fenced_code", "tables", "sane_lists"],
+    )
+    clean = _bleach.clean(html, tags=_MD_TAGS, attributes={}, strip=True)
+    return Markup(clean)
+
+
+app.add_template_filter(render_markdown, "markdown")
 
 
 def _relative_time(iso_string: str) -> str:
@@ -187,6 +282,24 @@ def _relative_time(iso_string: str) -> str:
 
 
 app.add_template_filter(_relative_time, "relative_time")
+
+
+def _datetime_fmt(iso_string: str) -> str:
+    """Human-readable absolute timestamp (UTC) like 'May 30, 2026 · 18:57:20
+    UTC' from a stored ISO string. Returns the input unchanged if it isn't a
+    parseable timestamp, and '' for empty input."""
+    if not iso_string:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_string)
+    except (ValueError, TypeError):
+        return str(iso_string)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%b %d, %Y · %H:%M:%S UTC")
+
+
+app.add_template_filter(_datetime_fmt, "datetime_fmt")
 
 
 def _pretty_json(value) -> str:
@@ -272,8 +385,42 @@ def _engine():
                     f"sqlite:///file:{db_path}?mode=ro&uri=true",
                     connect_args={"check_same_thread": False},
                 )
+                if _QUERY_LOG_PATH:
+                    from sqlalchemy import event
+
+                    event.listen(eng, "before_cursor_execute", _log_query)
                 _engine_cache[db_path] = eng
     return eng
+
+
+# Optional SQL query log. Set AVAI_QUERY_LOG=/path to record every statement
+# the dashboard runs (with the route that triggered it) for debugging.
+_QUERY_LOG_PATH = os.environ.get("AVAI_QUERY_LOG")
+_query_log_lock = threading.Lock()
+
+
+def _log_query(conn, cursor, statement, parameters, context, executemany):
+    """SQLAlchemy before_cursor_execute hook → append one line per query."""
+    try:
+        from flask import has_request_context
+
+        route = request.path if has_request_context() else "-"
+    except Exception:
+        route = "-"
+    sql = " ".join(str(statement).split())
+    params = str(parameters)
+    if len(params) > 300:
+        params = params[:300] + "…"
+    line = (
+        f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}\t"
+        f"{route}\t{sql}\t{params}\n"
+    )
+    with _query_log_lock:
+        try:
+            with open(_QUERY_LOG_PATH, "a") as fh:
+                fh.write(line)
+        except OSError:
+            pass
 
 
 def _session() -> Session:
@@ -285,25 +432,51 @@ def _session() -> Session:
 # ============================================================================
 
 
+# Schema-introspection cache. The table/column layout is static for the
+# lifetime of a dashboard process (the monitor, a separate process, is what
+# changes it), so re-running `sqlite_master` / `PRAGMA table_info` on every
+# fragment poll is pure waste. Cache per-engine with a short TTL so a
+# freshly-created table is still picked up within a few seconds.
+_SCHEMA_TTL = 30.0
+_tables_cache: dict[str, tuple[float, set]] = {}
+_columns_cache: dict[tuple[str, str], tuple[float, set]] = {}
+
+
+def _cache_key(session: Session) -> str:
+    return str(session.get_bind().url)
+
+
 def _existing_tables(session: Session) -> set[str]:
     """Tables actually present in the DB. The dashboard may read a
     database written by an *older* monitor that predates a collector
     (e.g. network_flows), so querying a not-yet-created table would 500.
-    Callers check membership here and degrade gracefully instead."""
-    return set(
+    Callers check membership here and degrade gracefully instead. Cached."""
+    key = _cache_key(session)
+    hit = _tables_cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _SCHEMA_TTL:
+        return hit[1]
+    tables = set(
         session.execute(
             text("SELECT name FROM sqlite_master WHERE type='table'")
         ).scalars()
     )
+    _tables_cache[key] = (time.monotonic(), tables)
+    return tables
 
 
 def _existing_columns(session: Session, table: str) -> set[str]:
     """Column names present on ``table``. The DB may have been written by
     an older monitor missing a newly-added column (e.g. network_flows.
     iface); selecting it would 500. Callers substitute a NULL literal
-    for absent columns instead."""
+    for absent columns instead. Cached."""
+    key = (_cache_key(session), table)
+    hit = _columns_cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _SCHEMA_TTL:
+        return hit[1]
     rows = session.execute(text(f"PRAGMA table_info({table})")).all()
-    return {r[1] for r in rows}  # row[1] is the column name
+    cols = {r[1] for r in rows}  # row[1] is the column name
+    _columns_cache[key] = (time.monotonic(), cols)
+    return cols
 
 
 def latest_run(session: Session):
@@ -330,6 +503,141 @@ def latest_run(session: Session):
     return session.execute(
         select(CollectionRun).order_by(desc(CollectionRun.started_at)).limit(1)
     ).scalar_one_or_none()
+
+
+def latest_narrative(session: Session):
+    """The most recent incident digest, or None. Guarded for DBs written by
+    an older monitor that predates the ``incident_narratives`` table."""
+    if "incident_narratives" not in _existing_tables(session):
+        return None
+    return session.execute(
+        select(IncidentNarrativeRow)
+        .order_by(desc(IncidentNarrativeRow.created_at))
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def latest_risk(session: Session):
+    """Most recent host posture score, or None. Guarded for older DBs that
+    predate the ``risk_scores`` table."""
+    if "risk_scores" not in _existing_tables(session):
+        return None
+    return session.execute(
+        select(RiskScoreRow).order_by(desc(RiskScoreRow.created_at)).limit(1)
+    ).scalar_one_or_none()
+
+
+def risk_trend(session: Session, limit: int = 30) -> list[int]:
+    """Recent scores oldest→newest for the sparkline. [] if unavailable."""
+    if "risk_scores" not in _existing_tables(session):
+        return []
+    rows = (
+        session.execute(
+            select(RiskScoreRow.score)
+            .order_by(desc(RiskScoreRow.created_at))
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+    return list(reversed(rows))
+
+
+_VULN_SOURCES = ("osv", "nvd", "cisa_kev", "github_advisory", "endoflife")
+
+
+def vulnerabilities(session: Session) -> list[dict]:
+    """Aggregate the CVE / EOL evidence the enrichment chain already
+    collected into a prioritised 'patch me' list (KEV → has-CVE → EOL).
+    Reads the enrichment_evidence cache; [] if it isn't present."""
+    if "enrichment_evidence" not in _existing_tables(session):
+        return []
+    from avai.enrichers.cache import register_schema
+
+    model = register_schema(Base)
+    rows = session.execute(
+        select(
+            model.source,
+            model.indicator_type,
+            model.indicator_value,
+            model.verdict_hint,
+            model.confidence,
+            model.summary,
+            model.details_json,
+        ).where(model.source.in_(_VULN_SOURCES))
+    ).all()
+
+    parsed = []
+    cve_detail: dict[str, dict] = {}  # CVE id -> {kev, cvss, severity}
+    for src, itype, ival, hint, conf, summary, dj in rows:
+        try:
+            details = json.loads(dj) if dj else {}
+        except (TypeError, ValueError):
+            details = {}
+        parsed.append((src, itype, ival, hint, summary, details))
+        if itype == "cve":
+            # forward-chained CVE rows carry the severity/exploited detail
+            d = cve_detail.setdefault(
+                ival.upper(), {"kev": False, "cvss": None, "severity": None}
+            )
+            if src == "cisa_kev":
+                d["kev"] = True
+            score = (details.get("cvss31") or {}).get("baseScore")
+            if score is None:
+                score = (details.get("cvss") or {}).get("score")
+            try:
+                score = float(score) if score is not None else None
+            except (TypeError, ValueError):
+                score = None
+            if score is not None and (d["cvss"] is None or score > d["cvss"]):
+                d["cvss"] = score
+            sev = (details.get("cvss31") or {}).get("baseSeverity") or details.get(
+                "severity"
+            )
+            if sev and not d["severity"]:
+                d["severity"] = str(sev).lower()
+
+    items: list[dict] = []
+    for src, itype, ival, hint, summary, details in parsed:
+        eol = src == "endoflife" and hint != "benign"
+        ids = details.get("vuln_ids") or []
+        # CVE-typed rows feed cve_detail only — they're shown attached to
+        # their parent package, not as standalone rows.
+        if not ids and not eol:
+            continue
+        cves = [
+            {
+                "id": cid,
+                **cve_detail.get(
+                    str(cid).upper(), {"kev": False, "cvss": None, "severity": None}
+                ),
+            }
+            for cid in ids
+        ]
+        kev = any(c["kev"] for c in cves)
+        cvss = max((c["cvss"] for c in cves if c["cvss"] is not None), default=None)
+        items.append(
+            {
+                "software": ival,
+                "source": src,
+                "cves": cves,
+                "kev": kev,
+                "cvss": cvss,
+                "eol": eol,
+                "summary": summary or "",
+            }
+        )
+    # prioritise: actively-exploited (KEV) → highest CVSS → has-CVE → EOL
+    items.sort(
+        key=lambda i: (
+            not i["kev"],
+            -(i["cvss"] or 0.0),
+            not i["cves"],
+            not i["eol"],
+            i["software"],
+        )
+    )
+    return items
 
 
 def recent_runs(session: Session, limit: int = 10) -> list[CollectionRun]:
@@ -364,6 +672,18 @@ def judged_since(session: Session, since: str) -> int:
             )
         ).scalar()
         or 0
+    )
+
+
+def cost_since(session: Session, since: str) -> float:
+    """Total estimated LLM cost (USD) of judgments produced since ``since``."""
+    return float(
+        session.execute(
+            select(func.coalesce(func.sum(Judgement.cost_usd), 0.0)).where(
+                Judgement.created_at >= since
+            )
+        ).scalar()
+        or 0.0
     )
 
 
@@ -510,9 +830,42 @@ def findings(
     stmt = stmt.offset((page - 1) * per_page).limit(per_page)
 
     raw = session.execute(stmt).scalars().all()
+
+    # Batch the artifact lookup: one query per collector (content_hash IN …)
+    # instead of one per finding. Keep the latest row per content_hash.
+    hashes_by_collector: dict[str, set[str]] = {}
+    for j in raw:
+        hashes_by_collector.setdefault(j.collector, set()).add(j.content_hash)
+    artifacts: dict[tuple, tuple] = {}
+    for collector, hashes in hashes_by_collector.items():
+        model = COLLECTOR_MODELS.get(collector)
+        if model is None:
+            continue
+        seen: set[str] = set()
+        for row_obj in session.execute(
+            select(model)
+            .where(model.content_hash.in_(hashes))
+            .order_by(model.collected_at.desc())
+        ).scalars():
+            if row_obj.content_hash in seen:  # desc order → first is latest
+                continue
+            seen.add(row_obj.content_hash)
+            full = {
+                col.name: getattr(row_obj, col.name)
+                for col in model.__table__.columns
+                if col.name not in _HIDDEN_SOURCE_FIELDS
+            }
+            fields = DISPLAY_FIELDS.get(collector, ())
+            artifacts[(collector, row_obj.content_hash)] = (
+                full,
+                " · ".join(
+                    str(full[f]) for f in fields if full.get(f) not in (None, "")
+                ),
+            )
+
     items = []
     for j in raw:
-        source_row, artifact = _row_and_artifact(session, j)
+        source_row, artifact = artifacts.get((j.collector, j.content_hash), ({}, ""))
         is_active = bool(
             latest_started and j.last_seen_at and j.last_seen_at >= latest_started
         )
@@ -530,6 +883,9 @@ def findings(
                 "artifact": artifact,
                 "source_row": source_row,
                 "content_hash": j.content_hash,
+                "novel": bool(getattr(j, "novel", 0)),
+                "context": _parse_json_obj(getattr(j, "context_json", None)),
+                "cost_usd": getattr(j, "cost_usd", None) or 0.0,
             }
         )
 
@@ -543,23 +899,67 @@ def findings(
     }
 
 
-def row_counts(session: Session, since: str) -> list[dict]:
+# Streaming collectors accumulate across many StreamingSession run_ids, so
+# their "this run" count is a time window on the (indexed) event_timestamp,
+# not a run_id match. Everything else is a snapshot keyed by run_id.
+_STREAMING_COLLECTORS = {"auth_events", "process_exec_events"}
+
+
+def row_counts(
+    session: Session,
+    latest_run_id: str,
+    latest_started: str,
+    prev_run_id: str | None = None,
+    prev_started: str | None = None,
+) -> list[dict]:
+    """Per-collector row counts for the latest run, with a change signal vs
+    the previous run.
+
+    Snapshot collectors are counted by ``run_id`` (already indexed) instead
+    of a ``collected_at`` range — turning per-table full scans into index
+    counts. Streaming collectors use an ``event_timestamp`` window (also
+    indexed). ``delta``/``is_new`` describe the change vs the previous run.
+    """
     out = []
     present = _existing_tables(session)
     for name, model in COLLECTOR_MODELS.items():
-        # Skip tables an older monitor never created — querying them
-        # would raise "no such table" and 500 the whole panel.
         if model.__tablename__ not in present:
             continue
-        n = (
-            session.execute(
+        if name in _STREAMING_COLLECTORS:
+            # streaming tables accumulate across sessions → time window
+            ts = model.event_timestamp
+            cur = session.execute(
+                select(func.count()).select_from(model).where(ts >= latest_started)
+            ).scalar()
+            prev = (
+                session.execute(
+                    select(func.count())
+                    .select_from(model)
+                    .where(ts >= prev_started, ts < latest_started)
+                ).scalar()
+                if prev_started is not None
+                else None
+            )
+        else:
+            # snapshot tables are keyed by run_id (indexed)
+            cur = session.execute(
                 select(func.count())
                 .select_from(model)
-                .where(model.collected_at >= since)
+                .where(model.run_id == latest_run_id)
             ).scalar()
-            or 0
-        )
-        out.append({"name": name, "rows": n})
+            prev = (
+                session.execute(
+                    select(func.count())
+                    .select_from(model)
+                    .where(model.run_id == prev_run_id)
+                ).scalar()
+                if prev_run_id is not None
+                else None
+            )
+        cur = cur or 0
+        delta = (cur - (prev or 0)) if prev is not None else None
+        is_new = prev == 0 and cur > 0 if prev is not None else False
+        out.append({"name": name, "rows": cur, "delta": delta, "is_new": is_new})
     out.sort(key=lambda x: x["rows"], reverse=True)
     return out
 
@@ -1345,76 +1745,6 @@ def persistence_tampering(
     }
 
 
-_TCC_AUTH = {0: "denied", 1: "unknown", 2: "allowed", 3: "limited"}
-
-
-def tcc_permissions(
-    session: Session,
-    run_id: str,
-    limit: int = 500,
-    verdict: str = "",
-    auth: str = "",
-    q: str = "",
-    page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
-):
-    """TCC privacy permissions for *run_id*, annotated with LLM verdicts."""
-    rows = _collector_rows_with_verdict(
-        session,
-        run_id,
-        TccPermissionRow,
-        "tcc_permissions",
-        ("scope", "service", "client", "auth_value"),
-        limit,
-    )
-    for r in rows:
-        svc = r.get("service") or ""
-        r["service_short"] = svc.removeprefix("kTCCService") or svc
-        r["auth_label"] = _TCC_AUTH.get(r.get("auth_value"), "unknown")
-    rows.sort(
-        key=lambda r: (
-            r.get("auth_value") != 2,  # allowed rows first
-            r["service_short"],
-            r.get("client") or "",
-        )
-    )
-
-    # Apply filters
-    if verdict:
-        rows = [r for r in rows if r.get("verdict") == verdict]
-    if auth:
-        rows = [r for r in rows if r.get("auth_label") == auth]
-    if q:
-        ql = q.lower()
-        rows = [
-            r
-            for r in rows
-            if ql in (r.get("service_short") or "").lower()
-            or ql in (r.get("client") or "").lower()
-        ]
-
-    counts = {
-        "total": len(rows),
-        "allowed": sum(1 for r in rows if r.get("auth_value") == 2),
-        "denied": sum(1 for r in rows if r.get("auth_value") == 0),
-        "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
-        "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
-    }
-
-    page_rows, total, total_pages = _paginate(rows, page, per_page)
-    return {
-        "rows": page_rows,
-        "counts": counts,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
-        "q": q,
-        "verdict": verdict,
-        "auth": auth,
-    }
-
-
 _AUTH_SUBSYSTEM_LABELS = {
     "com.apple.securityd": "securityd",
     "com.apple.TCC": "TCC",
@@ -1443,6 +1773,9 @@ AUTH_SUBSYSTEM_OPTIONS = [
 
 
 _AUTH_VERDICT_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3}
+
+
+_AUTH_AGG_WINDOW_HOURS = 24
 
 
 def auth_events_aggregated(
@@ -1476,9 +1809,17 @@ def auth_events_aggregated(
     if AuthEventRow.__tablename__ not in _existing_tables(session):
         return empty
 
-    # --- summary counts per subsystem (all rows, unfiltered) ---
+    # Bound the aggregation to a recent window on the indexed event_timestamp.
+    # auth_events accumulates indefinitely (100k+ rows); without this the
+    # GROUP BY scans the whole table on every poll.
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=_AUTH_AGG_WINDOW_HOURS)
+    ).isoformat(timespec="seconds")
+
+    # --- summary counts per subsystem (recent window) ---
     summary_rows = session.execute(
         select(AuthEventRow.subsystem, func.count().label("cnt"))
+        .where(AuthEventRow.event_timestamp >= cutoff)
         .group_by(AuthEventRow.subsystem)
         .order_by(func.count().desc())
         .limit(12)
@@ -1490,7 +1831,7 @@ def auth_events_aggregated(
     total_events = sum(summary.values())
 
     # --- aggregation: one row per unique (content_hash) pattern ---
-    conds = []
+    conds = [AuthEventRow.event_timestamp >= cutoff]
     if q:
         like = f"%{q}%"
         conds.append(
@@ -1761,7 +2102,134 @@ def fragment_overview():
             runs_total=runs_total(s),
             verdict_counts=verdict_counts(s),
             judged_this_run=(judged_since(s, latest.started_at) if latest else 0),
+            cost_this_run=(cost_since(s, latest.started_at) if latest else 0.0),
         )
+
+
+def _sparkline_points(scores: list, w: int = 140, h: int = 30, pad: int = 3) -> str:
+    """SVG polyline points for a 0-100 score series (oldest→newest)."""
+    if not scores:
+        return ""
+    pts = scores if len(scores) > 1 else scores * 2
+    n = len(pts)
+    span_x = (w - 2 * pad) / (n - 1)
+    out = []
+    for i, s in enumerate(pts):
+        x = pad + i * span_x
+        y = (h - pad) - (max(0, min(100, s)) / 100) * (h - 2 * pad)
+        out.append(f"{x:.1f},{y:.1f}")
+    return " ".join(out)
+
+
+@app.route("/fragments/risk")
+def fragment_risk():
+    with _session() as s:
+        row = latest_risk(s)
+        drivers = _parse_json_list(getattr(row, "drivers_json", None)) if row else []
+        trend = risk_trend(s)
+        return render_template(
+            "partials/_risk.html",
+            risk=row,
+            drivers=drivers,
+            spark_points=_sparkline_points(trend),
+            trend_len=len(trend),
+        )
+
+
+@app.route("/fragments/incident")
+def fragment_incident():
+    with _session() as s:
+        row = latest_narrative(s)
+        timeline = _parse_json_list(getattr(row, "timeline_json", None)) if row else []
+        actions = _parse_json_list(getattr(row, "actions_json", None)) if row else []
+        return render_template(
+            "partials/_incident.html",
+            narrative=row,
+            timeline=timeline,
+            actions=actions,
+        )
+
+
+@app.route("/fragments/verdicts")
+def fragment_verdicts():
+    """Merged verdicts panel: all-time totals donut + last-12h trend."""
+    with _session() as s:
+        return render_template(
+            "partials/_verdicts.html", verdict_counts=verdict_counts(s)
+        )
+
+
+@app.route("/fragments/posture")
+def fragment_posture():
+    """Merged posture panel: risk score + system-integrity checklist."""
+    with _session() as s:
+        latest = latest_run(s)
+        row = latest_risk(s)
+        drivers = _parse_json_list(getattr(row, "drivers_json", None)) if row else []
+        trend = risk_trend(s)
+        return render_template(
+            "partials/_posture.html",
+            risk=row,
+            drivers=drivers,
+            spark_points=_sparkline_points(trend),
+            trend_len=len(trend),
+            sysint=(system_integrity(s, latest.run_id) if latest else None),
+        )
+
+
+@app.route("/fragments/collection")
+def fragment_collection():
+    """Merged collection-health panel: row counts + recent runs + errors."""
+    with _session() as s:
+        latest = latest_run(s)
+        prid, pst = _prior_run(s, latest.started_at) if latest else (None, None)
+        return render_template(
+            "partials/_collection.html",
+            recent_runs=recent_runs(s),
+            errors=(collector_errors(s, latest.run_id) if latest else []),
+            row_counts=(
+                row_counts(s, latest.run_id, latest.started_at, prid, pst)
+                if latest
+                else []
+            ),
+        )
+
+
+@app.route("/fragments/network")
+def fragment_network():
+    """Tabbed network panel wrapper (tabs lazy-load the existing fragments)."""
+    return render_template("partials/_network.html")
+
+
+@app.route("/fragments/vulnerabilities")
+def fragment_vulnerabilities():
+    """CVE / EOL 'protect yourself' panel from collected enrichment evidence."""
+    with _session() as s:
+        return render_template(
+            "partials/_vulnerabilities.html", vulns=vulnerabilities(s)
+        )
+
+
+def _parse_json_list(raw) -> list:
+    """Defensively parse a stored JSON array column; [] on any problem."""
+    if not raw:
+        return []
+    try:
+        val = json.loads(raw)
+        return val if isinstance(val, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def _parse_json_obj(raw) -> dict:
+    """Defensively parse a stored JSON object column; {} on any problem."""
+    if not raw:
+        return {}
+    try:
+        val = json.loads(raw)
+        return val if isinstance(val, dict) else {}
+    except (ValueError, TypeError):
+        return {}
 
 
 @app.route("/fragments/sysint")
@@ -1881,34 +2349,6 @@ def fragment_persistence():
         )
 
 
-@app.route("/fragments/tcc")
-def fragment_tcc():
-    verdict = request.args.get("verdict", "")
-    auth = request.args.get("auth", "")
-    q = request.args.get("q", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
-    with _session() as s:
-        latest = latest_run(s)
-        return render_template(
-            "partials/_tcc.html",
-            data=(
-                tcc_permissions(
-                    s,
-                    latest.run_id,
-                    verdict=verdict,
-                    auth=auth,
-                    q=q,
-                    page=page,
-                    per_page=per_page,
-                )
-                if latest
-                else None
-            ),
-            per_page_options=PER_PAGE_OPTIONS,
-        )
-
-
 @app.route("/fragments/auth-events")
 def fragment_auth_events():
     q = request.args.get("q", "")
@@ -2000,10 +2440,25 @@ def fragment_findings():
 def fragment_row_counts():
     with _session() as s:
         latest = latest_run(s)
+        if latest is None:
+            return render_template("partials/_row_counts.html", row_counts=[])
+        prid, pst = _prior_run(s, latest.started_at)
         return render_template(
             "partials/_row_counts.html",
-            row_counts=(row_counts(s, latest.started_at) if latest else []),
+            row_counts=row_counts(s, latest.run_id, latest.started_at, prid, pst),
         )
+
+
+def _prior_run(session: Session, before_started: str) -> tuple[str | None, str | None]:
+    """``(run_id, started_at)`` of the run immediately before
+    ``before_started``, or ``(None, None)`` if it's the first run."""
+    row = session.execute(
+        select(CollectionRun.run_id, CollectionRun.started_at)
+        .where(CollectionRun.started_at < before_started)
+        .order_by(desc(CollectionRun.started_at))
+        .limit(1)
+    ).first()
+    return (row[0], row[1]) if row else (None, None)
 
 
 @app.route("/fragments/runs")
@@ -2055,6 +2510,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="open the dashboard in your default browser once it's serving",
+    )
     return parser
 
 
@@ -2063,16 +2523,26 @@ def main() -> int:
 
     app.config["DB_PATH"] = args.db
     _ensure_db_exists(args.db)
-    _serve(args.host, args.port, args.debug)
+    _serve(args.host, args.port, args.debug, args.open)
     return 0
 
 
-def _serve(host: str, port: int, debug: bool) -> None:
+def _open_browser(host: str, port: int) -> None:
+    """Open the dashboard in the default browser after a short delay so the
+    server has time to bind the socket. 0.0.0.0/:: aren't routable from a
+    browser, so point at loopback instead."""
+    url_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    threading.Timer(1.0, lambda: webbrowser.open(f"http://{url_host}:{port}")).start()
+
+
+def _serve(host: str, port: int, debug: bool, open_browser: bool = False) -> None:
     """Serve the dashboard. In normal use we run on waitress, a real
     (pure-Python, cross-platform) WSGI server, so there's no "this is a
     development server" warning. ``--debug`` falls back to Werkzeug's
     reloader/debugger (dev only), and if waitress somehow isn't installed
     we degrade to the dev server rather than failing to start."""
+    if open_browser:
+        _open_browser(host, port)
     if not debug:
         try:
             from waitress import serve

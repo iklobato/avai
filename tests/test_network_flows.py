@@ -699,14 +699,14 @@ class TestMissingTableGraceful:
         with app.test_client() as c:
             r = c.get("/fragments/network-flows")
         assert r.status_code == 200
-        assert "no network flows yet" in r.data.decode()
+        assert "no network flows match the current filters" in r.data.decode()
 
     def test_row_counts_skips_missing_table(self, tmp_path):
         from avai.dashboard import row_counts
 
         engine, _ = self._db_without_flows(tmp_path)
         with Session(engine) as s:
-            counts = row_counts(s, "2000-01-01")
+            counts = row_counts(s, "some-run", "2000-01-01")
         names = {c["name"] for c in counts}
         assert "network_flows" not in names
         assert "processes" in names

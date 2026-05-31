@@ -273,4 +273,4 @@ class TestMissingTableGraceful:
             r = c.get("/fragments/listening-ports")
         # missing table degrades to the empty-state card, not a 500
         assert r.status_code == 200
-        assert "no listening sockets in the latest run" in r.data.decode()
+        assert "no listening sockets match the current filters" in r.data.decode()

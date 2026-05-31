@@ -1,0 +1,28 @@
+{# Tabbed network panel — Listening / Outbound flows / DNS. Each tab lazily
+   loads its existing fragment into the shared content area via HTMX. The
+   first tab loads on render. #}
+{% set tabs = [
+  ('listening-ports', 'listening ports'),
+  ('network-flows',   'outbound flows'),
+  ('dns-queries',     'dns queries'),
+] %}
+
+<div>
+  <div class="flex items-center gap-1 mb-3 border-b border-slate-800">
+    {% for slug, label in tabs %}
+      <button type="button"
+              class="js-net-tab px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors
+                     {% if loop.first %}border-sky-500 text-slate-100{% else %}border-transparent text-slate-500 hover:text-slate-300{% endif %}"
+              data-net-tab="{{ slug }}"
+              hx-get="/fragments/{{ slug }}"
+              hx-target="#network-content"
+              hx-swap="innerHTML"
+              {% if loop.first %}hx-trigger="load, click"{% else %}hx-trigger="click"{% endif %}>
+        {{ label }}
+      </button>
+    {% endfor %}
+  </div>
+  <div id="network-content">
+    <div class="bg-slate-900 border border-slate-800 rounded-lg p-6 text-slate-500 italic">loading…</div>
+  </div>
+</div>
