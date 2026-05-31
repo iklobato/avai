@@ -22,3 +22,6 @@ venv/
 # Landing-page screenshots/logo must ship with the site (global gitignore excludes assets/)
 !landing-page/assets/
 !landing-page/assets/**
+
+# local secrets — never commit
+.env
