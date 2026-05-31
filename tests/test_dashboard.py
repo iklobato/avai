@@ -35,14 +35,44 @@ class TestEnsureDbExists:
         _ensure_db_exists(str(db))
         assert db.exists()
 
-    def test_is_no_op_when_file_already_populated(self, tmp_path):
-        db = tmp_path / "preexisting.db"
-        # Touch a non-trivial file so _ensure thinks it's real.
-        db.write_bytes(b"x" * 100)
-        mtime_before = db.stat().st_mtime_ns
-        _ensure_db_exists(str(db))
-        # No rewrite.
-        assert db.stat().st_mtime_ns == mtime_before
+    def test_adds_missing_tables_to_existing_db_preserving_data(self, tmp_path):
+        """Regression: a DB written by an OLDER monitor lacks a newly-added
+        table (e.g. control_state). _ensure_db_exists must add it on startup
+        WITHOUT touching existing data, so the read-only dashboard doesn't
+        500 on the new panel. This is the general 'every new table' fix."""
+        import sqlite3
+
+        from avai.host_monitor import CollectionRun, Sink
+
+        db = tmp_path / "old.db"
+        Sink(create_engine(f"sqlite:///{db}")).setup()  # full current schema
+        with Session(_engine_rw(str(db))) as s:  # seed real data
+            s.add(
+                CollectionRun(
+                    run_id="r1",
+                    started_at="2026-01-01T00:00:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.commit()
+        # Emulate an old DB: drop the table a later version introduced.
+        con = sqlite3.connect(str(db))
+        con.execute("DROP TABLE control_state")
+        con.commit()
+        con.close()
+
+        _ensure_db_exists(str(db))  # must re-add it, idempotently
+
+        con = sqlite3.connect(str(db))
+        tables = {
+            r[0]
+            for r in con.execute("select name from sqlite_master where type='table'")
+        }
+        runs = con.execute("select count(*) from collection_runs").fetchone()[0]
+        con.close()
+        assert "control_state" in tables  # missing table added
+        assert runs == 1  # existing data preserved, not wiped
 
     def test_schema_is_queryable_after_create(self, tmp_path):
         """The bug it regresses against: dashboard opens the file with
@@ -784,6 +814,21 @@ class TestControlPlane:
         assert r.status_code == 200
         assert b"monitor control" in r.data
 
+    def test_panel_survives_missing_control_table(self, client):
+        """Belt-and-suspenders: even if control_state is somehow absent, the
+        panel degrades to 'offline' (200) instead of 500ing."""
+        import sqlite3
+
+        con = sqlite3.connect(app.config["DB_PATH"])
+        con.execute("DROP TABLE IF EXISTS control_state")
+        con.commit()
+        con.close()
+        from avai.dashboard.control import read_control_state
+
+        with app.app_context():
+            assert read_control_state() is None  # degraded, did not raise
+        assert client.get("/fragments/control").status_code == 200
+
     def test_post_without_token_is_forbidden(self, client, monkeypatch):
         monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
         # Even supplying a header: fail closed when the server has no token.
@@ -821,13 +866,19 @@ class TestControlPlane:
 
     def test_unknown_collector_is_rejected(self, client, monkeypatch):
         monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
-        r = client.post("/control/collector/bogus/off", headers={"X-Avai-Token": "secret"})
+        r = client.post(
+            "/control/collector/bogus/off", headers={"X-Avai-Token": "secret"}
+        )
         assert r.status_code == 400
 
     def test_settings_update(self, client, monkeypatch):
         monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
         h = {"X-Avai-Token": "secret"}
-        client.post("/control/settings", headers=h, data={"interval": "45", "judge": "0", "enrich": "1"})
+        client.post(
+            "/control/settings",
+            headers=h,
+            data={"interval": "45", "judge": "0", "enrich": "1"},
+        )
         st = self._state()
         assert st["interval_override"] == 45
         assert st["judge_enabled"] == 0 and st["enrich_enabled"] == 1
@@ -841,5 +892,7 @@ class TestControlPlane:
 
     def test_unknown_maintenance_action_is_rejected(self, client, monkeypatch):
         monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
-        r = client.post("/control/maintenance/bogus", headers={"X-Avai-Token": "secret"})
+        r = client.post(
+            "/control/maintenance/bogus", headers={"X-Avai-Token": "secret"}
+        )
         assert r.status_code == 400

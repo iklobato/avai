@@ -115,14 +115,26 @@ def queue_command(command: str) -> None:
 
 
 def read_control_state() -> dict | None:
-    """Read the control row (read-only engine is fine) for display."""
+    """Read the control row (read-only engine is fine) for display.
+
+    Degrades to None if the table is absent — e.g. a DB written by an older
+    monitor before _ensure_db_exists has added control_state — so the panel
+    renders 'offline' instead of 500ing. Matches the dashboard's general
+    missing-table tolerance."""
+    from sqlalchemy.exc import OperationalError
+
     from .queries import _session
 
-    with _session() as session:
-        row = session.get(ControlState, 1)
-        if row is None:
-            return None
-        return {c.name: getattr(row, c.name) for c in ControlState.__table__.columns}
+    try:
+        with _session() as session:
+            row = session.get(ControlState, 1)
+            if row is None:
+                return None
+            return {
+                c.name: getattr(row, c.name) for c in ControlState.__table__.columns
+            }
+    except OperationalError:
+        return None
 
 
 def monitor_alive(state: dict | None) -> bool:
