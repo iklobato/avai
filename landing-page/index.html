@@ -107,8 +107,10 @@
     <div class="mt-10 flex flex-col sm:flex-row items-center justify-center gap-3">
       <div class="group relative">
         <pre class="mono text-left text-sm bg-slate-950/80 ring-1 ring-white/10 rounded-lg px-5 py-3 text-slate-200 shadow-2xl shadow-emerald-500/5">
-<span class="text-slate-500">$</span> docker run -p 8765:8765 -v "$PWD":/data iklob1/avai</pre>
-        <button onclick="navigator.clipboard.writeText('docker run -p 8765:8765 -v &quot;$PWD&quot;:/data iklob1/avai'); this.innerText='copied'; setTimeout(()=>this.innerText='copy',1500);"
+<span class="text-slate-500">$</span> pip install 'avai-monitor[judge]'
+<span class="text-slate-500">$</span> sudo avai monitor &amp;
+<span class="text-slate-500">$</span> avai dashboard</pre>
+        <button onclick="navigator.clipboard.writeText('pip install \'avai-monitor[judge]\'\nsudo avai monitor &\navai dashboard'); this.innerText='copied'; setTimeout(()=>this.innerText='copy',1500);"
                 class="copy-btn absolute -top-2 -right-2 text-[11px] mono px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 ring-1 ring-white/10 transition">copy</button>
       </div>
       <a href="https://github.com/iklobato/avai" class="text-sm text-slate-400 hover:text-slate-200 transition">
@@ -703,12 +705,21 @@
     </div>
 
     <div class="mt-12 grid md:grid-cols-3 gap-5">
-      <!-- Docker -->
+      <!-- pip -->
       <div class="card rounded-2xl p-6">
         <div class="flex items-center justify-between">
-          <div class="text-slate-100 font-medium">Docker</div>
+          <div class="text-slate-100 font-medium">pip (macOS or Linux)</div>
           <span class="text-[10px] uppercase tracking-widest text-emerald-300 bg-emerald-400/10 ring-1 ring-emerald-400/30 rounded px-1.5 py-0.5">recommended</span>
         </div>
+        <p class="mt-2 text-sm text-slate-400">Full visibility — including TCC, Gatekeeper, auth events — with sudo on macOS or Linux.</p>
+        <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">pip install 'avai-monitor[judge]'
+sudo avai monitor &
+avai dashboard</pre>
+      </div>
+
+      <!-- Docker -->
+      <div class="card rounded-2xl p-6">
+        <div class="text-slate-100 font-medium">Docker</div>
         <p class="mt-2 text-sm text-slate-400">Dashboard runs anywhere. Monitor needs a Linux host.</p>
         <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">docker run -p 8765:8765 \
   -v "$PWD":/data \
@@ -722,15 +733,6 @@
         <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">curl -O https://raw.githubusercontent.com/\
 iklobato/avai/main/docker-compose.yml
 docker compose up -d</pre>
-      </div>
-
-      <!-- pip -->
-      <div class="card rounded-2xl p-6">
-        <div class="text-slate-100 font-medium">pip (macOS or Linux)</div>
-        <p class="mt-2 text-sm text-slate-400">Full visibility — including TCC, Gatekeeper, auth events — with sudo on macOS or Linux.</p>
-        <pre class="mono text-xs mt-4 bg-slate-950/80 ring-1 ring-white/10 rounded-md p-3 text-slate-200 whitespace-pre-wrap">pip install 'avai-monitor[judge]'
-sudo avai monitor &
-avai dashboard</pre>
       </div>
     </div>
 
