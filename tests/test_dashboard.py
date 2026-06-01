@@ -128,6 +128,14 @@ class TestDashboardEndpoints:
         assert r.status_code == 200
         assert b"<html" in r.data or b"<!doctype html" in r.data.lower()
 
+    def test_findings_huge_page_does_not_500(self, client):
+        # Regression: an out-of-range ?page= used to build an OFFSET past
+        # SQLite's 64-bit INTEGER range, raising OverflowError -> HTTP 500.
+        # findings() now clamps page to the last page (like _paginate).
+        for page in ("10000000000000000000", "99999999", "-5"):
+            r = client.get(f"/fragments/findings?page={page}&per_page=200")
+            assert r.status_code == 200, f"page={page} returned {r.status_code}"
+
     def test_notifications_endpoint_returns_empty_items(self, client):
         # This is what the Docker HEALTHCHECK hits.
         r = client.get("/api/notifications/new?since=2099-01-01")

@@ -563,7 +563,11 @@ def findings(
         stmt = stmt.order_by(direction(sort_col), Judgement.created_at.desc())
 
     per_page = max(1, min(per_page, 200))
-    page = max(1, page)
+    # Clamp to the last page, mirroring _paginate. Without the upper bound a
+    # huge ?page= produces an OFFSET past SQLite's 64-bit INTEGER range and
+    # raises OverflowError → HTTP 500.
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
     stmt = stmt.offset((page - 1) * per_page).limit(per_page)
 
     raw = session.execute(stmt).scalars().all()
