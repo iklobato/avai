@@ -75,6 +75,35 @@ app.config["TEMPLATES_AUTO_RELOAD"] = True
 app.jinja_env.auto_reload = True
 
 
+# Content-Security-Policy: the dashboard ships its own vendored JS/CSS and uses
+# a few inline <script>/<style> blocks plus Tailwind's Play build (which compiles
+# via eval), so script/style need 'unsafe-inline'/'unsafe-eval'. frame-ancestors
+# 'none' (with X-Frame-Options) blocks clickjacking of the control buttons.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
+
+@app.after_request
+def _security_headers(response):
+    """Add baseline security headers to every response and drop the server
+    banner. The dashboard is loopback-only by default, but these are cheap
+    defense-in-depth (clickjacking, MIME sniffing, referrer leakage)."""
+    response.headers.setdefault("Content-Security-Policy", _CSP)
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers["Server"] = "avai"
+    return response
+
+
 try:
     import bleach as _bleach
     import markdown as _markdown

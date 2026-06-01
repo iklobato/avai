@@ -136,6 +136,13 @@ class TestDashboardEndpoints:
             r = client.get(f"/fragments/findings?page={page}&per_page=200")
             assert r.status_code == 200, f"page={page} returned {r.status_code}"
 
+    def test_security_headers_present(self, client):
+        r = client.get("/")
+        assert r.headers.get("X-Frame-Options") == "DENY"
+        assert r.headers.get("X-Content-Type-Options") == "nosniff"
+        assert "frame-ancestors 'none'" in r.headers.get("Content-Security-Policy", "")
+        assert r.headers.get("Server") == "avai"
+
     def test_notifications_endpoint_returns_empty_items(self, client):
         # This is what the Docker HEALTHCHECK hits.
         r = client.get("/api/notifications/new?since=2099-01-01")
