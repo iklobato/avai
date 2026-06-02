@@ -812,6 +812,43 @@ class TestIncidentNarratorNormalization:
         nar = self._narrator({"headline": "h", "severity": "low", "summary": "s"})
         assert nar.narrate([]) is None
 
+    def test_findings_are_capped_keeping_most_severe(self):
+        # Regression: an unbounded findings list could blow the LLM context
+        # window and fail the digest every cycle. narrate() caps to
+        # MAX_FINDINGS, keeping the most severe/confident.
+        from avai.host_monitor import DEFAULT_PROMPTS_PATH, IncidentNarrator, Prompts
+
+        class _FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def complete_structured(self, **kw):
+                self.calls.append(kw)
+                return {
+                    "headline": "h",
+                    "severity": "high",
+                    "summary": "s",
+                    "timeline": [],
+                    "actions": [],
+                }
+
+        client = _FakeClient()
+        nar = IncidentNarrator(
+            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=client
+        )
+        cap = IncidentNarrator.MAX_FINDINGS
+        findings = [
+            {"content_hash": "keep", "verdict": "malicious", "confidence": 0.99}
+        ]
+        findings += [
+            {"content_hash": f"f{i}", "verdict": "suspicious", "confidence": 0.1}
+            for i in range(cap + 20)
+        ]
+        nar.narrate(findings)
+        user = client.calls[0]["user"]
+        assert user.count('"content_hash"') == cap  # trimmed to the cap
+        assert '"keep"' in user  # the malicious finding survived the trim
+
     def test_timeline_and_actions_are_normalised(self):
         nar = self._narrator(
             {
@@ -918,14 +955,41 @@ class TestRiskScoreSink:
     def test_privilege_and_integrity_queries(self, sink):
         from avai.host_monitor import PrivilegeConfigRow, SystemIntegrityRow
 
-        _w(sink, SystemIntegrityRow, run_id="r1", collected_at=_TS[0],
-           filevault_active=0, firewall_global_state=1)
-        _w(sink, PrivilegeConfigRow, run_id="r1", collected_at=_TS[0],
-           kind="sudoers", subject="dev", detail="ALL=(ALL) NOPASSWD: ALL")
-        _w(sink, PrivilegeConfigRow, run_id="r1", collected_at=_TS[0],
-           kind="account", subject="backdoor", detail="uid=0")
-        _w(sink, PrivilegeConfigRow, run_id="r1", collected_at=_TS[0],
-           kind="account", subject="root", detail="uid=0")
+        _w(
+            sink,
+            SystemIntegrityRow,
+            run_id="r1",
+            collected_at=_TS[0],
+            filevault_active=0,
+            firewall_global_state=1,
+        )
+        _w(
+            sink,
+            PrivilegeConfigRow,
+            run_id="r1",
+            collected_at=_TS[0],
+            kind="sudoers",
+            subject="dev",
+            detail="ALL=(ALL) NOPASSWD: ALL",
+        )
+        _w(
+            sink,
+            PrivilegeConfigRow,
+            run_id="r1",
+            collected_at=_TS[0],
+            kind="account",
+            subject="backdoor",
+            detail="uid=0",
+        )
+        _w(
+            sink,
+            PrivilegeConfigRow,
+            run_id="r1",
+            collected_at=_TS[0],
+            kind="account",
+            subject="root",
+            detail="uid=0",
+        )
 
         integ = sink.system_integrity_row("r1")
         assert integ["filevault_active"] == 0 and integ["firewall_global_state"] == 1
@@ -933,10 +997,17 @@ class TestRiskScoreSink:
         assert nopasswd == 1 and uid0 == 1  # 'root' excluded
 
     def test_write_and_latest_risk(self, sink):
-        sink.write_risk_score({
-            "created_at": _TS[0], "run_id": "r1", "score": 72, "grade": "C",
-            "prev_score": None, "drivers_json": "[]", "explanation": "init",
-        })
+        sink.write_risk_score(
+            {
+                "created_at": _TS[0],
+                "run_id": "r1",
+                "score": 72,
+                "grade": "C",
+                "prev_score": None,
+                "drivers_json": "[]",
+                "explanation": "init",
+            }
+        )
         row = sink.latest_risk_row()
         assert row.score == 72 and row.grade == "C"
 
@@ -958,7 +1029,9 @@ class TestEstimateCost:
         from avai.host_monitor import estimate_cost
 
         assert estimate_cost("claude-opus-4-8", 1_000_000, 0) == pytest.approx(15.0)
-        assert estimate_cost("anthropic/claude-sonnet-4-6", 0, 1_000_000) == pytest.approx(15.0)
+        assert estimate_cost(
+            "anthropic/claude-sonnet-4-6", 0, 1_000_000
+        ) == pytest.approx(15.0)
 
     def test_unknown_model_uses_default_tier(self):
         from avai.host_monitor import estimate_cost
@@ -971,9 +1044,15 @@ class TestJudgmentCostPersistence:
         from avai.host_monitor import Judgement, Judgment, ThreatCategory, Verdict
 
         j = Judgment(
-            content_hash="hc", collector="processes", verdict=Verdict.MALICIOUS,
-            category=ThreatCategory.PERSISTENCE, confidence=0.9, reasoning="r",
-            remediation="", model="m", created_at="2026-01-01T00:00:00Z",
+            content_hash="hc",
+            collector="processes",
+            verdict=Verdict.MALICIOUS,
+            category=ThreatCategory.PERSISTENCE,
+            confidence=0.9,
+            reasoning="r",
+            remediation="",
+            model="m",
+            created_at="2026-01-01T00:00:00Z",
             cost_usd=0.0012,
         )
         sink.write_judgments([j])
