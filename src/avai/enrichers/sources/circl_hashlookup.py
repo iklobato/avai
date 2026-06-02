@@ -52,14 +52,28 @@ class CirclHashlookupEnricher(Enricher):
         body = resp.json()
         # "FileName" / "ProductName" are NSRL standard fields.
         product = body.get("ProductName") or body.get("FileName") or "?"
+        details = {k: body.get(k) for k in (
+            "FileName", "ProductName", "FileSize", "OpSystemCode",
+            "trust", "source", "KnownMalicious",
+        )}
+        # CIRCL aggregates known-MALICIOUS hashes alongside the NSRL
+        # known-good set. A present-and-truthy KnownMalicious flag means
+        # this hash is NOT a whitelist hit — emitting BENIGN here would
+        # let a known-bad binary suppress the judge. Honour it.
+        if body.get("KnownMalicious"):
+            return Evidence(
+                source       = self.name,
+                indicator    = indicator,
+                verdict_hint = VerdictHint.MALICIOUS,
+                confidence   = 0.9,
+                summary      = f"CIRCL: hash flagged KnownMalicious ({product})",
+                details      = details,
+            )
         return Evidence(
             source       = self.name,
             indicator    = indicator,
             verdict_hint = VerdictHint.BENIGN,
             confidence   = 0.9,
             summary      = f"CIRCL/NSRL: known-good binary ({product})",
-            details      = {k: body.get(k) for k in (
-                "FileName", "ProductName", "FileSize", "OpSystemCode",
-                "trust", "source", "KnownMalicious",
-            )},
+            details      = details,
         )

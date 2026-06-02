@@ -62,7 +62,17 @@ class OSVEnricher(Enricher):
         vulns = body.get("vulns") or []
         if not vulns:
             return None
-        ids = [v.get("id") for v in vulns[:5] if v.get("id")]
+        # Collect each vuln's primary id AND its aliases. OSV's primary
+        # id is often a GHSA-/PYSEC-/OSV- id with the CVE only in aliases;
+        # the chain forward-enriches CVE-/GHSA- ids (CVSS, KEV), so a
+        # CVE buried in aliases must be surfaced or that stage never runs.
+        seen: set[str] = set()
+        ids: list[str] = []
+        for v in vulns[:5]:
+            for cand in (v.get("id"), *(v.get("aliases") or [])):
+                if cand and cand not in seen:
+                    seen.add(cand)
+                    ids.append(cand)
         # Treat severity-tagged vulns as suspicious. Without severity
         # data we still report — better signal than silence.
         return Evidence(

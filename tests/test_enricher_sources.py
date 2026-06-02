@@ -146,6 +146,25 @@ class TestCirclHashlookup:
         e = self._enricher(http)
         assert e._fetch(Indicator(IndicatorType.SHA1, "a" * 40)) is None
 
+    def test_known_malicious_hit_is_not_reported_benign(self):
+        # Regression: CIRCL aggregates known-malicious hashes alongside
+        # the NSRL known-good set. A KnownMalicious hit used to be emitted
+        # as a BENIGN whitelist hit (conf 0.9), which could suppress the
+        # judge on a known-bad binary.
+        http = _FakeHttp(
+            _FakeResp(
+                json_body={
+                    "FileName": "evil.exe",
+                    "KnownMalicious": True,
+                }
+            )
+        )
+        e = self._enricher(http)
+        ev = e._fetch(Indicator(IndicatorType.SHA1, "b" * 40))
+        assert ev is not None
+        assert ev.verdict_hint is VerdictHint.MALICIOUS
+        assert ev.verdict_hint is not VerdictHint.BENIGN
+
 
 # ---------------------------------------------------------------------------
 # Shodan InternetDB
@@ -376,6 +395,31 @@ class TestOSV:
         e = self._enricher(http)
         ev = e._fetch(Indicator(IndicatorType.CVE, "CVE-2024-1"))
         assert ev is not None
+
+    def test_cve_alias_is_surfaced_for_forward_chain(self):
+        # Regression: OSV's primary id is often GHSA-/PYSEC-, with the CVE
+        # only in aliases. details["vuln_ids"] used to carry the primary id
+        # only, so the chain's CVE forward-enrichment (NVD CVSS, CISA KEV)
+        # never fired. Aliases must be surfaced too.
+        http = _FakeHttp(
+            _FakeResp(
+                json_body={
+                    "vulns": [
+                        {
+                            "id": "GHSA-1234-aaaa-bbbb",
+                            "aliases": ["CVE-2024-9999"],
+                            "summary": "rce",
+                        },
+                    ],
+                }
+            )
+        )
+        e = self._enricher(http)
+        ev = e._fetch(Indicator(IndicatorType.PACKAGE, "pkg@1.0"))
+        assert ev is not None
+        vuln_ids = ev.details["vuln_ids"]
+        assert "CVE-2024-9999" in vuln_ids  # alias surfaced
+        assert "GHSA-1234-aaaa-bbbb" in vuln_ids  # primary id kept
 
 
 # ---------------------------------------------------------------------------
