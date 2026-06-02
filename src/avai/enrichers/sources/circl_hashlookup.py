@@ -21,6 +21,10 @@ from avai.enrichers.base import (
 from avai.enrichers.http import HttpClient
 
 _BASE = "https://hashlookup.circl.lu/lookup"
+# CIRCL scores each hash 0-100 in "hashlookup:trust". Only a high score
+# is a genuine known-good signal; below this we give no opinion rather
+# than a false benign that could suppress the judge.
+_MIN_TRUST = 50
 
 
 class CirclHashlookupEnricher(Enricher):
@@ -50,30 +54,27 @@ class CirclHashlookupEnricher(Enricher):
         if resp.status_code != 200:
             return None
         body = resp.json()
-        # "FileName" / "ProductName" are NSRL standard fields.
-        product = body.get("ProductName") or body.get("FileName") or "?"
+        # Real CIRCL fields (verified against the live API): FileName,
+        # FileSize, ProductCode, OpSystemCode, source, and the trust score
+        # "hashlookup:trust" (0-100). There is no ProductName/KnownMalicious.
+        name = body.get("FileName") or body.get("ProductCode") or "?"
         details = {k: body.get(k) for k in (
-            "FileName", "ProductName", "FileSize", "OpSystemCode",
-            "trust", "source", "KnownMalicious",
+            "FileName", "FileSize", "ProductCode", "OpSystemCode",
+            "source", "hashlookup:trust", "hashlookup:parent-total",
         )}
-        # CIRCL aggregates known-MALICIOUS hashes alongside the NSRL
-        # known-good set. A present-and-truthy KnownMalicious flag means
-        # this hash is NOT a whitelist hit — emitting BENIGN here would
-        # let a known-bad binary suppress the judge. Honour it.
-        if body.get("KnownMalicious"):
-            return Evidence(
-                source       = self.name,
-                indicator    = indicator,
-                verdict_hint = VerdictHint.MALICIOUS,
-                confidence   = 0.9,
-                summary      = f"CIRCL: hash flagged KnownMalicious ({product})",
-                details      = details,
-            )
+        try:
+            trust = int(body.get("hashlookup:trust"))
+        except (TypeError, ValueError):
+            trust = 0
+        # Low-trust hashes are known to CIRCL but seen in untrusted/malicious
+        # contexts — not a whitelist hit. Give no opinion rather than benign.
+        if trust < _MIN_TRUST:
+            return None
         return Evidence(
             source       = self.name,
             indicator    = indicator,
             verdict_hint = VerdictHint.BENIGN,
             confidence   = 0.9,
-            summary      = f"CIRCL/NSRL: known-good binary ({product})",
+            summary      = f"CIRCL/NSRL: known-good binary ({name}, trust={trust})",
             details      = details,
         )
