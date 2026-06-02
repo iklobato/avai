@@ -13,4 +13,4 @@ Or programmatically:
     from avai.dashboard import app as dashboard_app
 """
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
