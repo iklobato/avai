@@ -252,6 +252,29 @@ class TestParsingDefensiveness:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].verdict is Verdict.UNKNOWN
 
+    def test_verdict_and_category_are_case_normalized(self, prompts):
+        # Regression: under litellm JSON-mode the enum isn't hard-enforced,
+        # so a model returning "Malicious" / " MALICIOUS " used to collapse
+        # to UNKNOWN. Values are normalized (strip+lower) before coercion.
+        client = _FakeClient(
+            parsed={
+                "judgments": [
+                    {
+                        "index": 0,
+                        "verdict": " Malicious ",
+                        "category": "Command_And_Control",
+                        "confidence": 0.9,
+                        "reasoning": "x",
+                        "remediation": "",
+                    },
+                ]
+            }
+        )
+        judge = _judge(prompts, client)
+        result = judge.judge("processes", "", [{"content_hash": "a"}])
+        assert result[0].verdict is Verdict.MALICIOUS
+        assert result[0].category is ThreatCategory.COMMAND_AND_CONTROL
+
     def test_invalid_category_value_falls_back_to_none(self, prompts):
         client = _FakeClient(
             parsed={
@@ -369,6 +392,33 @@ class TestBatching:
         entries = [{"content_hash": f"h{i}"} for i in range(10)]
         judge.judge("processes", "", entries)
         # All 3 capped entries fit in one batch.
+        assert len(client.calls) == 1
+
+    def test_zero_batch_size_does_not_crash_cycle(self, prompts):
+        # Regression: batch_size=0 → range(0,n,0) raised ValueError from
+        # the _batches generator, escaping the per-batch try/except and
+        # breaking the cycle. __init__ now clamps to >=1.
+        client = _FakeClient(parsed={"judgments": []})
+        judge = LlmJudge(
+            prompts=prompts, model="m", batch_size=0, max_per_collector=0, client=client
+        )
+        assert judge.batch_size == 1
+        entries = [{"content_hash": f"h{i}"} for i in range(3)]
+        judge.judge("processes", "", entries)  # must not raise
+        assert len(client.calls) == 3  # one per entry at batch_size 1
+
+    def test_negative_batch_size_still_judges(self, prompts):
+        # Negative used to yield zero batches → silently judged nothing.
+        client = _FakeClient(parsed={"judgments": []})
+        judge = LlmJudge(
+            prompts=prompts,
+            model="m",
+            batch_size=-5,
+            max_per_collector=0,
+            client=client,
+        )
+        assert judge.batch_size == 1
+        judge.judge("processes", "", [{"content_hash": "a"}])
         assert len(client.calls) == 1
 
 
