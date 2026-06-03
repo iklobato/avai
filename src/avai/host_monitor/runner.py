@@ -9,7 +9,7 @@ from typing import Optional
 
 from .enums import Verdict
 from .constants import DEFAULT_BASELINE_MIN_RUNS, LOG, _CORRELATED_COLLECTOR
-from .shell import content_hash, utcnow
+from .runtime import Clock, Digest
 from .risk import compute_risk_score
 from .judge import Judge
 from .narrator import IncidentNarrator
@@ -275,7 +275,7 @@ class Runner:
         for r in rows:
             r["run_id"] = run_id
             r["collected_at"] = started
-            r["content_hash"] = content_hash(r, c.judge_fields)
+            r["content_hash"] = Digest.of_row(r, c.judge_fields)
         self.sink.write(c.model, rows)
         collected_ms = int((time.monotonic() - t0) * 1000)
 
@@ -409,7 +409,7 @@ class Runner:
         try:
             self.sink.write_narrative(
                 {
-                    "created_at": utcnow(),
+                    "created_at": Clock().now_iso(),
                     "run_id": run_id,
                     "model": self.narrator.model,
                     "severity": result["severity"],
@@ -455,7 +455,7 @@ class Runner:
         try:
             self.sink.write_risk_score(
                 {
-                    "created_at": utcnow(),
+                    "created_at": Clock().now_iso(),
                     "run_id": run_id,
                     "score": result["score"],
                     "grade": result["grade"],

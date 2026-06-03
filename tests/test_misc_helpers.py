@@ -219,14 +219,13 @@ class TestSinkUnjudgedAll:
     def test_returns_distinct_hashes_across_runs(self, tmp_path):
         # The streaming variant of unjudged ignores run_id so streaming
         # rows that span runs are still classified once each.
+        from avai.host_monitor.runtime import Clock, Digest
         from avai.host_monitor import (
             AuthEventRow,
             Judgment,
             Sink,
             ThreatCategory,
             Verdict,
-            content_hash,
-            utcnow,
         )
 
         class _S:
@@ -242,13 +241,13 @@ class TestSinkUnjudgedAll:
         )
         sink = Sink(engine)
         sink.setup()
-        ts = utcnow()
+        ts = Clock().now_iso()
 
         # Write two rows: one judged, one unjudged.
-        h_judged = content_hash(
+        h_judged = Digest.of_row(
             {"event_type": "login_ok", "event_message": "alice"}, _S.judge_fields
         )
-        h_unjudged = content_hash(
+        h_unjudged = Digest.of_row(
             {"event_type": "login_fail", "event_message": "bob"}, _S.judge_fields
         )
         sink.write(

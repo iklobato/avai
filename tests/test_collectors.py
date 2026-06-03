@@ -9,7 +9,7 @@ real OS binaries — so they run anywhere and would have caught the bug.
 Why the bug slipped through before: the enrichment/dashboard/judge
 layers were tested hard, but the collectors were waved off as
 "needs OS binaries". The crash was NOT in OS-binary territory — it
-was in `host_paths_for_home()` returning [] and the caller doing
+was in `HostPaths.for_home()` returning [] and the caller doing
 `[...][0]`. Pure logic, fully unit-testable. This file closes that gap.
 """
 
@@ -20,7 +20,8 @@ from pathlib import Path
 import pytest
 
 import avai.host_monitor as hm
-from avai.host_monitor import LinuxLaunchItemsCollector, host_path, host_paths_for_home
+from avai.host_monitor import LinuxLaunchItemsCollector
+from avai.host_monitor.runtime import HostPaths
 
 # ---------------------------------------------------------------------------
 # host_path — absolute-path translation under HOST_PREFIX
@@ -30,15 +31,15 @@ from avai.host_monitor import LinuxLaunchItemsCollector, host_path, host_paths_f
 class TestHostPath:
     def test_passthrough_without_prefix(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
-        assert host_path("/etc/passwd") == Path("/etc/passwd")
+        assert HostPaths.translate("/etc/passwd") == Path("/etc/passwd")
 
     def test_prepends_prefix_when_set(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
-        assert host_path("/etc/passwd") == Path("/host/etc/passwd")
+        assert HostPaths.translate("/etc/passwd") == Path("/host/etc/passwd")
 
     def test_relative_path_is_passthrough_even_with_prefix(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
-        assert host_path("relative/dir") == Path("relative/dir")
+        assert HostPaths.translate("relative/dir") == Path("relative/dir")
 
 
 # ---------------------------------------------------------------------------
@@ -50,12 +51,12 @@ class TestHostPath:
 class TestHostPathsForHome:
     def test_absolute_template_returns_single_translated_path(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
-        out = host_paths_for_home("/etc/systemd/system")
+        out = HostPaths.for_home("/etc/systemd/system")
         assert out == [Path("/host/etc/systemd/system")]
 
     def test_home_template_without_prefix_expands_user_home(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
-        out = host_paths_for_home("~/.config/systemd/user")
+        out = HostPaths.for_home("~/.config/systemd/user")
         assert len(out) == 1
         assert str(out[0]).endswith("/.config/systemd/user")
         assert "~" not in str(out[0])  # expanduser ran
@@ -68,7 +69,7 @@ class TestHostPathsForHome:
         (tmp_path / "home" / "alice").mkdir(parents=True)
         (tmp_path / "home" / "bob").mkdir(parents=True)
         (tmp_path / "root").mkdir()
-        out = host_paths_for_home("~/.config/systemd/user")
+        out = HostPaths.for_home("~/.config/systemd/user")
         names = sorted(str(p) for p in out)
         assert any("home/alice/.config/systemd/user" in p for p in names)
         assert any("home/bob/.config/systemd/user" in p for p in names)
@@ -83,12 +84,12 @@ class TestHostPathsForHome:
         # exist (e.g. only /proc and /sys were bind-mounted). The
         # function must return [] — and callers must tolerate it.
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
-        assert host_paths_for_home("~/.config/systemd/user") == []
+        assert HostPaths.for_home("~/.config/systemd/user") == []
 
     def test_only_root_home_present(self, tmp_path, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         (tmp_path / "root").mkdir()
-        out = host_paths_for_home("~/.config/systemd/user")
+        out = HostPaths.for_home("~/.config/systemd/user")
         assert len(out) == 1
         assert "root/.config/systemd/user" in str(out[0])
 

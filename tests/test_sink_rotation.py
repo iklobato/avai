@@ -15,12 +15,12 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from avai.host_monitor.runtime import Clock
 from avai.host_monitor import (
     Base,
     CollectionRun,
     LaunchItemRow,
     Sink,
-    utcnow,
 )
 
 
@@ -76,7 +76,7 @@ class TestDatabaseSizeBytes:
     def test_grows_after_writes(self, file_sink):
         before = file_sink.database_size_bytes()
         # Add a lot of rows so the on-disk file grows.
-        ts = utcnow()
+        ts = Clock().now_iso()
         run_id, _ = file_sink.start_run("h", 5)
         file_sink.write(LaunchItemRow, [{
             "run_id": run_id, "collected_at": ts,
@@ -91,7 +91,7 @@ class TestDatabaseSizeBytes:
 
 class TestDatabaseLiveBytes:
     def test_decreases_after_delete_and_pragma(self, file_sink):
-        ts = utcnow()
+        ts = Clock().now_iso()
         run_id, _ = file_sink.start_run("h", 5)
         file_sink.write(LaunchItemRow, [{
             "run_id": run_id, "collected_at": ts,
@@ -166,10 +166,10 @@ class TestTouchJudgments:
             content_hash=h, collector="processes",
             verdict=Verdict.BENIGN, category=ThreatCategory.NONE,
             confidence=0.9, reasoning="r", remediation="",
-            model="m", created_at=utcnow(),
+            model="m", created_at=Clock().now_iso(),
         )])
         # Bump last_seen.
-        new_ts = utcnow()
+        new_ts = Clock().now_iso()
         file_sink.touch_judgments("processes", [h], new_ts)
         # Read it back.
         from avai.host_monitor import Judgement
@@ -179,4 +179,4 @@ class TestTouchJudgments:
         assert row.last_seen_at == new_ts
 
     def test_empty_hash_list_is_noop(self, file_sink):
-        file_sink.touch_judgments("processes", [], utcnow())  # no crash
+        file_sink.touch_judgments("processes", [], Clock().now_iso())  # no crash

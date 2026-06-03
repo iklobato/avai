@@ -43,7 +43,7 @@ from .models import (
     SystemIntegrityRow,
     _RowBase,
 )
-from .shell import utcnow
+from .runtime import Clock
 
 if TYPE_CHECKING:
     from .collectors import Collector
@@ -82,7 +82,7 @@ class Sink:
 
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
         run_id = str(uuid.uuid4())
-        started = utcnow()
+        started = Clock().now_iso()
         with Session(self.engine) as session:
             session.add(
                 CollectionRun(
@@ -102,7 +102,7 @@ class Sink:
                 update(CollectionRun)
                 .where(CollectionRun.run_id == self.run_id)
                 .values(
-                    finished_at=utcnow(), collectors_ok=ok, collectors_failed=failed
+                    finished_at=Clock().now_iso(), collectors_ok=ok, collectors_failed=failed
                 )
             )
             session.commit()
@@ -122,7 +122,7 @@ class Sink:
                     collector=collector,
                     error_class=type(exc).__name__,
                     message=str(exc)[:1000],
-                    occurred_at=utcnow(),
+                    occurred_at=Clock().now_iso(),
                 )
             )
             session.commit()
@@ -694,7 +694,7 @@ class Sink:
                     run_id=run_id,
                     collector=collector,
                     hostname=hostname,
-                    started_at=utcnow(),
+                    started_at=Clock().now_iso(),
                 )
             )
             session.commit()
@@ -705,7 +705,7 @@ class Sink:
             session.execute(
                 update(StreamingSession)
                 .where(StreamingSession.run_id == run_id)
-                .values(finished_at=utcnow(), row_count=row_count)
+                .values(finished_at=Clock().now_iso(), row_count=row_count)
             )
             session.commit()
 

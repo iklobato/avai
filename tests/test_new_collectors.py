@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from avai.dashboard import app, dns_queries, network_flows, persistence_tampering
 from avai.enrichers import IndicatorType, extract_indicators
+from avai.host_monitor.runtime import Digest
 from avai.host_monitor import (
     DnsQueriesCollector,
     DnsQueryRow,
@@ -35,7 +36,6 @@ from avai.host_monitor import (
     Sink,
     SshAuthorizedKeyRow,
     SshAuthorizedKeysCollector,
-    content_hash,
 )
 from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 
@@ -295,7 +295,7 @@ def _write(sink, model, rows, fields, ts, run_id):
     for r in rows:
         r["run_id"] = run_id
         r["collected_at"] = ts
-        r["content_hash"] = content_hash(r, fields)
+        r["content_hash"] = Digest.of_row(r, fields)
     sink.write(model, rows)
 
 

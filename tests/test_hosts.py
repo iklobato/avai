@@ -102,11 +102,10 @@ class TestLinuxPrivilegedAccountsReadFiles:
     def test_reads_and_parses_group_file(self, tmp_path, monkeypatch):
         group = tmp_path / "group"
         group.write_text("sudo:x:27:alice\nstaff:x:50:bob\n")
-        # host_path is identity when HOST_PREFIX is unset; point the reader
-        # at our temp file by patching host_path for /etc/group.
-        import avai.host_monitor.hosts.linux as linux_mod
+        # Point the reader at our temp file by patching the path translator.
+        from avai.host_monitor.runtime import HostPaths
 
-        monkeypatch.setattr(linux_mod, "host_path", lambda p: group)
+        monkeypatch.setattr(HostPaths, "translate", staticmethod(lambda p: group))
         rows = list(LinuxPrivilegedAccounts().privileged_group_members())
         assert len(rows) == 1
         assert rows[0]["subject"] == "sudo"
@@ -134,6 +133,16 @@ class TestHostWiring:
         assert "hosts_file" in names
 
     def test_streaming_sets_differ_per_os(self):
-        mac = {c.name for c in MacOSHost().streaming_collectors(Prompts(system="", user_template=""))}
-        linux = {c.name for c in LinuxHost().streaming_collectors(Prompts(system="", user_template=""))}
+        mac = {
+            c.name
+            for c in MacOSHost().streaming_collectors(
+                Prompts(system="", user_template="")
+            )
+        }
+        linux = {
+            c.name
+            for c in LinuxHost().streaming_collectors(
+                Prompts(system="", user_template="")
+            )
+        }
         assert mac == linux == {"auth_events", "process_exec_events"}

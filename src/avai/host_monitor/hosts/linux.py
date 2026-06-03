@@ -37,7 +37,7 @@ from ..collectors import (
 from ..constants import BROWSER_PROFILES_LINUX, WATCHED_FILES_LINUX
 from ..enums import Browser
 from ..prompts import Prompts
-from ..shell import host_path, host_paths_for_home
+from ..runtime import HostPaths
 
 
 class LinuxFilesystemLayout:
@@ -56,29 +56,29 @@ class LinuxFilesystemLayout:
     )
 
     def privileged_bin_dirs(self) -> list[Path]:
-        return [host_path(d) for d in self._BIN_DIRS]
+        return [HostPaths.translate(d) for d in self._BIN_DIRS]
 
     def home_dirs(self) -> list[Path]:
         homes: list[Path] = []
-        base = host_path("/home")
+        base = HostPaths.translate("/home")
         if base.is_dir():
             try:
                 homes += [d for d in base.iterdir() if d.is_dir()]
             except OSError:
                 pass
-        root = host_path("/root")
+        root = HostPaths.translate("/root")
         if root.is_dir():
             homes.append(root)
         return homes
 
     def hosts_file(self) -> Path:
-        return host_path("/etc/hosts")
+        return HostPaths.translate("/etc/hosts")
 
     def sudoers_file(self) -> Path:
-        return host_path("/etc/sudoers")
+        return HostPaths.translate("/etc/sudoers")
 
     def sudoers_dir(self) -> Path:
-        return host_path("/etc/sudoers.d")
+        return HostPaths.translate("/etc/sudoers.d")
 
     def tcpdump_interface_args(self) -> list[str]:
         # '-i any' prefixes each line with the interface + direction.
@@ -92,7 +92,7 @@ class LinuxPrivilegedAccounts:
     _PRIV_GROUPS = frozenset({"sudo", "wheel", "admin"})
 
     def privileged_group_members(self) -> Iterable[dict]:
-        path = host_path("/etc/group")
+        path = HostPaths.translate("/etc/group")
         try:
             content = path.read_text(errors="replace")
         except (OSError, UnicodeDecodeError):
@@ -100,7 +100,7 @@ class LinuxPrivilegedAccounts:
         yield from self._parse_groups(content, str(path), self._PRIV_GROUPS)
 
     def uid0_accounts(self) -> Iterable[dict]:
-        path = host_path("/etc/passwd")
+        path = HostPaths.translate("/etc/passwd")
         try:
             content = path.read_text(errors="replace")
         except (OSError, UnicodeDecodeError):
@@ -165,14 +165,14 @@ class LinuxHost:
         # absolute /etc paths become /host/etc paths automatically.
         watched: list[str] = []
         for tmpl in WATCHED_FILES_LINUX:
-            for p in host_paths_for_home(tmpl):
+            for p in HostPaths.for_home(tmpl):
                 watched.append(str(p))
 
         expanded_browser_profiles: dict[Browser, list[str]] = {}
         for browser, templates in BROWSER_PROFILES_LINUX.items():
             out: list[str] = []
             for tmpl in templates:
-                for p in host_paths_for_home(tmpl):
+                for p in HostPaths.for_home(tmpl):
                     out.append(str(p))
             expanded_browser_profiles[browser] = out
 

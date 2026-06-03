@@ -61,22 +61,16 @@ from .models import (
     WifiStateRow,
     _RowBase,
 )
-from .runtime import JsonLineStreamSource
-from .shell import (
-    _read_sysfs,
-    _ssh_fingerprint,
-    exit_code,
-    expand,
-    external_sqlite_rows,
-    host_path,
-    host_paths_for_home,
-    jsonable,
-    process_running,
-    read_plist,
-    run_json,
-    safe_psutil_connections,
-    sha256_file,
-    utcnow,
+from .runtime import (
+    Clock,
+    Coerce,
+    CommandRunner,
+    Digest,
+    ExternalSqliteReader,
+    HostPaths,
+    JsonLineStreamSource,
+    PsutilConnections,
+    ServiceProbe,
 )
 
 
@@ -257,7 +251,7 @@ class NetworkConnectionsCollector(SnapshotCollector):
     judge_enabled = False  # too high churn; aggregate behaviourally instead
 
     def collect(self):
-        for c in safe_psutil_connections():
+        for c in PsutilConnections.inet():
             yield {
                 "pid": c.pid,
                 "family": c.family.name,
@@ -277,7 +271,7 @@ class ListeningPortsCollector(SnapshotCollector):
 
     def collect(self):
         names: dict[int, Optional[str]] = {}
-        for c in safe_psutil_connections():
+        for c in PsutilConnections.inet():
             if c.status != psutil.CONN_LISTEN:
                 continue
             if c.pid is not None and c.pid not in names:
@@ -456,7 +450,7 @@ class NetworkFlowsCollector(SnapshotCollector):
         return iface
 
     def _aggregate(self, output: str, default_iface: Optional[str]) -> dict:
-        now = utcnow()
+        now = Clock().now_iso()
         flows: dict[tuple, dict] = {}
         for line in output.splitlines():
             parsed = self._parse_line(line)
@@ -597,7 +591,7 @@ class DnsQueriesCollector(SnapshotCollector):
             provider = self._DOH_IPS[ip]
             key = (provider, "DoH", ip)
             if key not in queries:
-                now = utcnow()
+                now = Clock().now_iso()
                 queries[key] = {
                     "iface": None,
                     "qname": provider,
@@ -638,7 +632,7 @@ class DnsQueriesCollector(SnapshotCollector):
         return stdout, iface
 
     def _aggregate(self, output: str, default_iface: Optional[str], proc_map: dict):
-        now = utcnow()
+        now = Clock().now_iso()
         queries: dict[tuple, dict] = {}
         for line in output.splitlines():
             parsed = self._parse_dns_line(line)
@@ -751,7 +745,7 @@ class UsbDevicesCollector(SnapshotCollector):
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
     def collect(self):
-        data = run_json(["system_profiler", "-json", "SPUSBDataType"], timeout=30)
+        data = CommandRunner().json(["system_profiler", "-json", "SPUSBDataType"], timeout=30)
         root = data.get("SPUSBDataType", []) if isinstance(data, dict) else (data or [])
         yield from self._walk(root, None)
 
@@ -767,7 +761,7 @@ class UsbDevicesCollector(SnapshotCollector):
                 "location_id": loc,
                 "speed": item.get("device_speed"),
                 "raw_json": json.dumps(
-                    {k: jsonable(v) for k, v in item.items() if k != "_items"}
+                    {k: Coerce.jsonable(v) for k, v in item.items() if k != "_items"}
                 ),
             }
             yield from self._walk(item.get("_items"), loc)
@@ -786,7 +780,7 @@ class BluetoothCollector(SnapshotCollector):
     _PAIRED_GROUPS = {"device_connected", "device_not_connected", "device_paired"}
 
     def collect(self):
-        data = run_json(["system_profiler", "-json", "SPBluetoothDataType"], timeout=30)
+        data = CommandRunner().json(["system_profiler", "-json", "SPBluetoothDataType"], timeout=30)
         sections = (
             data.get("SPBluetoothDataType", [])
             if isinstance(data, dict)
@@ -806,7 +800,7 @@ class BluetoothCollector(SnapshotCollector):
                             "connected": int(group == "device_connected"),
                             "paired": int(group in self._PAIRED_GROUPS),
                             "minor_type": dev.get("device_minorType"),
-                            "raw_json": json.dumps(jsonable(dev)),
+                            "raw_json": json.dumps(Coerce.jsonable(dev)),
                         }
 
 
@@ -816,7 +810,7 @@ class WifiCollector(SnapshotCollector):
     judge_fields = ("ssid", "bssid", "security")
 
     def collect(self):
-        data = run_json(["system_profiler", "-json", "SPAirPortDataType"], timeout=30)
+        data = CommandRunner().json(["system_profiler", "-json", "SPAirPortDataType"], timeout=30)
         sections = (
             data.get("SPAirPortDataType", [])
             if isinstance(data, dict)
@@ -832,7 +826,7 @@ class WifiCollector(SnapshotCollector):
                     "bssid": cur.get("spairport_network_bssid"),
                     "channel": str(channel) if channel is not None else None,
                     "security": cur.get("spairport_security_mode"),
-                    "raw_json": json.dumps(jsonable(cur)),
+                    "raw_json": json.dumps(Coerce.jsonable(cur)),
                 }
 
 
@@ -851,7 +845,7 @@ class LaunchItemsCollector(SnapshotCollector):
 
     def collect(self):
         for scope, dir_str in LAUNCH_DIRS:
-            d = expand(dir_str)
+            d = HostPaths.expand(dir_str)
             if not d.is_dir():
                 continue
             try:
@@ -865,7 +859,7 @@ class LaunchItemsCollector(SnapshotCollector):
 
     @staticmethod
     def _row(scope: LaunchScope, path: Path):
-        data = read_plist(path)
+        data = HostPaths.read_plist(path)
         if data is None:
             return None
         try:
@@ -879,19 +873,19 @@ class LaunchItemsCollector(SnapshotCollector):
             "label": data.get("Label"),
             "program": data.get("Program"),
             "program_arguments_json": json.dumps(
-                jsonable(data.get("ProgramArguments") or [])
+                Coerce.jsonable(data.get("ProgramArguments") or [])
             ),
             "run_at_load": int(bool(data.get("RunAtLoad"))),
             "keep_alive": int(bool(data.get("KeepAlive"))),
             "start_interval": data.get("StartInterval"),
             "start_calendar_interval_json": (
-                json.dumps(jsonable(sci)) if sci is not None else None
+                json.dumps(Coerce.jsonable(sci)) if sci is not None else None
             ),
             "user_name": data.get("UserName"),
             "group_name": data.get("GroupName"),
-            "sha256": sha256_file(path),
+            "sha256": Digest.sha256_file(path),
             "mtime": mtime,
-            "raw_json": json.dumps(jsonable(data)),
+            "raw_json": json.dumps(Coerce.jsonable(data)),
         }
 
 
@@ -911,12 +905,12 @@ class QuarantineCollector(SnapshotCollector):
     }
 
     def collect(self):
-        path = expand(
+        path = HostPaths.expand(
             "~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
         )
         if not path.exists():
             return
-        for row in external_sqlite_rows(
+        for row in ExternalSqliteReader().rows(
             path, "LSQuarantineEvent", list(self._COLUMN_MAP.keys())
         ):
             yield {self._COLUMN_MAP[k]: v for k, v in row.items()}
@@ -951,7 +945,7 @@ class BrowserExtensionsCollector(SnapshotCollector):
         for browser, profiles in self.profiles.items():
             reader = self.readers.get(browser, self.default_reader)
             for base_str in profiles:
-                base = expand(base_str)
+                base = HostPaths.expand(base_str)
                 if not base.is_dir():
                     continue
                 yield from reader.read(base, browser)
@@ -971,8 +965,8 @@ class SystemIntegrityCollector(SnapshotCollector):
     )
 
     def collect(self):
-        fv = exit_code(["fdesetup", "isactive"])
-        alf = read_plist(Path("/Library/Preferences/com.apple.alf.plist")) or {}
+        fv = CommandRunner().exit_code(["fdesetup", "isactive"])
+        alf = HostPaths.read_plist(Path("/Library/Preferences/com.apple.alf.plist")) or {}
         # spctl --status always exits 0; the state is in its stdout text.
         try:
             _gk = subprocess.run(
@@ -999,10 +993,10 @@ class SystemIntegrityCollector(SnapshotCollector):
             "gatekeeper_assessments_enabled": gk,
             # launchctl list only covers the user domain; sshd/screensharingd/
             # ARDAgent are system-domain services — use pgrep instead.
-            "remote_login_enabled": process_running("sshd"),
-            "screen_sharing_enabled": process_running("screensharingd"),
-            "remote_management_enabled": process_running("ARDAgent"),
-            "raw_json": json.dumps({"alf": jsonable(alf)}),
+            "remote_login_enabled": ServiceProbe().running("sshd"),
+            "screen_sharing_enabled": ServiceProbe().running("screensharingd"),
+            "remote_management_enabled": ServiceProbe().running("ARDAgent"),
+            "raw_json": json.dumps({"alf": Coerce.jsonable(alf)}),
         }
 
 
@@ -1062,7 +1056,7 @@ class FileIntegrityCollector(SnapshotCollector):
 
     def collect(self):
         for path_str in self.watched:
-            p = expand(path_str)
+            p = HostPaths.expand(path_str)
             try:
                 st = p.lstat()
             except FileNotFoundError:
@@ -1072,7 +1066,7 @@ class FileIntegrityCollector(SnapshotCollector):
                 continue
             yield {
                 "path": str(p),
-                "sha256": sha256_file(p) if p.is_file() else None,
+                "sha256": Digest.sha256_file(p) if p.is_file() else None,
                 "size": st.st_size,
                 "mtime": st.st_mtime,
                 "mode": st.st_mode,
@@ -1101,7 +1095,7 @@ class InstalledAppsCollector(SnapshotCollector):
     judge_fields = ("bundle_id", "name", "path")
 
     def collect(self):
-        for app_dir in (Path("/Applications"), expand("~/Applications")):
+        for app_dir in (Path("/Applications"), HostPaths.expand("~/Applications")):
             if not app_dir.is_dir():
                 continue
             try:
@@ -1109,14 +1103,14 @@ class InstalledAppsCollector(SnapshotCollector):
             except PermissionError:
                 continue
             for app in apps:
-                info = read_plist(app / "Contents" / "Info.plist") or {}
+                info = HostPaths.read_plist(app / "Contents" / "Info.plist") or {}
                 yield {
                     "path": str(app),
                     "bundle_id": info.get("CFBundleIdentifier"),
                     "name": info.get("CFBundleName") or info.get("CFBundleDisplayName"),
                     "version": info.get("CFBundleShortVersionString"),
                     "raw_json": json.dumps(
-                        jsonable(
+                        Coerce.jsonable(
                             {
                                 k: info.get(k)
                                 for k in APP_INFO_KEYS
@@ -1163,7 +1157,7 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
         cmd = ["dpkg-query", "-W", "-f", fmt]
         # When containerised, --admindir points dpkg-query at the host's
         # package database rather than the container's.
-        host_admindir = host_path("/var/lib/dpkg")
+        host_admindir = HostPaths.translate("/var/lib/dpkg")
         if constants.HOST_PREFIX and host_admindir.is_dir():
             cmd[1:1] = ["--admindir", str(host_admindir)]
         try:
@@ -1211,13 +1205,13 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
         # handles them. We extract [Desktop Entry] Name / Exec /
         # Comment / Categories.
         roots: list[Path] = [
-            host_path("/usr/share/applications"),
-            host_path("/usr/local/share/applications"),
-            host_path("/var/lib/flatpak/exports/share/applications"),
+            HostPaths.translate("/usr/share/applications"),
+            HostPaths.translate("/usr/local/share/applications"),
+            HostPaths.translate("/var/lib/flatpak/exports/share/applications"),
         ]
-        roots.extend(host_paths_for_home("~/.local/share/applications"))
+        roots.extend(HostPaths.for_home("~/.local/share/applications"))
         roots.extend(
-            host_paths_for_home("~/.local/share/flatpak/exports/share/applications")
+            HostPaths.for_home("~/.local/share/flatpak/exports/share/applications")
         )
         for root in roots:
             if not root.is_dir():
@@ -1342,7 +1336,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
             # mode with no /host/home and no /host/root mounted — so we
             # iterate rather than index [0] (which raised IndexError and
             # killed the whole collector).
-            for d in host_paths_for_home(dir_str):
+            for d in HostPaths.for_home(dir_str):
                 if not d.is_dir():
                     continue
                 try:
@@ -1361,13 +1355,13 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
 
         # /etc/crontab — single file, has-user-column form
         scope, p = self._CRON_FILE
-        p = host_path(p)
+        p = HostPaths.translate(p)
         if p.is_file():
             yield from self._cron_rows(scope, p, has_user_col=True)
 
         # /etc/cron.d/* — drop-in files, has-user-column form
         for scope, d in self._CRON_DROP_INS:
-            d = host_path(d)
+            d = HostPaths.translate(d)
             if not d.is_dir():
                 continue
             try:
@@ -1382,7 +1376,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
         # /var/spool/cron* — per-user crontabs (no user column inside).
         # The filename IS the username.
         for scope, d in self._USER_CRONS:
-            d = host_path(d)
+            d = HostPaths.translate(d)
             if not d.is_dir():
                 continue
             try:
@@ -1450,7 +1444,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
             ),
             "user_name": service_sec.get("User"),
             "group_name": service_sec.get("Group"),
-            "sha256": sha256_file(path),
+            "sha256": Digest.sha256_file(path),
             "mtime": mtime,
             "raw_json": json.dumps(
                 {
@@ -1485,7 +1479,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
             mtime = path.stat().st_mtime
         except OSError:
             mtime = None
-        digest = sha256_file(path)
+        digest = Digest.sha256_file(path)
 
         for lineno, raw in enumerate(text.splitlines(), 1):
             line = raw.strip()
@@ -1587,7 +1581,7 @@ class LinuxAuthEventsCollector(StreamingCollector):
         # In container mode, point journalctl at the host's journal
         # directory rather than the container's empty one.
         if constants.HOST_PREFIX:
-            host_journal = host_path("/var/log/journal")
+            host_journal = HostPaths.translate("/var/log/journal")
             if host_journal.is_dir():
                 cmd.extend(["--directory", str(host_journal)])
         for i, group in enumerate(self._MATCH_GROUPS):
@@ -1666,7 +1660,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
     )
 
     def collect(self):
-        root = host_path("/sys/bus/usb/devices")
+        root = HostPaths.translate("/sys/bus/usb/devices")
         if not root.is_dir():
             return
         try:
@@ -1681,7 +1675,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
                 continue
             if not dev.is_dir():
                 continue
-            attrs = {a: _read_sysfs(dev / a) for a in self._ATTRS}
+            attrs = {a: HostPaths.read_sysfs(dev / a) for a in self._ATTRS}
             attrs = {k: v for k, v in attrs.items() if v is not None}
             if not attrs.get("idVendor") and not attrs.get("product"):
                 # Empty entry (e.g. root hubs without descriptors).
@@ -1717,7 +1711,7 @@ class LinuxBluetoothCollector(SnapshotCollector):
     judge_fields = ("name", "address", "minor_type")
 
     def collect(self):
-        root = host_path("/var/lib/bluetooth")
+        root = HostPaths.translate("/var/lib/bluetooth")
         if not root.is_dir():
             return
         try:
@@ -1784,7 +1778,7 @@ class LinuxWifiCollector(SnapshotCollector):
         # sysfs discovery via HOST_PREFIX; iw queries via netlink which
         # the host-network namespace (network_mode: host) already
         # exposes to the container.
-        net = host_path("/sys/class/net")
+        net = HostPaths.translate("/sys/class/net")
         if not net.is_dir():
             return
         try:
@@ -1916,14 +1910,14 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     @staticmethod
     def _selinux_state() -> Optional[str]:
         """Returns 'Enforcing' / 'Permissive' / None (not present)."""
-        flag = _read_sysfs(host_path("/sys/fs/selinux/enforce"))
+        flag = HostPaths.read_sysfs(HostPaths.translate("/sys/fs/selinux/enforce"))
         if flag is None:
             return None
         return {"0": "Permissive", "1": "Enforcing"}.get(flag, "Unknown")
 
     @staticmethod
     def _apparmor_state() -> dict:
-        enabled = _read_sysfs(host_path("/sys/module/apparmor/parameters/enabled"))
+        enabled = HostPaths.read_sysfs(HostPaths.translate("/sys/module/apparmor/parameters/enabled"))
         return (
             {"enabled": enabled == "Y"} if enabled is not None else {"enabled": False}
         )
@@ -1931,7 +1925,7 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     @staticmethod
     def _ufw_active() -> bool:
         # /etc/ufw/ufw.conf is the canonical persistent state.
-        conf = _read_sysfs(host_path("/etc/ufw/ufw.conf"))
+        conf = HostPaths.read_sysfs(HostPaths.translate("/etc/ufw/ufw.conf"))
         if conf is None:
             return False
         for line in conf.splitlines():
@@ -2060,7 +2054,7 @@ class SetuidFilesCollector(SnapshotCollector):
                     "gid": st.st_gid,
                     "size": st.st_size,
                     "mtime": st.st_mtime,
-                    "sha256": sha256_file(path),
+                    "sha256": Digest.sha256_file(path),
                     "setuid": int(setuid),
                     "setgid": int(setgid),
                     "raw_json": json.dumps(
@@ -2132,7 +2126,7 @@ class SshAuthorizedKeysCollector(SnapshotCollector):
                     "path": path,
                     "owner": owner,
                     "key_type": parts[idx],
-                    "fingerprint": _ssh_fingerprint(parts[idx + 1]),
+                    "fingerprint": Digest.ssh_fingerprint(parts[idx + 1]),
                     "comment": " ".join(parts[idx + 2 :]) or None,
                     "options": " ".join(parts[:idx]) or None,
                 }
@@ -2257,7 +2251,7 @@ class MdmProfilesCollector(SnapshotCollector):
 
     def collect(self):
         try:
-            data = run_json(
+            data = CommandRunner().json(
                 ["system_profiler", "-json", "SPConfigurationProfileDataType"],
                 timeout=30,
             )
@@ -2278,7 +2272,7 @@ class MdmProfilesCollector(SnapshotCollector):
                 "install_date": entry.get("spconfigprofile_install_date"),
                 "profile_scope": entry.get("spconfigprofile_profile_scope"),
                 "is_supervised": None,
-                "raw_json": json.dumps(jsonable(entry)),
+                "raw_json": json.dumps(Coerce.jsonable(entry)),
             }
 
     @classmethod
@@ -2313,7 +2307,7 @@ class KernelExtensionsCollector(SnapshotCollector):
 
     def collect(self):
         try:
-            data = run_json(
+            data = CommandRunner().json(
                 ["system_profiler", "-json", "SPExtensionsDataType"],
                 timeout=60,
             )
@@ -2332,7 +2326,7 @@ class KernelExtensionsCollector(SnapshotCollector):
                 "team_id": None,
                 "signing_id": kext.get("spext_signed_by"),
                 "raw_json": json.dumps(
-                    jsonable(
+                    Coerce.jsonable(
                         {
                             k: v
                             for k, v in kext.items()
@@ -2373,7 +2367,7 @@ class SystemExtensionsCollector(SnapshotCollector):
 
     def collect(self):
         db = Path("/Library/SystemExtensions/db.plist")
-        data = read_plist(db)
+        data = HostPaths.read_plist(db)
         if not data:
             return
         # The plist is a top-level dict with 'extensions' as the list
@@ -2397,7 +2391,7 @@ class SystemExtensionsCollector(SnapshotCollector):
                 "version": version,
                 "state": ext.get("state"),
                 "categories": ",".join(categories) if categories else None,
-                "raw_json": json.dumps(jsonable(ext)),
+                "raw_json": json.dumps(Coerce.jsonable(ext)),
             }
 
 
@@ -2479,7 +2473,7 @@ class LinuxProcessExecCollector(StreamingCollector):
     def _cmd(self) -> list[str]:
         cmd = ["journalctl", "-f", "--output=json", "--no-pager"]
         if constants.HOST_PREFIX:
-            host_journal = host_path("/var/log/journal")
+            host_journal = HostPaths.translate("/var/log/journal")
             if host_journal.is_dir():
                 cmd.extend(["--directory", str(host_journal)])
         cmd.extend(["_AUDIT_TYPE_NAME=EXECVE", "+", "_AUDIT_TYPE_NAME=SYSCALL"])

@@ -13,6 +13,7 @@ from typing import Any, Iterable
 import pytest
 from sqlalchemy import create_engine
 
+from avai.host_monitor.runtime import Clock, Coerce, Digest
 from avai.host_monitor import (
     Base,
     CollectionRun,
@@ -24,9 +25,6 @@ from avai.host_monitor import (
     Sink,
     ThreatCategory,
     Verdict,
-    content_hash,
-    coerce_enum,
-    utcnow,
 )
 
 
@@ -36,33 +34,33 @@ from avai.host_monitor import (
 
 class TestContentHash:
     def test_returns_none_for_empty_fields(self):
-        assert content_hash({"a": 1}, []) is None
+        assert Digest.of_row({"a": 1}, []) is None
 
     def test_deterministic_for_same_inputs(self):
         row = {"name": "foo", "exe": "/bin/foo", "pid": 42}
-        h1 = content_hash(row, ["name", "exe"])
-        h2 = content_hash(row, ["name", "exe"])
+        h1 = Digest.of_row(row, ["name", "exe"])
+        h2 = Digest.of_row(row, ["name", "exe"])
         assert h1 == h2
 
     def test_changes_when_a_judged_field_changes(self):
-        a = content_hash({"name": "foo", "exe": "/bin/foo"}, ["name", "exe"])
-        b = content_hash({"name": "foo", "exe": "/bin/bar"}, ["name", "exe"])
+        a = Digest.of_row({"name": "foo", "exe": "/bin/foo"}, ["name", "exe"])
+        b = Digest.of_row({"name": "foo", "exe": "/bin/bar"}, ["name", "exe"])
         assert a != b
 
     def test_ignores_non_judge_field_changes(self):
-        a = content_hash({"name": "foo", "pid": 1}, ["name"])
-        b = content_hash({"name": "foo", "pid": 99}, ["name"])
+        a = Digest.of_row({"name": "foo", "pid": 1}, ["name"])
+        b = Digest.of_row({"name": "foo", "pid": 99}, ["name"])
         assert a == b
 
     def test_missing_field_treated_as_null(self):
         """A row missing one of the judge_fields hashes as if the
         field were present-but-None — *not* an exception."""
-        a = content_hash({"name": "foo"}, ["name", "missing"])
-        b = content_hash({"name": "foo", "missing": None}, ["name", "missing"])
+        a = Digest.of_row({"name": "foo"}, ["name", "missing"])
+        b = Digest.of_row({"name": "foo", "missing": None}, ["name", "missing"])
         assert a == b
 
     def test_output_is_a_hex_sha256(self):
-        h = content_hash({"x": 1}, ["x"])
+        h = Digest.of_row({"x": 1}, ["x"])
         assert isinstance(h, str)
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
@@ -74,14 +72,14 @@ class TestContentHash:
 
 class TestCoerceEnum:
     def test_returns_enum_for_valid_string(self):
-        assert coerce_enum("malicious", Verdict, Verdict.UNKNOWN) is Verdict.MALICIOUS
+        assert Coerce.enum("malicious", Verdict, Verdict.UNKNOWN) is Verdict.MALICIOUS
 
     def test_returns_default_for_unknown_string(self):
-        assert coerce_enum("not-a-verdict", Verdict, Verdict.UNKNOWN) is Verdict.UNKNOWN
+        assert Coerce.enum("not-a-verdict", Verdict, Verdict.UNKNOWN) is Verdict.UNKNOWN
 
     def test_returns_default_for_wrong_type(self):
-        assert coerce_enum(None, Verdict, Verdict.UNKNOWN) is Verdict.UNKNOWN
-        assert coerce_enum(42, Verdict, Verdict.BENIGN) is Verdict.BENIGN
+        assert Coerce.enum(None, Verdict, Verdict.UNKNOWN) is Verdict.UNKNOWN
+        assert Coerce.enum(42, Verdict, Verdict.BENIGN) is Verdict.BENIGN
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +88,7 @@ class TestCoerceEnum:
 
 class TestUtcnow:
     def test_returns_iso_with_utc_offset_or_z(self):
-        ts = utcnow()
+        ts = Clock().now_iso()
         # Must contain a date+time separator and end in either +00:00 or Z.
         assert "T" in ts or " " in ts
         assert ts.endswith(("+00:00", "Z"))
@@ -257,18 +255,18 @@ class TestSinkUnjudged:
                                    judge_fields=("name", "exe"))
         rows = [
             {"name": "a", "exe": "/x", "pid": 1, "username": "u",
-             "run_id": run_id, "collected_at": utcnow(),
-             "content_hash": content_hash({"name": "a", "exe": "/x"},
+             "run_id": run_id, "collected_at": Clock().now_iso(),
+             "content_hash": Digest.of_row({"name": "a", "exe": "/x"},
                                           collector.judge_fields)},
             # Same judge_fields → same hash → should dedup.
             {"name": "a", "exe": "/x", "pid": 2, "username": "u",
-             "run_id": run_id, "collected_at": utcnow(),
-             "content_hash": content_hash({"name": "a", "exe": "/x"},
+             "run_id": run_id, "collected_at": Clock().now_iso(),
+             "content_hash": Digest.of_row({"name": "a", "exe": "/x"},
                                           collector.judge_fields)},
             # Different exe → distinct hash.
             {"name": "b", "exe": "/y", "pid": 3, "username": "u",
-             "run_id": run_id, "collected_at": utcnow(),
-             "content_hash": content_hash({"name": "b", "exe": "/y"},
+             "run_id": run_id, "collected_at": Clock().now_iso(),
+             "content_hash": Digest.of_row({"name": "b", "exe": "/y"},
                                           collector.judge_fields)},
         ]
         sink.write(ProcessRow, rows)
@@ -282,10 +280,10 @@ class TestSinkUnjudged:
         run_id, _ = sink.start_run("h", 5)
         collector = _StubCollector("processes", ProcessRow,
                                    judge_fields=("name", "exe"))
-        h = content_hash({"name": "a", "exe": "/x"}, collector.judge_fields)
+        h = Digest.of_row({"name": "a", "exe": "/x"}, collector.judge_fields)
         sink.write(ProcessRow, [{
             "name": "a", "exe": "/x", "pid": 1, "username": "u",
-            "run_id": run_id, "collected_at": utcnow(),
+            "run_id": run_id, "collected_at": Clock().now_iso(),
             "content_hash": h,
         }])
         # Pre-seed the judgement so this hash is "already judged".
@@ -294,7 +292,7 @@ class TestSinkUnjudged:
             content_hash=h, collector="processes",
             verdict=Verdict.BENIGN, category=ThreatCategory.NONE,
             confidence=0.99, reasoning="r", remediation="",
-            model="test", created_at=utcnow(),
+            model="test", created_at=Clock().now_iso(),
         )])
         unjudged = sink.unjudged(collector)
         assert unjudged == []
@@ -313,7 +311,7 @@ class TestSinkWriteJudgments:
             content_hash="aa" * 32, collector="processes",
             verdict=Verdict.BENIGN, category=ThreatCategory.NONE,
             confidence=0.5, reasoning="r", remediation="",
-            model="m", created_at=utcnow(),
+            model="m", created_at=Clock().now_iso(),
         )
         sink.write_judgments([j])
         sink.write_judgments([j])  # should not raise / not duplicate

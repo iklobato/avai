@@ -16,16 +16,23 @@ time.
 from __future__ import annotations
 
 from .clock import Clock, FrozenClock
+from .coerce import Coerce
 from .command_runner import CommandRunner
 from .digest import Digest
+from .host_paths import HostPaths
+from .probes import PsutilConnections, ServiceProbe
 from .sqlite_reader import ExternalSqliteReader
 from .stream_source import JsonLineStreamSource, LineParser
 
 __all__ = [
     "Clock",
     "FrozenClock",
+    "Coerce",
     "CommandRunner",
     "Digest",
+    "HostPaths",
+    "PsutilConnections",
+    "ServiceProbe",
     "ExternalSqliteReader",
     "JsonLineStreamSource",
     "LineParser",
