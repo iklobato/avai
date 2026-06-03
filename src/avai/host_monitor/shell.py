@@ -1,20 +1,23 @@
-"""Subprocess / filesystem / hashing helpers used by collectors."""
+"""Transitional shim over the :mod:`.runtime` collaborators.
+
+The subprocess / hashing / external-SQLite / clock logic now lives in the
+injectable classes under :mod:`avai.host_monitor.runtime`. The free
+functions below remain only as a thin delegation layer so existing call
+sites keep working during the OS-abstraction migration; they are removed
+in Stage 2 once every caller injects a collaborator directly.
+
+The path / plist / sysfs / psutil helpers still defined here move onto
+the per-OS ``Host`` capabilities in Stage 3.
+"""
 
 from __future__ import annotations
 
-import base64
-import binascii
-import hashlib
-import json
 import os
 import plistlib
-import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
-
-from sqlalchemy import MetaData, Table, create_engine, select
 
 try:
     import psutil
@@ -23,10 +26,15 @@ except ImportError:
     sys.exit(2)
 
 from . import constants
+from .runtime import Clock, CommandRunner, Digest, ExternalSqliteReader
+
+_runner = CommandRunner()
+_clock = Clock()
+_sqlite = ExternalSqliteReader()
 
 
 def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return _clock.now_iso()
 
 
 def expand(p: str) -> Path:
@@ -77,39 +85,19 @@ def host_paths_for_home(template: str) -> list[Path]:
 
 
 def run_json(cmd: list[str], timeout: int = 60) -> Any:
-    r = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"{cmd[0]} rc={r.returncode}: " f"{r.stderr.decode(errors='replace')[:200]}"
-        )
-    return json.loads(r.stdout) if r.stdout else None
+    return _runner.json(cmd, timeout)
 
 
 def run_ndjson(cmd: list[str], timeout: int = 180) -> Iterable[dict]:
-    r = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
-    if r.returncode != 0:
-        raise RuntimeError(
-            f"{cmd[0]} rc={r.returncode}: " f"{r.stderr.decode(errors='replace')[:200]}"
-        )
-    for line in r.stdout.splitlines():
-        if not line.strip():
-            continue
-        try:
-            yield json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    return _runner.ndjson(cmd, timeout)
 
 
 def exit_code(cmd: list[str], timeout: int = 10) -> Optional[int]:
-    try:
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
-        return r.returncode
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
+    return _runner.exit_code(cmd, timeout)
 
 
 def service_loaded(label: str) -> Optional[int]:
-    code = exit_code(["launchctl", "list", label])
+    code = _runner.exit_code(["launchctl", "list", label])
     return None if code is None else int(code == 0)
 
 
@@ -120,19 +108,12 @@ def process_running(name: str) -> Optional[int]:
     (sshd, screensharingd, ARDAgent) that launchctl list misses from the
     user session.
     """
-    code = exit_code(["pgrep", "-x", name])
+    code = _runner.exit_code(["pgrep", "-x", name])
     return None if code is None else int(code == 0)
 
 
 def sha256_file(path: Path, chunk: int = 65536) -> Optional[str]:
-    h = hashlib.sha256()
-    try:
-        with open(path, "rb") as f:
-            for block in iter(lambda: f.read(chunk), b""):
-                h.update(block)
-    except OSError:
-        return None
-    return h.hexdigest()
+    return Digest.sha256_file(path, chunk)
 
 
 def read_plist(path: Path) -> Optional[dict]:
@@ -160,17 +141,7 @@ def external_sqlite_rows(
     path: Path, table_name: str, columns: list[str]
 ) -> Iterable[dict]:
     """Reflect an external SQLite table and yield row dicts. No raw SQL."""
-    url = f"sqlite:///file:{path}?mode=ro&uri=true"
-    engine = create_engine(url)
-    try:
-        meta = MetaData()
-        table = Table(table_name, meta, autoload_with=engine)
-        stmt = select(*(table.c[c] for c in columns))
-        with engine.connect() as conn:
-            for row in conn.execute(stmt):
-                yield dict(row._mapping)
-    finally:
-        engine.dispose()
+    return _sqlite.rows(path, table_name, columns)
 
 
 def safe_psutil_connections() -> list:
@@ -184,16 +155,7 @@ def safe_psutil_connections() -> list:
 
 def content_hash(row: dict, fields: Iterable[str]) -> Optional[str]:
     """Stable SHA-256 over the declared judgeable fields of a row."""
-    keys = list(fields)
-    if not keys:
-        return None
-    canonical = json.dumps(
-        [row.get(k) for k in keys],
-        ensure_ascii=False,
-        separators=(",", ":"),
-        default=str,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return Digest.of_row(row, fields)
 
 
 def coerce_enum(value: Any, enum_cls, default):
@@ -215,9 +177,4 @@ def _read_sysfs(path: Path, encoding: str = "utf-8") -> Optional[str]:
 def _ssh_fingerprint(b64key: str) -> Optional[str]:
     """SHA256 fingerprint of an SSH public key blob, OpenSSH-style
     (``SHA256:<base64 of sha256(raw key), unpadded>``)."""
-    try:
-        raw = base64.b64decode(b64key, validate=True)
-    except (ValueError, binascii.Error):
-        return None
-    digest = hashlib.sha256(raw).digest()
-    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+    return Digest.ssh_fingerprint(b64key)
