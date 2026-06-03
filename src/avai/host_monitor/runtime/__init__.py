@@ -19,6 +19,7 @@ from .clock import Clock, FrozenClock
 from .command_runner import CommandRunner
 from .digest import Digest
 from .sqlite_reader import ExternalSqliteReader
+from .stream_source import JsonLineStreamSource, LineParser
 
 __all__ = [
     "Clock",
@@ -26,4 +27,6 @@ __all__ = [
     "CommandRunner",
     "Digest",
     "ExternalSqliteReader",
+    "JsonLineStreamSource",
+    "LineParser",
 ]

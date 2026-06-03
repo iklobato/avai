@@ -62,6 +62,7 @@ from .models import (
     _RowBase,
 )
 from .prompts import Prompts
+from .runtime import JsonLineStreamSource
 from .shell import (
     _read_sysfs,
     _ssh_fingerprint,
@@ -1007,6 +1008,22 @@ class SystemIntegrityCollector(SnapshotCollector):
         }
 
 
+class UnifiedLogAuthParser:
+    """Strategy: macOS ``log stream --style ndjson`` event → auth row."""
+
+    def parse(self, event: dict) -> dict:
+        return {
+            "event_timestamp": event.get("timestamp"),
+            "process": event.get("processImagePath"),
+            "subsystem": event.get("subsystem"),
+            "category": event.get("category"),
+            "event_type": event.get("eventType"),
+            "event_message": event.get("eventMessage"),
+            "pid": event.get("processID"),
+            "raw_json": json.dumps(event),
+        }
+
+
 class AuthEventsCollector(StreamingCollector):
     """Tails the macOS unified log forever via ``log stream``. Each
     matching event is yielded as it arrives — no polling gaps."""
@@ -1030,58 +1047,10 @@ class AuthEventsCollector(StreamingCollector):
             "--predicate",
             self.predicate,
         ]
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+        source = JsonLineStreamSource(
+            cmd, UnifiedLogAuthParser(), killer_name="log-stream-killer"
         )
-
-        # Watchdog: when stop_event fires, terminate the subprocess,
-        # which closes stdout and ends the read loop below.
-        def _terminator():
-            stop_event.wait()
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
-
-        threading.Thread(
-            target=_terminator, daemon=True, name="log-stream-killer"
-        ).start()
-
-        try:
-            for line in proc.stdout:
-                if stop_event.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                yield {
-                    "event_timestamp": e.get("timestamp"),
-                    "process": e.get("processImagePath"),
-                    "subsystem": e.get("subsystem"),
-                    "category": e.get("category"),
-                    "event_type": e.get("eventType"),
-                    "event_message": e.get("eventMessage"),
-                    "pid": e.get("processID"),
-                    "raw_json": json.dumps(e),
-                }
-        finally:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+        yield from source.stream(stop_event)
 
 
 class FileIntegrityCollector(SnapshotCollector):
@@ -1630,53 +1599,19 @@ class LinuxAuthEventsCollector(StreamingCollector):
         return cmd
 
     def stream(self, stop_event: threading.Event):
-        proc = subprocess.Popen(
-            self._cmd(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+        source = JsonLineStreamSource(
+            self._cmd(), JournalAuthParser(), killer_name="journalctl-killer"
         )
+        yield from source.stream(stop_event)
 
-        def _terminator():
-            stop_event.wait()
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
 
-        threading.Thread(
-            target=_terminator, daemon=True, name="journalctl-killer"
-        ).start()
+class JournalAuthParser:
+    """Strategy: ``journalctl --output=json`` event → auth row."""
 
-        try:
-            for line in proc.stdout:
-                if stop_event.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                yield self._row_from_journal_event(e)
-        finally:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-
-    @staticmethod
-    def _row_from_journal_event(e: dict) -> dict:
+    def parse(self, event: dict) -> dict:
         # journalctl --output=json gives __REALTIME_TIMESTAMP in
         # microseconds since the epoch (as a string).
-        ts_us = e.get("__REALTIME_TIMESTAMP")
+        ts_us = event.get("__REALTIME_TIMESTAMP")
         ts = None
         if ts_us:
             try:
@@ -1687,19 +1622,19 @@ class LinuxAuthEventsCollector(StreamingCollector):
                 pass
 
         try:
-            pid = int(e["_PID"]) if e.get("_PID") else None
+            pid = int(event["_PID"]) if event.get("_PID") else None
         except (TypeError, ValueError):
             pid = None
 
         return {
             "event_timestamp": ts,
-            "process": e.get("_EXE") or e.get("_COMM"),
-            "subsystem": e.get("_SYSTEMD_UNIT") or "syslog",
-            "category": str(e.get("SYSLOG_FACILITY") or ""),
-            "event_type": f"priority={e.get('PRIORITY', '?')}",
-            "event_message": e.get("MESSAGE"),
+            "process": event.get("_EXE") or event.get("_COMM"),
+            "subsystem": event.get("_SYSTEMD_UNIT") or "syslog",
+            "category": str(event.get("SYSLOG_FACILITY") or ""),
+            "event_type": f"priority={event.get('PRIORITY', '?')}",
+            "event_message": event.get("MESSAGE"),
             "pid": pid,
-            "raw_json": json.dumps(e),
+            "raw_json": json.dumps(event),
         }
 
 
@@ -2617,63 +2552,29 @@ class MacosProcessExecCollector(StreamingCollector):
 
     def stream(self, stop_event: threading.Event):
         cmd = ["eslogger", *self._EVENTS]
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+        source = JsonLineStreamSource(
+            cmd, EsloggerExecParser(), killer_name="eslogger-killer"
         )
+        yield from source.stream(stop_event)
 
-        def _terminator():
-            stop_event.wait()
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
 
-        threading.Thread(
-            target=_terminator, daemon=True, name="eslogger-killer"
-        ).start()
+class EsloggerExecParser:
+    """Strategy: macOS ``eslogger exec`` Endpoint-Security event → exec row."""
 
-        try:
-            for line in proc.stdout:
-                if stop_event.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                yield self._row_from_eslogger_event(e)
-        finally:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-
-    @staticmethod
-    def _row_from_eslogger_event(e: dict) -> dict:
+    def parse(self, event: dict) -> dict:
         # eslogger emits ES events: { time, action_type, event,
         # process, ... } where event.exec.{target, args, ...}
-        event_obj = e.get("event") or {}
+        event_obj = event.get("event") or {}
         exec_evt = event_obj.get("exec") or {}
         target = exec_evt.get("target") or {}
         target_exe = (target.get("executable") or {}).get("path")
         args = exec_evt.get("args") or []
-        parent = e.get("process") or {}
+        parent = event.get("process") or {}
         parent_path = (parent.get("executable") or {}).get("path")
         target_token = target.get("audit_token") or {}
         parent_token = parent.get("audit_token") or {}
         return {
-            "event_timestamp": e.get("time"),
+            "event_timestamp": event.get("time"),
             "event_type": "exec",
             "pid": target_token.get("pid"),
             "ppid": parent_token.get("pid"),
@@ -2683,7 +2584,7 @@ class MacosProcessExecCollector(StreamingCollector):
             "exe_args_json": json.dumps(args),
             "parent_path": parent_path,
             "signing_id": target.get("signing_id"),
-            "raw_json": json.dumps(e),
+            "raw_json": json.dumps(event),
         }
 
 
@@ -2715,51 +2616,17 @@ class LinuxProcessExecCollector(StreamingCollector):
         return cmd
 
     def stream(self, stop_event: threading.Event):
-        proc = subprocess.Popen(
-            self._cmd(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+        source = JsonLineStreamSource(
+            self._cmd(), AuditExecParser(), killer_name="journalctl-audit-killer"
         )
+        yield from source.stream(stop_event)
 
-        def _terminator():
-            stop_event.wait()
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
 
-        threading.Thread(
-            target=_terminator, daemon=True, name="journalctl-audit-killer"
-        ).start()
+class AuditExecParser:
+    """Strategy: Linux audit ``journalctl --output=json`` event → exec row."""
 
-        try:
-            for line in proc.stdout:
-                if stop_event.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                yield self._row_from_audit_event(e)
-        finally:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-
-    @staticmethod
-    def _row_from_audit_event(e: dict) -> dict:
-        ts_us = e.get("__REALTIME_TIMESTAMP")
+    def parse(self, event: dict) -> dict:
+        ts_us = event.get("__REALTIME_TIMESTAMP")
         ts = None
         if ts_us:
             try:
@@ -2769,11 +2636,11 @@ class LinuxProcessExecCollector(StreamingCollector):
             except (TypeError, ValueError):
                 pass
         try:
-            pid = int(e["_PID"]) if e.get("_PID") else None
+            pid = int(event["_PID"]) if event.get("_PID") else None
         except (TypeError, ValueError):
             pid = None
         try:
-            uid = int(e["_UID"]) if e.get("_UID") else None
+            uid = int(event["_UID"]) if event.get("_UID") else None
         except (TypeError, ValueError):
             uid = None
         # audit EXECVE messages carry the args as separate fields a0,
@@ -2784,16 +2651,16 @@ class LinuxProcessExecCollector(StreamingCollector):
         # judge sees everything.
         return {
             "event_timestamp": ts,
-            "event_type": e.get("_AUDIT_TYPE_NAME") or "AUDIT",
+            "event_type": event.get("_AUDIT_TYPE_NAME") or "AUDIT",
             "pid": pid,
             "ppid": None,
             "uid": uid,
             "username": None,
-            "exe_path": e.get("EXE") or e.get("_EXE"),
+            "exe_path": event.get("EXE") or event.get("_EXE"),
             "exe_args_json": None,
             "parent_path": None,
             "signing_id": None,
-            "raw_json": json.dumps(e),
+            "raw_json": json.dumps(event),
         }
 
 
