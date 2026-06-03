@@ -13,7 +13,10 @@ import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import ClassVar, Iterable, Optional
+from typing import TYPE_CHECKING, ClassVar, Iterable, Optional
+
+if TYPE_CHECKING:
+    from .hosts.capabilities import FilesystemLayout, PrivilegedAccounts
 
 try:
     import psutil
@@ -26,11 +29,8 @@ from .constants import (
     APP_INFO_KEYS,
     AUTH_LOG_PREDICATE,
     BROWSER_PROFILES,
-    BROWSER_PROFILES_LINUX,
-    IS_LINUX,
     LAUNCH_DIRS,
     WATCHED_FILES,
-    WATCHED_FILES_LINUX,
 )
 from .enums import Browser, LaunchScope
 from .models import (
@@ -61,7 +61,6 @@ from .models import (
     WifiStateRow,
     _RowBase,
 )
-from .prompts import Prompts
 from .runtime import JsonLineStreamSource
 from .shell import (
     _read_sysfs,
@@ -383,9 +382,13 @@ class NetworkFlowsCollector(SnapshotCollector):
         self,
         judge_hints: str = "",
         resolver: Optional["ProcessConnectionResolver"] = None,
+        iface_args: Optional[list[str]] = None,
     ):
         super().__init__(judge_hints)
         self._resolver = resolver or ProcessConnectionResolver()
+        # tcpdump flags that make each line carry its interface name;
+        # supplied by the host (Linux '-i any' vs macOS '-k I').
+        self._iface_args = list(iface_args or [])
 
     def collect(self):
         stdout, default_iface = self._capture()
@@ -409,16 +412,12 @@ class NetworkFlowsCollector(SnapshotCollector):
             raise RuntimeError("tcpdump not found on PATH")
         # -t drops timestamps (we stamp our own); TCP/UDP (v4 + v6) only.
         cmd = ["tcpdump", "-n", "-q", "-l", "-t", "-c", str(self.MAX_PACKETS)]
-        if IS_LINUX:
-            # 'any' prefixes each line with the interface + direction.
-            cmd += ["-i", "any"]
-        else:
-            # macOS auto-selects the 'pktap' pseudo-device, which aggregates
-            # every interface — so without this every flow is labelled
-            # 'pktap'. '-k I' prints the real per-packet interface name as
-            # the leading token (same shape as Linux '-i any'), which
-            # _parse_line already picks up.
-            cmd += ["-k", "I"]
+        # Interface flags supplied by the host: Linux '-i any' prefixes
+        # each line with the interface + direction; macOS '-k I' prints
+        # the real per-packet interface (otherwise every flow is labelled
+        # with the 'pktap' aggregating pseudo-device). Both yield the
+        # leading-interface-token shape that _parse_line expects.
+        cmd += self._iface_args
         cmd += ["tcp", "or", "udp"]
         try:
             r = subprocess.run(
@@ -580,9 +579,11 @@ class DnsQueriesCollector(SnapshotCollector):
         self,
         judge_hints: str = "",
         resolver: Optional["ProcessConnectionResolver"] = None,
+        iface_args: Optional[list[str]] = None,
     ):
         super().__init__(judge_hints)
         self._resolver = resolver or ProcessConnectionResolver()
+        self._iface_args = list(iface_args or [])
 
     def collect(self):
         stdout, default_iface = self._capture()
@@ -616,10 +617,7 @@ class DnsQueriesCollector(SnapshotCollector):
         if shutil.which("tcpdump") is None:
             raise RuntimeError("tcpdump not found on PATH")
         cmd = ["tcpdump", "-n", "-l", "-t", "-c", str(self.MAX_PACKETS)]
-        if IS_LINUX:
-            cmd += ["-i", "any"]
-        else:
-            cmd += ["-k", "I"]
+        cmd += self._iface_args
         cmd += ["udp", "port", "53", "or", "tcp", "port", "53"]
         try:
             r = subprocess.run(
@@ -2031,30 +2029,12 @@ class SetuidFilesCollector(SnapshotCollector):
     model = SetuidFileRow
     judge_fields = ("path", "uid", "setuid", "setgid")
 
-    _BIN_DIRS_MACOS = (
-        "/bin",
-        "/sbin",
-        "/usr/bin",
-        "/usr/sbin",
-        "/usr/local/bin",
-        "/usr/local/sbin",
-        "/usr/libexec",
-    )
-    _BIN_DIRS_LINUX = (
-        "/bin",
-        "/sbin",
-        "/usr/bin",
-        "/usr/sbin",
-        "/usr/local/bin",
-        "/usr/local/sbin",
-        "/usr/libexec",
-        "/opt",
-    )
+    def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
+        super().__init__(judge_hints=judge_hints)
+        self._fs = fs
 
     def collect(self):
-        bin_dirs = self._BIN_DIRS_LINUX if IS_LINUX else self._BIN_DIRS_MACOS
-        for d in bin_dirs:
-            base = host_path(d) if IS_LINUX else Path(d)
+        for base in self._fs.privileged_bin_dirs():
             if not base.is_dir():
                 continue
             try:
@@ -2118,8 +2098,12 @@ class SshAuthorizedKeysCollector(SnapshotCollector):
         }
     )
 
+    def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
+        super().__init__(judge_hints=judge_hints)
+        self._fs = fs
+
     def collect(self):
-        for home in self._home_dirs():
+        for home in self._fs.home_dirs():
             owner = home.name
             for fname in ("authorized_keys", "authorized_keys2"):
                 path = home / ".ssh" / fname
@@ -2129,34 +2113,6 @@ class SshAuthorizedKeysCollector(SnapshotCollector):
                     continue
                 for row in self._parse_authorized_keys(content, str(path), owner):
                     yield row
-
-    def _home_dirs(self) -> list[Path]:
-        homes: list[Path] = []
-        if IS_LINUX:
-            base = host_path("/home")
-            if base.is_dir():
-                try:
-                    homes += [d for d in base.iterdir() if d.is_dir()]
-                except OSError:
-                    pass
-            root = host_path("/root")
-            if root.is_dir():
-                homes.append(root)
-        else:
-            users = Path("/Users")
-            if users.is_dir():
-                try:
-                    homes += [
-                        d
-                        for d in users.iterdir()
-                        if d.is_dir() and not d.name.startswith(".")
-                    ]
-                except OSError:
-                    pass
-            root = Path("/var/root")
-            if root.is_dir():
-                homes.append(root)
-        return homes
 
     @classmethod
     def _parse_authorized_keys(cls, content: str, path: str, owner: str):
@@ -2193,8 +2149,12 @@ class HostsFileCollector(SnapshotCollector):
     model = HostsFileRow
     judge_fields = ("ip", "hostnames")
 
+    def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
+        super().__init__(judge_hints=judge_hints)
+        self._fs = fs
+
     def collect(self):
-        path = host_path("/etc/hosts") if IS_LINUX else Path("/etc/hosts")
+        path = self._fs.hosts_file()
         try:
             content = path.read_text(errors="replace")
         except (OSError, UnicodeDecodeError):
@@ -2231,18 +2191,26 @@ class PrivilegeConfigCollector(SnapshotCollector):
     model = PrivilegeConfigRow
     judge_fields = ("kind", "subject", "detail")
 
-    _PRIV_GROUPS = frozenset({"sudo", "wheel", "admin"})
+    def __init__(
+        self,
+        judge_hints: str = "",
+        fs: "FilesystemLayout" = None,
+        accounts: "PrivilegedAccounts" = None,
+    ):
+        super().__init__(judge_hints=judge_hints)
+        self._fs = fs
+        self._accounts = accounts
 
     def collect(self):
         yield from self._sudoers()
-        yield from self._priv_groups()
-        yield from self._uid0_accounts()
-
-    # -- sudoers (both platforms) ----------------------------------------
+        yield from self._accounts.privileged_group_members()
+        yield from self._accounts.uid0_accounts()
 
     def _sudoers(self):
-        files = [host_path("/etc/sudoers") if IS_LINUX else Path("/etc/sudoers")]
-        sudoers_d = host_path("/etc/sudoers.d") if IS_LINUX else Path("/etc/sudoers.d")
+        """Sudoers parsing is identical across platforms; only the file
+        locations differ, supplied by the FilesystemLayout."""
+        files = [self._fs.sudoers_file()]
+        sudoers_d = self._fs.sudoers_dir()
         if sudoers_d.is_dir():
             try:
                 files += sorted(p for p in sudoers_d.iterdir() if p.is_file())
@@ -2273,104 +2241,6 @@ class PrivilegeConfigCollector(SnapshotCollector):
                 }
             )
         return rows
-
-    # -- privileged group membership -------------------------------------
-
-    def _priv_groups(self):
-        if IS_LINUX:
-            path = host_path("/etc/group")
-            try:
-                content = path.read_text(errors="replace")
-            except (OSError, UnicodeDecodeError):
-                return
-            yield from self._parse_groups(content, str(path), self._PRIV_GROUPS)
-        else:
-            for gname in ("admin", "wheel"):
-                out = self._dscl(["-read", f"/Groups/{gname}", "GroupMembership"])
-                members = out.split(":", 1)[1].strip() if ":" in out else out.strip()
-                if members:
-                    yield {
-                        "kind": "group",
-                        "subject": gname,
-                        "detail": members,
-                        "source_path": "dscl:/Groups",
-                    }
-
-    @staticmethod
-    def _parse_groups(content: str, path: str, priv_groups):
-        """Pure parser for /etc/group: members of privileged groups."""
-        rows = []
-        for line in content.splitlines():
-            parts = line.strip().split(":")
-            if len(parts) < 4:
-                continue
-            gname, members = parts[0], parts[3]
-            if gname in priv_groups and members:
-                rows.append(
-                    {
-                        "kind": "group",
-                        "subject": gname,
-                        "detail": members,
-                        "source_path": path,
-                    }
-                )
-        return rows
-
-    # -- UID-0 accounts --------------------------------------------------
-
-    def _uid0_accounts(self):
-        if IS_LINUX:
-            path = host_path("/etc/passwd")
-            try:
-                content = path.read_text(errors="replace")
-            except (OSError, UnicodeDecodeError):
-                return
-            yield from self._parse_passwd_uid0(content, str(path))
-        else:
-            out = self._dscl(["-list", "/Users", "UniqueID"])
-            for line in out.splitlines():
-                cols = line.split()
-                if len(cols) >= 2 and cols[-1] == "0":
-                    yield {
-                        "kind": "account",
-                        "subject": cols[0],
-                        "detail": "uid=0",
-                        "source_path": "dscl:/Users",
-                    }
-
-    @staticmethod
-    def _parse_passwd_uid0(content: str, path: str):
-        """Pure parser for /etc/passwd: accounts with uid 0."""
-        rows = []
-        for line in content.splitlines():
-            parts = line.strip().split(":")
-            if len(parts) < 7:
-                continue
-            user, uid, shell = parts[0], parts[2], parts[6]
-            if uid == "0":
-                rows.append(
-                    {
-                        "kind": "account",
-                        "subject": user,
-                        "detail": f"uid=0 shell={shell}",
-                        "source_path": path,
-                    }
-                )
-        return rows
-
-    @staticmethod
-    def _dscl(args: list[str]) -> str:
-        try:
-            r = subprocess.run(
-                ["dscl", ".", *args],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            return r.stdout or "" if r.returncode == 0 else ""
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return ""
 
 
 class MdmProfilesCollector(SnapshotCollector):
@@ -2662,127 +2532,3 @@ class AuditExecParser:
             "signing_id": None,
             "raw_json": json.dumps(event),
         }
-
-
-def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
-    h = prompts.hint_for
-    return [
-        ProcessCollector(judge_hints=h("processes")),
-        NetworkConnectionsCollector(judge_hints=h("network_connections")),
-        ListeningPortsCollector(judge_hints=h("listening_ports")),
-        NetworkFlowsCollector(judge_hints=h("network_flows")),
-        DnsQueriesCollector(judge_hints=h("dns_queries")),
-        NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
-        UsbDevicesCollector(judge_hints=h("usb_devices")),
-        BluetoothCollector(judge_hints=h("bluetooth_devices")),
-        WifiCollector(judge_hints=h("wifi_state")),
-        LaunchItemsCollector(judge_hints=h("launch_items")),
-        QuarantineCollector(judge_hints=h("quarantine_events")),
-        BrowserExtensionsCollector(judge_hints=h("browser_extensions")),
-        SystemIntegrityCollector(judge_hints=h("system_integrity")),
-        FileIntegrityCollector(judge_hints=h("file_integrity")),
-        InstalledAppsCollector(judge_hints=h("installed_apps")),
-        # Phase 4 additions
-        MountsCollector(judge_hints=h("mounts")),
-        SetuidFilesCollector(judge_hints=h("setuid_files")),
-        MdmProfilesCollector(judge_hints=h("mdm_profiles")),
-        KernelExtensionsCollector(judge_hints=h("kernel_extensions")),
-        SystemExtensionsCollector(judge_hints=h("system_extensions")),
-        # Persistence & tampering
-        SshAuthorizedKeysCollector(judge_hints=h("ssh_authorized_keys")),
-        HostsFileCollector(judge_hints=h("hosts_file")),
-        PrivilegeConfigCollector(judge_hints=h("privilege_config")),
-    ]
-
-
-def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
-    """Linux snapshot collector set — full parity with the macOS set
-    minus the two slices that have no Linux equivalent.
-
-    Cross-platform via psutil: processes, network connections, listening
-    ports, network interfaces.
-
-    Same collector classes, Linux paths: file_integrity (WATCHED_FILES_LINUX),
-    browser_extensions (BROWSER_PROFILES_LINUX).
-
-    Linux-specific implementations:
-      Phase 1 — installed_apps (dpkg-query + XDG .desktop)
-      Phase 2 — launch_items (systemd unit files + cron entries)
-      Phase 3 — usb_devices (sysfs walk), bluetooth_devices
-                (/var/lib/bluetooth INI files), wifi_state (sysfs +
-                `iw dev link`), system_integrity (SELinux + AppArmor
-                + ufw / firewalld + sshd + vnc + LUKS).
-
-    Dropped on Linux: quarantine_events (a macOS-only concept with no Linux
-    analog).
-    """
-    h = prompts.hint_for
-
-    # Expand watched-file templates through host_paths_for_home so that
-    # ~/-prefixed entries become one path per user home found under
-    # the container's bind-mounted /host/home (or the literal
-    # expanduser path on a native install). Absolute /etc paths
-    # become /host/etc paths automatically.
-    watched: list[str] = []
-    for tmpl in WATCHED_FILES_LINUX:
-        for p in host_paths_for_home(tmpl):
-            watched.append(str(p))
-
-    # Same treatment for browser profile roots — one entry per
-    # user_home/.config/<browser>.
-    expanded_browser_profiles: dict[Browser, list[str]] = {}
-    for browser, templates in BROWSER_PROFILES_LINUX.items():
-        out: list[str] = []
-        for tmpl in templates:
-            for p in host_paths_for_home(tmpl):
-                out.append(str(p))
-        expanded_browser_profiles[browser] = out
-
-    return [
-        ProcessCollector(judge_hints=h("processes")),
-        NetworkConnectionsCollector(judge_hints=h("network_connections")),
-        ListeningPortsCollector(judge_hints=h("listening_ports")),
-        NetworkFlowsCollector(judge_hints=h("network_flows")),
-        DnsQueriesCollector(judge_hints=h("dns_queries")),
-        NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
-        LinuxUsbDevicesCollector(judge_hints=h("usb_devices")),
-        LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),
-        LinuxWifiCollector(judge_hints=h("wifi_state")),
-        LinuxLaunchItemsCollector(judge_hints=h("launch_items")),
-        BrowserExtensionsCollector(
-            judge_hints=h("browser_extensions"),
-            profiles=expanded_browser_profiles,
-        ),
-        LinuxSystemIntegrityCollector(judge_hints=h("system_integrity")),
-        FileIntegrityCollector(
-            judge_hints=h("file_integrity"),
-            watched=watched,
-        ),
-        LinuxInstalledAppsCollector(judge_hints=h("installed_apps")),
-        # Phase 4 additions — cross-platform
-        MountsCollector(judge_hints=h("mounts")),
-        SetuidFilesCollector(judge_hints=h("setuid_files")),
-        # Persistence & tampering
-        SshAuthorizedKeysCollector(judge_hints=h("ssh_authorized_keys")),
-        HostsFileCollector(judge_hints=h("hosts_file")),
-        PrivilegeConfigCollector(judge_hints=h("privilege_config")),
-    ]
-
-
-def build_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
-    if IS_LINUX:
-        return _build_linux_snapshot_collectors(prompts)
-    return _build_macos_snapshot_collectors(prompts)
-
-
-def build_streaming_collectors(prompts: Prompts) -> list[StreamingCollector]:
-    h = prompts.hint_for
-    if IS_LINUX:
-        return [
-            LinuxAuthEventsCollector(judge_hints=h("auth_events")),
-            LinuxProcessExecCollector(judge_hints=h("process_exec_events")),
-        ]
-    return [
-        AuthEventsCollector(judge_hints=h("auth_events")),
-        MacosProcessExecCollector(judge_hints=h("process_exec_events")),
-    ]

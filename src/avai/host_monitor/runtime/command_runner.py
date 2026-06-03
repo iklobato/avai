@@ -68,3 +68,15 @@ class CommandRunner:
             return r.returncode
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return None
+
+    def text(self, cmd: list[str], timeout: int = 10) -> str:
+        """Return *cmd*'s stdout as text, or ``""`` on a non-zero exit,
+        missing binary, or timeout. For tools queried for their textual
+        output (e.g. ``dscl``) where failure should degrade quietly."""
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, check=False
+            )
+            return (r.stdout or "") if r.returncode == 0 else ""
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return ""
