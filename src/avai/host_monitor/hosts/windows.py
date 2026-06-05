@@ -40,6 +40,16 @@ from ..collectors import (
     SshAuthorizedKeysCollector,
     StreamingCollector,
 )
+from ..exposure_collectors import (
+    LoginSessionsCollector,
+    NetworkSharesCollector,
+    ProxyConfigCollector,
+    TrustedRootsCollector,
+    WindowsCertParser,
+    WindowsProxyParser,
+    WindowsSessionParser,
+    WindowsSharesParser,
+)
 from ..models import InstalledAppRow, LaunchItemRow
 from ..net_collectors import (
     ArpTableCollector,
@@ -379,6 +389,39 @@ class WindowsHost:
                     PsDnsParser(),
                 ),
                 judge_hints=h("dns_resolvers"),
+            ),
+            # Exposure & MITM surface (promiscuous_ifaces composed out — no
+            # clean Windows analog).
+            ProxyConfigCollector(
+                self._ps(
+                    "Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\"
+                    "CurrentVersion\\Internet Settings' | Select-Object "
+                    "ProxyEnable,ProxyServer,AutoConfigURL | ConvertTo-Json -Compress",
+                    WindowsProxyParser(),
+                ),
+                judge_hints=h("proxy_config"),
+            ),
+            LoginSessionsCollector(
+                CommandSnapshot(
+                    self._runner, ["query", "user"], WindowsSessionParser()
+                ),
+                judge_hints=h("login_sessions"),
+            ),
+            NetworkSharesCollector(
+                self._ps(
+                    "Get-SmbConnection | Select-Object ServerName,ShareName,Dialect | "
+                    "ConvertTo-Json -Compress",
+                    WindowsSharesParser(),
+                ),
+                judge_hints=h("network_shares"),
+            ),
+            TrustedRootsCollector(
+                self._ps(
+                    "Get-ChildItem Cert:\\LocalMachine\\Root | Select-Object "
+                    "Subject,Thumbprint | ConvertTo-Json -Compress",
+                    WindowsCertParser(),
+                ),
+                judge_hints=h("trusted_roots"),
             ),
         ]
 

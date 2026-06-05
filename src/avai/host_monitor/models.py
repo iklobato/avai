@@ -507,3 +507,62 @@ class DnsResolverRow(_RowBase):
     search: Mapped[Optional[str]]
     interface: Mapped[Optional[str]]
     raw_json: Mapped[Optional[str]]
+
+
+# ---------------------------------------------------------------------------
+# Network exposure & MITM surface (Tier 2)
+# ---------------------------------------------------------------------------
+
+
+class ProxyConfigRow(_RowBase):
+    """A configured proxy / PAC. A silently-set proxy is MITM / exfil."""
+
+    __tablename__ = "proxy_config"
+    scope: Mapped[Optional[str]] = mapped_column(index=True)  # http|https|pac|...
+    host: Mapped[Optional[str]] = mapped_column(index=True)
+    port: Mapped[Optional[str]]
+    pac_url: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class LoginSessionRow(_RowBase):
+    """An active login session. A remote source is a live operator."""
+
+    __tablename__ = "login_sessions"
+    user: Mapped[Optional[str]] = mapped_column(index=True)
+    tty: Mapped[Optional[str]]
+    source: Mapped[Optional[str]] = mapped_column(index=True)  # remote host/IP or local
+    login_at: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class NetworkShareRow(_RowBase):
+    """A mounted network share (SMB/NFS/…) — lateral movement / staging."""
+
+    __tablename__ = "network_shares"
+    remote: Mapped[Optional[str]] = mapped_column(index=True)
+    mountpoint: Mapped[Optional[str]]
+    fstype: Mapped[Optional[str]]
+    options: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class PromiscuousInterfaceRow(_RowBase):
+    """An interface's promiscuous flag — promisc=1 means a sniffer."""
+
+    __tablename__ = "promiscuous_ifaces"
+    interface: Mapped[Optional[str]] = mapped_column(index=True)
+    promiscuous: Mapped[Optional[int]] = mapped_column(index=True)
+    flags: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class TrustedRootRow(_RowBase):
+    """A trusted root CA. A new non-standard root enables TLS interception
+    / fake code-signing."""
+
+    __tablename__ = "trusted_roots"
+    subject: Mapped[Optional[str]] = mapped_column(index=True)
+    fingerprint: Mapped[Optional[str]] = mapped_column(index=True)
+    source: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]

@@ -34,6 +34,18 @@ from ..collectors import (
     UsbDevicesCollector,
     WifiCollector,
 )
+from ..exposure_collectors import (
+    LoginSessionsCollector,
+    MacosCertParser,
+    MacosMountSharesParser,
+    MacosPromiscParser,
+    MacosProxyParser,
+    NetworkSharesCollector,
+    PromiscuousInterfacesCollector,
+    ProxyConfigCollector,
+    TrustedRootsCollector,
+    WhoParser,
+)
 from ..net_collectors import (
     ArpTableCollector,
     DnsResolversCollector,
@@ -189,6 +201,39 @@ class MacOSHost:
             DnsResolversCollector(
                 CommandSnapshot(self._runner, ["scutil", "--dns"], MacosDnsParser()),
                 judge_hints=h("dns_resolvers"),
+            ),
+            # Exposure & MITM surface
+            ProxyConfigCollector(
+                CommandSnapshot(
+                    self._runner, ["scutil", "--proxy"], MacosProxyParser()
+                ),
+                judge_hints=h("proxy_config"),
+            ),
+            LoginSessionsCollector(
+                CommandSnapshot(self._runner, ["who"], WhoParser()),
+                judge_hints=h("login_sessions"),
+            ),
+            NetworkSharesCollector(
+                CommandSnapshot(self._runner, ["mount"], MacosMountSharesParser()),
+                judge_hints=h("network_shares"),
+            ),
+            PromiscuousInterfacesCollector(
+                CommandSnapshot(self._runner, ["ifconfig"], MacosPromiscParser()),
+                judge_hints=h("promiscuous_ifaces"),
+            ),
+            TrustedRootsCollector(
+                CommandSnapshot(
+                    self._runner,
+                    [
+                        "security",
+                        "find-certificate",
+                        "-a",
+                        "-Z",
+                        "/Library/Keychains/System.keychain",
+                    ],
+                    MacosCertParser(),
+                ),
+                judge_hints=h("trusted_roots"),
             ),
         ]
 

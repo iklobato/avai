@@ -36,6 +36,18 @@ from ..collectors import (
 )
 from ..constants import BROWSER_PROFILES_LINUX, WATCHED_FILES_LINUX
 from ..enums import Browser
+from ..exposure_collectors import (
+    LinuxPromiscParser,
+    LinuxProxyEnvParser,
+    LinuxTrustListParser,
+    LoginSessionsCollector,
+    NetworkSharesCollector,
+    ProcMountsSharesParser,
+    PromiscuousInterfacesCollector,
+    ProxyConfigCollector,
+    TrustedRootsCollector,
+    WhoParser,
+)
 from ..net_collectors import (
     ArpTableCollector,
     DnsResolversCollector,
@@ -235,6 +247,33 @@ class LinuxHost:
                     HostPaths.translate("/etc/resolv.conf"), ResolvConfParser()
                 ),
                 judge_hints=h("dns_resolvers"),
+            ),
+            # Exposure & MITM surface
+            ProxyConfigCollector(
+                FileSnapshot(
+                    HostPaths.translate("/etc/environment"), LinuxProxyEnvParser()
+                ),
+                judge_hints=h("proxy_config"),
+            ),
+            LoginSessionsCollector(
+                CommandSnapshot(self._runner, ["who"], WhoParser()),
+                judge_hints=h("login_sessions"),
+            ),
+            NetworkSharesCollector(
+                FileSnapshot(
+                    HostPaths.translate("/proc/mounts"), ProcMountsSharesParser()
+                ),
+                judge_hints=h("network_shares"),
+            ),
+            PromiscuousInterfacesCollector(
+                CommandSnapshot(self._runner, ["ip", "link"], LinuxPromiscParser()),
+                judge_hints=h("promiscuous_ifaces"),
+            ),
+            TrustedRootsCollector(
+                CommandSnapshot(
+                    self._runner, ["trust", "list"], LinuxTrustListParser()
+                ),
+                judge_hints=h("trusted_roots"),
             ),
         ]
 
