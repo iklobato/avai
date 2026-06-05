@@ -21,6 +21,7 @@ from .command_runner import CommandRunner
 from .digest import Digest
 from .host_paths import HostPaths
 from .probes import PsutilConnections, ServiceProbe
+from .row_source import CommandSnapshot, FileSnapshot, RowParser, RowSource
 from .sqlite_reader import ExternalSqliteReader
 from .stream_source import JsonLineStreamSource, LineParser
 
@@ -33,6 +34,10 @@ __all__ = [
     "HostPaths",
     "PsutilConnections",
     "ServiceProbe",
+    "CommandSnapshot",
+    "FileSnapshot",
+    "RowParser",
+    "RowSource",
     "ExternalSqliteReader",
     "JsonLineStreamSource",
     "LineParser",
