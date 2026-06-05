@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from avai.dashboard import app, dns_queries, network_flows, persistence_tampering
 from avai.enrichers import IndicatorType, extract_indicators
+from avai.host_monitor.runtime import Digest
 from avai.host_monitor import (
     DnsQueriesCollector,
     DnsQueryRow,
@@ -35,8 +36,8 @@ from avai.host_monitor import (
     Sink,
     SshAuthorizedKeyRow,
     SshAuthorizedKeysCollector,
-    content_hash,
 )
+from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 
 # ---------------------------------------------------------------------------
 # process -> flow attribution
@@ -221,17 +222,17 @@ class TestPrivilegeParsers:
         assert all(r["kind"] == "sudoers" for r in rows)
 
     def test_groups_only_privileged_with_members(self):
-        rows = PrivilegeConfigCollector._parse_groups(
+        rows = LinuxPrivilegedAccounts._parse_groups(
             "sudo:x:27:alice,bob\nwheel:x:10:\nstaff:x:50:carol\n",
             "/etc/group",
-            PrivilegeConfigCollector._PRIV_GROUPS,
+            LinuxPrivilegedAccounts._PRIV_GROUPS,
         )
         assert len(rows) == 1
         assert rows[0]["subject"] == "sudo"
         assert rows[0]["detail"] == "alice,bob"
 
     def test_passwd_flags_uid0_only(self):
-        rows = PrivilegeConfigCollector._parse_passwd_uid0(
+        rows = LinuxPrivilegedAccounts._parse_passwd_uid0(
             "root:x:0:0:root:/root:/bin/bash\n"
             "backdoor:x:0:0::/:/bin/sh\n"
             "bob:x:1000:1000::/home/bob:/bin/bash\n",
@@ -294,7 +295,7 @@ def _write(sink, model, rows, fields, ts, run_id):
     for r in rows:
         r["run_id"] = run_id
         r["collected_at"] = ts
-        r["content_hash"] = content_hash(r, fields)
+        r["content_hash"] = Digest.of_row(r, fields)
     sink.write(model, rows)
 
 

@@ -19,7 +19,7 @@ except ImportError:
 
 from .enums import ThreatCategory, Verdict
 from .constants import DEFAULT_JUDGE_BATCH, DEFAULT_JUDGE_MAX_PER_COLLECTOR, DEFAULT_JUDGE_MODEL, DEFAULT_JUDGE_TIMEOUT_S, DEFAULT_PRICING, LOG, MODEL_PRICING
-from .shell import coerce_enum, utcnow
+from .runtime import Clock, Coerce
 from .prompts import Prompts
 
 
@@ -296,7 +296,7 @@ class LlmJudge(Judge):
             )
             entries = entries[: self.max_per_collector]
 
-        now = utcnow()
+        now = Clock().now_iso()
         results: list[Judgment] = []
         for batch in self._batches(entries):
             try:
@@ -360,8 +360,8 @@ class LlmJudge(Judge):
             yield Judgment(
                 content_hash=batch[idx]["content_hash"],
                 collector=collector,
-                verdict=coerce_enum(item.get("verdict"), Verdict, Verdict.UNKNOWN),
-                category=coerce_enum(
+                verdict=Coerce.enum(item.get("verdict"), Verdict, Verdict.UNKNOWN),
+                category=Coerce.enum(
                     item.get("category"), ThreatCategory, ThreatCategory.NONE
                 ),
                 confidence=max(0.0, min(1.0, confidence)),

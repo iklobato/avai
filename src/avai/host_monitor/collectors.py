@@ -13,7 +13,10 @@ import threading
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import ClassVar, Iterable, Optional
+from typing import TYPE_CHECKING, ClassVar, Iterable, Optional
+
+if TYPE_CHECKING:
+    from .hosts.capabilities import FilesystemLayout, PrivilegedAccounts
 
 try:
     import psutil
@@ -26,11 +29,8 @@ from .constants import (
     APP_INFO_KEYS,
     AUTH_LOG_PREDICATE,
     BROWSER_PROFILES,
-    BROWSER_PROFILES_LINUX,
-    IS_LINUX,
     LAUNCH_DIRS,
     WATCHED_FILES,
-    WATCHED_FILES_LINUX,
 )
 from .enums import Browser, LaunchScope
 from .models import (
@@ -61,22 +61,16 @@ from .models import (
     WifiStateRow,
     _RowBase,
 )
-from .prompts import Prompts
-from .shell import (
-    _read_sysfs,
-    _ssh_fingerprint,
-    exit_code,
-    expand,
-    external_sqlite_rows,
-    host_path,
-    host_paths_for_home,
-    jsonable,
-    process_running,
-    read_plist,
-    run_json,
-    safe_psutil_connections,
-    sha256_file,
-    utcnow,
+from .runtime import (
+    Clock,
+    Coerce,
+    CommandRunner,
+    Digest,
+    ExternalSqliteReader,
+    HostPaths,
+    JsonLineStreamSource,
+    PsutilConnections,
+    ServiceProbe,
 )
 
 
@@ -257,7 +251,7 @@ class NetworkConnectionsCollector(SnapshotCollector):
     judge_enabled = False  # too high churn; aggregate behaviourally instead
 
     def collect(self):
-        for c in safe_psutil_connections():
+        for c in PsutilConnections.inet():
             yield {
                 "pid": c.pid,
                 "family": c.family.name,
@@ -277,7 +271,7 @@ class ListeningPortsCollector(SnapshotCollector):
 
     def collect(self):
         names: dict[int, Optional[str]] = {}
-        for c in safe_psutil_connections():
+        for c in PsutilConnections.inet():
             if c.status != psutil.CONN_LISTEN:
                 continue
             if c.pid is not None and c.pid not in names:
@@ -382,9 +376,13 @@ class NetworkFlowsCollector(SnapshotCollector):
         self,
         judge_hints: str = "",
         resolver: Optional["ProcessConnectionResolver"] = None,
+        iface_args: Optional[list[str]] = None,
     ):
         super().__init__(judge_hints)
         self._resolver = resolver or ProcessConnectionResolver()
+        # tcpdump flags that make each line carry its interface name;
+        # supplied by the host (Linux '-i any' vs macOS '-k I').
+        self._iface_args = list(iface_args or [])
 
     def collect(self):
         stdout, default_iface = self._capture()
@@ -408,16 +406,12 @@ class NetworkFlowsCollector(SnapshotCollector):
             raise RuntimeError("tcpdump not found on PATH")
         # -t drops timestamps (we stamp our own); TCP/UDP (v4 + v6) only.
         cmd = ["tcpdump", "-n", "-q", "-l", "-t", "-c", str(self.MAX_PACKETS)]
-        if IS_LINUX:
-            # 'any' prefixes each line with the interface + direction.
-            cmd += ["-i", "any"]
-        else:
-            # macOS auto-selects the 'pktap' pseudo-device, which aggregates
-            # every interface — so without this every flow is labelled
-            # 'pktap'. '-k I' prints the real per-packet interface name as
-            # the leading token (same shape as Linux '-i any'), which
-            # _parse_line already picks up.
-            cmd += ["-k", "I"]
+        # Interface flags supplied by the host: Linux '-i any' prefixes
+        # each line with the interface + direction; macOS '-k I' prints
+        # the real per-packet interface (otherwise every flow is labelled
+        # with the 'pktap' aggregating pseudo-device). Both yield the
+        # leading-interface-token shape that _parse_line expects.
+        cmd += self._iface_args
         cmd += ["tcp", "or", "udp"]
         try:
             r = subprocess.run(
@@ -456,7 +450,7 @@ class NetworkFlowsCollector(SnapshotCollector):
         return iface
 
     def _aggregate(self, output: str, default_iface: Optional[str]) -> dict:
-        now = utcnow()
+        now = Clock().now_iso()
         flows: dict[tuple, dict] = {}
         for line in output.splitlines():
             parsed = self._parse_line(line)
@@ -579,9 +573,11 @@ class DnsQueriesCollector(SnapshotCollector):
         self,
         judge_hints: str = "",
         resolver: Optional["ProcessConnectionResolver"] = None,
+        iface_args: Optional[list[str]] = None,
     ):
         super().__init__(judge_hints)
         self._resolver = resolver or ProcessConnectionResolver()
+        self._iface_args = list(iface_args or [])
 
     def collect(self):
         stdout, default_iface = self._capture()
@@ -595,7 +591,7 @@ class DnsQueriesCollector(SnapshotCollector):
             provider = self._DOH_IPS[ip]
             key = (provider, "DoH", ip)
             if key not in queries:
-                now = utcnow()
+                now = Clock().now_iso()
                 queries[key] = {
                     "iface": None,
                     "qname": provider,
@@ -615,10 +611,7 @@ class DnsQueriesCollector(SnapshotCollector):
         if shutil.which("tcpdump") is None:
             raise RuntimeError("tcpdump not found on PATH")
         cmd = ["tcpdump", "-n", "-l", "-t", "-c", str(self.MAX_PACKETS)]
-        if IS_LINUX:
-            cmd += ["-i", "any"]
-        else:
-            cmd += ["-k", "I"]
+        cmd += self._iface_args
         cmd += ["udp", "port", "53", "or", "tcp", "port", "53"]
         try:
             r = subprocess.run(
@@ -639,7 +632,7 @@ class DnsQueriesCollector(SnapshotCollector):
         return stdout, iface
 
     def _aggregate(self, output: str, default_iface: Optional[str], proc_map: dict):
-        now = utcnow()
+        now = Clock().now_iso()
         queries: dict[tuple, dict] = {}
         for line in output.splitlines():
             parsed = self._parse_dns_line(line)
@@ -752,7 +745,7 @@ class UsbDevicesCollector(SnapshotCollector):
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
     def collect(self):
-        data = run_json(["system_profiler", "-json", "SPUSBDataType"], timeout=30)
+        data = CommandRunner().json(["system_profiler", "-json", "SPUSBDataType"], timeout=30)
         root = data.get("SPUSBDataType", []) if isinstance(data, dict) else (data or [])
         yield from self._walk(root, None)
 
@@ -768,7 +761,7 @@ class UsbDevicesCollector(SnapshotCollector):
                 "location_id": loc,
                 "speed": item.get("device_speed"),
                 "raw_json": json.dumps(
-                    {k: jsonable(v) for k, v in item.items() if k != "_items"}
+                    {k: Coerce.jsonable(v) for k, v in item.items() if k != "_items"}
                 ),
             }
             yield from self._walk(item.get("_items"), loc)
@@ -787,7 +780,7 @@ class BluetoothCollector(SnapshotCollector):
     _PAIRED_GROUPS = {"device_connected", "device_not_connected", "device_paired"}
 
     def collect(self):
-        data = run_json(["system_profiler", "-json", "SPBluetoothDataType"], timeout=30)
+        data = CommandRunner().json(["system_profiler", "-json", "SPBluetoothDataType"], timeout=30)
         sections = (
             data.get("SPBluetoothDataType", [])
             if isinstance(data, dict)
@@ -807,7 +800,7 @@ class BluetoothCollector(SnapshotCollector):
                             "connected": int(group == "device_connected"),
                             "paired": int(group in self._PAIRED_GROUPS),
                             "minor_type": dev.get("device_minorType"),
-                            "raw_json": json.dumps(jsonable(dev)),
+                            "raw_json": json.dumps(Coerce.jsonable(dev)),
                         }
 
 
@@ -817,7 +810,7 @@ class WifiCollector(SnapshotCollector):
     judge_fields = ("ssid", "bssid", "security")
 
     def collect(self):
-        data = run_json(["system_profiler", "-json", "SPAirPortDataType"], timeout=30)
+        data = CommandRunner().json(["system_profiler", "-json", "SPAirPortDataType"], timeout=30)
         sections = (
             data.get("SPAirPortDataType", [])
             if isinstance(data, dict)
@@ -833,7 +826,7 @@ class WifiCollector(SnapshotCollector):
                     "bssid": cur.get("spairport_network_bssid"),
                     "channel": str(channel) if channel is not None else None,
                     "security": cur.get("spairport_security_mode"),
-                    "raw_json": json.dumps(jsonable(cur)),
+                    "raw_json": json.dumps(Coerce.jsonable(cur)),
                 }
 
 
@@ -852,7 +845,7 @@ class LaunchItemsCollector(SnapshotCollector):
 
     def collect(self):
         for scope, dir_str in LAUNCH_DIRS:
-            d = expand(dir_str)
+            d = HostPaths.expand(dir_str)
             if not d.is_dir():
                 continue
             try:
@@ -866,7 +859,7 @@ class LaunchItemsCollector(SnapshotCollector):
 
     @staticmethod
     def _row(scope: LaunchScope, path: Path):
-        data = read_plist(path)
+        data = HostPaths.read_plist(path)
         if data is None:
             return None
         try:
@@ -880,19 +873,19 @@ class LaunchItemsCollector(SnapshotCollector):
             "label": data.get("Label"),
             "program": data.get("Program"),
             "program_arguments_json": json.dumps(
-                jsonable(data.get("ProgramArguments") or [])
+                Coerce.jsonable(data.get("ProgramArguments") or [])
             ),
             "run_at_load": int(bool(data.get("RunAtLoad"))),
             "keep_alive": int(bool(data.get("KeepAlive"))),
             "start_interval": data.get("StartInterval"),
             "start_calendar_interval_json": (
-                json.dumps(jsonable(sci)) if sci is not None else None
+                json.dumps(Coerce.jsonable(sci)) if sci is not None else None
             ),
             "user_name": data.get("UserName"),
             "group_name": data.get("GroupName"),
-            "sha256": sha256_file(path),
+            "sha256": Digest.sha256_file(path),
             "mtime": mtime,
-            "raw_json": json.dumps(jsonable(data)),
+            "raw_json": json.dumps(Coerce.jsonable(data)),
         }
 
 
@@ -912,12 +905,12 @@ class QuarantineCollector(SnapshotCollector):
     }
 
     def collect(self):
-        path = expand(
+        path = HostPaths.expand(
             "~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
         )
         if not path.exists():
             return
-        for row in external_sqlite_rows(
+        for row in ExternalSqliteReader().rows(
             path, "LSQuarantineEvent", list(self._COLUMN_MAP.keys())
         ):
             yield {self._COLUMN_MAP[k]: v for k, v in row.items()}
@@ -952,7 +945,7 @@ class BrowserExtensionsCollector(SnapshotCollector):
         for browser, profiles in self.profiles.items():
             reader = self.readers.get(browser, self.default_reader)
             for base_str in profiles:
-                base = expand(base_str)
+                base = HostPaths.expand(base_str)
                 if not base.is_dir():
                     continue
                 yield from reader.read(base, browser)
@@ -972,8 +965,8 @@ class SystemIntegrityCollector(SnapshotCollector):
     )
 
     def collect(self):
-        fv = exit_code(["fdesetup", "isactive"])
-        alf = read_plist(Path("/Library/Preferences/com.apple.alf.plist")) or {}
+        fv = CommandRunner().exit_code(["fdesetup", "isactive"])
+        alf = HostPaths.read_plist(Path("/Library/Preferences/com.apple.alf.plist")) or {}
         # spctl --status always exits 0; the state is in its stdout text.
         try:
             _gk = subprocess.run(
@@ -1000,10 +993,26 @@ class SystemIntegrityCollector(SnapshotCollector):
             "gatekeeper_assessments_enabled": gk,
             # launchctl list only covers the user domain; sshd/screensharingd/
             # ARDAgent are system-domain services — use pgrep instead.
-            "remote_login_enabled": process_running("sshd"),
-            "screen_sharing_enabled": process_running("screensharingd"),
-            "remote_management_enabled": process_running("ARDAgent"),
-            "raw_json": json.dumps({"alf": jsonable(alf)}),
+            "remote_login_enabled": ServiceProbe().running("sshd"),
+            "screen_sharing_enabled": ServiceProbe().running("screensharingd"),
+            "remote_management_enabled": ServiceProbe().running("ARDAgent"),
+            "raw_json": json.dumps({"alf": Coerce.jsonable(alf)}),
+        }
+
+
+class UnifiedLogAuthParser:
+    """Strategy: macOS ``log stream --style ndjson`` event → auth row."""
+
+    def parse(self, event: dict) -> dict:
+        return {
+            "event_timestamp": event.get("timestamp"),
+            "process": event.get("processImagePath"),
+            "subsystem": event.get("subsystem"),
+            "category": event.get("category"),
+            "event_type": event.get("eventType"),
+            "event_message": event.get("eventMessage"),
+            "pid": event.get("processID"),
+            "raw_json": json.dumps(event),
         }
 
 
@@ -1030,58 +1039,10 @@ class AuthEventsCollector(StreamingCollector):
             "--predicate",
             self.predicate,
         ]
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+        source = JsonLineStreamSource(
+            cmd, UnifiedLogAuthParser(), killer_name="log-stream-killer"
         )
-
-        # Watchdog: when stop_event fires, terminate the subprocess,
-        # which closes stdout and ends the read loop below.
-        def _terminator():
-            stop_event.wait()
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
-
-        threading.Thread(
-            target=_terminator, daemon=True, name="log-stream-killer"
-        ).start()
-
-        try:
-            for line in proc.stdout:
-                if stop_event.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                yield {
-                    "event_timestamp": e.get("timestamp"),
-                    "process": e.get("processImagePath"),
-                    "subsystem": e.get("subsystem"),
-                    "category": e.get("category"),
-                    "event_type": e.get("eventType"),
-                    "event_message": e.get("eventMessage"),
-                    "pid": e.get("processID"),
-                    "raw_json": json.dumps(e),
-                }
-        finally:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+        yield from source.stream(stop_event)
 
 
 class FileIntegrityCollector(SnapshotCollector):
@@ -1095,7 +1056,7 @@ class FileIntegrityCollector(SnapshotCollector):
 
     def collect(self):
         for path_str in self.watched:
-            p = expand(path_str)
+            p = HostPaths.expand(path_str)
             try:
                 st = p.lstat()
             except FileNotFoundError:
@@ -1105,7 +1066,7 @@ class FileIntegrityCollector(SnapshotCollector):
                 continue
             yield {
                 "path": str(p),
-                "sha256": sha256_file(p) if p.is_file() else None,
+                "sha256": Digest.sha256_file(p) if p.is_file() else None,
                 "size": st.st_size,
                 "mtime": st.st_mtime,
                 "mode": st.st_mode,
@@ -1134,7 +1095,7 @@ class InstalledAppsCollector(SnapshotCollector):
     judge_fields = ("bundle_id", "name", "path")
 
     def collect(self):
-        for app_dir in (Path("/Applications"), expand("~/Applications")):
+        for app_dir in (Path("/Applications"), HostPaths.expand("~/Applications")):
             if not app_dir.is_dir():
                 continue
             try:
@@ -1142,14 +1103,14 @@ class InstalledAppsCollector(SnapshotCollector):
             except PermissionError:
                 continue
             for app in apps:
-                info = read_plist(app / "Contents" / "Info.plist") or {}
+                info = HostPaths.read_plist(app / "Contents" / "Info.plist") or {}
                 yield {
                     "path": str(app),
                     "bundle_id": info.get("CFBundleIdentifier"),
                     "name": info.get("CFBundleName") or info.get("CFBundleDisplayName"),
                     "version": info.get("CFBundleShortVersionString"),
                     "raw_json": json.dumps(
-                        jsonable(
+                        Coerce.jsonable(
                             {
                                 k: info.get(k)
                                 for k in APP_INFO_KEYS
@@ -1196,7 +1157,7 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
         cmd = ["dpkg-query", "-W", "-f", fmt]
         # When containerised, --admindir points dpkg-query at the host's
         # package database rather than the container's.
-        host_admindir = host_path("/var/lib/dpkg")
+        host_admindir = HostPaths.translate("/var/lib/dpkg")
         if constants.HOST_PREFIX and host_admindir.is_dir():
             cmd[1:1] = ["--admindir", str(host_admindir)]
         try:
@@ -1244,13 +1205,13 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
         # handles them. We extract [Desktop Entry] Name / Exec /
         # Comment / Categories.
         roots: list[Path] = [
-            host_path("/usr/share/applications"),
-            host_path("/usr/local/share/applications"),
-            host_path("/var/lib/flatpak/exports/share/applications"),
+            HostPaths.translate("/usr/share/applications"),
+            HostPaths.translate("/usr/local/share/applications"),
+            HostPaths.translate("/var/lib/flatpak/exports/share/applications"),
         ]
-        roots.extend(host_paths_for_home("~/.local/share/applications"))
+        roots.extend(HostPaths.for_home("~/.local/share/applications"))
         roots.extend(
-            host_paths_for_home("~/.local/share/flatpak/exports/share/applications")
+            HostPaths.for_home("~/.local/share/flatpak/exports/share/applications")
         )
         for root in roots:
             if not root.is_dir():
@@ -1375,7 +1336,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
             # mode with no /host/home and no /host/root mounted — so we
             # iterate rather than index [0] (which raised IndexError and
             # killed the whole collector).
-            for d in host_paths_for_home(dir_str):
+            for d in HostPaths.for_home(dir_str):
                 if not d.is_dir():
                     continue
                 try:
@@ -1394,13 +1355,13 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
 
         # /etc/crontab — single file, has-user-column form
         scope, p = self._CRON_FILE
-        p = host_path(p)
+        p = HostPaths.translate(p)
         if p.is_file():
             yield from self._cron_rows(scope, p, has_user_col=True)
 
         # /etc/cron.d/* — drop-in files, has-user-column form
         for scope, d in self._CRON_DROP_INS:
-            d = host_path(d)
+            d = HostPaths.translate(d)
             if not d.is_dir():
                 continue
             try:
@@ -1415,7 +1376,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
         # /var/spool/cron* — per-user crontabs (no user column inside).
         # The filename IS the username.
         for scope, d in self._USER_CRONS:
-            d = host_path(d)
+            d = HostPaths.translate(d)
             if not d.is_dir():
                 continue
             try:
@@ -1483,7 +1444,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
             ),
             "user_name": service_sec.get("User"),
             "group_name": service_sec.get("Group"),
-            "sha256": sha256_file(path),
+            "sha256": Digest.sha256_file(path),
             "mtime": mtime,
             "raw_json": json.dumps(
                 {
@@ -1518,7 +1479,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
             mtime = path.stat().st_mtime
         except OSError:
             mtime = None
-        digest = sha256_file(path)
+        digest = Digest.sha256_file(path)
 
         for lineno, raw in enumerate(text.splitlines(), 1):
             line = raw.strip()
@@ -1620,7 +1581,7 @@ class LinuxAuthEventsCollector(StreamingCollector):
         # In container mode, point journalctl at the host's journal
         # directory rather than the container's empty one.
         if constants.HOST_PREFIX:
-            host_journal = host_path("/var/log/journal")
+            host_journal = HostPaths.translate("/var/log/journal")
             if host_journal.is_dir():
                 cmd.extend(["--directory", str(host_journal)])
         for i, group in enumerate(self._MATCH_GROUPS):
@@ -1630,53 +1591,19 @@ class LinuxAuthEventsCollector(StreamingCollector):
         return cmd
 
     def stream(self, stop_event: threading.Event):
-        proc = subprocess.Popen(
-            self._cmd(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+        source = JsonLineStreamSource(
+            self._cmd(), JournalAuthParser(), killer_name="journalctl-killer"
         )
+        yield from source.stream(stop_event)
 
-        def _terminator():
-            stop_event.wait()
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
 
-        threading.Thread(
-            target=_terminator, daemon=True, name="journalctl-killer"
-        ).start()
+class JournalAuthParser:
+    """Strategy: ``journalctl --output=json`` event → auth row."""
 
-        try:
-            for line in proc.stdout:
-                if stop_event.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                yield self._row_from_journal_event(e)
-        finally:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-
-    @staticmethod
-    def _row_from_journal_event(e: dict) -> dict:
+    def parse(self, event: dict) -> dict:
         # journalctl --output=json gives __REALTIME_TIMESTAMP in
         # microseconds since the epoch (as a string).
-        ts_us = e.get("__REALTIME_TIMESTAMP")
+        ts_us = event.get("__REALTIME_TIMESTAMP")
         ts = None
         if ts_us:
             try:
@@ -1687,19 +1614,19 @@ class LinuxAuthEventsCollector(StreamingCollector):
                 pass
 
         try:
-            pid = int(e["_PID"]) if e.get("_PID") else None
+            pid = int(event["_PID"]) if event.get("_PID") else None
         except (TypeError, ValueError):
             pid = None
 
         return {
             "event_timestamp": ts,
-            "process": e.get("_EXE") or e.get("_COMM"),
-            "subsystem": e.get("_SYSTEMD_UNIT") or "syslog",
-            "category": str(e.get("SYSLOG_FACILITY") or ""),
-            "event_type": f"priority={e.get('PRIORITY', '?')}",
-            "event_message": e.get("MESSAGE"),
+            "process": event.get("_EXE") or event.get("_COMM"),
+            "subsystem": event.get("_SYSTEMD_UNIT") or "syslog",
+            "category": str(event.get("SYSLOG_FACILITY") or ""),
+            "event_type": f"priority={event.get('PRIORITY', '?')}",
+            "event_message": event.get("MESSAGE"),
             "pid": pid,
-            "raw_json": json.dumps(e),
+            "raw_json": json.dumps(event),
         }
 
 
@@ -1733,7 +1660,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
     )
 
     def collect(self):
-        root = host_path("/sys/bus/usb/devices")
+        root = HostPaths.translate("/sys/bus/usb/devices")
         if not root.is_dir():
             return
         try:
@@ -1748,7 +1675,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
                 continue
             if not dev.is_dir():
                 continue
-            attrs = {a: _read_sysfs(dev / a) for a in self._ATTRS}
+            attrs = {a: HostPaths.read_sysfs(dev / a) for a in self._ATTRS}
             attrs = {k: v for k, v in attrs.items() if v is not None}
             if not attrs.get("idVendor") and not attrs.get("product"):
                 # Empty entry (e.g. root hubs without descriptors).
@@ -1784,7 +1711,7 @@ class LinuxBluetoothCollector(SnapshotCollector):
     judge_fields = ("name", "address", "minor_type")
 
     def collect(self):
-        root = host_path("/var/lib/bluetooth")
+        root = HostPaths.translate("/var/lib/bluetooth")
         if not root.is_dir():
             return
         try:
@@ -1851,7 +1778,7 @@ class LinuxWifiCollector(SnapshotCollector):
         # sysfs discovery via HOST_PREFIX; iw queries via netlink which
         # the host-network namespace (network_mode: host) already
         # exposes to the container.
-        net = host_path("/sys/class/net")
+        net = HostPaths.translate("/sys/class/net")
         if not net.is_dir():
             return
         try:
@@ -1983,14 +1910,14 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     @staticmethod
     def _selinux_state() -> Optional[str]:
         """Returns 'Enforcing' / 'Permissive' / None (not present)."""
-        flag = _read_sysfs(host_path("/sys/fs/selinux/enforce"))
+        flag = HostPaths.read_sysfs(HostPaths.translate("/sys/fs/selinux/enforce"))
         if flag is None:
             return None
         return {"0": "Permissive", "1": "Enforcing"}.get(flag, "Unknown")
 
     @staticmethod
     def _apparmor_state() -> dict:
-        enabled = _read_sysfs(host_path("/sys/module/apparmor/parameters/enabled"))
+        enabled = HostPaths.read_sysfs(HostPaths.translate("/sys/module/apparmor/parameters/enabled"))
         return (
             {"enabled": enabled == "Y"} if enabled is not None else {"enabled": False}
         )
@@ -1998,7 +1925,7 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     @staticmethod
     def _ufw_active() -> bool:
         # /etc/ufw/ufw.conf is the canonical persistent state.
-        conf = _read_sysfs(host_path("/etc/ufw/ufw.conf"))
+        conf = HostPaths.read_sysfs(HostPaths.translate("/etc/ufw/ufw.conf"))
         if conf is None:
             return False
         for line in conf.splitlines():
@@ -2096,30 +2023,12 @@ class SetuidFilesCollector(SnapshotCollector):
     model = SetuidFileRow
     judge_fields = ("path", "uid", "setuid", "setgid")
 
-    _BIN_DIRS_MACOS = (
-        "/bin",
-        "/sbin",
-        "/usr/bin",
-        "/usr/sbin",
-        "/usr/local/bin",
-        "/usr/local/sbin",
-        "/usr/libexec",
-    )
-    _BIN_DIRS_LINUX = (
-        "/bin",
-        "/sbin",
-        "/usr/bin",
-        "/usr/sbin",
-        "/usr/local/bin",
-        "/usr/local/sbin",
-        "/usr/libexec",
-        "/opt",
-    )
+    def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
+        super().__init__(judge_hints=judge_hints)
+        self._fs = fs
 
     def collect(self):
-        bin_dirs = self._BIN_DIRS_LINUX if IS_LINUX else self._BIN_DIRS_MACOS
-        for d in bin_dirs:
-            base = host_path(d) if IS_LINUX else Path(d)
+        for base in self._fs.privileged_bin_dirs():
             if not base.is_dir():
                 continue
             try:
@@ -2145,7 +2054,7 @@ class SetuidFilesCollector(SnapshotCollector):
                     "gid": st.st_gid,
                     "size": st.st_size,
                     "mtime": st.st_mtime,
-                    "sha256": sha256_file(path),
+                    "sha256": Digest.sha256_file(path),
                     "setuid": int(setuid),
                     "setgid": int(setgid),
                     "raw_json": json.dumps(
@@ -2183,8 +2092,12 @@ class SshAuthorizedKeysCollector(SnapshotCollector):
         }
     )
 
+    def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
+        super().__init__(judge_hints=judge_hints)
+        self._fs = fs
+
     def collect(self):
-        for home in self._home_dirs():
+        for home in self._fs.home_dirs():
             owner = home.name
             for fname in ("authorized_keys", "authorized_keys2"):
                 path = home / ".ssh" / fname
@@ -2194,34 +2107,6 @@ class SshAuthorizedKeysCollector(SnapshotCollector):
                     continue
                 for row in self._parse_authorized_keys(content, str(path), owner):
                     yield row
-
-    def _home_dirs(self) -> list[Path]:
-        homes: list[Path] = []
-        if IS_LINUX:
-            base = host_path("/home")
-            if base.is_dir():
-                try:
-                    homes += [d for d in base.iterdir() if d.is_dir()]
-                except OSError:
-                    pass
-            root = host_path("/root")
-            if root.is_dir():
-                homes.append(root)
-        else:
-            users = Path("/Users")
-            if users.is_dir():
-                try:
-                    homes += [
-                        d
-                        for d in users.iterdir()
-                        if d.is_dir() and not d.name.startswith(".")
-                    ]
-                except OSError:
-                    pass
-            root = Path("/var/root")
-            if root.is_dir():
-                homes.append(root)
-        return homes
 
     @classmethod
     def _parse_authorized_keys(cls, content: str, path: str, owner: str):
@@ -2241,7 +2126,7 @@ class SshAuthorizedKeysCollector(SnapshotCollector):
                     "path": path,
                     "owner": owner,
                     "key_type": parts[idx],
-                    "fingerprint": _ssh_fingerprint(parts[idx + 1]),
+                    "fingerprint": Digest.ssh_fingerprint(parts[idx + 1]),
                     "comment": " ".join(parts[idx + 2 :]) or None,
                     "options": " ".join(parts[:idx]) or None,
                 }
@@ -2258,8 +2143,12 @@ class HostsFileCollector(SnapshotCollector):
     model = HostsFileRow
     judge_fields = ("ip", "hostnames")
 
+    def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
+        super().__init__(judge_hints=judge_hints)
+        self._fs = fs
+
     def collect(self):
-        path = host_path("/etc/hosts") if IS_LINUX else Path("/etc/hosts")
+        path = self._fs.hosts_file()
         try:
             content = path.read_text(errors="replace")
         except (OSError, UnicodeDecodeError):
@@ -2296,18 +2185,26 @@ class PrivilegeConfigCollector(SnapshotCollector):
     model = PrivilegeConfigRow
     judge_fields = ("kind", "subject", "detail")
 
-    _PRIV_GROUPS = frozenset({"sudo", "wheel", "admin"})
+    def __init__(
+        self,
+        judge_hints: str = "",
+        fs: "FilesystemLayout" = None,
+        accounts: "PrivilegedAccounts" = None,
+    ):
+        super().__init__(judge_hints=judge_hints)
+        self._fs = fs
+        self._accounts = accounts
 
     def collect(self):
         yield from self._sudoers()
-        yield from self._priv_groups()
-        yield from self._uid0_accounts()
-
-    # -- sudoers (both platforms) ----------------------------------------
+        yield from self._accounts.privileged_group_members()
+        yield from self._accounts.uid0_accounts()
 
     def _sudoers(self):
-        files = [host_path("/etc/sudoers") if IS_LINUX else Path("/etc/sudoers")]
-        sudoers_d = host_path("/etc/sudoers.d") if IS_LINUX else Path("/etc/sudoers.d")
+        """Sudoers parsing is identical across platforms; only the file
+        locations differ, supplied by the FilesystemLayout."""
+        files = [self._fs.sudoers_file()]
+        sudoers_d = self._fs.sudoers_dir()
         if sudoers_d.is_dir():
             try:
                 files += sorted(p for p in sudoers_d.iterdir() if p.is_file())
@@ -2339,104 +2236,6 @@ class PrivilegeConfigCollector(SnapshotCollector):
             )
         return rows
 
-    # -- privileged group membership -------------------------------------
-
-    def _priv_groups(self):
-        if IS_LINUX:
-            path = host_path("/etc/group")
-            try:
-                content = path.read_text(errors="replace")
-            except (OSError, UnicodeDecodeError):
-                return
-            yield from self._parse_groups(content, str(path), self._PRIV_GROUPS)
-        else:
-            for gname in ("admin", "wheel"):
-                out = self._dscl(["-read", f"/Groups/{gname}", "GroupMembership"])
-                members = out.split(":", 1)[1].strip() if ":" in out else out.strip()
-                if members:
-                    yield {
-                        "kind": "group",
-                        "subject": gname,
-                        "detail": members,
-                        "source_path": "dscl:/Groups",
-                    }
-
-    @staticmethod
-    def _parse_groups(content: str, path: str, priv_groups):
-        """Pure parser for /etc/group: members of privileged groups."""
-        rows = []
-        for line in content.splitlines():
-            parts = line.strip().split(":")
-            if len(parts) < 4:
-                continue
-            gname, members = parts[0], parts[3]
-            if gname in priv_groups and members:
-                rows.append(
-                    {
-                        "kind": "group",
-                        "subject": gname,
-                        "detail": members,
-                        "source_path": path,
-                    }
-                )
-        return rows
-
-    # -- UID-0 accounts --------------------------------------------------
-
-    def _uid0_accounts(self):
-        if IS_LINUX:
-            path = host_path("/etc/passwd")
-            try:
-                content = path.read_text(errors="replace")
-            except (OSError, UnicodeDecodeError):
-                return
-            yield from self._parse_passwd_uid0(content, str(path))
-        else:
-            out = self._dscl(["-list", "/Users", "UniqueID"])
-            for line in out.splitlines():
-                cols = line.split()
-                if len(cols) >= 2 and cols[-1] == "0":
-                    yield {
-                        "kind": "account",
-                        "subject": cols[0],
-                        "detail": "uid=0",
-                        "source_path": "dscl:/Users",
-                    }
-
-    @staticmethod
-    def _parse_passwd_uid0(content: str, path: str):
-        """Pure parser for /etc/passwd: accounts with uid 0."""
-        rows = []
-        for line in content.splitlines():
-            parts = line.strip().split(":")
-            if len(parts) < 7:
-                continue
-            user, uid, shell = parts[0], parts[2], parts[6]
-            if uid == "0":
-                rows.append(
-                    {
-                        "kind": "account",
-                        "subject": user,
-                        "detail": f"uid=0 shell={shell}",
-                        "source_path": path,
-                    }
-                )
-        return rows
-
-    @staticmethod
-    def _dscl(args: list[str]) -> str:
-        try:
-            r = subprocess.run(
-                ["dscl", ".", *args],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            return r.stdout or "" if r.returncode == 0 else ""
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return ""
-
 
 class MdmProfilesCollector(SnapshotCollector):
     """macOS configuration profiles (MDM payloads). Unauthorized MDM
@@ -2452,7 +2251,7 @@ class MdmProfilesCollector(SnapshotCollector):
 
     def collect(self):
         try:
-            data = run_json(
+            data = CommandRunner().json(
                 ["system_profiler", "-json", "SPConfigurationProfileDataType"],
                 timeout=30,
             )
@@ -2473,7 +2272,7 @@ class MdmProfilesCollector(SnapshotCollector):
                 "install_date": entry.get("spconfigprofile_install_date"),
                 "profile_scope": entry.get("spconfigprofile_profile_scope"),
                 "is_supervised": None,
-                "raw_json": json.dumps(jsonable(entry)),
+                "raw_json": json.dumps(Coerce.jsonable(entry)),
             }
 
     @classmethod
@@ -2508,7 +2307,7 @@ class KernelExtensionsCollector(SnapshotCollector):
 
     def collect(self):
         try:
-            data = run_json(
+            data = CommandRunner().json(
                 ["system_profiler", "-json", "SPExtensionsDataType"],
                 timeout=60,
             )
@@ -2527,7 +2326,7 @@ class KernelExtensionsCollector(SnapshotCollector):
                 "team_id": None,
                 "signing_id": kext.get("spext_signed_by"),
                 "raw_json": json.dumps(
-                    jsonable(
+                    Coerce.jsonable(
                         {
                             k: v
                             for k, v in kext.items()
@@ -2568,7 +2367,7 @@ class SystemExtensionsCollector(SnapshotCollector):
 
     def collect(self):
         db = Path("/Library/SystemExtensions/db.plist")
-        data = read_plist(db)
+        data = HostPaths.read_plist(db)
         if not data:
             return
         # The plist is a top-level dict with 'extensions' as the list
@@ -2592,7 +2391,7 @@ class SystemExtensionsCollector(SnapshotCollector):
                 "version": version,
                 "state": ext.get("state"),
                 "categories": ",".join(categories) if categories else None,
-                "raw_json": json.dumps(jsonable(ext)),
+                "raw_json": json.dumps(Coerce.jsonable(ext)),
             }
 
 
@@ -2617,63 +2416,29 @@ class MacosProcessExecCollector(StreamingCollector):
 
     def stream(self, stop_event: threading.Event):
         cmd = ["eslogger", *self._EVENTS]
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+        source = JsonLineStreamSource(
+            cmd, EsloggerExecParser(), killer_name="eslogger-killer"
         )
+        yield from source.stream(stop_event)
 
-        def _terminator():
-            stop_event.wait()
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
 
-        threading.Thread(
-            target=_terminator, daemon=True, name="eslogger-killer"
-        ).start()
+class EsloggerExecParser:
+    """Strategy: macOS ``eslogger exec`` Endpoint-Security event → exec row."""
 
-        try:
-            for line in proc.stdout:
-                if stop_event.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                yield self._row_from_eslogger_event(e)
-        finally:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-
-    @staticmethod
-    def _row_from_eslogger_event(e: dict) -> dict:
+    def parse(self, event: dict) -> dict:
         # eslogger emits ES events: { time, action_type, event,
         # process, ... } where event.exec.{target, args, ...}
-        event_obj = e.get("event") or {}
+        event_obj = event.get("event") or {}
         exec_evt = event_obj.get("exec") or {}
         target = exec_evt.get("target") or {}
         target_exe = (target.get("executable") or {}).get("path")
         args = exec_evt.get("args") or []
-        parent = e.get("process") or {}
+        parent = event.get("process") or {}
         parent_path = (parent.get("executable") or {}).get("path")
         target_token = target.get("audit_token") or {}
         parent_token = parent.get("audit_token") or {}
         return {
-            "event_timestamp": e.get("time"),
+            "event_timestamp": event.get("time"),
             "event_type": "exec",
             "pid": target_token.get("pid"),
             "ppid": parent_token.get("pid"),
@@ -2683,7 +2448,7 @@ class MacosProcessExecCollector(StreamingCollector):
             "exe_args_json": json.dumps(args),
             "parent_path": parent_path,
             "signing_id": target.get("signing_id"),
-            "raw_json": json.dumps(e),
+            "raw_json": json.dumps(event),
         }
 
 
@@ -2708,58 +2473,24 @@ class LinuxProcessExecCollector(StreamingCollector):
     def _cmd(self) -> list[str]:
         cmd = ["journalctl", "-f", "--output=json", "--no-pager"]
         if constants.HOST_PREFIX:
-            host_journal = host_path("/var/log/journal")
+            host_journal = HostPaths.translate("/var/log/journal")
             if host_journal.is_dir():
                 cmd.extend(["--directory", str(host_journal)])
         cmd.extend(["_AUDIT_TYPE_NAME=EXECVE", "+", "_AUDIT_TYPE_NAME=SYSCALL"])
         return cmd
 
     def stream(self, stop_event: threading.Event):
-        proc = subprocess.Popen(
-            self._cmd(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
+        source = JsonLineStreamSource(
+            self._cmd(), AuditExecParser(), killer_name="journalctl-audit-killer"
         )
+        yield from source.stream(stop_event)
 
-        def _terminator():
-            stop_event.wait()
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
 
-        threading.Thread(
-            target=_terminator, daemon=True, name="journalctl-audit-killer"
-        ).start()
+class AuditExecParser:
+    """Strategy: Linux audit ``journalctl --output=json`` event → exec row."""
 
-        try:
-            for line in proc.stdout:
-                if stop_event.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    e = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                yield self._row_from_audit_event(e)
-        finally:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-
-    @staticmethod
-    def _row_from_audit_event(e: dict) -> dict:
-        ts_us = e.get("__REALTIME_TIMESTAMP")
+    def parse(self, event: dict) -> dict:
+        ts_us = event.get("__REALTIME_TIMESTAMP")
         ts = None
         if ts_us:
             try:
@@ -2769,11 +2500,11 @@ class LinuxProcessExecCollector(StreamingCollector):
             except (TypeError, ValueError):
                 pass
         try:
-            pid = int(e["_PID"]) if e.get("_PID") else None
+            pid = int(event["_PID"]) if event.get("_PID") else None
         except (TypeError, ValueError):
             pid = None
         try:
-            uid = int(e["_UID"]) if e.get("_UID") else None
+            uid = int(event["_UID"]) if event.get("_UID") else None
         except (TypeError, ValueError):
             uid = None
         # audit EXECVE messages carry the args as separate fields a0,
@@ -2784,138 +2515,14 @@ class LinuxProcessExecCollector(StreamingCollector):
         # judge sees everything.
         return {
             "event_timestamp": ts,
-            "event_type": e.get("_AUDIT_TYPE_NAME") or "AUDIT",
+            "event_type": event.get("_AUDIT_TYPE_NAME") or "AUDIT",
             "pid": pid,
             "ppid": None,
             "uid": uid,
             "username": None,
-            "exe_path": e.get("EXE") or e.get("_EXE"),
+            "exe_path": event.get("EXE") or event.get("_EXE"),
             "exe_args_json": None,
             "parent_path": None,
             "signing_id": None,
-            "raw_json": json.dumps(e),
+            "raw_json": json.dumps(event),
         }
-
-
-def _build_macos_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
-    h = prompts.hint_for
-    return [
-        ProcessCollector(judge_hints=h("processes")),
-        NetworkConnectionsCollector(judge_hints=h("network_connections")),
-        ListeningPortsCollector(judge_hints=h("listening_ports")),
-        NetworkFlowsCollector(judge_hints=h("network_flows")),
-        DnsQueriesCollector(judge_hints=h("dns_queries")),
-        NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
-        UsbDevicesCollector(judge_hints=h("usb_devices")),
-        BluetoothCollector(judge_hints=h("bluetooth_devices")),
-        WifiCollector(judge_hints=h("wifi_state")),
-        LaunchItemsCollector(judge_hints=h("launch_items")),
-        QuarantineCollector(judge_hints=h("quarantine_events")),
-        BrowserExtensionsCollector(judge_hints=h("browser_extensions")),
-        SystemIntegrityCollector(judge_hints=h("system_integrity")),
-        FileIntegrityCollector(judge_hints=h("file_integrity")),
-        InstalledAppsCollector(judge_hints=h("installed_apps")),
-        # Phase 4 additions
-        MountsCollector(judge_hints=h("mounts")),
-        SetuidFilesCollector(judge_hints=h("setuid_files")),
-        MdmProfilesCollector(judge_hints=h("mdm_profiles")),
-        KernelExtensionsCollector(judge_hints=h("kernel_extensions")),
-        SystemExtensionsCollector(judge_hints=h("system_extensions")),
-        # Persistence & tampering
-        SshAuthorizedKeysCollector(judge_hints=h("ssh_authorized_keys")),
-        HostsFileCollector(judge_hints=h("hosts_file")),
-        PrivilegeConfigCollector(judge_hints=h("privilege_config")),
-    ]
-
-
-def _build_linux_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
-    """Linux snapshot collector set — full parity with the macOS set
-    minus the two slices that have no Linux equivalent.
-
-    Cross-platform via psutil: processes, network connections, listening
-    ports, network interfaces.
-
-    Same collector classes, Linux paths: file_integrity (WATCHED_FILES_LINUX),
-    browser_extensions (BROWSER_PROFILES_LINUX).
-
-    Linux-specific implementations:
-      Phase 1 — installed_apps (dpkg-query + XDG .desktop)
-      Phase 2 — launch_items (systemd unit files + cron entries)
-      Phase 3 — usb_devices (sysfs walk), bluetooth_devices
-                (/var/lib/bluetooth INI files), wifi_state (sysfs +
-                `iw dev link`), system_integrity (SELinux + AppArmor
-                + ufw / firewalld + sshd + vnc + LUKS).
-
-    Dropped on Linux: quarantine_events (a macOS-only concept with no Linux
-    analog).
-    """
-    h = prompts.hint_for
-
-    # Expand watched-file templates through host_paths_for_home so that
-    # ~/-prefixed entries become one path per user home found under
-    # the container's bind-mounted /host/home (or the literal
-    # expanduser path on a native install). Absolute /etc paths
-    # become /host/etc paths automatically.
-    watched: list[str] = []
-    for tmpl in WATCHED_FILES_LINUX:
-        for p in host_paths_for_home(tmpl):
-            watched.append(str(p))
-
-    # Same treatment for browser profile roots — one entry per
-    # user_home/.config/<browser>.
-    expanded_browser_profiles: dict[Browser, list[str]] = {}
-    for browser, templates in BROWSER_PROFILES_LINUX.items():
-        out: list[str] = []
-        for tmpl in templates:
-            for p in host_paths_for_home(tmpl):
-                out.append(str(p))
-        expanded_browser_profiles[browser] = out
-
-    return [
-        ProcessCollector(judge_hints=h("processes")),
-        NetworkConnectionsCollector(judge_hints=h("network_connections")),
-        ListeningPortsCollector(judge_hints=h("listening_ports")),
-        NetworkFlowsCollector(judge_hints=h("network_flows")),
-        DnsQueriesCollector(judge_hints=h("dns_queries")),
-        NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
-        LinuxUsbDevicesCollector(judge_hints=h("usb_devices")),
-        LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),
-        LinuxWifiCollector(judge_hints=h("wifi_state")),
-        LinuxLaunchItemsCollector(judge_hints=h("launch_items")),
-        BrowserExtensionsCollector(
-            judge_hints=h("browser_extensions"),
-            profiles=expanded_browser_profiles,
-        ),
-        LinuxSystemIntegrityCollector(judge_hints=h("system_integrity")),
-        FileIntegrityCollector(
-            judge_hints=h("file_integrity"),
-            watched=watched,
-        ),
-        LinuxInstalledAppsCollector(judge_hints=h("installed_apps")),
-        # Phase 4 additions — cross-platform
-        MountsCollector(judge_hints=h("mounts")),
-        SetuidFilesCollector(judge_hints=h("setuid_files")),
-        # Persistence & tampering
-        SshAuthorizedKeysCollector(judge_hints=h("ssh_authorized_keys")),
-        HostsFileCollector(judge_hints=h("hosts_file")),
-        PrivilegeConfigCollector(judge_hints=h("privilege_config")),
-    ]
-
-
-def build_snapshot_collectors(prompts: Prompts) -> list[SnapshotCollector]:
-    if IS_LINUX:
-        return _build_linux_snapshot_collectors(prompts)
-    return _build_macos_snapshot_collectors(prompts)
-
-
-def build_streaming_collectors(prompts: Prompts) -> list[StreamingCollector]:
-    h = prompts.hint_for
-    if IS_LINUX:
-        return [
-            LinuxAuthEventsCollector(judge_hints=h("auth_events")),
-            LinuxProcessExecCollector(judge_hints=h("process_exec_events")),
-        ]
-    return [
-        AuthEventsCollector(judge_hints=h("auth_events")),
-        MacosProcessExecCollector(judge_hints=h("process_exec_events")),
-    ]

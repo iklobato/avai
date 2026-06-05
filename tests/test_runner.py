@@ -22,6 +22,7 @@ from avai.enrichers import (
     IndicatorType,
     VerdictHint,
 )
+from avai.host_monitor.runtime import Clock, Digest
 from avai.host_monitor import (
     DEFAULT_BASELINE_MIN_RUNS,
     Base,
@@ -30,8 +31,6 @@ from avai.host_monitor import (
     ProcessRow,
     Runner,
     Sink,
-    content_hash,
-    utcnow,
 )
 
 
@@ -128,8 +127,8 @@ class TestEnrichEntries:
                 "username": "u",
                 "status": "ESTABLISHED",
                 "run_id": "x",
-                "collected_at": utcnow(),
-                "content_hash": content_hash(
+                "collected_at": Clock().now_iso(),
+                "content_hash": Digest.of_row(
                     {"raddr": "8.8.8.8:53", "pid": 1, "proc_name": "dns"},
                     collector.judge_fields,
                 ),
@@ -210,7 +209,7 @@ class TestEnrichEntries:
         collector.name = "network_connections"
         collector.model = NetworkConnectionRow
         collector.judge_fields = ("raddr",)
-        h = content_hash({"raddr": "8.8.8.8:53"}, collector.judge_fields)
+        h = Digest.of_row({"raddr": "8.8.8.8:53"}, collector.judge_fields)
         rows = [{"raddr": "8.8.8.8:53", "content_hash": h}]
         unjudged = [{"content_hash": h, "raddr": "8.8.8.8:53"}]
         # Should not raise; broken source counts as an error in stats.
@@ -295,7 +294,7 @@ def _add_run(sink, started_at, finished=True):
 
 
 def _add_proc(sink, run_id, collected_at, name):
-    h = content_hash({"name": name}, ("name",))
+    h = Digest.of_row({"name": name}, ("name",))
     sink.write(
         ProcessRow,
         [
@@ -493,7 +492,7 @@ class TestAttachCorrelation:
             collected_at=_TS[0],
         )
 
-        h = content_hash({"name": "evil"}, ("name",))
+        h = Digest.of_row({"name": "evil"}, ("name",))
         rows = [{"content_hash": h, "pid": 42, "name": "evil"}]
         unjudged = [{"content_hash": h, "name": "evil"}]
         runner = Runner(sink, [], [], NullJudge(), 5)
@@ -539,7 +538,7 @@ class TestAttachCorrelation:
 
     def test_process_with_no_correlated_rows_gets_no_related(self, sink):
         self._setup_two_runs(sink)
-        h = content_hash({"name": "quiet"}, ("name",))
+        h = Digest.of_row({"name": "quiet"}, ("name",))
         rows = [{"content_hash": h, "pid": 999, "name": "quiet"}]
         unjudged = [{"content_hash": h, "name": "quiet"}]
         runner = Runner(sink, [], [], NullJudge(), 5)
@@ -567,7 +566,7 @@ class TestAttachCorrelation:
             collected_at=_TS[0],
         )
 
-        h = content_hash({"name": "evil"}, ("name",))
+        h = Digest.of_row({"name": "evil"}, ("name",))
         rows = [{"content_hash": h, "pid": 42, "name": "evil"}]
         unjudged = [{"content_hash": h, "name": "evil"}]
         runner = Runner(sink, [], [], NullJudge(), 5)

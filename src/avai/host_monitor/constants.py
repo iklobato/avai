@@ -1,21 +1,14 @@
 """Defaults, tunables, pricing tables, and static data tables."""
+
 from __future__ import annotations
 
 import logging
 import os
-import platform as _platform
 from pathlib import Path
 
 from .enums import Browser, LaunchScope
 
-
 LOG = logging.getLogger("host_monitor")
-
-
-IS_MACOS = _platform.system() == "Darwin"
-
-
-IS_LINUX = _platform.system() == "Linux"
 
 
 _PKG_DIR = Path(__file__).resolve().parent.parent

@@ -6,7 +6,7 @@ import time
 from typing import Optional
 
 from .constants import LOG
-from .shell import content_hash, utcnow
+from .runtime import Clock, Digest
 from .sink import Sink
 from .collectors import StreamingCollector
 
@@ -77,8 +77,8 @@ class StreamingWorker:
         try:
             for row in self.collector.stream(self.stop_event):
                 row["run_id"] = self.run_id
-                row["collected_at"] = utcnow()
-                row["content_hash"] = content_hash(row, self.collector.judge_fields)
+                row["collected_at"] = Clock().now_iso()
+                row["content_hash"] = Digest.of_row(row, self.collector.judge_fields)
                 buffer.append(row)
                 now = time.monotonic()
                 if len(buffer) >= self.batch_size or (
