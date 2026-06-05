@@ -34,8 +34,35 @@ from ..collectors import (
     UsbDevicesCollector,
     WifiCollector,
 )
+from ..exposure_collectors import (
+    LoginSessionsCollector,
+    MacosCertParser,
+    MacosMountSharesParser,
+    MacosPromiscParser,
+    MacosProxyParser,
+    NetworkSharesCollector,
+    PromiscuousInterfacesCollector,
+    ProxyConfigCollector,
+    TrustedRootsCollector,
+    WhoParser,
+)
+from ..net_collectors import (
+    ArpTableCollector,
+    DnsResolversCollector,
+    MacosArpParser,
+    MacosDnsParser,
+    MacosNdpParser,
+    MacosRouteParser,
+    NdpNeighborsCollector,
+    RoutesCollector,
+)
+from ..persistence_collectors import (
+    EnvValueParser,
+    InjectionEnvCollector,
+    SshKnownHostsCollector,
+)
 from ..prompts import Prompts
-from ..runtime import CommandRunner
+from ..runtime import CommandRunner, CommandSnapshot
 
 
 class MacOSFilesystemLayout:
@@ -163,6 +190,67 @@ class MacOSHost:
                 fs=self._fs,
                 accounts=self._accounts,
             ),
+            # Network neighborhood & topology
+            ArpTableCollector(
+                CommandSnapshot(self._runner, ["arp", "-an"], MacosArpParser()),
+                judge_hints=h("arp_table"),
+            ),
+            NdpNeighborsCollector(
+                CommandSnapshot(self._runner, ["ndp", "-an"], MacosNdpParser()),
+                judge_hints=h("ndp_neighbors"),
+            ),
+            RoutesCollector(
+                CommandSnapshot(self._runner, ["netstat", "-rn"], MacosRouteParser()),
+                judge_hints=h("routes"),
+            ),
+            DnsResolversCollector(
+                CommandSnapshot(self._runner, ["scutil", "--dns"], MacosDnsParser()),
+                judge_hints=h("dns_resolvers"),
+            ),
+            # Exposure & MITM surface
+            ProxyConfigCollector(
+                CommandSnapshot(
+                    self._runner, ["scutil", "--proxy"], MacosProxyParser()
+                ),
+                judge_hints=h("proxy_config"),
+            ),
+            LoginSessionsCollector(
+                CommandSnapshot(self._runner, ["who"], WhoParser()),
+                judge_hints=h("login_sessions"),
+            ),
+            NetworkSharesCollector(
+                CommandSnapshot(self._runner, ["mount"], MacosMountSharesParser()),
+                judge_hints=h("network_shares"),
+            ),
+            PromiscuousInterfacesCollector(
+                CommandSnapshot(self._runner, ["ifconfig"], MacosPromiscParser()),
+                judge_hints=h("promiscuous_ifaces"),
+            ),
+            TrustedRootsCollector(
+                CommandSnapshot(
+                    self._runner,
+                    [
+                        "security",
+                        "find-certificate",
+                        "-a",
+                        "-Z",
+                        "/Library/Keychains/System.keychain",
+                    ],
+                    MacosCertParser(),
+                ),
+                judge_hints=h("trusted_roots"),
+            ),
+            # Persistence / injection (kernel_modules composed out — the
+            # kernel_extensions collector covers loaded kernel code on macOS).
+            InjectionEnvCollector(
+                CommandSnapshot(
+                    self._runner,
+                    ["launchctl", "getenv", "DYLD_INSERT_LIBRARIES"],
+                    EnvValueParser("DYLD_INSERT_LIBRARIES", "launchd"),
+                ),
+                judge_hints=h("injection_env"),
+            ),
+            SshKnownHostsCollector(judge_hints=h("ssh_known_hosts"), fs=self._fs),
         ]
 
     def streaming_collectors(self, prompts: Prompts) -> list[StreamingCollector]:

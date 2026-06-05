@@ -341,3 +341,99 @@ error -67062 from system_profiler/syspolicyd, mDNSResponder probes) \
 as benign unless accompanied by an unusual message. \
 Provide a one-sentence remediation for suspicious/malicious patterns.\
 """
+
+arp_table = """\
+Each row is an ARP (IPv4 neighbor) cache entry (ip, mac, interface, \
+flags). Flag: a new/changed MAC for the default gateway IP (ARP-spoof / \
+man-in-the-middle); two IPs sharing one MAC, or one IP flapping between \
+MACs; the gateway MAC differing from the known-good vendor OUI. Benign: \
+stable IP->MAC bindings, multicast/broadcast entries (224.x, ff:ff:..).\
+"""
+
+ndp_neighbors = """\
+Each row is an IPv6 NDP neighbor-cache entry (ip, mac, interface, state). \
+Same threat model as the ARP table for IPv6: a changed MAC for the \
+link-local/default router, or one MAC claiming many addresses. Benign: \
+stable reachable neighbors, incomplete/expired transient entries.\
+"""
+
+routes = """\
+Each row is a routing-table entry (destination, gateway, interface, \
+flags). Flag: a changed or unexpected `default` route gateway (traffic \
+redirection); newly added static routes for sensitive prefixes pointing \
+at an unfamiliar next-hop; a default route on an unexpected interface \
+(rogue tunnel/VPN). Benign: the stable default route via the LAN gateway.\
+"""
+
+dns_resolvers = """\
+Each row is a configured DNS resolver (server, scope, search, interface). \
+If an `evidence` array is present, trust its verdict on the server IP. \
+Flag: a nameserver set to a public/unfamiliar IP (DNS hijack/exfil); a \
+resolver pointing off-LAN when policy expects the local gateway; \
+suspicious search domains. Benign: the LAN gateway, the expected \
+corporate/ISP resolvers, mDNS/local scopes.\
+"""
+
+proxy_config = """\
+Each row is a configured proxy or PAC (scope, host, port, pac_url). If an \
+`evidence` array is present, trust its verdict on the host/URL. Flag: any \
+proxy or PAC pointing at an unfamiliar/public host (silent MITM or exfil); \
+a PAC URL on a non-corporate domain. Benign: no proxy, or the expected \
+corporate proxy/PAC.\
+"""
+
+login_sessions = """\
+Each row is an active login session (user, tty, source). If an `evidence` \
+array is present, trust its verdict on a remote source IP. Flag: sessions \
+whose source is a public/unfamiliar IP (remote intruder); unexpected users \
+logged in; many concurrent remote sessions. Benign: local console/tty \
+sessions for the expected user(s).\
+"""
+
+network_shares = """\
+Each row is a mounted network share (remote, mountpoint, fstype). If an \
+`evidence` array is present, trust its verdict on the remote server. Flag: \
+shares from unfamiliar/public servers (lateral movement / data staging); \
+unexpected SMB/NFS mounts. Benign: known corporate file servers, expected \
+NAS mounts.\
+"""
+
+promiscuous_ifaces = """\
+Each row is a network interface and its promiscuous flag (promiscuous=1 \
+means the NIC is capturing all traffic — a sniffer). Flag: any non-virtual \
+interface with promiscuous=1 that isn't a known capture/monitoring tool. \
+Benign: promiscuous=0 everywhere; bridges/hypervisor taps on a host that \
+legitimately bridges.\
+"""
+
+trusted_roots = """\
+Each row is a trusted root CA (subject, fingerprint). Flag: a root CA that \
+isn't a well-known public/OS-vendor or expected corporate CA — a rogue \
+root enables transparent TLS interception or fake code-signing; CAs with \
+odd/personal subject names. Benign: the standard public CA set and the \
+known enterprise CA.\
+"""
+
+injection_env = """\
+Each row is a library-injection setting (DYLD_INSERT_LIBRARIES / \
+LD_PRELOAD / AppInit_DLLs) with its value. ANY value here is high-signal: \
+it force-loads attacker code into other processes. Flag essentially all \
+non-empty entries unless the library is a known, signed developer/AV tool \
+in a standard path. Benign: empty (no injection configured).\
+"""
+
+kernel_modules = """\
+Each row is a loaded kernel module / driver (name, size, used_by). Flag: \
+modules with random/short names, no dependents on an unexpected module, or \
+names mimicking legitimate ones; anything not part of the distro/vendor \
+set (possible rootkit). Benign: standard in-tree modules and signed \
+vendor drivers.\
+"""
+
+ssh_known_hosts = """\
+Each row is a host pinned in a user's known_hosts (host, key_type, \
+fingerprint). Flag: internal/production hostnames or IPs that reveal \
+lateral-movement targets the user shouldn't reach; a changed key \
+fingerprint for a known host (possible MITM). Benign: common public hosts \
+(github.com, package mirrors) and expected internal jump hosts.\
+"""

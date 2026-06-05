@@ -36,8 +36,36 @@ from ..collectors import (
 )
 from ..constants import BROWSER_PROFILES_LINUX, WATCHED_FILES_LINUX
 from ..enums import Browser
+from ..exposure_collectors import (
+    LinuxPromiscParser,
+    LinuxProxyEnvParser,
+    LinuxTrustListParser,
+    LoginSessionsCollector,
+    NetworkSharesCollector,
+    ProcMountsSharesParser,
+    PromiscuousInterfacesCollector,
+    ProxyConfigCollector,
+    TrustedRootsCollector,
+    WhoParser,
+)
+from ..net_collectors import (
+    ArpTableCollector,
+    DnsResolversCollector,
+    IpNeighParser,
+    IpRouteParser,
+    NdpNeighborsCollector,
+    ResolvConfParser,
+    RoutesCollector,
+)
+from ..persistence_collectors import (
+    InjectionEnvCollector,
+    KernelModulesCollector,
+    LdSoPreloadParser,
+    ProcModulesParser,
+    SshKnownHostsCollector,
+)
 from ..prompts import Prompts
-from ..runtime import HostPaths
+from ..runtime import CommandRunner, CommandSnapshot, FileSnapshot, HostPaths
 
 
 class LinuxFilesystemLayout:
@@ -153,6 +181,7 @@ class LinuxHost:
     events) by simply not assembling them."""
 
     def __init__(self) -> None:
+        self._runner = CommandRunner()
         self._fs = LinuxFilesystemLayout()
         self._accounts = LinuxPrivilegedAccounts()
 
@@ -205,6 +234,66 @@ class LinuxHost:
                 fs=self._fs,
                 accounts=self._accounts,
             ),
+            # Network neighborhood & topology
+            ArpTableCollector(
+                CommandSnapshot(self._runner, ["ip", "neigh"], IpNeighParser("flags")),
+                judge_hints=h("arp_table"),
+            ),
+            NdpNeighborsCollector(
+                CommandSnapshot(
+                    self._runner, ["ip", "-6", "neigh"], IpNeighParser("state")
+                ),
+                judge_hints=h("ndp_neighbors"),
+            ),
+            RoutesCollector(
+                CommandSnapshot(self._runner, ["ip", "route"], IpRouteParser()),
+                judge_hints=h("routes"),
+            ),
+            DnsResolversCollector(
+                FileSnapshot(
+                    HostPaths.translate("/etc/resolv.conf"), ResolvConfParser()
+                ),
+                judge_hints=h("dns_resolvers"),
+            ),
+            # Exposure & MITM surface
+            ProxyConfigCollector(
+                FileSnapshot(
+                    HostPaths.translate("/etc/environment"), LinuxProxyEnvParser()
+                ),
+                judge_hints=h("proxy_config"),
+            ),
+            LoginSessionsCollector(
+                CommandSnapshot(self._runner, ["who"], WhoParser()),
+                judge_hints=h("login_sessions"),
+            ),
+            NetworkSharesCollector(
+                FileSnapshot(
+                    HostPaths.translate("/proc/mounts"), ProcMountsSharesParser()
+                ),
+                judge_hints=h("network_shares"),
+            ),
+            PromiscuousInterfacesCollector(
+                CommandSnapshot(self._runner, ["ip", "link"], LinuxPromiscParser()),
+                judge_hints=h("promiscuous_ifaces"),
+            ),
+            TrustedRootsCollector(
+                CommandSnapshot(
+                    self._runner, ["trust", "list"], LinuxTrustListParser()
+                ),
+                judge_hints=h("trusted_roots"),
+            ),
+            # Persistence / injection
+            InjectionEnvCollector(
+                FileSnapshot(
+                    HostPaths.translate("/etc/ld.so.preload"), LdSoPreloadParser()
+                ),
+                judge_hints=h("injection_env"),
+            ),
+            KernelModulesCollector(
+                FileSnapshot(HostPaths.translate("/proc/modules"), ProcModulesParser()),
+                judge_hints=h("kernel_modules"),
+            ),
+            SshKnownHostsCollector(judge_hints=h("ssh_known_hosts"), fs=self._fs),
         ]
 
     def streaming_collectors(self, prompts: Prompts) -> list[StreamingCollector]:

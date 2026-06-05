@@ -300,6 +300,85 @@ class FileIntegrityExtractor(IndicatorExtractor):
             )
 
 
+def _share_server(remote: str) -> str | None:
+    """Pull the server host out of a share path: ``//server/share``,
+    ``\\\\server\\share`` (SMB) or ``server:/export`` (NFS)."""
+    r = remote.strip()
+    if r.startswith(("//", "\\\\")):
+        head = r.replace("\\", "/").lstrip("/").split("/", 1)[0]
+    elif ":" in r and not r.startswith("/"):
+        head = r.split(":", 1)[0]
+    else:
+        return None
+    if "@" in head:
+        head = head.split("@", 1)[1]
+    return head or None
+
+
+class ProxyConfigExtractor(IndicatorExtractor):
+    """Enrich a configured proxy host (public IP/domain) and PAC URL."""
+
+    def extract(self, row):
+        host = row.get("host")
+        if isinstance(host, str) and host:
+            if _is_ipv4(host) and not _is_private_ip(host):
+                yield Indicator(IndicatorType.IPV4, host)
+            elif _is_ipv6(host):
+                yield Indicator(IndicatorType.IPV6, host)
+            elif _is_domain(host):
+                yield Indicator(IndicatorType.DOMAIN, host)
+        pac = row.get("pac_url")
+        if isinstance(pac, str) and pac.startswith(("http://", "https://")):
+            yield Indicator(IndicatorType.URL, pac)
+
+
+class NetworkShareExtractor(IndicatorExtractor):
+    """Enrich the server of a mounted network share."""
+
+    def extract(self, row):
+        remote = row.get("remote")
+        if not isinstance(remote, str) or not remote:
+            return
+        server = _share_server(remote)
+        if not server:
+            return
+        if _is_ipv4(server) and not _is_private_ip(server):
+            yield Indicator(IndicatorType.IPV4, server)
+        elif _is_domain(server):
+            yield Indicator(IndicatorType.DOMAIN, server)
+
+
+class LoginSessionExtractor(IndicatorExtractor):
+    """Enrich a remote login source when it's a public IP/domain."""
+
+    def extract(self, row):
+        src = row.get("source")
+        if not isinstance(src, str) or not src or src == "local":
+            return
+        if _is_ipv4(src) and not _is_private_ip(src):
+            yield Indicator(IndicatorType.IPV4, src)
+        elif _is_ipv6(src):
+            yield Indicator(IndicatorType.IPV6, src)
+        elif _is_domain(src):
+            yield Indicator(IndicatorType.DOMAIN, src)
+
+
+class DnsResolverExtractor(IndicatorExtractor):
+    """Enrich the configured nameserver when it's a *public* IP — a
+    resolver pointed at an attacker-controlled box is the DNS-hijack
+    signal. LAN/private resolvers (your router) carry no threat-intel
+    value and are skipped."""
+
+    def extract(self, row):
+        server = row.get("server")
+        if not isinstance(server, str) or not server:
+            return
+        if _is_ipv4(server) and not _is_private_ip(server):
+            yield Indicator(IndicatorType.IPV4, server)
+        elif _is_ipv6(server):
+            yield Indicator(IndicatorType.IPV6, server)
+
+
 class _NoOp(IndicatorExtractor):
     """Sink for collectors we deliberately don't enrich yet."""
 
@@ -326,6 +405,10 @@ EXTRACTORS: dict[str, IndicatorExtractor] = {
     "system_integrity": SystemIntegrityExtractor(),
     "process_exec_events": ProcessExecEventExtractor(),
     "file_integrity": FileIntegrityExtractor(),
+    "dns_resolvers": DnsResolverExtractor(),
+    "proxy_config": ProxyConfigExtractor(),
+    "network_shares": NetworkShareExtractor(),
+    "login_sessions": LoginSessionExtractor(),
 }
 
 _NOOP = _NoOp()

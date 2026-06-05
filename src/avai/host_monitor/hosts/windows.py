@@ -40,9 +40,35 @@ from ..collectors import (
     SshAuthorizedKeysCollector,
     StreamingCollector,
 )
+from ..exposure_collectors import (
+    LoginSessionsCollector,
+    NetworkSharesCollector,
+    ProxyConfigCollector,
+    TrustedRootsCollector,
+    WindowsCertParser,
+    WindowsProxyParser,
+    WindowsSessionParser,
+    WindowsSharesParser,
+)
 from ..models import InstalledAppRow, LaunchItemRow
+from ..net_collectors import (
+    ArpTableCollector,
+    DnsResolversCollector,
+    NdpNeighborsCollector,
+    PsDnsParser,
+    PsNeighborParser,
+    PsRouteParser,
+    RoutesCollector,
+)
+from ..persistence_collectors import (
+    InjectionEnvCollector,
+    KernelModulesCollector,
+    SshKnownHostsCollector,
+    WindowsAppInitParser,
+    WindowsDriverParser,
+)
 from ..prompts import Prompts
-from ..runtime import CommandRunner
+from ..runtime import CommandRunner, CommandSnapshot
 
 # A path guaranteed not to exist, handed to collectors that read a file
 # Windows doesn't have (e.g. sudoers) so their shared parser yields nothing
@@ -334,7 +360,102 @@ class WindowsHost:
                 fs=self._fs,
                 accounts=self._accounts,
             ),
+            # Network neighborhood & topology
+            ArpTableCollector(
+                self._ps(
+                    "Get-NetNeighbor -AddressFamily IPv4 | "
+                    "Select-Object IPAddress,LinkLayerAddress,InterfaceAlias,State | "
+                    "ConvertTo-Json -Compress",
+                    PsNeighborParser("flags"),
+                ),
+                judge_hints=h("arp_table"),
+            ),
+            NdpNeighborsCollector(
+                self._ps(
+                    "Get-NetNeighbor -AddressFamily IPv6 | "
+                    "Select-Object IPAddress,LinkLayerAddress,InterfaceAlias,State | "
+                    "ConvertTo-Json -Compress",
+                    PsNeighborParser("state"),
+                ),
+                judge_hints=h("ndp_neighbors"),
+            ),
+            RoutesCollector(
+                self._ps(
+                    "Get-NetRoute | Select-Object "
+                    "DestinationPrefix,NextHop,InterfaceAlias,RouteMetric | "
+                    "ConvertTo-Json -Compress",
+                    PsRouteParser(),
+                ),
+                judge_hints=h("routes"),
+            ),
+            DnsResolversCollector(
+                self._ps(
+                    "Get-DnsClientServerAddress | "
+                    "Select-Object InterfaceAlias,ServerAddresses | "
+                    "ConvertTo-Json -Compress",
+                    PsDnsParser(),
+                ),
+                judge_hints=h("dns_resolvers"),
+            ),
+            # Exposure & MITM surface (promiscuous_ifaces composed out — no
+            # clean Windows analog).
+            ProxyConfigCollector(
+                self._ps(
+                    "Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\"
+                    "CurrentVersion\\Internet Settings' | Select-Object "
+                    "ProxyEnable,ProxyServer,AutoConfigURL | ConvertTo-Json -Compress",
+                    WindowsProxyParser(),
+                ),
+                judge_hints=h("proxy_config"),
+            ),
+            LoginSessionsCollector(
+                CommandSnapshot(
+                    self._runner, ["query", "user"], WindowsSessionParser()
+                ),
+                judge_hints=h("login_sessions"),
+            ),
+            NetworkSharesCollector(
+                self._ps(
+                    "Get-SmbConnection | Select-Object ServerName,ShareName,Dialect | "
+                    "ConvertTo-Json -Compress",
+                    WindowsSharesParser(),
+                ),
+                judge_hints=h("network_shares"),
+            ),
+            TrustedRootsCollector(
+                self._ps(
+                    "Get-ChildItem Cert:\\LocalMachine\\Root | Select-Object "
+                    "Subject,Thumbprint | ConvertTo-Json -Compress",
+                    WindowsCertParser(),
+                ),
+                judge_hints=h("trusted_roots"),
+            ),
+            # Persistence / injection
+            InjectionEnvCollector(
+                self._ps(
+                    "Get-ItemProperty 'HKLM:\\Software\\Microsoft\\"
+                    "Windows NT\\CurrentVersion\\Windows' | Select-Object "
+                    "AppInit_DLLs,LoadAppInit_DLLs | ConvertTo-Json -Compress",
+                    WindowsAppInitParser(),
+                ),
+                judge_hints=h("injection_env"),
+            ),
+            KernelModulesCollector(
+                CommandSnapshot(
+                    self._runner, ["driverquery", "/fo", "csv"], WindowsDriverParser()
+                ),
+                judge_hints=h("kernel_modules"),
+            ),
+            SshKnownHostsCollector(judge_hints=h("ssh_known_hosts"), fs=self._fs),
         ]
+
+    def _ps(self, script: str, parser) -> CommandSnapshot:
+        """A PowerShell-backed CommandSnapshot for a ConvertTo-Json query."""
+        return CommandSnapshot(
+            self._runner,
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            parser,
+        )
 
     def streaming_collectors(self, prompts: Prompts) -> list[StreamingCollector]:
         # Windows Event Log / Sysmon streaming is the remaining work; no

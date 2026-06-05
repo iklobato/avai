@@ -455,3 +455,153 @@ class PrivilegeConfigRow(_RowBase):
     subject: Mapped[Optional[str]]  # user / group / rule owner
     detail: Mapped[Optional[str]]  # the rule, member list, uid/shell
     source_path: Mapped[Optional[str]]
+
+
+# ---------------------------------------------------------------------------
+# Network neighborhood & topology (Tier 1)
+# ---------------------------------------------------------------------------
+
+
+class ArpEntryRow(_RowBase):
+    """One ARP (IPv4 neighbor) cache entry. A new MAC for a known IP — the
+    gateway especially — is a classic ARP-spoof / rogue-device signal."""
+
+    __tablename__ = "arp_table"
+    ip: Mapped[Optional[str]] = mapped_column(index=True)
+    mac: Mapped[Optional[str]] = mapped_column(index=True)
+    interface: Mapped[Optional[str]]
+    flags: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class NdpNeighborRow(_RowBase):
+    """One IPv6 NDP neighbor-cache entry (the v6 analog of ARP)."""
+
+    __tablename__ = "ndp_neighbors"
+    ip: Mapped[Optional[str]] = mapped_column(index=True)
+    mac: Mapped[Optional[str]] = mapped_column(index=True)
+    interface: Mapped[Optional[str]]
+    state: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class RouteRow(_RowBase):
+    """One routing-table entry. A changed default route or an added static
+    route is route-hijack / redirection persistence."""
+
+    __tablename__ = "routes"
+    destination: Mapped[Optional[str]] = mapped_column(index=True)
+    gateway: Mapped[Optional[str]] = mapped_column(index=True)
+    interface: Mapped[Optional[str]]
+    flags: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class DnsResolverRow(_RowBase):
+    """One configured DNS resolver. A nameserver swapped to an attacker IP
+    is a cheap, high-impact DNS hijack."""
+
+    __tablename__ = "dns_resolvers"
+    server: Mapped[Optional[str]] = mapped_column(index=True)
+    scope: Mapped[Optional[str]]
+    search: Mapped[Optional[str]]
+    interface: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+# ---------------------------------------------------------------------------
+# Network exposure & MITM surface (Tier 2)
+# ---------------------------------------------------------------------------
+
+
+class ProxyConfigRow(_RowBase):
+    """A configured proxy / PAC. A silently-set proxy is MITM / exfil."""
+
+    __tablename__ = "proxy_config"
+    scope: Mapped[Optional[str]] = mapped_column(index=True)  # http|https|pac|...
+    host: Mapped[Optional[str]] = mapped_column(index=True)
+    port: Mapped[Optional[str]]
+    pac_url: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class LoginSessionRow(_RowBase):
+    """An active login session. A remote source is a live operator."""
+
+    __tablename__ = "login_sessions"
+    user: Mapped[Optional[str]] = mapped_column(index=True)
+    tty: Mapped[Optional[str]]
+    source: Mapped[Optional[str]] = mapped_column(index=True)  # remote host/IP or local
+    login_at: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class NetworkShareRow(_RowBase):
+    """A mounted network share (SMB/NFS/…) — lateral movement / staging."""
+
+    __tablename__ = "network_shares"
+    remote: Mapped[Optional[str]] = mapped_column(index=True)
+    mountpoint: Mapped[Optional[str]]
+    fstype: Mapped[Optional[str]]
+    options: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class PromiscuousInterfaceRow(_RowBase):
+    """An interface's promiscuous flag — promisc=1 means a sniffer."""
+
+    __tablename__ = "promiscuous_ifaces"
+    interface: Mapped[Optional[str]] = mapped_column(index=True)
+    promiscuous: Mapped[Optional[int]] = mapped_column(index=True)
+    flags: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class TrustedRootRow(_RowBase):
+    """A trusted root CA. A new non-standard root enables TLS interception
+    / fake code-signing."""
+
+    __tablename__ = "trusted_roots"
+    subject: Mapped[Optional[str]] = mapped_column(index=True)
+    fingerprint: Mapped[Optional[str]] = mapped_column(index=True)
+    source: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+# ---------------------------------------------------------------------------
+# Host persistence / injection (Tier 3)
+# ---------------------------------------------------------------------------
+
+
+class InjectionEnvRow(_RowBase):
+    """A library-injection setting (DYLD_INSERT_LIBRARIES / LD_PRELOAD /
+    AppInit_DLLs). Any value here is code-injection persistence."""
+
+    __tablename__ = "injection_env"
+    scope: Mapped[Optional[str]] = mapped_column(index=True)
+    variable: Mapped[Optional[str]]
+    value: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class KernelModuleRow(_RowBase):
+    """A loaded kernel module (Linux/Windows driver). A new/unsigned module
+    can be a rootkit."""
+
+    __tablename__ = "kernel_modules"
+    name: Mapped[Optional[str]] = mapped_column(index=True)
+    size: Mapped[Optional[str]]
+    used_by: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class SshKnownHostRow(_RowBase):
+    """A host pinned in a user's ``known_hosts`` — reveals pivot targets and
+    can hide a ProxyCommand backdoor."""
+
+    __tablename__ = "ssh_known_hosts"
+    host: Mapped[Optional[str]] = mapped_column(index=True)
+    key_type: Mapped[Optional[str]]
+    fingerprint: Mapped[Optional[str]] = mapped_column(index=True)
+    source_path: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
