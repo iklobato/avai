@@ -60,6 +60,13 @@ from ..net_collectors import (
     PsRouteParser,
     RoutesCollector,
 )
+from ..persistence_collectors import (
+    InjectionEnvCollector,
+    KernelModulesCollector,
+    SshKnownHostsCollector,
+    WindowsAppInitParser,
+    WindowsDriverParser,
+)
 from ..prompts import Prompts
 from ..runtime import CommandRunner, CommandSnapshot
 
@@ -423,6 +430,23 @@ class WindowsHost:
                 ),
                 judge_hints=h("trusted_roots"),
             ),
+            # Persistence / injection
+            InjectionEnvCollector(
+                self._ps(
+                    "Get-ItemProperty 'HKLM:\\Software\\Microsoft\\"
+                    "Windows NT\\CurrentVersion\\Windows' | Select-Object "
+                    "AppInit_DLLs,LoadAppInit_DLLs | ConvertTo-Json -Compress",
+                    WindowsAppInitParser(),
+                ),
+                judge_hints=h("injection_env"),
+            ),
+            KernelModulesCollector(
+                CommandSnapshot(
+                    self._runner, ["driverquery", "/fo", "csv"], WindowsDriverParser()
+                ),
+                judge_hints=h("kernel_modules"),
+            ),
+            SshKnownHostsCollector(judge_hints=h("ssh_known_hosts"), fs=self._fs),
         ]
 
     def _ps(self, script: str, parser) -> CommandSnapshot:

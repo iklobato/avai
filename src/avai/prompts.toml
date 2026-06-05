@@ -413,3 +413,27 @@ root enables transparent TLS interception or fake code-signing; CAs with \
 odd/personal subject names. Benign: the standard public CA set and the \
 known enterprise CA.\
 """
+
+injection_env = """\
+Each row is a library-injection setting (DYLD_INSERT_LIBRARIES / \
+LD_PRELOAD / AppInit_DLLs) with its value. ANY value here is high-signal: \
+it force-loads attacker code into other processes. Flag essentially all \
+non-empty entries unless the library is a known, signed developer/AV tool \
+in a standard path. Benign: empty (no injection configured).\
+"""
+
+kernel_modules = """\
+Each row is a loaded kernel module / driver (name, size, used_by). Flag: \
+modules with random/short names, no dependents on an unexpected module, or \
+names mimicking legitimate ones; anything not part of the distro/vendor \
+set (possible rootkit). Benign: standard in-tree modules and signed \
+vendor drivers.\
+"""
+
+ssh_known_hosts = """\
+Each row is a host pinned in a user's known_hosts (host, key_type, \
+fingerprint). Flag: internal/production hostnames or IPs that reveal \
+lateral-movement targets the user shouldn't reach; a changed key \
+fingerprint for a known host (possible MITM). Benign: common public hosts \
+(github.com, package mirrors) and expected internal jump hosts.\
+"""

@@ -57,6 +57,13 @@ from ..net_collectors import (
     ResolvConfParser,
     RoutesCollector,
 )
+from ..persistence_collectors import (
+    InjectionEnvCollector,
+    KernelModulesCollector,
+    LdSoPreloadParser,
+    ProcModulesParser,
+    SshKnownHostsCollector,
+)
 from ..prompts import Prompts
 from ..runtime import CommandRunner, CommandSnapshot, FileSnapshot, HostPaths
 
@@ -275,6 +282,18 @@ class LinuxHost:
                 ),
                 judge_hints=h("trusted_roots"),
             ),
+            # Persistence / injection
+            InjectionEnvCollector(
+                FileSnapshot(
+                    HostPaths.translate("/etc/ld.so.preload"), LdSoPreloadParser()
+                ),
+                judge_hints=h("injection_env"),
+            ),
+            KernelModulesCollector(
+                FileSnapshot(HostPaths.translate("/proc/modules"), ProcModulesParser()),
+                judge_hints=h("kernel_modules"),
+            ),
+            SshKnownHostsCollector(judge_hints=h("ssh_known_hosts"), fs=self._fs),
         ]
 
     def streaming_collectors(self, prompts: Prompts) -> list[StreamingCollector]:

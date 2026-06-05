@@ -566,3 +566,42 @@ class TrustedRootRow(_RowBase):
     fingerprint: Mapped[Optional[str]] = mapped_column(index=True)
     source: Mapped[Optional[str]]
     raw_json: Mapped[Optional[str]]
+
+
+# ---------------------------------------------------------------------------
+# Host persistence / injection (Tier 3)
+# ---------------------------------------------------------------------------
+
+
+class InjectionEnvRow(_RowBase):
+    """A library-injection setting (DYLD_INSERT_LIBRARIES / LD_PRELOAD /
+    AppInit_DLLs). Any value here is code-injection persistence."""
+
+    __tablename__ = "injection_env"
+    scope: Mapped[Optional[str]] = mapped_column(index=True)
+    variable: Mapped[Optional[str]]
+    value: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class KernelModuleRow(_RowBase):
+    """A loaded kernel module (Linux/Windows driver). A new/unsigned module
+    can be a rootkit."""
+
+    __tablename__ = "kernel_modules"
+    name: Mapped[Optional[str]] = mapped_column(index=True)
+    size: Mapped[Optional[str]]
+    used_by: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class SshKnownHostRow(_RowBase):
+    """A host pinned in a user's ``known_hosts`` — reveals pivot targets and
+    can hide a ProxyCommand backdoor."""
+
+    __tablename__ = "ssh_known_hosts"
+    host: Mapped[Optional[str]] = mapped_column(index=True)
+    key_type: Mapped[Optional[str]]
+    fingerprint: Mapped[Optional[str]] = mapped_column(index=True)
+    source_path: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]

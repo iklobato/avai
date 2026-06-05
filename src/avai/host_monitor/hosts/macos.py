@@ -56,6 +56,11 @@ from ..net_collectors import (
     NdpNeighborsCollector,
     RoutesCollector,
 )
+from ..persistence_collectors import (
+    EnvValueParser,
+    InjectionEnvCollector,
+    SshKnownHostsCollector,
+)
 from ..prompts import Prompts
 from ..runtime import CommandRunner, CommandSnapshot
 
@@ -235,6 +240,17 @@ class MacOSHost:
                 ),
                 judge_hints=h("trusted_roots"),
             ),
+            # Persistence / injection (kernel_modules composed out — the
+            # kernel_extensions collector covers loaded kernel code on macOS).
+            InjectionEnvCollector(
+                CommandSnapshot(
+                    self._runner,
+                    ["launchctl", "getenv", "DYLD_INSERT_LIBRARIES"],
+                    EnvValueParser("DYLD_INSERT_LIBRARIES", "launchd"),
+                ),
+                judge_hints=h("injection_env"),
+            ),
+            SshKnownHostsCollector(judge_hints=h("ssh_known_hosts"), fs=self._fs),
         ]
 
     def streaming_collectors(self, prompts: Prompts) -> list[StreamingCollector]:
