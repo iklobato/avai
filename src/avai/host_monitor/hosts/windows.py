@@ -41,8 +41,17 @@ from ..collectors import (
     StreamingCollector,
 )
 from ..models import InstalledAppRow, LaunchItemRow
+from ..net_collectors import (
+    ArpTableCollector,
+    DnsResolversCollector,
+    NdpNeighborsCollector,
+    PsDnsParser,
+    PsNeighborParser,
+    PsRouteParser,
+    RoutesCollector,
+)
 from ..prompts import Prompts
-from ..runtime import CommandRunner
+from ..runtime import CommandRunner, CommandSnapshot
 
 # A path guaranteed not to exist, handed to collectors that read a file
 # Windows doesn't have (e.g. sudoers) so their shared parser yields nothing
@@ -334,7 +343,52 @@ class WindowsHost:
                 fs=self._fs,
                 accounts=self._accounts,
             ),
+            # Network neighborhood & topology
+            ArpTableCollector(
+                self._ps(
+                    "Get-NetNeighbor -AddressFamily IPv4 | "
+                    "Select-Object IPAddress,LinkLayerAddress,InterfaceAlias,State | "
+                    "ConvertTo-Json -Compress",
+                    PsNeighborParser("flags"),
+                ),
+                judge_hints=h("arp_table"),
+            ),
+            NdpNeighborsCollector(
+                self._ps(
+                    "Get-NetNeighbor -AddressFamily IPv6 | "
+                    "Select-Object IPAddress,LinkLayerAddress,InterfaceAlias,State | "
+                    "ConvertTo-Json -Compress",
+                    PsNeighborParser("state"),
+                ),
+                judge_hints=h("ndp_neighbors"),
+            ),
+            RoutesCollector(
+                self._ps(
+                    "Get-NetRoute | Select-Object "
+                    "DestinationPrefix,NextHop,InterfaceAlias,RouteMetric | "
+                    "ConvertTo-Json -Compress",
+                    PsRouteParser(),
+                ),
+                judge_hints=h("routes"),
+            ),
+            DnsResolversCollector(
+                self._ps(
+                    "Get-DnsClientServerAddress | "
+                    "Select-Object InterfaceAlias,ServerAddresses | "
+                    "ConvertTo-Json -Compress",
+                    PsDnsParser(),
+                ),
+                judge_hints=h("dns_resolvers"),
+            ),
         ]
+
+    def _ps(self, script: str, parser) -> CommandSnapshot:
+        """A PowerShell-backed CommandSnapshot for a ConvertTo-Json query."""
+        return CommandSnapshot(
+            self._runner,
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            parser,
+        )
 
     def streaming_collectors(self, prompts: Prompts) -> list[StreamingCollector]:
         # Windows Event Log / Sysmon streaming is the remaining work; no

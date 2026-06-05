@@ -455,3 +455,55 @@ class PrivilegeConfigRow(_RowBase):
     subject: Mapped[Optional[str]]  # user / group / rule owner
     detail: Mapped[Optional[str]]  # the rule, member list, uid/shell
     source_path: Mapped[Optional[str]]
+
+
+# ---------------------------------------------------------------------------
+# Network neighborhood & topology (Tier 1)
+# ---------------------------------------------------------------------------
+
+
+class ArpEntryRow(_RowBase):
+    """One ARP (IPv4 neighbor) cache entry. A new MAC for a known IP — the
+    gateway especially — is a classic ARP-spoof / rogue-device signal."""
+
+    __tablename__ = "arp_table"
+    ip: Mapped[Optional[str]] = mapped_column(index=True)
+    mac: Mapped[Optional[str]] = mapped_column(index=True)
+    interface: Mapped[Optional[str]]
+    flags: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class NdpNeighborRow(_RowBase):
+    """One IPv6 NDP neighbor-cache entry (the v6 analog of ARP)."""
+
+    __tablename__ = "ndp_neighbors"
+    ip: Mapped[Optional[str]] = mapped_column(index=True)
+    mac: Mapped[Optional[str]] = mapped_column(index=True)
+    interface: Mapped[Optional[str]]
+    state: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class RouteRow(_RowBase):
+    """One routing-table entry. A changed default route or an added static
+    route is route-hijack / redirection persistence."""
+
+    __tablename__ = "routes"
+    destination: Mapped[Optional[str]] = mapped_column(index=True)
+    gateway: Mapped[Optional[str]] = mapped_column(index=True)
+    interface: Mapped[Optional[str]]
+    flags: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]
+
+
+class DnsResolverRow(_RowBase):
+    """One configured DNS resolver. A nameserver swapped to an attacker IP
+    is a cheap, high-impact DNS hijack."""
+
+    __tablename__ = "dns_resolvers"
+    server: Mapped[Optional[str]] = mapped_column(index=True)
+    scope: Mapped[Optional[str]]
+    search: Mapped[Optional[str]]
+    interface: Mapped[Optional[str]]
+    raw_json: Mapped[Optional[str]]

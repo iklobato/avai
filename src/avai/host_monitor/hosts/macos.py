@@ -34,8 +34,18 @@ from ..collectors import (
     UsbDevicesCollector,
     WifiCollector,
 )
+from ..net_collectors import (
+    ArpTableCollector,
+    DnsResolversCollector,
+    MacosArpParser,
+    MacosDnsParser,
+    MacosNdpParser,
+    MacosRouteParser,
+    NdpNeighborsCollector,
+    RoutesCollector,
+)
 from ..prompts import Prompts
-from ..runtime import CommandRunner
+from ..runtime import CommandRunner, CommandSnapshot
 
 
 class MacOSFilesystemLayout:
@@ -162,6 +172,23 @@ class MacOSHost:
                 judge_hints=h("privilege_config"),
                 fs=self._fs,
                 accounts=self._accounts,
+            ),
+            # Network neighborhood & topology
+            ArpTableCollector(
+                CommandSnapshot(self._runner, ["arp", "-an"], MacosArpParser()),
+                judge_hints=h("arp_table"),
+            ),
+            NdpNeighborsCollector(
+                CommandSnapshot(self._runner, ["ndp", "-an"], MacosNdpParser()),
+                judge_hints=h("ndp_neighbors"),
+            ),
+            RoutesCollector(
+                CommandSnapshot(self._runner, ["netstat", "-rn"], MacosRouteParser()),
+                judge_hints=h("routes"),
+            ),
+            DnsResolversCollector(
+                CommandSnapshot(self._runner, ["scutil", "--dns"], MacosDnsParser()),
+                judge_hints=h("dns_resolvers"),
             ),
         ]
 

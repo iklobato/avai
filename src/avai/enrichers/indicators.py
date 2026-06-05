@@ -300,6 +300,22 @@ class FileIntegrityExtractor(IndicatorExtractor):
             )
 
 
+class DnsResolverExtractor(IndicatorExtractor):
+    """Enrich the configured nameserver when it's a *public* IP — a
+    resolver pointed at an attacker-controlled box is the DNS-hijack
+    signal. LAN/private resolvers (your router) carry no threat-intel
+    value and are skipped."""
+
+    def extract(self, row):
+        server = row.get("server")
+        if not isinstance(server, str) or not server:
+            return
+        if _is_ipv4(server) and not _is_private_ip(server):
+            yield Indicator(IndicatorType.IPV4, server)
+        elif _is_ipv6(server):
+            yield Indicator(IndicatorType.IPV6, server)
+
+
 class _NoOp(IndicatorExtractor):
     """Sink for collectors we deliberately don't enrich yet."""
 
@@ -326,6 +342,7 @@ EXTRACTORS: dict[str, IndicatorExtractor] = {
     "system_integrity": SystemIntegrityExtractor(),
     "process_exec_events": ProcessExecEventExtractor(),
     "file_integrity": FileIntegrityExtractor(),
+    "dns_resolvers": DnsResolverExtractor(),
 }
 
 _NOOP = _NoOp()

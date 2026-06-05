@@ -36,8 +36,17 @@ from ..collectors import (
 )
 from ..constants import BROWSER_PROFILES_LINUX, WATCHED_FILES_LINUX
 from ..enums import Browser
+from ..net_collectors import (
+    ArpTableCollector,
+    DnsResolversCollector,
+    IpNeighParser,
+    IpRouteParser,
+    NdpNeighborsCollector,
+    ResolvConfParser,
+    RoutesCollector,
+)
 from ..prompts import Prompts
-from ..runtime import HostPaths
+from ..runtime import CommandRunner, CommandSnapshot, FileSnapshot, HostPaths
 
 
 class LinuxFilesystemLayout:
@@ -153,6 +162,7 @@ class LinuxHost:
     events) by simply not assembling them."""
 
     def __init__(self) -> None:
+        self._runner = CommandRunner()
         self._fs = LinuxFilesystemLayout()
         self._accounts = LinuxPrivilegedAccounts()
 
@@ -204,6 +214,27 @@ class LinuxHost:
                 judge_hints=h("privilege_config"),
                 fs=self._fs,
                 accounts=self._accounts,
+            ),
+            # Network neighborhood & topology
+            ArpTableCollector(
+                CommandSnapshot(self._runner, ["ip", "neigh"], IpNeighParser("flags")),
+                judge_hints=h("arp_table"),
+            ),
+            NdpNeighborsCollector(
+                CommandSnapshot(
+                    self._runner, ["ip", "-6", "neigh"], IpNeighParser("state")
+                ),
+                judge_hints=h("ndp_neighbors"),
+            ),
+            RoutesCollector(
+                CommandSnapshot(self._runner, ["ip", "route"], IpRouteParser()),
+                judge_hints=h("routes"),
+            ),
+            DnsResolversCollector(
+                FileSnapshot(
+                    HostPaths.translate("/etc/resolv.conf"), ResolvConfParser()
+                ),
+                judge_hints=h("dns_resolvers"),
             ),
         ]
 

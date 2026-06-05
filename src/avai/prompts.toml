@@ -341,3 +341,35 @@ error -67062 from system_profiler/syspolicyd, mDNSResponder probes) \
 as benign unless accompanied by an unusual message. \
 Provide a one-sentence remediation for suspicious/malicious patterns.\
 """
+
+arp_table = """\
+Each row is an ARP (IPv4 neighbor) cache entry (ip, mac, interface, \
+flags). Flag: a new/changed MAC for the default gateway IP (ARP-spoof / \
+man-in-the-middle); two IPs sharing one MAC, or one IP flapping between \
+MACs; the gateway MAC differing from the known-good vendor OUI. Benign: \
+stable IP->MAC bindings, multicast/broadcast entries (224.x, ff:ff:..).\
+"""
+
+ndp_neighbors = """\
+Each row is an IPv6 NDP neighbor-cache entry (ip, mac, interface, state). \
+Same threat model as the ARP table for IPv6: a changed MAC for the \
+link-local/default router, or one MAC claiming many addresses. Benign: \
+stable reachable neighbors, incomplete/expired transient entries.\
+"""
+
+routes = """\
+Each row is a routing-table entry (destination, gateway, interface, \
+flags). Flag: a changed or unexpected `default` route gateway (traffic \
+redirection); newly added static routes for sensitive prefixes pointing \
+at an unfamiliar next-hop; a default route on an unexpected interface \
+(rogue tunnel/VPN). Benign: the stable default route via the LAN gateway.\
+"""
+
+dns_resolvers = """\
+Each row is a configured DNS resolver (server, scope, search, interface). \
+If an `evidence` array is present, trust its verdict on the server IP. \
+Flag: a nameserver set to a public/unfamiliar IP (DNS hijack/exfil); a \
+resolver pointing off-LAN when policy expects the local gateway; \
+suspicious search domains. Benign: the LAN gateway, the expected \
+corporate/ISP resolvers, mDNS/local scopes.\
+"""
