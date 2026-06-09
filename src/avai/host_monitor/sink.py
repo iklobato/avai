@@ -48,6 +48,12 @@ from .runtime import Clock
 if TYPE_CHECKING:
     from .collectors import Collector
 
+# How long a writer waits for the SQLite write lock before raising
+# "database is locked". Generous (vs. the 5s pysqlite default) so the
+# snapshot loop and streaming-worker threads can serialise their writes
+# through WAL checkpoints on a large DB without losing a batch.
+_BUSY_TIMEOUT_MS = 30_000
+
 
 class Sink:
     """SQLAlchemy repository — owns schema, run lifecycle, writes, lookups."""
@@ -102,7 +108,9 @@ class Sink:
                 update(CollectionRun)
                 .where(CollectionRun.run_id == self.run_id)
                 .values(
-                    finished_at=Clock().now_iso(), collectors_ok=ok, collectors_failed=failed
+                    finished_at=Clock().now_iso(),
+                    collectors_ok=ok,
+                    collectors_failed=failed,
                 )
             )
             session.commit()
@@ -715,6 +723,14 @@ def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA synchronous=NORMAL")
     cur.execute("PRAGMA foreign_keys=ON")
+    # SQLite serialises writes, so the snapshot loop and the streaming-worker
+    # threads (auth_events, process_exec) contend for the single write lock.
+    # The pysqlite default busy timeout is only 5s — on a large DB a write or
+    # WAL checkpoint can hold the lock longer than that, and the loser raises
+    # "database is locked" instead of waiting. A generous timeout makes the
+    # contending writer block-and-retry rather than fail, which is the
+    # documented SQLite remedy for multi-connection write contention.
+    cur.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
     cur.close()
 
 
