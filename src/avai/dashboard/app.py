@@ -1,16 +1,50 @@
 """Flask app, config, Jinja template filters, and all HTTP routes."""
+
 from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
 from flask import Flask, jsonify, render_template, request
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
+
 from avai.host_monitor import CollectionRun
 
-from .queries import DEFAULT_DB_PATH, DEFAULT_PER_PAGE, PER_PAGE_OPTIONS, _parse_json_list, _session, auth_events_aggregated, category_options, collector_errors, collector_options, cost_since, dns_queries, findings, judged_since, latest_narrative, latest_risk, latest_run, listening_ports, network_flows, new_alerts, persistence_tampering, recent_runs, risk_trend, row_counts, runs_total, system_integrity, verdict_counts, verdict_timeseries, vulnerabilities
-
+from .queries import (
+    DEFAULT_DB_PATH,
+    DEFAULT_PER_PAGE,
+    PER_PAGE_OPTIONS,
+    _parse_json_list,
+    _session,
+    auth_events_aggregated,
+    category_options,
+    collector_errors,
+    collector_options,
+    cost_since,
+    disk_usage,
+    dns_queries,
+    findings,
+    host_resources,
+    judged_since,
+    latest_narrative,
+    latest_risk,
+    latest_run,
+    listening_ports,
+    network_flows,
+    new_alerts,
+    persistence_tampering,
+    recent_runs,
+    resource_trend,
+    risk_trend,
+    row_counts,
+    runs_total,
+    system_integrity,
+    verdict_counts,
+    verdict_timeseries,
+    vulnerabilities,
+)
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
 
@@ -341,6 +375,19 @@ def fragment_sysint():
         )
 
 
+@app.route("/fragments/resources")
+def fragment_resources():
+    """System-resources panel: current memory/swap/CPU/load/uptime/tasks +
+    per-filesystem disk table + trend-chart canvases."""
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_resources.html",
+            resources=(host_resources(s, latest.run_id) if latest else None),
+            disks=(disk_usage(s, latest.run_id) if latest else []),
+        )
+
+
 @app.route("/fragments/network-flows")
 def fragment_network_flows():
     verdict = request.args.get("verdict", "")
@@ -573,6 +620,14 @@ def fragment_runs():
 def api_chart_verdicts():
     with _session() as s:
         return jsonify(verdict_timeseries(s, hours=12))
+
+
+@app.route("/api/chart/resources")
+def api_chart_resources():
+    """Memory / CPU / swap percentage time-series for the resource trend
+    charts (latest N runs)."""
+    with _session() as s:
+        return jsonify(resource_trend(s))
 
 
 @app.route("/api/notifications/new")

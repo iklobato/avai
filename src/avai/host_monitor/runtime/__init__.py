@@ -20,7 +20,7 @@ from .coerce import Coerce
 from .command_runner import CommandRunner
 from .digest import Digest
 from .host_paths import HostPaths
-from .probes import PsutilConnections, ServiceProbe
+from .probes import DiskMetrics, PsutilConnections, ServiceProbe, SystemMetrics
 from .row_source import CommandSnapshot, FileSnapshot, RowParser, RowSource
 from .sqlite_reader import ExternalSqliteReader
 from .stream_source import JsonLineStreamSource, LineParser
@@ -33,6 +33,8 @@ __all__ = [
     "Digest",
     "HostPaths",
     "PsutilConnections",
+    "SystemMetrics",
+    "DiskMetrics",
     "ServiceProbe",
     "CommandSnapshot",
     "FileSnapshot",

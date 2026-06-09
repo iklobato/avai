@@ -157,6 +157,16 @@
       <div class="col-span-full text-slate-500 italic">loading overview…</div>
     </section>
 
+    {# ---------- system resources (memory / swap / cpu / load / disk + trends) ---------- #}
+    <section id="resources"
+             hx-get="/fragments/resources"
+             hx-trigger="load, every 30s"
+             hx-swap="innerHTML">
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
+        loading system resources…
+      </div>
+    </section>
+
     {# ---------- incident digest (LLM-written attack-story from active findings) ---------- #}
     <section id="incident"
              hx-get="/fragments/incident"
@@ -382,6 +392,77 @@
         renderVerdictDonut();
         refreshChart();
       }
+    });
+
+    // ---- System-resource trend charts (memory/swap %, cpu %) ----
+    // The two canvases live inside the /fragments/resources partial, swapped
+    // on every poll — rebuild from /api/chart/resources after each swap.
+    function lineChart(canvas, labels, series) {
+      const existing = Chart.getChart(canvas);
+      if (existing) existing.destroy();
+      new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: series.map(s => ({
+            label: s.label,
+            data: s.data,
+            borderColor: s.color,
+            backgroundColor: s.color + '22',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.25,
+            fill: true,
+          })),
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            x: { display: false },
+            y: {
+              beginAtZero: true, suggestedMax: 100,
+              ticks: { color: '#64748b', font: { size: 10 }, precision: 0 },
+              grid: { color: '#1e293b' },
+            },
+          },
+          plugins: {
+            legend: {
+              display: series.length > 1, position: 'bottom',
+              labels: { color: '#cbd5e1', font: { size: 10 }, boxWidth: 10, boxHeight: 10, padding: 10 },
+            },
+            tooltip: {
+              backgroundColor: '#0f172a', borderColor: '#334155', borderWidth: 1,
+              titleColor: '#e2e8f0', bodyColor: '#cbd5e1',
+            },
+          },
+        },
+      });
+    }
+
+    async function renderResourceCharts() {
+      const memCanvas = document.getElementById('resource-mem-chart');
+      const cpuCanvas = document.getElementById('resource-cpu-chart');
+      if (!memCanvas && !cpuCanvas) return;
+      let data;
+      try {
+        const r = await fetch('/api/chart/resources', { cache: 'no-store' });
+        if (!r.ok) return;
+        data = await r.json();
+      } catch (e) { return; }
+      const labels = data.labels || [];
+      if (memCanvas) lineChart(memCanvas, labels, [
+        { label: 'memory', data: data.mem || [], color: '#38bdf8' },
+        { label: 'swap',   data: data.swap || [], color: '#a78bfa' },
+      ]);
+      if (cpuCanvas) lineChart(cpuCanvas, labels, [
+        { label: 'cpu', data: data.cpu || [], color: '#34d399' },
+      ]);
+    }
+
+    document.body.addEventListener('htmx:afterSwap', (e) => {
+      if (e.target && e.target.id === 'resources') renderResourceCharts();
     });
 
     // ---- Network tabs: highlight the active tab on click ----

@@ -1,4 +1,5 @@
 """Read-only DB query layer — no Flask app, uses current_app for config."""
+
 from __future__ import annotations
 
 import ipaddress
@@ -8,11 +9,57 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from flask import current_app, request
-from sqlalchemy import and_, asc, case, create_engine, desc, func, literal, or_, select, text
-from sqlalchemy.orm import Session
-from avai.host_monitor import AuthEventRow, Base, BluetoothDeviceRow, BrowserExtensionRow, CollectionRun, CollectorErrorRow, DnsQueryRow, FileIntegrityRow, HostsFileRow, IncidentNarrativeRow, InstalledAppRow, Judgement, KernelExtensionRow, LaunchItemRow, ListeningPortRow, MdmProfileRow, MountRow, NetworkConnectionRow, NetworkFlowRow, NetworkInterfaceRow, PrivilegeConfigRow, ProcessExecRow, ProcessRow, QuarantineEventRow, RiskScoreRow, SetuidFileRow, SshAuthorizedKeyRow, SystemExtensionRow, SystemIntegrityRow, UsbDeviceRow, WifiStateRow
 
+from flask import current_app, request
+from sqlalchemy import (
+    and_,
+    asc,
+    case,
+    create_engine,
+    desc,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+)
+from sqlalchemy.orm import Session
+
+from avai.host_monitor import (
+    AuthEventRow,
+    Base,
+    BluetoothDeviceRow,
+    BrowserExtensionRow,
+    CollectionRun,
+    CollectorErrorRow,
+    DiskUsageRow,
+    DnsQueryRow,
+    FileIntegrityRow,
+    HostResourceRow,
+    HostsFileRow,
+    IncidentNarrativeRow,
+    InstalledAppRow,
+    Judgement,
+    KernelExtensionRow,
+    LaunchItemRow,
+    ListeningPortRow,
+    MdmProfileRow,
+    MountRow,
+    NetworkConnectionRow,
+    NetworkFlowRow,
+    NetworkInterfaceRow,
+    PrivilegeConfigRow,
+    ProcessExecRow,
+    ProcessRow,
+    QuarantineEventRow,
+    RiskScoreRow,
+    SetuidFileRow,
+    SshAuthorizedKeyRow,
+    SystemExtensionRow,
+    SystemIntegrityRow,
+    UsbDeviceRow,
+    WifiStateRow,
+)
 
 COLLECTOR_MODELS = {
     "processes": ProcessRow,
@@ -41,6 +88,8 @@ COLLECTOR_MODELS = {
     "mdm_profiles": MdmProfileRow,
     "kernel_extensions": KernelExtensionRow,
     "system_extensions": SystemExtensionRow,
+    "host_resources": HostResourceRow,
+    "disk_usage": DiskUsageRow,
 }
 
 
@@ -68,6 +117,8 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "mdm_profiles": ("display_name", "organization"),
     "kernel_extensions": ("bundle_id", "name"),
     "system_extensions": ("bundle_id", "team_id"),
+    "host_resources": (),
+    "disk_usage": ("mountpoint", "device", "fstype"),
 }
 
 
@@ -1741,6 +1792,59 @@ def system_integrity(session: Session, run_id: str):
             ("Screen Sharing", row.screen_sharing_enabled),
             ("Remote Mgmt (ARD)", row.remote_management_enabled),
         ],
+    }
+
+
+def host_resources(session: Session, run_id: str) -> dict | None:
+    """Latest aggregate resource meters (memory/swap/CPU/load/uptime/tasks)
+    for ``run_id`` as ``{"row": HostResourceRow, "per_core": [float, …]}``,
+    or None. Guarded for DBs written before the table existed."""
+    if "host_resources" not in _existing_tables(session):
+        return None
+    row = session.execute(
+        select(HostResourceRow).where(HostResourceRow.run_id == run_id).limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return {"row": row, "per_core": _parse_json_list(row.cpu_per_core_json)}
+
+
+def disk_usage(session: Session, run_id: str) -> list[DiskUsageRow]:
+    """Per-filesystem usage rows for ``run_id``, fullest first. [] when the
+    table is absent (older DB) or the run collected none."""
+    if "disk_usage" not in _existing_tables(session):
+        return []
+    rows = list(
+        session.execute(
+            select(DiskUsageRow).where(DiskUsageRow.run_id == run_id)
+        ).scalars()
+    )
+    rows.sort(key=lambda r: r.percent if r.percent is not None else -1.0, reverse=True)
+    return rows
+
+
+def resource_trend(session: Session, limit: int = 60) -> dict:
+    """Recent memory/CPU/swap percentages oldest→newest for the trend
+    charts. Empty series when the table is absent."""
+    empty = {"labels": [], "mem": [], "cpu": [], "swap": []}
+    if "host_resources" not in _existing_tables(session):
+        return empty
+    rows = session.execute(
+        select(
+            HostResourceRow.collected_at,
+            HostResourceRow.mem_percent,
+            HostResourceRow.cpu_percent,
+            HostResourceRow.swap_percent,
+        )
+        .order_by(desc(HostResourceRow.collected_at))
+        .limit(limit)
+    ).all()
+    rows = list(reversed(rows))
+    return {
+        "labels": [r[0] for r in rows],
+        "mem": [r[1] for r in rows],
+        "cpu": [r[2] for r in rows],
+        "swap": [r[3] for r in rows],
     }
 
 

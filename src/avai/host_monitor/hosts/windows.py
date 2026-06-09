@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Iterable
 
 from ..collectors import (
+    DiskUsageCollector,
+    HostResourcesCollector,
     HostsFileCollector,
     ListeningPortsCollector,
     MountsCollector,
@@ -346,6 +348,8 @@ class WindowsHost:
             NetworkConnectionsCollector(judge_hints=h("network_connections")),
             ListeningPortsCollector(judge_hints=h("listening_ports")),
             NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
+            HostResourcesCollector(judge_hints=h("host_resources")),
+            DiskUsageCollector(judge_hints=h("disk_usage")),
             MountsCollector(judge_hints=h("mounts")),
             WindowsInstalledAppsCollector(
                 self._runner, judge_hints=h("installed_apps")

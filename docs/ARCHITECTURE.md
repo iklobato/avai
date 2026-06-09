@@ -600,6 +600,7 @@ graph TD
 | `/fragments/network-flows` | `_network` | `network_flows` (+ `_attach_ip_enrichment`) |
 | `/fragments/listening-ports` | `_network` | `listening_ports` |
 | `/fragments/dns-queries` | `_network` | `dns_queries` |
+| `/fragments/resources` | `_resources` | `host_resources`, `disk_usage` |
 | `/fragments/persistence` | `_findings` | `persistence_tampering` |
 | `/fragments/auth-events` | `_auth_events` | `auth_events_aggregated` |
 | `/fragments/errors` | `_errors` | `collector_errors` |
@@ -607,6 +608,7 @@ graph TD
 | `/fragments/row-counts` | `_row_counts` | `row_counts` |
 | `/fragments/runs` | `_runs` | `recent_runs`, `_prior_run` |
 | `/api/chart/verdicts` | JSON | `verdict_timeseries` |
+| `/api/chart/resources` | JSON | `resource_trend` |
 | `/api/notifications/new` | JSON | `new_alerts` |
 
 ### 6.3 Query layer (selected)

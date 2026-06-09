@@ -11,8 +11,10 @@ from typing import Iterable
 
 from ..collectors import (
     BrowserExtensionsCollector,
+    DiskUsageCollector,
     DnsQueriesCollector,
     FileIntegrityCollector,
+    HostResourcesCollector,
     HostsFileCollector,
     LinuxAuthEventsCollector,
     LinuxBluetoothCollector,
@@ -212,6 +214,8 @@ class LinuxHost:
             NetworkFlowsCollector(judge_hints=h("network_flows"), iface_args=iface),
             DnsQueriesCollector(judge_hints=h("dns_queries"), iface_args=iface),
             NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
+            HostResourcesCollector(judge_hints=h("host_resources")),
+            DiskUsageCollector(judge_hints=h("disk_usage")),
             LinuxUsbDevicesCollector(judge_hints=h("usb_devices")),
             LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),
             LinuxWifiCollector(judge_hints=h("wifi_state")),

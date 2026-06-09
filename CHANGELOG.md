@@ -3,6 +3,11 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [Unreleased]
+
+### Added
+- **System resources collectors + dashboard panel (htop-style telemetry).** Two new snapshot collectors capture the aggregate resource meters every cycle: `HostResourcesCollector` → `host_resources` (memory, swap, per-core + overall CPU, load average, uptime, task/thread counts) and `DiskUsageCollector` → `disk_usage` (per-filesystem capacity + best-effort per-device I/O). Both are psutil-backed and cross-platform (registered on macOS, Linux, and Windows), with psutil access behind injectable `SystemMetrics` / `DiskMetrics` runtime seams (mirroring `PsutilConnections`) and uptime derived from the injected `Clock`. They're continuous metrics, not discrete artifacts, so they're not LLM-judged (`judge_enabled = False`). New `/fragments/resources` dashboard panel renders current values as stat tiles, a `df`-style disk table, and Chart.js memory/swap/CPU trend lines (`/api/chart/resources`, latest 60 runs) — not realtime; it polls on the standard 30 s cadence. Schema migration `0003_host_resources`.
+
 ## [0.3.3] — 2026-05-30
 
 ### Fixed

@@ -1,0 +1,135 @@
+{% from "partials/_macros.html" import card_header %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("system resources") }}
+
+  {% if resources %}
+    {% set r = resources.row %}
+    {% set u = r.uptime_seconds or 0 %}
+
+    {# ---- current-value tiles ---- #}
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500">memory</div>
+        <div class="text-lg font-mono tabular-nums text-slate-100 mt-1">
+          {{ "%.0f"|format(r.mem_percent) if r.mem_percent is not none else "—" }}<span class="text-xs text-slate-500">%</span>
+        </div>
+        <div class="text-[11px] text-slate-400 font-mono">
+          {{ r.mem_used | human_bytes }} / {{ r.mem_total | human_bytes }}
+        </div>
+      </div>
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500">swap</div>
+        <div class="text-lg font-mono tabular-nums text-slate-100 mt-1">
+          {{ "%.0f"|format(r.swap_percent) if r.swap_percent is not none else "—" }}<span class="text-xs text-slate-500">%</span>
+        </div>
+        <div class="text-[11px] text-slate-400 font-mono">
+          {{ r.swap_used | human_bytes }} / {{ r.swap_total | human_bytes }}
+        </div>
+      </div>
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500">cpu</div>
+        <div class="text-lg font-mono tabular-nums text-slate-100 mt-1">
+          {{ "%.0f"|format(r.cpu_percent) if r.cpu_percent is not none else "—" }}<span class="text-xs text-slate-500">%</span>
+        </div>
+        <div class="text-[11px] text-slate-400 font-mono">
+          {{ r.cpu_count_logical or "?" }} cores
+        </div>
+      </div>
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500">load avg</div>
+        <div class="text-sm font-mono tabular-nums text-slate-100 mt-1.5">
+          {% if r.load_1 is not none %}
+            {{ "%.2f"|format(r.load_1) }} · {{ "%.2f"|format(r.load_5) }} · {{ "%.2f"|format(r.load_15) }}
+          {% else %}—{% endif %}
+        </div>
+        <div class="text-[11px] text-slate-500">1 · 5 · 15 min</div>
+      </div>
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500">uptime</div>
+        <div class="text-sm font-mono tabular-nums text-slate-100 mt-1.5">
+          {{ u // 86400 }}d {{ (u % 86400) // 3600 }}h {{ (u % 3600) // 60 }}m
+        </div>
+      </div>
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500">tasks</div>
+        <div class="text-sm font-mono tabular-nums text-slate-100 mt-1.5">
+          {{ r.tasks_total if r.tasks_total is not none else "—" }}
+          <span class="text-slate-500">·</span>
+          {{ r.tasks_running or 0 }} run
+        </div>
+        <div class="text-[11px] text-slate-500">{{ r.threads_total or 0 }} threads</div>
+      </div>
+    </div>
+
+    {# ---- trend charts (filled by /api/chart/resources via dashboard.html JS) ---- #}
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">memory &amp; swap %</div>
+        <div class="h-40"><canvas id="resource-mem-chart"></canvas></div>
+      </div>
+      <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">cpu %</div>
+        <div class="h-40"><canvas id="resource-cpu-chart"></canvas></div>
+      </div>
+    </div>
+
+    {# ---- per-core breakdown ---- #}
+    {% if resources.per_core %}
+      <div class="mb-5">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">per-core cpu %</div>
+        <div class="flex flex-wrap gap-1.5">
+          {% for core in resources.per_core %}
+            <span class="text-[11px] font-mono tabular-nums text-slate-300 bg-slate-950/50 border border-slate-800 rounded px-1.5 py-0.5">
+              {{ loop.index0 }}: {{ "%.0f"|format(core) }}%
+            </span>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+
+    {# ---- disk usage (df) ---- #}
+    <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">disk usage</div>
+    {% if disks %}
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="text-[10px] uppercase tracking-wider text-slate-500 text-left">
+            <th class="py-1 font-medium">mount</th>
+            <th class="py-1 font-medium">device</th>
+            <th class="py-1 font-medium">fstype</th>
+            <th class="py-1 font-medium text-right">used / total</th>
+            <th class="py-1 font-medium text-right w-16">%</th>
+            <th class="py-1 pl-3 w-28"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/80">
+          {% for d in disks %}
+            {% set pct = d.percent or 0 %}
+            <tr>
+              <td class="py-1.5 font-mono text-xs text-slate-300">{{ d.mountpoint }}</td>
+              <td class="py-1.5 font-mono text-xs text-slate-500 truncate max-w-[10rem]" title="{{ d.device }}">{{ d.device }}</td>
+              <td class="py-1.5 font-mono text-xs text-slate-500">{{ d.fstype }}</td>
+              <td class="py-1.5 text-right font-mono tabular-nums text-xs text-slate-400">
+                {{ d.used | human_bytes }} / {{ d.total | human_bytes }}
+              </td>
+              <td class="py-1.5 text-right font-mono tabular-nums text-xs {{ 'text-red-400' if pct >= 90 else ('text-amber-400' if pct >= 75 else 'text-slate-300') }}">
+                {{ "%.0f"|format(pct) }}%
+              </td>
+              <td class="py-1.5 pl-3">
+                <div class="h-1.5 rounded bg-slate-800 overflow-hidden">
+                  <div class="h-full {{ 'bg-red-500/70' if pct >= 90 else ('bg-amber-500/70' if pct >= 75 else 'bg-sky-500/70') }}"
+                       style="width: {{ [pct, 2] | max }}%"></div>
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="text-slate-500 italic text-sm">no filesystems reported in latest run</div>
+    {% endif %}
+
+  {% else %}
+    <div class="text-slate-500 italic">no host_resources row in latest run</div>
+  {% endif %}
+</div>

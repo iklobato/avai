@@ -1,9 +1,10 @@
 """SQLAlchemy ORM models — the database schema."""
+
 from __future__ import annotations
 
 from typing import Optional
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
@@ -593,6 +594,72 @@ class KernelModuleRow(_RowBase):
     size: Mapped[Optional[str]]
     used_by: Mapped[Optional[str]]
     raw_json: Mapped[Optional[str]]
+
+
+class HostResourceRow(_RowBase):
+    """One snapshot of the host's aggregate resource meters — memory, swap,
+    CPU, load average, uptime, task/thread counts — the top-of-``htop``
+    panel. One row per collection cycle. A continuous metric, not a discrete
+    artifact, so it isn't LLM-judged (``judge_enabled=False``); the
+    dashboard trends it instead. Per-OS-only fields (buffers/cached on
+    Linux, wired on macOS, iowait on Linux) are nullable."""
+
+    __tablename__ = "host_resources"
+    # Memory (bytes, except *_percent)
+    mem_total: Mapped[Optional[int]]
+    mem_available: Mapped[Optional[int]]
+    mem_used: Mapped[Optional[int]]
+    mem_free: Mapped[Optional[int]]
+    mem_percent: Mapped[Optional[float]]
+    mem_active: Mapped[Optional[int]]
+    mem_inactive: Mapped[Optional[int]]
+    mem_buffers: Mapped[Optional[int]]
+    mem_cached: Mapped[Optional[int]]
+    mem_wired: Mapped[Optional[int]]
+    # Swap
+    swap_total: Mapped[Optional[int]]
+    swap_used: Mapped[Optional[int]]
+    swap_free: Mapped[Optional[int]]
+    swap_percent: Mapped[Optional[float]]
+    # CPU (percentages over the sample window) + per-core JSON list
+    cpu_percent: Mapped[Optional[float]]
+    cpu_user: Mapped[Optional[float]]
+    cpu_system: Mapped[Optional[float]]
+    cpu_idle: Mapped[Optional[float]]
+    cpu_iowait: Mapped[Optional[float]]
+    cpu_per_core_json: Mapped[Optional[str]]
+    cpu_count_physical: Mapped[Optional[int]]
+    cpu_count_logical: Mapped[Optional[int]]
+    # Load average + uptime
+    load_1: Mapped[Optional[float]]
+    load_5: Mapped[Optional[float]]
+    load_15: Mapped[Optional[float]]
+    boot_time: Mapped[Optional[float]]
+    uptime_seconds: Mapped[Optional[int]]
+    # Task/thread tallies
+    tasks_total: Mapped[Optional[int]]
+    tasks_running: Mapped[Optional[int]]
+    threads_total: Mapped[Optional[int]]
+
+
+class DiskUsageRow(_RowBase):
+    """One mounted filesystem's capacity + (best-effort) per-device I/O
+    counters — the ``df`` table. One row per filesystem per cycle. Like
+    :class:`HostResourceRow`, a continuous metric (not LLM-judged)."""
+
+    __tablename__ = "disk_usage"
+    device: Mapped[Optional[str]]
+    mountpoint: Mapped[Optional[str]] = mapped_column(index=True)
+    fstype: Mapped[Optional[str]]
+    opts: Mapped[Optional[str]]
+    total: Mapped[Optional[int]]
+    used: Mapped[Optional[int]]
+    free: Mapped[Optional[int]]
+    percent: Mapped[Optional[float]]
+    io_read_bytes: Mapped[Optional[int]]
+    io_write_bytes: Mapped[Optional[int]]
+    io_read_count: Mapped[Optional[int]]
+    io_write_count: Mapped[Optional[int]]
 
 
 class SshKnownHostRow(_RowBase):
