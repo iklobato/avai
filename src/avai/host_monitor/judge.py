@@ -1,4 +1,5 @@
 """LLM judging: completion clients, the judge, and cost estimation."""
+
 from __future__ import annotations
 
 import json
@@ -17,10 +18,18 @@ try:
 except ImportError:
     HAS_LITELLM = False
 
+from .constants import (
+    DEFAULT_JUDGE_BATCH,
+    DEFAULT_JUDGE_MAX_PER_COLLECTOR,
+    DEFAULT_JUDGE_MODEL,
+    DEFAULT_JUDGE_TIMEOUT_S,
+    DEFAULT_PRICING,
+    LOG,
+    MODEL_PRICING,
+)
 from .enums import ThreatCategory, Verdict
-from .constants import DEFAULT_JUDGE_BATCH, DEFAULT_JUDGE_MAX_PER_COLLECTOR, DEFAULT_JUDGE_MODEL, DEFAULT_JUDGE_TIMEOUT_S, DEFAULT_PRICING, LOG, MODEL_PRICING
-from .runtime import Clock, Coerce
 from .prompts import Prompts
+from .runtime import Clock, Coerce
 
 
 def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -272,7 +281,10 @@ class LlmJudge(Judge):
     ):
         self.prompts = prompts
         self.model = model
-        self.batch_size = batch_size
+        # Clamp: batch_size 0 makes range() raise inside the _batches
+        # generator (escapes the per-batch try); negative silently judges
+        # nothing. Either way a bad --judge-batch-size must not break the cycle.
+        self.batch_size = max(1, batch_size)
         self.max_per_collector = max_per_collector
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -360,9 +372,15 @@ class LlmJudge(Judge):
             yield Judgment(
                 content_hash=batch[idx]["content_hash"],
                 collector=collector,
-                verdict=Coerce.enum(item.get("verdict"), Verdict, Verdict.UNKNOWN),
+                verdict=Coerce.enum(
+                    str(item.get("verdict") or "").strip().lower(),
+                    Verdict,
+                    Verdict.UNKNOWN,
+                ),
                 category=Coerce.enum(
-                    item.get("category"), ThreatCategory, ThreatCategory.NONE
+                    str(item.get("category") or "").strip().lower(),
+                    ThreatCategory,
+                    ThreatCategory.NONE,
                 ),
                 confidence=max(0.0, min(1.0, confidence)),
                 reasoning=str(item.get("reasoning") or "")[:500],

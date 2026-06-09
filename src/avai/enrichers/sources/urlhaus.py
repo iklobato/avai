@@ -51,17 +51,41 @@ class URLhausEnricher(Enricher):
         if body.get("query_status") != "ok":
             return None
 
-        threat = body.get("threat") or body.get("url_status") or "?"
-        tags   = body.get("tags") or []
-        first  = body.get("date_added") or body.get("firstseen") or ""
+        # The /url/ and /host/ responses have different shapes: a URL hit
+        # carries threat/url_status/tags/date_added; a host hit carries
+        # firstseen/url_count/urls[] with NO top-level threat. Parse each.
+        if indicator.type is IndicatorType.URL:
+            threat = body.get("threat") or "?"
+            tags   = body.get("tags") or []
+            status = body.get("url_status") or "?"
+            added  = body.get("date_added") or ""
+            return Evidence(
+                source       = self.name,
+                indicator    = indicator,
+                verdict_hint = VerdictHint.MALICIOUS,
+                confidence   = 0.9,
+                summary      = f"URLhaus: known-malicious url, threat={threat} status={status} tags={tags} added={added}",
+                details      = {k: body.get(k) for k in (
+                    "threat", "url_status", "tags", "date_added",
+                    "blacklists", "payloads",
+                )},
+            )
+        # host/domain: "ok" only means URLhaus knows the host; a host with
+        # zero associated malware URLs is not actionable.
+        try:
+            url_count = int(body.get("url_count") or 0)
+        except (TypeError, ValueError):
+            url_count = 0
+        if url_count <= 0:
+            return None
+        first = body.get("firstseen") or ""
         return Evidence(
             source       = self.name,
             indicator    = indicator,
-            verdict_hint = VerdictHint.MALICIOUS,
-            confidence   = 0.9,
-            summary      = f"URLhaus: known-malicious {field}, threat={threat} tags={tags} first={first}",
+            verdict_hint = VerdictHint.SUSPICIOUS,
+            confidence   = 0.7,
+            summary      = f"URLhaus: host has hosted {url_count} malware URL(s), firstseen={first}",
             details      = {k: body.get(k) for k in (
-                "threat", "url_status", "tags", "date_added",
-                "blacklists", "payloads",
+                "firstseen", "url_count", "blacklists", "urlhaus_reference",
             )},
         )

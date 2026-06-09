@@ -1,4 +1,5 @@
 """CLI entrypoint and WSGI launcher for `avai dashboard`."""
+
 from __future__ import annotations
 
 import argparse
@@ -6,11 +7,12 @@ import sys
 import threading
 import webbrowser
 from pathlib import Path
-from sqlalchemy import create_engine
-from avai.host_monitor import Base
 
-from .queries import DEFAULT_DB_PATH
+from sqlalchemy import create_engine
+
+
 from .app import app
+from .queries import DEFAULT_DB_PATH
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -78,32 +80,30 @@ def _serve(host: str, port: int, debug: bool, open_browser: bool = False) -> Non
 
 
 def _ensure_db_exists(db_path: str) -> None:
-    """Create an empty schema if the DB file doesn't exist yet.
+    """Bring the dashboard's DB up to the current schema, on every start.
 
-    The dashboard opens the database read-only with ``immutable=1``,
-    which SQLite *refuses* to apply to a non-existent file (the
-    immutable flag promises the file won't change — there's no file
-    to promise about). Without this, a dashboard launched before the
-    monitor has run produces 500s on every query.
+    The dashboard opens the DB read-only and so can't create or migrate
+    tables at query time. We run the monitor's own schema bootstrap
+    (:meth:`Sink.setup` = ``create_all`` + Alembic upgrade) here instead.
+    Crucially this is NOT gated on "file missing": ``create_all`` only
+    issues ``CREATE TABLE`` for tables that don't exist yet and never
+    touches existing data, so running it against a DB written by an OLDER
+    monitor — one lacking a newly-added table such as ``control_state`` —
+    simply adds the missing table. That's what stops every panel 500ing
+    after a version that introduces a new table. Reusing ``Sink.setup``
+    keeps the dashboard's schema bootstrap in lockstep with the monitor's
+    (one source of truth), so future tables/migrations are covered too.
 
-    Creating the schema also makes empty-state rendering work: every
-    table exists, every query returns zero rows, every panel renders
-    empty rather than erroring.
+    It also lets a dashboard launched before the monitor has ever run
+    render empty panels (every table exists, every query returns zero rows).
     """
-    db_file = Path(db_path)
-    if db_file.exists() and db_file.stat().st_size > 0:
-        return
-    db_file.parent.mkdir(parents=True, exist_ok=True)
-    # Register the enrichment model on Base.metadata before create_all,
-    # so a dashboard-only deployment (no monitor co-located) still gets
-    # the enrichment_evidence table — otherwise any dashboard query
-    # against it 500s.
-    from avai.enrichers.cache import register_schema
+    from avai.host_monitor import Sink
 
-    register_schema(Base)
+    db_file = Path(db_path)
+    db_file.parent.mkdir(parents=True, exist_ok=True)
     write_engine = create_engine(f"sqlite:///{db_path}")
     try:
-        Base.metadata.create_all(write_engine)
+        Sink(write_engine).setup()
     finally:
         write_engine.dispose()
 

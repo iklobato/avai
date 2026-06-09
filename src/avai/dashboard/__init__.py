@@ -48,6 +48,15 @@ from .app import (
     index,
     render_markdown,
 )
+from .control import (
+    bump_scan_now,
+    monitor_alive,
+    queue_command,
+    read_control_state,
+    set_collector,
+    set_paused,
+    set_settings,
+)
 from .queries import (
     _AUTH_AGG_WINDOW_HOURS,
     _AUTH_SUBSYSTEM_LABELS,
@@ -193,6 +202,13 @@ __all__ = [
     "api_notifications_new",
     "app",
     "auth_events_aggregated",
+    "bump_scan_now",
+    "monitor_alive",
+    "queue_command",
+    "read_control_state",
+    "set_collector",
+    "set_paused",
+    "set_settings",
     "category_options",
     "collector_errors",
     "collector_options",

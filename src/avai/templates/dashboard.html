@@ -148,6 +148,16 @@
 
   <main class="max-w-screen-2xl mx-auto px-6 py-6 space-y-8">
 
+    {# ---------- monitor control (pause / scan-now / scanners / settings) ---------- #}
+    <section id="control"
+             hx-get="/fragments/control"
+             hx-trigger="load, every 15s"
+             hx-swap="innerHTML">
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
+        loading control…
+      </div>
+    </section>
+
     {# ---------- overview ---------- #}
     <section id="overview"
              hx-get="/fragments/overview"
@@ -463,6 +473,21 @@
 
     document.body.addEventListener('htmx:afterSwap', (e) => {
       if (e.target && e.target.id === 'resources') renderResourceCharts();
+    });
+
+    // ---- Control plane: attach the secret token to every /control* request.
+    // The token lives only in localStorage (pasted once into the panel), so a
+    // viewer who loads the page sees no secret and any control POST without it
+    // 403s. A custom header also can't be forged by a cross-site form (CSRF).
+    document.body.addEventListener('htmx:configRequest', (e) => {
+      if (e.detail.path && e.detail.path.indexOf('/control') === 0) {
+        e.detail.headers['X-Avai-Token'] = localStorage.getItem('avai_control_token') || '';
+      }
+    });
+    // Repopulate the token input from localStorage after the panel swaps.
+    document.body.addEventListener('htmx:afterSwap', (e) => {
+      const inp = document.getElementById('control-token');
+      if (inp && !inp.value) inp.value = localStorage.getItem('avai_control_token') || '';
     });
 
     // ---- Network tabs: highlight the active tab on click ----

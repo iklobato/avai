@@ -19,6 +19,7 @@ from avai.enrichers.base import (
 from avai.enrichers.http import HttpClient
 
 _QUERY = "https://api.osv.dev/v1/query"
+_VULN = "https://api.osv.dev/v1/vulns"
 
 
 # Heuristic ecosystem mapping. avai's `installed_apps` collector
@@ -42,7 +43,14 @@ class OSVEnricher(Enricher):
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         if indicator.type is IndicatorType.CVE:
-            payload = {"id": indicator.value.upper()}
+            # id lookups use GET /v1/vulns/{id}; POST /v1/query rejects a
+            # top-level {"id": ...} with HTTP 400 (verified against the API).
+            resp = self._http.get(f"{_VULN}/{indicator.value.upper()}")
+            if resp.status_code == 404:
+                return None
+            if resp.status_code != 200:
+                return None
+            vulns = [resp.json()]
         else:
             # PACKAGE is "<name>@<version>". Either piece may be missing.
             name, _, version = indicator.value.partition("@")
@@ -55,14 +63,23 @@ class OSVEnricher(Enricher):
             payload = {"package": pkg}
             if version:
                 payload["version"] = version
-        resp = self._http.post(_QUERY, json=payload)
-        if resp.status_code != 200:
-            return None
-        body = resp.json()
-        vulns = body.get("vulns") or []
+            resp = self._http.post(_QUERY, json=payload)
+            if resp.status_code != 200:
+                return None
+            vulns = resp.json().get("vulns") or []
         if not vulns:
             return None
-        ids = [v.get("id") for v in vulns[:5] if v.get("id")]
+        # Collect each vuln's primary id AND its aliases. OSV's primary
+        # id is often a GHSA-/PYSEC-/OSV- id with the CVE only in aliases;
+        # the chain forward-enriches CVE-/GHSA- ids (CVSS, KEV), so a
+        # CVE buried in aliases must be surfaced or that stage never runs.
+        seen: set[str] = set()
+        ids: list[str] = []
+        for v in vulns[:5]:
+            for cand in (v.get("id"), *(v.get("aliases") or [])):
+                if cand and cand not in seen:
+                    seen.add(cand)
+                    ids.append(cand)
         # Treat severity-tagged vulns as suspicious. Without severity
         # data we still report — better signal than silence.
         return Evidence(

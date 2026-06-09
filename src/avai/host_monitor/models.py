@@ -125,6 +125,44 @@ class StreamingSession(Base):
     row_count: Mapped[int] = mapped_column(default=0)
 
 
+class ControlState(Base):
+    """Single-row (id=1) cooperative control channel between the dashboard
+    and the monitor. The dashboard (a separate, otherwise read-only process)
+    writes *intent* here; the running monitor reads this row once per poll
+    tick and obeys, writing its heartbeat back. There is no other IPC.
+
+    One-shot actions use a nonce/applied pair: the dashboard increments the
+    nonce, the monitor acts only when ``nonce != applied`` and then copies
+    ``nonce`` into ``applied``. This avoids the lost-update race a bare
+    boolean flag would have (the writer never clears, so it can't clobber an
+    ack the monitor just wrote)."""
+
+    __tablename__ = "control_state"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+
+    # Live settings — the monitor re-reads these every cycle.
+    paused: Mapped[int] = mapped_column(default=0)
+    interval_override: Mapped[Optional[int]]  # None => use the CLI --interval
+    judge_enabled: Mapped[Optional[int]]  # None => CLI default
+    enrich_enabled: Mapped[Optional[int]]  # None => CLI default
+    disabled_collectors: Mapped[Optional[str]]  # CSV of collector .name values
+
+    # One-shot triggers (nonce/applied pairs).
+    scan_now_nonce: Mapped[int] = mapped_column(default=0)
+    scan_now_applied: Mapped[int] = mapped_column(default=0)
+    command: Mapped[Optional[str]]  # prune|clear|rejudge|renarrate|reset_baseline
+    command_nonce: Mapped[int] = mapped_column(default=0)
+    command_applied: Mapped[int] = mapped_column(default=0)
+    command_result: Mapped[Optional[str]]  # short status the dashboard surfaces
+
+    # Heartbeat — written by the monitor so the dashboard knows it's alive.
+    pid: Mapped[Optional[int]]
+    status: Mapped[Optional[str]]  # running|scanning|paused
+    last_seen_at: Mapped[Optional[str]]
+    applied_at: Mapped[Optional[str]]
+    current_interval: Mapped[Optional[int]]
+
+
 class _RowBase(Base):
     """Common columns for every collector table."""
 

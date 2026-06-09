@@ -22,6 +22,11 @@ class IncidentNarrator:
     SCHEMA_NAME = "submit_incident"
     SEVERITIES = ("informational", "low", "medium", "high", "critical")
     PRIORITIES = ("immediate", "high", "medium", "low")
+    # Bound the prompt: a host with hundreds of active findings would
+    # otherwise produce a user message that can blow the context window and
+    # fail the digest every cycle. Keep the most severe/confident findings.
+    MAX_FINDINGS = 40
+    _VERDICT_RANK = {"malicious": 2, "suspicious": 1}
 
     @classmethod
     def _narrative_schema(cls) -> dict:
@@ -84,6 +89,22 @@ class IncidentNarrator:
     def auth_mode(self) -> str:
         return type(self._client).__name__
 
+    def _cap(self, findings: list[dict]) -> list[dict]:
+        """Trim to MAX_FINDINGS, keeping the most severe/confident, then
+        restore the original (timeline) order so the digest still reads as
+        a sequence."""
+        if len(findings) <= self.MAX_FINDINGS:
+            return findings
+        ranked = sorted(
+            enumerate(findings),
+            key=lambda it: (
+                self._VERDICT_RANK.get(str(it[1].get("verdict")), 0),
+                it[1].get("confidence") or 0.0,
+            ),
+            reverse=True,
+        )[: self.MAX_FINDINGS]
+        return [f for _, f in sorted(ranked, key=lambda it: it[0])]
+
     def narrate(self, findings: list[dict]) -> Optional[dict]:
         """Return a structured digest
         ``{headline, severity, summary, timeline[], actions[]}`` or None on
@@ -91,6 +112,7 @@ class IncidentNarrator:
         the cycle."""
         if not findings:
             return None
+        findings = self._cap(findings)
         user = self._user_template.safe_substitute(
             count=len(findings),
             findings=json.dumps(findings, ensure_ascii=False),

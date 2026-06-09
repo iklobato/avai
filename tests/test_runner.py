@@ -22,7 +22,6 @@ from avai.enrichers import (
     IndicatorType,
     VerdictHint,
 )
-from avai.host_monitor.runtime import Clock, Digest
 from avai.host_monitor import (
     DEFAULT_BASELINE_MIN_RUNS,
     Base,
@@ -32,6 +31,7 @@ from avai.host_monitor import (
     Runner,
     Sink,
 )
+from avai.host_monitor.runtime import Clock, Digest
 
 
 class _StubCollector:
@@ -811,6 +811,43 @@ class TestIncidentNarratorNormalization:
         nar = self._narrator({"headline": "h", "severity": "low", "summary": "s"})
         assert nar.narrate([]) is None
 
+    def test_findings_are_capped_keeping_most_severe(self):
+        # Regression: an unbounded findings list could blow the LLM context
+        # window and fail the digest every cycle. narrate() caps to
+        # MAX_FINDINGS, keeping the most severe/confident.
+        from avai.host_monitor import DEFAULT_PROMPTS_PATH, IncidentNarrator, Prompts
+
+        class _FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def complete_structured(self, **kw):
+                self.calls.append(kw)
+                return {
+                    "headline": "h",
+                    "severity": "high",
+                    "summary": "s",
+                    "timeline": [],
+                    "actions": [],
+                }
+
+        client = _FakeClient()
+        nar = IncidentNarrator(
+            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=client
+        )
+        cap = IncidentNarrator.MAX_FINDINGS
+        findings = [
+            {"content_hash": "keep", "verdict": "malicious", "confidence": 0.99}
+        ]
+        findings += [
+            {"content_hash": f"f{i}", "verdict": "suspicious", "confidence": 0.1}
+            for i in range(cap + 20)
+        ]
+        nar.narrate(findings)
+        user = client.calls[0]["user"]
+        assert user.count('"content_hash"') == cap  # trimmed to the cap
+        assert '"keep"' in user  # the malicious finding survived the trim
+
     def test_timeline_and_actions_are_normalised(self):
         nar = self._narrator(
             {
@@ -917,14 +954,41 @@ class TestRiskScoreSink:
     def test_privilege_and_integrity_queries(self, sink):
         from avai.host_monitor import PrivilegeConfigRow, SystemIntegrityRow
 
-        _w(sink, SystemIntegrityRow, run_id="r1", collected_at=_TS[0],
-           filevault_active=0, firewall_global_state=1)
-        _w(sink, PrivilegeConfigRow, run_id="r1", collected_at=_TS[0],
-           kind="sudoers", subject="dev", detail="ALL=(ALL) NOPASSWD: ALL")
-        _w(sink, PrivilegeConfigRow, run_id="r1", collected_at=_TS[0],
-           kind="account", subject="backdoor", detail="uid=0")
-        _w(sink, PrivilegeConfigRow, run_id="r1", collected_at=_TS[0],
-           kind="account", subject="root", detail="uid=0")
+        _w(
+            sink,
+            SystemIntegrityRow,
+            run_id="r1",
+            collected_at=_TS[0],
+            filevault_active=0,
+            firewall_global_state=1,
+        )
+        _w(
+            sink,
+            PrivilegeConfigRow,
+            run_id="r1",
+            collected_at=_TS[0],
+            kind="sudoers",
+            subject="dev",
+            detail="ALL=(ALL) NOPASSWD: ALL",
+        )
+        _w(
+            sink,
+            PrivilegeConfigRow,
+            run_id="r1",
+            collected_at=_TS[0],
+            kind="account",
+            subject="backdoor",
+            detail="uid=0",
+        )
+        _w(
+            sink,
+            PrivilegeConfigRow,
+            run_id="r1",
+            collected_at=_TS[0],
+            kind="account",
+            subject="root",
+            detail="uid=0",
+        )
 
         integ = sink.system_integrity_row("r1")
         assert integ["filevault_active"] == 0 and integ["firewall_global_state"] == 1
@@ -932,10 +996,17 @@ class TestRiskScoreSink:
         assert nopasswd == 1 and uid0 == 1  # 'root' excluded
 
     def test_write_and_latest_risk(self, sink):
-        sink.write_risk_score({
-            "created_at": _TS[0], "run_id": "r1", "score": 72, "grade": "C",
-            "prev_score": None, "drivers_json": "[]", "explanation": "init",
-        })
+        sink.write_risk_score(
+            {
+                "created_at": _TS[0],
+                "run_id": "r1",
+                "score": 72,
+                "grade": "C",
+                "prev_score": None,
+                "drivers_json": "[]",
+                "explanation": "init",
+            }
+        )
         row = sink.latest_risk_row()
         assert row.score == 72 and row.grade == "C"
 
@@ -957,7 +1028,9 @@ class TestEstimateCost:
         from avai.host_monitor import estimate_cost
 
         assert estimate_cost("claude-opus-4-8", 1_000_000, 0) == pytest.approx(15.0)
-        assert estimate_cost("anthropic/claude-sonnet-4-6", 0, 1_000_000) == pytest.approx(15.0)
+        assert estimate_cost(
+            "anthropic/claude-sonnet-4-6", 0, 1_000_000
+        ) == pytest.approx(15.0)
 
     def test_unknown_model_uses_default_tier(self):
         from avai.host_monitor import estimate_cost
@@ -970,12 +1043,177 @@ class TestJudgmentCostPersistence:
         from avai.host_monitor import Judgement, Judgment, ThreatCategory, Verdict
 
         j = Judgment(
-            content_hash="hc", collector="processes", verdict=Verdict.MALICIOUS,
-            category=ThreatCategory.PERSISTENCE, confidence=0.9, reasoning="r",
-            remediation="", model="m", created_at="2026-01-01T00:00:00Z",
+            content_hash="hc",
+            collector="processes",
+            verdict=Verdict.MALICIOUS,
+            category=ThreatCategory.PERSISTENCE,
+            confidence=0.9,
+            reasoning="r",
+            remediation="",
+            model="m",
+            created_at="2026-01-01T00:00:00Z",
             cost_usd=0.0012,
         )
         sink.write_judgments([j])
         with Session(sink.engine) as s:
             row = s.get(Judgement, ("hc", "processes"))
         assert row.cost_usd == pytest.approx(0.0012)
+
+
+# ---------------------------------------------------------------------------
+# Cooperative control plane
+# ---------------------------------------------------------------------------
+
+
+def _set_control(sink, **vals):
+    """Write fields onto the single control row (creating it if needed)."""
+    from sqlalchemy import update
+
+    from avai.host_monitor import ControlState
+
+    sink.ensure_control_row(interval=300, judge_enabled=True, enrich_enabled=True)
+    with Session(sink.engine) as s:
+        s.execute(update(ControlState).where(ControlState.id == 1).values(**vals))
+        s.commit()
+
+
+class TestControlSink:
+    def test_round_trip_and_acks(self, sink):
+        sink.ensure_control_row(interval=120, judge_enabled=True, enrich_enabled=False)
+        c = sink.read_control()
+        assert c["interval_override"] == 120
+        assert c["judge_enabled"] == 1 and c["enrich_enabled"] == 0
+        assert c["paused"] == 0
+        sink.write_heartbeat(pid=4321, status="running", current_interval=120)
+        sink.ack_scan_now(7)
+        sink.ack_command(3, "ok")
+        c = sink.read_control()
+        assert c["pid"] == 4321 and c["status"] == "running"
+        assert c["scan_now_applied"] == 7
+        assert c["command_applied"] == 3 and c["command_result"] == "ok"
+
+    def test_ensure_is_idempotent(self, sink):
+        sink.ensure_control_row(interval=100, judge_enabled=True, enrich_enabled=True)
+        _set_control(sink, paused=1)
+        sink.ensure_control_row(interval=999, judge_enabled=False, enrich_enabled=False)
+        c = sink.read_control()
+        assert c["paused"] == 1 and c["interval_override"] == 100  # not clobbered
+
+
+class TestControlSettingsGating:
+    def test_disabled_collector_is_skipped(self, sink):
+        _CountingCollector.calls = []
+        a = _CountingCollector("a")
+        b = _CountingCollector("b")
+        _set_control(sink, disabled_collectors="a")
+        runner = Runner(sink, [a, b], [], NullJudge(), 5)
+        runner.run_once()
+        assert _CountingCollector.calls == ["b"]  # "a" skipped
+
+    def test_judge_and_enrich_toggles(self, sink):
+        runner = Runner(sink, [], [], NullJudge(), 5, enrichment_chain=None)
+        _set_control(sink, judge_enabled=0, enrich_enabled=0)
+        runner._refresh_control()
+        assert runner._judge_on() is False and runner._enrich_on() is False
+        _set_control(sink, judge_enabled=1, enrich_enabled=1)
+        runner._refresh_control()
+        assert runner._judge_on() is True and runner._enrich_on() is True
+
+    def test_settings_default_to_constructor_state_when_unset(self, sink):
+        runner = Runner(sink, [], [], NullJudge(), 5, enrichment_chain=None)
+        _set_control(sink, judge_enabled=None, enrich_enabled=None)
+        runner._refresh_control()
+        # None => fall back to what the monitor was built with.
+        assert runner._judge_on() is False  # NullJudge
+        assert runner._enrich_on() is False  # no chain
+
+
+class TestControlCommands:
+    def test_rejudge_clears_judgements_and_acks(self, sink):
+        from avai.host_monitor import Judgement
+
+        with Session(sink.engine) as s:
+            s.add(
+                Judgement(
+                    content_hash="h1",
+                    collector="processes",
+                    verdict="benign",
+                    model="m",
+                    created_at=Clock().now_iso(),
+                )
+            )
+            s.commit()
+        _set_control(sink, command="rejudge", command_nonce=1, command_applied=0)
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        runner._run_pending_command(sink.read_control())
+        with Session(sink.engine) as s:
+            assert s.query(Judgement).count() == 0
+        c = sink.read_control()
+        assert c["command_applied"] == 1
+        assert "judgement" in c["command_result"]
+
+    def test_reset_baseline_drops_runs(self, sink):
+        _add_run(sink, _TS[0])
+        _add_run(sink, _TS[1])
+        _set_control(sink, command="reset_baseline", command_nonce=1, command_applied=0)
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        runner._run_pending_command(sink.read_control())
+        assert sink.completed_run_count() == 0
+        assert sink.read_control()["command_applied"] == 1
+
+    def test_already_applied_command_is_skipped(self, sink):
+        _set_control(sink, command="clear", command_nonce=2, command_applied=2)
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        # nonce == applied → no-op (no exception, result unchanged)
+        runner._run_pending_command(sink.read_control())
+        assert sink.read_control()["command_applied"] == 2
+
+
+class TestControlLoop:
+    """Drive a single iteration of run_forever by having the stubbed
+    run_once / heartbeat request shutdown, so the loop exits deterministically."""
+
+    def test_runs_a_cycle_when_not_paused(self, sink):
+        _set_control(sink, paused=0)
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        calls = []
+
+        def fake_run_once():
+            calls.append(1)
+            runner.request_shutdown()
+            return ("rid", 0, 0)
+
+        runner.run_once = fake_run_once
+        runner.run_forever(300)
+        assert calls == [1]
+
+    def test_paused_skips_the_cycle(self, sink):
+        _set_control(sink, paused=1)
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        calls = []
+        runner.run_once = lambda: calls.append(1) or ("rid", 0, 0)
+        orig = runner._heartbeat
+
+        def fake_hb(status, interval):  # stop the loop after one tick
+            orig(status, interval)
+            runner.request_shutdown()
+
+        runner._heartbeat = fake_hb
+        runner.run_forever(300)
+        assert calls == []  # paused → never scanned
+        assert sink.read_control()["status"] == "paused"
+
+    def test_scan_now_overrides_pause_and_acks(self, sink):
+        _set_control(sink, paused=1, scan_now_nonce=1, scan_now_applied=0)
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        calls = []
+
+        def fake_run_once():
+            calls.append(1)
+            runner.request_shutdown()
+            return ("rid", 0, 0)
+
+        runner.run_once = fake_run_once
+        runner.run_forever(300)
+        assert calls == [1]  # scan-now forced a cycle despite pause
+        assert sink.read_control()["scan_now_applied"] == 1

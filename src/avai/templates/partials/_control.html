@@ -1,0 +1,119 @@
+{# Cooperative control panel. POSTs write the control_state row; the monitor
+   obeys it within ~3s. All actions carry the X-Avai-Token header (injected
+   from localStorage by dashboard.html); the server fails closed without it.
+   Swapped into #control on load/poll and after every action. #}
+{% set disabled = (ctrl.disabled_collectors.split(',') if ctrl and ctrl.disabled_collectors else []) %}
+{% set paused = ctrl and ctrl.paused %}
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5 space-y-4">
+  <div class="flex items-center justify-between">
+    <h3 class="text-[10px] uppercase tracking-widest text-slate-400">monitor control</h3>
+    <span class="text-xs flex items-center gap-2">
+      {% if alive %}
+        <span class="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
+        <span class="text-slate-300">
+          {{ ctrl.status or "running" }}{% if ctrl and ctrl.pid %} · pid {{ ctrl.pid }}{% endif %}
+        </span>
+      {% else %}
+        <span class="inline-block w-2 h-2 rounded-full bg-slate-600"></span>
+        <span class="text-slate-500">monitor offline</span>
+      {% endif %}
+    </span>
+  </div>
+
+  {% if not control_enabled %}
+    <div class="text-amber-400/90 text-xs bg-amber-950/30 border border-amber-900/40 rounded p-2">
+      Control is disabled. Set <span class="font-mono">AVAI_CONTROL_TOKEN</span> on the
+      dashboard process to enable it, then paste the token below.
+    </div>
+  {% endif %}
+
+  {# Token lives only in the browser (localStorage), never server-rendered. #}
+  <div>
+    <input id="control-token" type="password" autocomplete="off"
+           placeholder="control token"
+           oninput="localStorage.setItem('avai_control_token', this.value)"
+           class="w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 font-mono" />
+  </div>
+
+  {# pause / resume + scan now #}
+  <div class="flex flex-wrap gap-2">
+    {% if paused %}
+      <button hx-post="/control/resume" hx-target="#control" hx-swap="innerHTML"
+              class="px-3 py-1.5 text-xs rounded bg-emerald-700 hover:bg-emerald-600 text-white">▶ resume</button>
+    {% else %}
+      <button hx-post="/control/pause" hx-target="#control" hx-swap="innerHTML"
+              class="px-3 py-1.5 text-xs rounded bg-slate-700 hover:bg-slate-600 text-white">⏸ pause</button>
+    {% endif %}
+    <button hx-post="/control/scan-now" hx-target="#control" hx-swap="innerHTML"
+            class="px-3 py-1.5 text-xs rounded bg-sky-700 hover:bg-sky-600 text-white">⟳ scan now</button>
+    {% if paused %}<span class="text-amber-400 text-xs self-center">scanning paused</span>{% endif %}
+  </div>
+
+  {# live settings #}
+  <form hx-post="/control/settings" hx-target="#control" hx-swap="innerHTML"
+        class="flex flex-wrap items-end gap-3 text-xs text-slate-300">
+    <label class="flex flex-col gap-1">
+      <span class="text-slate-500">interval (s)</span>
+      <input name="interval" type="number" min="5"
+             value="{{ ctrl.interval_override if ctrl and ctrl.interval_override else (ctrl.current_interval if ctrl else '') }}"
+             class="w-24 bg-slate-950 border border-slate-700 rounded px-2 py-1" />
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-slate-500">judge</span>
+      <select name="judge" class="bg-slate-950 border border-slate-700 rounded px-2 py-1">
+        <option value="1" {% if not ctrl or ctrl.judge_enabled %}selected{% endif %}>on</option>
+        <option value="0" {% if ctrl and not ctrl.judge_enabled %}selected{% endif %}>off</option>
+      </select>
+    </label>
+    <label class="flex flex-col gap-1">
+      <span class="text-slate-500">enrich</span>
+      <select name="enrich" class="bg-slate-950 border border-slate-700 rounded px-2 py-1">
+        <option value="1" {% if not ctrl or ctrl.enrich_enabled %}selected{% endif %}>on</option>
+        <option value="0" {% if ctrl and not ctrl.enrich_enabled %}selected{% endif %}>off</option>
+      </select>
+    </label>
+    <button type="submit" class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-white">apply</button>
+  </form>
+
+  {# per-collector enable/disable #}
+  <details class="text-xs">
+    <summary class="cursor-pointer text-slate-400 select-none">
+      scanners ({{ collectors|length - disabled|length }}/{{ collectors|length }} on)
+    </summary>
+    <div class="mt-2 grid grid-cols-2 md:grid-cols-3 gap-1">
+      {% for name in collectors %}
+        {% set off = name in disabled %}
+        <button hx-post="/control/collector/{{ name }}/{{ 'on' if off else 'off' }}"
+                hx-target="#control" hx-swap="innerHTML"
+                class="flex items-center justify-between gap-2 px-2 py-1 rounded border
+                       {{ 'border-slate-800 text-slate-600 bg-slate-950' if off else 'border-slate-700 text-slate-200 bg-slate-800/40' }}">
+          <span class="font-mono truncate">{{ name }}</span>
+          <span class="{{ 'text-slate-600' if off else 'text-emerald-400' }}">{{ 'off' if off else 'on' }}</span>
+        </button>
+      {% endfor %}
+    </div>
+  </details>
+
+  {# maintenance one-shots #}
+  <details class="text-xs">
+    <summary class="cursor-pointer text-slate-400 select-none">maintenance</summary>
+    <div class="mt-2 flex flex-wrap gap-2">
+      <button hx-post="/control/maintenance/prune" hx-target="#control" hx-swap="innerHTML"
+              class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-white">prune to size</button>
+      <button hx-post="/control/maintenance/rejudge" hx-target="#control" hx-swap="innerHTML"
+              class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-white">re-judge</button>
+      <button hx-post="/control/maintenance/renarrate" hx-target="#control" hx-swap="innerHTML"
+              class="px-2 py-1 rounded bg-slate-700 hover:bg-slate-600 text-white">re-narrate</button>
+      <button hx-post="/control/maintenance/reset_baseline" hx-target="#control" hx-swap="innerHTML"
+              hx-confirm="Reset the host baseline? Run history is dropped and novelty re-learns over the next runs."
+              class="px-2 py-1 rounded bg-amber-800 hover:bg-amber-700 text-white">reset baseline</button>
+      <button hx-post="/control/maintenance/clear" hx-target="#control" hx-swap="innerHTML"
+              hx-confirm="Wipe ALL collected telemetry, runs, verdicts, narratives and risk scores? This cannot be undone."
+              class="px-2 py-1 rounded bg-red-900 hover:bg-red-800 text-white">clear data</button>
+    </div>
+  </details>
+
+  {% if ctrl and ctrl.command_result %}
+    <div class="text-xs text-slate-500">last action: <span class="text-slate-300 font-mono">{{ ctrl.command_result }}</span></div>
+  {% endif %}
+</div>

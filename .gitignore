@@ -25,3 +25,7 @@ venv/
 
 # local secrets — never commit
 .env
+
+# Playwright MCP verification artifacts
+.playwright-mcp/
+*-resources.png

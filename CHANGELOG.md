@@ -3,10 +3,26 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
-## [Unreleased]
+## [0.5.0] — 2026-06-09
 
 ### Added
-- **System resources collectors + dashboard panel (htop-style telemetry).** Two new snapshot collectors capture the aggregate resource meters every cycle: `HostResourcesCollector` → `host_resources` (memory, swap, per-core + overall CPU, load average, uptime, task/thread counts) and `DiskUsageCollector` → `disk_usage` (per-filesystem capacity + best-effort per-device I/O). Both are psutil-backed and cross-platform (registered on macOS, Linux, and Windows), with psutil access behind injectable `SystemMetrics` / `DiskMetrics` runtime seams (mirroring `PsutilConnections`) and uptime derived from the injected `Clock`. They're continuous metrics, not discrete artifacts, so they're not LLM-judged (`judge_enabled = False`). New `/fragments/resources` dashboard panel renders current values as stat tiles, a `df`-style disk table, and Chart.js memory/swap/CPU trend lines (`/api/chart/resources`, latest 60 runs) — not realtime; it polls on the standard 30 s cadence. Schema migration `0003_host_resources`.
+- **System resources collectors + dashboard panel (htop-style telemetry).** Two new snapshot collectors capture the aggregate resource meters every cycle: `HostResourcesCollector` → `host_resources` (memory, swap, per-core + overall CPU, load average, uptime, task/thread counts) and `DiskUsageCollector` → `disk_usage` (per-filesystem capacity + best-effort per-device I/O). Both are psutil-backed and cross-platform (registered on macOS, Linux, and Windows), with psutil access behind injectable `SystemMetrics` / `DiskMetrics` runtime seams (mirroring `PsutilConnections`) and uptime derived from the injected `Clock`. They're continuous metrics, not discrete artifacts, so they're not LLM-judged (`judge_enabled = False`). New `/fragments/resources` dashboard panel renders current values as stat tiles, a `df`-style disk table, and Chart.js memory/swap/CPU trend lines (`/api/chart/resources`) — not realtime; it polls on the standard 30 s cadence. Schema migration `0004_host_resources`.
+
+### Fixed
+- **SQLite `busy_timeout` eliminates "database is locked" under concurrent writers.** The snapshot loop and the streaming-worker threads serialise their writes through SQLite; with only the 5 s pysqlite default a write or WAL checkpoint on a large DB could hold the lock longer and the losing writer raised (observed on `auth_events` streaming flushes). Every connection now sets a 30 s `busy_timeout` so the contender blocks-and-retries instead of failing.
+
+## [0.4.0] — 2026-06-02
+
+### Added
+- **Cooperative control plane for the dashboard.** Pause/resume the monitor, trigger an immediate scan, toggle individual collectors, change runtime settings (interval, judge, enrich), and run maintenance actions — all from the dashboard. State is exchanged via a new `control_state` table the monitor reads each cycle. Every mutating `/control/*` endpoint is gated by a shared-secret `X-Avai-Token` header (set `AVAI_CONTROL_TOKEN`); it fails closed (control disabled) when the secret is unset, and the custom header doubles as CSRF defence.
+- **Baseline security headers on every dashboard response.** Content-Security-Policy (including `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and `Referrer-Policy: no-referrer`; the WSGI server banner is masked.
+
+### Fixed
+- **Dashboard brings the DB schema current on every start.** Running `create_all` + Alembic upgrade at launch means a database written by an older monitor (missing a newly-added table such as `control_state`) no longer 500s every panel — missing tables are added without touching existing data.
+- **Findings page no longer returns HTTP 500 on a huge `?page=`.** An out-of-range page built an `OFFSET` past SQLite's 64-bit integer range; the page is now clamped to the last page.
+- **Enricher real-API correctness & rate-limit handling.** `circl_hashlookup` uses the real `hashlookup:trust` score (no more false-benign whitelisting of untrusted hashes); `osv` CVE lookups use `GET /v1/vulns/{id}` (the old `POST /v1/query {"id":…}` returns HTTP 400) and surface CVE aliases so the CVE forward-chain fires; `urlhaus` parses the `/host/` response shape separately from `/url/`; `phishtank` (HTTP 509) and `nvd` (HTTP 403) over-quota responses surface as rate-limits; `greynoise` non-404 client errors are raised, not silently swallowed.
+- **LLM judge robustness.** `--judge-batch-size 0`/negative can no longer break the monitor cycle (clamped to ≥1); model verdict/category strings are case-normalized before enum coercion, so a `"Malicious"` from JSON-mode is no longer downgraded to `unknown`.
+- **Incident narrator caps the findings** fed to the LLM (most severe/confident first) so a host with hundreds of active findings can't blow the context window and silently stop generating the digest.
 
 ## [0.3.3] — 2026-05-30
 

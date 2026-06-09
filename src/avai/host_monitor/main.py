@@ -212,6 +212,13 @@ def main() -> int:
             narrator=narrator,
         )
         runner.setup()
+        # Seed the cooperative control row with this run's settings so the
+        # dashboard reflects reality (no-op if it already exists).
+        sink.ensure_control_row(
+            interval=args.interval,
+            judge_enabled=not args.no_judge,
+            enrich_enabled=not args.no_enrich,
+        )
 
         if args.once:
             run_id, ok, failed = runner.run_once()
