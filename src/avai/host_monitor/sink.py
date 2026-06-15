@@ -20,6 +20,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .constants import LOG
@@ -74,7 +75,20 @@ class Sink:
             register_schema(Base)
         except Exception:
             LOG.exception("enrichment schema registration failed")
-        Base.metadata.create_all(self.engine)
+        # create_all / ALTER are not atomic with respect to a second
+        # process running the same bootstrap on the shared SQLite file
+        # (monitor + dashboard both call setup() at startup against the
+        # bind-mounted DB). Two processes can each pass create_all's
+        # checkfirst and then both issue CREATE/ALTER, so the loser sees
+        # "table already exists" / "duplicate column name". Those are
+        # benign here — the schema is the same — so tolerate them rather
+        # than crash a container's startup.
+        try:
+            Base.metadata.create_all(self.engine)
+        except OperationalError as e:
+            if not _is_benign_concurrent_ddl(e):
+                raise
+            LOG.info("create_all raced with another bootstrap (continuing): %s", e)
         _migrate_add_columns(self.engine)
         # Apply Alembic migrations (indexes / future schema changes). The DB
         # was just built by create_all, so this stamps the baseline and runs
@@ -836,6 +850,16 @@ class Sink:
         return n
 
 
+def _is_benign_concurrent_ddl(exc: OperationalError) -> bool:
+    """True when a DDL statement failed only because another process ran
+    the same bootstrap first (monitor + dashboard both call Sink.setup on
+    the shared SQLite file). SQLite reports these as "table ... already
+    exists" or "duplicate column name ...". The resulting schema is
+    identical either way, so the loser can safely continue."""
+    msg = str(exc).lower()
+    return "already exists" in msg or "duplicate column name" in msg
+
+
 def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     cur = dbapi_conn.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
@@ -869,11 +893,18 @@ def _migrate_add_columns(engine: Engine) -> None:
                 continue
             col_type = col.type.compile(engine.dialect)
             nullable = "" if col.nullable else " NOT NULL DEFAULT ''"
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        f"ALTER TABLE {table.name} "
-                        f"ADD COLUMN {col.name} {col_type}{nullable}"
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE {table.name} "
+                            f"ADD COLUMN {col.name} {col_type}{nullable}"
+                        )
                     )
-                )
+            except OperationalError as e:
+                # Another process added the column between our inspect and
+                # our ALTER. Benign — keep going with the rest.
+                if not _is_benign_concurrent_ddl(e):
+                    raise
+                continue
             LOG.info("schema migration: added %s.%s", table.name, col.name)
