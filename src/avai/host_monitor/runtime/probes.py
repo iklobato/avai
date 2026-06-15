@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from collections import namedtuple
 from typing import Optional
 
 try:
@@ -11,7 +13,42 @@ except ImportError:
     sys.stderr.write("Required: pip install psutil\n")
     sys.exit(2)
 
+from .. import constants
 from .command_runner import CommandRunner
+
+# Virtual / pseudo filesystems that carry no meaningful capacity — never
+# part of a "df" view, and the bulk of what a container's own mount table
+# is made of. Used to filter the host mount table in container mode.
+_PSEUDO_FSTYPES = frozenset(
+    {
+        "autofs",
+        "binfmt_misc",
+        "bpf",
+        "cgroup",
+        "cgroup2",
+        "configfs",
+        "debugfs",
+        "devpts",
+        "devtmpfs",
+        "fusectl",
+        "hugetlbfs",
+        "mqueue",
+        "nsfs",
+        "overlay",
+        "proc",
+        "pstore",
+        "ramfs",
+        "rpc_pipefs",
+        "securityfs",
+        "squashfs",
+        "sysfs",
+        "tmpfs",
+        "tracefs",
+    }
+)
+
+_HostPart = namedtuple("_HostPart", "device mountpoint fstype opts")
+_HostUsage = namedtuple("_HostUsage", "total used free percent")
 
 
 class PsutilConnections:
@@ -91,24 +128,145 @@ class DiskMetrics:
     """Thin seam over psutil's filesystem + disk-I/O readings (the ``df``
     table htop and similar tools show). Mirrors :class:`PsutilConnections`:
     a missing/unreadable source degrades to an empty result rather than
-    raising, since an unmountable pseudo-filesystem is normal."""
+    raising, since an unmountable pseudo-filesystem is normal.
+
+    **Container mode.** psutil reads the *container's* mount table and
+    statvfs's the *container's* paths, so a containerised monitor would
+    report its own overlay + bind mounts as "host disks" — wrong and
+    duplicated. When the host root is bind-mounted read-only at
+    ``$HOST_PREFIX/rootfs`` (see docker-compose.yml), this reads the real
+    host mount table and measures each filesystem through that prefix
+    instead. In container mode *without* that mount we emit nothing (and
+    log once) rather than present misleading container-internal rows.
+    """
+
+    def __init__(self, rootfs: Optional[str] = None) -> None:
+        # Explicit override for tests; production derives it from HOST_PREFIX.
+        self._rootfs_override = rootfs
+
+    def _rootfs(self) -> Optional[str]:
+        if self._rootfs_override is not None:
+            return self._rootfs_override
+        if not constants.HOST_PREFIX:
+            return None
+        candidate = constants.HOST_PREFIX + "/rootfs"
+        return candidate if os.path.isdir(candidate) else None
 
     def partitions(self) -> list:
-        try:
-            return psutil.disk_partitions(all=False)
-        except OSError:
-            return []
+        rootfs = self._rootfs()
+        if rootfs is None:
+            if constants.HOST_PREFIX:
+                # Container mode but the host root isn't mounted: psutil
+                # would surface the container's overlay/bind mounts as host
+                # disks. Skip rather than mislead.
+                constants.LOG.warning(
+                    "disk_usage: container mode but %s/rootfs is not mounted; "
+                    "skipping (bind-mount the host root read-only to enable)",
+                    constants.HOST_PREFIX,
+                )
+                return []
+            try:
+                return psutil.disk_partitions(all=False)
+            except OSError:
+                return []
+        return _host_partitions(rootfs)
 
     def usage(self, mountpoint: str):
         """Usage for one mountpoint. Raises (``PermissionError``/``OSError``)
-        for an unreadable mount — the caller skips that partition."""
-        return psutil.disk_usage(mountpoint)
+        for an unreadable mount — the caller skips that partition. In
+        container mode the mountpoint is a host path measured through the
+        rootfs mount."""
+        rootfs = self._rootfs()
+        if rootfs is None:
+            return psutil.disk_usage(mountpoint)
+        return _statvfs_usage(_join_rootfs(rootfs, mountpoint))
 
     def io_counters(self) -> dict:
+        # /proc/diskstats is not namespaced, so psutil already reports the
+        # host's per-device counters even from inside the container.
         try:
             return psutil.disk_io_counters(perdisk=True) or {}
         except (OSError, RuntimeError):
             return {}
+
+
+def _unescape_mount_field(field: str) -> str:
+    r"""Decode the octal escapes (\040 space, \011 tab, \012 nl, \134 \\)
+    that /proc/mounts uses for whitespace in device/mountpoint fields."""
+    if "\\" not in field:
+        return field
+    out, i = [], 0
+    while i < len(field):
+        if field[i] == "\\" and i + 3 < len(field) and field[i + 1 : i + 4].isdigit():
+            out.append(chr(int(field[i + 1 : i + 4], 8)))
+            i += 4
+        else:
+            out.append(field[i])
+            i += 1
+    return "".join(out)
+
+
+def _parse_mounts(text: str) -> list:
+    """Parse /proc/mounts content into ``_HostPart`` rows, dropping pseudo
+    filesystems and de-duplicating by mountpoint (keeping the first, i.e.
+    the underlying mount rather than a later overlay/bind of the same point)."""
+    seen: set[str] = set()
+    parts: list = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        device, mountpoint, fstype, opts = (
+            _unescape_mount_field(fields[0]),
+            _unescape_mount_field(fields[1]),
+            fields[2],
+            fields[3],
+        )
+        if fstype in _PSEUDO_FSTYPES or mountpoint in seen:
+            continue
+        seen.add(mountpoint)
+        parts.append(_HostPart(device, mountpoint, fstype, opts))
+    return parts
+
+
+def _host_partitions(rootfs: str) -> list:
+    """Read the host's mount table. With ``pid: host`` the container's
+    ``/proc/1/mounts`` is the host init's mount namespace (the real host
+    filesystems); fall back to the rootfs-mounted copy if that's
+    unreadable."""
+    for path in ("/proc/1/mounts", rootfs.rstrip("/") + "/proc/1/mounts"):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return _parse_mounts(f.read())
+        except OSError:
+            continue
+    return []
+
+
+def _join_rootfs(rootfs: str, mountpoint: str) -> str:
+    """Resolve a host mountpoint to its path under the rootfs mount.
+    ``("/host/rootfs", "/")`` → ``/host/rootfs``; ``(..., "/home")`` →
+    ``/host/rootfs/home``."""
+    return (
+        rootfs.rstrip("/") + "/" + mountpoint.lstrip("/")
+        if mountpoint != "/"
+        else rootfs.rstrip("/") or "/"
+    )
+
+
+def _statvfs_usage(path: str) -> "_HostUsage":
+    """``statvfs``-based usage matching psutil.disk_usage semantics: ``free``
+    is space available to an unprivileged user and ``percent`` is computed
+    against the user-visible total (used + avail), so reserved blocks don't
+    skew it."""
+    st = os.statvfs(path)
+    total = st.f_blocks * st.f_frsize
+    avail_root = st.f_bfree * st.f_frsize
+    avail_user = st.f_bavail * st.f_frsize
+    used = total - avail_root
+    total_user = used + avail_user
+    percent = round(used / total_user * 100, 1) if total_user > 0 else 0.0
+    return _HostUsage(total=total, used=used, free=avail_user, percent=percent)
 
 
 class ServiceProbe:

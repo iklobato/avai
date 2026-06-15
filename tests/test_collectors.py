@@ -271,3 +271,43 @@ class TestCronRows:
             )
         )
         assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# LinuxAuthEventsCollector._cmd — journalctl --directory selection in
+# container mode. Without the runtime-journal fallback, hosts with
+# volatile-only journald (Storage=volatile/auto, no /var/log/journal)
+# silently collected zero auth events from inside the container.
+# ---------------------------------------------------------------------------
+
+
+class TestLinuxAuthEventsJournalDir:
+    def _directory_arg(self, cmd):
+        return cmd[cmd.index("--directory") + 1] if "--directory" in cmd else None
+
+    def test_no_directory_flag_without_prefix(self, monkeypatch):
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
+        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        assert "--directory" not in cmd
+
+    def test_prefers_persistent_journal(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+        persistent = tmp_path / "var" / "log" / "journal"
+        runtime = tmp_path / "run" / "log" / "journal"
+        persistent.mkdir(parents=True)
+        runtime.mkdir(parents=True)
+        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        assert self._directory_arg(cmd) == str(persistent)
+
+    def test_falls_back_to_runtime_journal(self, monkeypatch, tmp_path):
+        # The regression: only the volatile runtime journal exists.
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+        runtime = tmp_path / "run" / "log" / "journal"
+        runtime.mkdir(parents=True)
+        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        assert self._directory_arg(cmd) == str(runtime)
+
+    def test_no_directory_flag_when_no_host_journal_present(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        assert "--directory" not in cmd
