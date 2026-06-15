@@ -77,6 +77,14 @@ services:
       - /home:/host/home:ro
       - /root:/host/root:ro
 
+      # Host root, read-only + recursive, so the disk_usage collector
+      # measures the real host filesystems (capacity/used per mount) rather
+      # than the container's own overlay + bind mounts. DiskMetrics reads
+      # the host mount table and statvfs's each filesystem through this
+      # prefix; without it, disk_usage emits nothing in container mode
+      # rather than report misleading container-internal rows.
+      - /:/host/rootfs:ro
+
       # ----- native-path mounts (CLI tools without prefix flags) -----
       - /run/systemd:/run/systemd:ro
       - /run/dbus:/run/dbus:ro
