@@ -1751,11 +1751,19 @@ class LinuxAuthEventsCollector(StreamingCollector):
             f"--priority={self.priority}",
         ]
         # In container mode, point journalctl at the host's journal
-        # directory rather than the container's empty one.
+        # directory rather than the container's empty one. Prefer the
+        # persistent journal, but fall back to the runtime (volatile)
+        # journal — hosts with systemd Storage=volatile/auto and no
+        # persistent storage keep logs only under /run/log/journal, so
+        # without this fallback auth_events would silently collect nothing.
         if constants.HOST_PREFIX:
-            host_journal = HostPaths.translate("/var/log/journal")
-            if host_journal.is_dir():
-                cmd.extend(["--directory", str(host_journal)])
+            for host_journal in (
+                HostPaths.translate("/var/log/journal"),
+                HostPaths.translate("/run/log/journal"),
+            ):
+                if host_journal.is_dir():
+                    cmd.extend(["--directory", str(host_journal)])
+                    break
         for i, group in enumerate(self._MATCH_GROUPS):
             if i > 0:
                 cmd.append("+")
