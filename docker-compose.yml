@@ -89,6 +89,15 @@ services:
       - NET_RAW
       - DAC_READ_SEARCH
 
+    # The image bakes a dashboard healthcheck (probes :8765). The monitor
+    # role listens on no port, so that probe is meaningless here — it would
+    # either peg the container as permanently "unhealthy" or, under
+    # network_mode: host, falsely report healthy by hitting the dashboard's
+    # published port. Disable it so `docker ps` reflects the monitor's real
+    # state (process up/down via restart policy).
+    healthcheck:
+      disable: true
+
     restart: unless-stopped
 
   dashboard:
