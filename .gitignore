@@ -27,6 +27,10 @@ venv/
 !web/public/assets/
 !web/public/assets/**
 
+# web/lib is application source, not a build artifact (global gitignore has lib/)
+!web/lib/
+!web/lib/**
+
 # local secrets — never commit
 .env
 
