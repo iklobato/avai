@@ -3,6 +3,17 @@
 Receives article deliveries from [AutoSEO](https://getautoseo.com) and publishes
 them as blog posts served by the dashboard app.
 
+## Production (DigitalOcean App Platform)
+
+The Flask app runs as the `webhook` service component of the `avai-landing`
+app, path-routed behind getavai.com (see `landing-page/.do/app.yaml`):
+
+- Webhook:  `https://getavai.com/webhooks/autoseo`
+- Articles: `https://getavai.com/blog` and `https://getavai.com/blog/<slug>`
+
+The marketing static site keeps serving `/`. Storage is **ephemeral** — posts
+and downloaded images reset on every redeploy.
+
 ## Endpoint
 
 `POST /webhooks/autoseo`

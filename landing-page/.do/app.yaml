@@ -1,22 +1,80 @@
+# DigitalOcean App Platform spec for the avai-landing app (getavai.com).
+#
+# Two components behind one domain, routed by path:
+#   - static_site `web`  -> /            (the marketing site, /landing-page)
+#   - service     `webhook` -> /blog, /webhooks, /static
+#                                        (the Flask app: AutoSEO webhook + blog)
+#
+# So https://getavai.com/blog/<slug> serves published articles and
+# https://getavai.com/webhooks/autoseo receives AutoSEO deliveries, while the
+# marketing site keeps serving everything else.
+#
+# Apply: doctl apps update <APP_ID> --spec landing-page/.do/app.yaml
+#        (inject the real AUTOSEO_WEBHOOK_TOKEN from a local copy — never commit it)
+#
+# CAVEAT — ephemeral storage: the service filesystem does not persist across
+# deploys. The SQLite DB (/data/avai.db) and downloaded images (static/blog/...)
+# reset on every redeploy. Back them with a managed DB + object storage for
+# durable content.
 name: avai-landing
 region: nyc
+
+domains:
+  - domain: www.getavai.com
+    type: PRIMARY
+  - domain: getavai.com
+    type: ALIAS
+
+features:
+  - buildpack-stack=ubuntu-22
 
 static_sites:
   - name: web
     source_dir: /landing-page
+    index_document: index.html
+    # SPA shell: serve index.html for any unmatched path under this component.
+    catchall_document: index.html
     github:
       repo: iklobato/avai
       branch: release/0.1.0
       deploy_on_push: true
-    index_document: index.html
-    # SPA shell: serve index.html for any unmatched path. (error_document
-    # and catchall_document are mutually exclusive — catchall wins for a
-    # single-page marketing site.)
-    catchall_document: index.html
-    routes:
-      - path: /
 
-# Custom domain is attached after the first deploy (see deploy notes):
-# getavai.com's DNS zone lives at GoDaddy, not DigitalOcean, so DO can't
-# manage the zone here. Instead we add the domain to the app and point a
-# CNAME at the app's *.ondigitalocean.app ingress from GoDaddy.
+services:
+  - name: webhook
+    dockerfile_path: Dockerfile
+    source_dir: /
+    github:
+      repo: iklobato/avai
+      # Switch to `main` once PR #8 is merged.
+      branch: feat/autoseo-webhook
+      deploy_on_push: true
+    http_port: 8765
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /blog
+      initial_delay_seconds: 15
+      period_seconds: 30
+      timeout_seconds: 5
+      failure_threshold: 3
+    envs:
+      # Real value injected at deploy time — NEVER commit the token.
+      - key: AUTOSEO_WEBHOOK_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_AT_DEPLOY
+      - key: AUTOSEO_SITE_URL
+        scope: RUN_TIME
+        value: https://www.getavai.com
+
+# Path routing: more specific prefixes first, the static site catches the rest.
+ingress:
+  rules:
+    - component: { name: webhook }
+      match: { path: { prefix: /blog } }
+    - component: { name: webhook }
+      match: { path: { prefix: /webhooks } }
+    - component: { name: webhook }
+      match: { path: { prefix: /static } }
+    - component: { name: web }
+      match: { path: { prefix: / } }
