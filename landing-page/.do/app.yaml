@@ -32,7 +32,7 @@ services:
     source_dir: /web
     github:
       repo: iklobato/avai
-      branch: feat/nextjs-rebuild
+      branch: main
       deploy_on_push: true
     http_port: 8080
     instance_count: 1
