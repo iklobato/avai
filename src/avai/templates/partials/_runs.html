@@ -4,6 +4,7 @@
   {{ card_header("recent runs") }}
   {% if recent_runs %}
     <div class="js-paged" data-pg="runs" data-page-size="8">
+    <div class="overflow-x-auto">
     <table class="w-full text-sm">
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -24,6 +25,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     <div class="js-pager"></div>
     </div>
   {% else %}

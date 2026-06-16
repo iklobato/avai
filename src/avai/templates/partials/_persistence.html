@@ -1,24 +1,11 @@
-{% from "partials/_macros.html" import card_header, pagination_bar %}
+{% from "partials/_macros.html" import card_header, pagination_bar, verdict_pill as verdict_pill_base %}
 
-{% set verdict_cls = {
-  'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
-  'suspicious': 'bg-amber-900/40 text-amber-300 border border-amber-900/60',
-  'unknown':    'bg-slate-700/40 text-slate-300 border border-slate-600',
-  'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
-} %}
-
+{# Row-shaped convenience wrapper over the shared pill: keeps the
+   {{ verdict_pill(k) }} call sites tidy while the colour palette lives in
+   one place (_macros.html). #}
 {% macro verdict_pill(row) %}
-  {% if row.verdict %}
-    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px]
-                 font-semibold uppercase tracking-wider
-                 {{ verdict_cls.get(row.verdict, verdict_cls['unknown']) }}">
-      {{ row.verdict }}{% if row.confidence is not none %}
-        <span class="ml-1 opacity-70">{{ "%.0f"|format(row.confidence * 100) }}%</span>
-      {% endif %}
-    </span>
-  {% else %}
-    <span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>
-  {% endif %}
+  {% if row.verdict %}{{ verdict_pill_base(row.verdict, row.confidence) }}
+  {% else %}<span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>{% endif %}
 {% endmacro %}
 
 {% macro subhead(title, c) %}
@@ -46,6 +33,7 @@
            name="q"
            value="{{ data.q }}"
            placeholder="search keys / hosts / rules"
+           aria-label="search persistence by keys, hosts or rules"
            autocomplete="off"
            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-48 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
            hx-get="/fragments/persistence"
@@ -55,6 +43,7 @@
            hx-vals='{"ssh_page": 1, "hosts_page": 1, "priv_page": 1}'>
 
     <select name="verdict"
+            aria-label="filter persistence by verdict"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/persistence"
             hx-target="#persistence"
@@ -69,6 +58,7 @@
     </select>
 
     <select name="per_page"
+            aria-label="rows per page"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/persistence"
             hx-target="#persistence"
@@ -87,6 +77,7 @@
     {# ---------- SSH authorized keys ---------- #}
     {{ subhead("SSH authorized keys", data.counts.ssh_keys) }}
     {% if data.ssh_keys %}
+      <div class="overflow-x-auto">
       <table class="w-full text-xs">
         <thead>
           <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -111,6 +102,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
       {% if data.pagination.ssh.total_pages > 1 %}
       <div class="flex items-center gap-3 mt-2 text-xs">
         <button type="button"
@@ -138,6 +130,7 @@
     {# ---------- /etc/hosts ---------- #}
     {{ subhead("/etc/hosts mappings", data.counts.hosts) }}
     {% if data.hosts %}
+      <div class="overflow-x-auto">
       <table class="w-full text-xs">
         <thead>
           <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -158,6 +151,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
       {% if data.pagination.hosts.total_pages > 1 %}
       <div class="flex items-center gap-3 mt-2 text-xs">
         <button type="button"
@@ -185,6 +179,7 @@
     {# ---------- privilege config ---------- #}
     {{ subhead("privilege config", data.counts.privilege) }}
     {% if data.privilege %}
+      <div class="overflow-x-auto">
       <table class="w-full text-xs">
         <thead>
           <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -207,6 +202,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
       {% if data.pagination.priv.total_pages > 1 %}
       <div class="flex items-center gap-3 mt-2 text-xs">
         <button type="button"

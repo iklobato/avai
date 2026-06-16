@@ -24,6 +24,52 @@
     };
   </script>
   <style>
+    /* ===== Design tokens: single source of truth for verdict colors =====
+       Pills reference these via Tailwind classes in _macros.html; the
+       Chart.js configs below reference the same hexes through one JS map
+       (VERDICT_HEX). Keep all three in sync. */
+    :root {
+      --verdict-malicious:  #ef4444;
+      --verdict-suspicious: #f59e0b;
+      --verdict-unknown:    #94a3b8;
+      --verdict-benign:     #10b981;
+    }
+
+    /* Screen-reader-only text: announced by assistive tech, hidden visually.
+       Used to label search/select controls that show only a placeholder. */
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+
+    /* WCAG 2.4.7 — an always-visible keyboard focus ring on every
+       interactive element. :focus-visible fires for keyboard nav only, so
+       mouse users don't see it. */
+    a:focus-visible, button:focus-visible, input:focus-visible,
+    select:focus-visible, textarea:focus-visible,
+    [tabindex]:focus-visible, [role="tab"]:focus-visible {
+      outline: 2px solid #38bdf8;
+      outline-offset: 2px;
+      border-radius: 2px;
+    }
+
+    /* WCAG 1.4.3 — slate-500/600 as body text fall below the 4.5:1 contrast
+       floor on the slate-900/950 surfaces. Lift both to an AA-passing grey
+       in one place (5.5:1) instead of touching ~200 utility sites. The
+       `body` prefix outranks the bare Tailwind utility, so this wins
+       regardless of the Play-CDN stylesheet's source order. */
+    body .text-slate-500, body .text-slate-600 { color: #8b99ad; }
+
+    /* WCAG 2.3.3 — honour users who request reduced motion (the pulsing
+       status dot, toast fade-in, htmx swap transitions). */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+      }
+    }
+
     /* a tiny bit of color-scheme glue Tailwind doesn't cover */
     select { color-scheme: dark; }
     .htmx-swapping, .htmx-settling { opacity: 0.85; transition: opacity 200ms; }
@@ -108,7 +154,7 @@
   <header class="border-b border-slate-800/80 bg-slate-900/40 backdrop-blur sticky top-0 z-10">
     <div class="max-w-screen-2xl mx-auto px-6 py-4 flex items-baseline justify-between gap-6">
       <div class="flex items-baseline gap-3">
-        <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true"></span>
         <h1 class="text-base font-semibold tracking-tight">avai host monitor</h1>
         <span id="header-meta"
               class="text-xs text-slate-500"
@@ -143,6 +189,9 @@
     </button>
   </div>
   <div id="toast-container"
+       role="region"
+       aria-label="security alerts"
+       aria-live="assertive"
        class="fixed top-28 right-4 z-50 w-96 max-w-[calc(100vw-2rem)] space-y-2 pointer-events-none">
   </div>
 
@@ -163,7 +212,7 @@
              hx-get="/fragments/overview"
              hx-trigger="load, every 30s"
              hx-swap="innerHTML"
-             class="grid grid-cols-2 xl:grid-cols-4 gap-4">
+             class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
       <div class="col-span-full text-slate-500 italic">loading overview…</div>
     </section>
 
@@ -261,13 +310,18 @@
   </main>
 
   <script>
-    // ---- Chart.js: stacked-bar verdict timeline ----
-    const COLOR = {
+    // ---- Verdict palette: the single JS source of truth, mirroring the
+    // --verdict-* CSS tokens in <style> and the pill classes in
+    // _macros.html. Both Chart.js configs below read from this. ----
+    const VERDICT_HEX = {
       malicious:  '#ef4444',
       suspicious: '#f59e0b',
       unknown:    '#94a3b8',
       benign:     '#10b981',
     };
+
+    // ---- Chart.js: stacked-bar verdict timeline ----
+    const COLOR = VERDICT_HEX;
 
     function formatLabel(iso13) {
       // 'YYYY-MM-DDTHH' → 'MM-DD HH:00'
@@ -280,6 +334,8 @@
     async function refreshChart() {
       const canvas = document.getElementById('verdict-chart');
       if (!canvas) return;
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', 'verdict activity over time, stacked by severity');
       try {
         const r = await fetch('/api/chart/verdicts', { cache: 'no-store' });
         if (!r.ok) return;
@@ -344,18 +400,18 @@
     // The donut lives inside the /fragments/verdicts partial (swapped on
     // every poll). We re-create the Chart after each swap, destroying the
     // prior instance first.
-    const VERDICT_COLOR = {
-      malicious:  '#ef4444',
-      suspicious: '#f59e0b',
-      unknown:    '#94a3b8',
-      benign:     '#10b981',
-    };
+    const VERDICT_COLOR = VERDICT_HEX;
     function renderVerdictDonut() {
       const canvas = document.querySelector('.js-verdict-donut');
       if (!canvas) return;
       const verdicts = ['malicious', 'suspicious', 'unknown', 'benign'];
       const values = verdicts.map(v => parseInt(canvas.dataset[v] || '0', 10));
       const total  = values.reduce((a, b) => a + b, 0);
+      // Canvas is opaque to assistive tech — expose the distribution as text.
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', total > 0
+        ? 'verdict totals — ' + verdicts.map((v, i) => `${v} ${values[i]}`).join(', ')
+        : 'verdict totals — none yet');
       // If everything is zero, Chart.js still draws — but show a thin
       // ghost ring instead of a solid one.
       const data = total > 0
@@ -490,16 +546,74 @@
       if (inp && !inp.value) inp.value = localStorage.getItem('avai_control_token') || '';
     });
 
-    // ---- Network tabs: highlight the active tab on click ----
-    document.body.addEventListener('click', (e) => {
-      const tab = e.target.closest && e.target.closest('.js-net-tab');
-      if (!tab) return;
+    // ---- Global HTMX error surface ----
+    // Without this, a fragment that 5xx's or fails to reach the server just
+    // leaves its "loading…" placeholder forever. Show a transient error toast
+    // (deduped per message) so the user knows the panel is stale.
+    const _shownErrors = new Set();
+    function showErrorToast(msg) {
+      const container = document.getElementById('toast-container');
+      if (!container || _shownErrors.has(msg)) return;
+      _shownErrors.add(msg);
+      const t = document.createElement('div');
+      t.setAttribute('role', 'alert');
+      t.className =
+        'js-toast pointer-events-auto bg-slate-900 border border-slate-800 ' +
+        'rounded-lg shadow-lg overflow-hidden border-l-4 border-l-red-500 ' +
+        'animate-[fadein_200ms_ease-out] p-3 text-xs text-slate-200';
+      t.textContent = '⚠ ' + msg;
+      container.appendChild(t);
+      refreshDismissAll();
+      setTimeout(() => {
+        if (t.isConnected) { t.remove(); refreshDismissAll(); }
+        _shownErrors.delete(msg);
+      }, 8000);
+    }
+    document.body.addEventListener('htmx:responseError', (e) => {
+      const status = (e.detail && e.detail.xhr && e.detail.xhr.status) || '?';
+      showErrorToast(`a panel failed to load (HTTP ${status}) — it will retry on the next refresh`);
+    });
+    document.body.addEventListener('htmx:sendError', () => {
+      showErrorToast('network error reaching the monitor — retrying on the next refresh');
+    });
+
+    // ---- Network tabs: manage active state (visual + ARIA) ----
+    // A roving tabindex + aria-selected keeps the tablist accessible: the
+    // active tab is the only one in the tab order, and arrow keys move
+    // between them (WAI-ARIA tabs pattern).
+    function activateNetTab(tab) {
       document.querySelectorAll('.js-net-tab').forEach((t) => {
         t.classList.remove('border-sky-500', 'text-slate-100');
         t.classList.add('border-transparent', 'text-slate-500');
+        t.setAttribute('aria-selected', 'false');
+        t.setAttribute('tabindex', '-1');
       });
       tab.classList.add('border-sky-500', 'text-slate-100');
       tab.classList.remove('border-transparent', 'text-slate-500');
+      tab.setAttribute('aria-selected', 'true');
+      tab.setAttribute('tabindex', '0');
+      const panel = document.getElementById('network-content');
+      if (panel && tab.id) panel.setAttribute('aria-labelledby', tab.id);
+    }
+    document.body.addEventListener('click', (e) => {
+      const tab = e.target.closest && e.target.closest('.js-net-tab');
+      if (tab) activateNetTab(tab);
+    });
+    document.body.addEventListener('keydown', (e) => {
+      const tab = e.target.closest && e.target.closest('.js-net-tab');
+      if (!tab) return;
+      const tabs = Array.from(document.querySelectorAll('.js-net-tab'));
+      const i = tabs.indexOf(tab);
+      let next = null;
+      if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+      else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+      else if (e.key === 'Home') next = tabs[0];
+      else if (e.key === 'End') next = tabs[tabs.length - 1];
+      if (next) {
+        e.preventDefault();
+        next.focus();
+        next.click();  // load the panel + set active state
+      }
     });
 
     // ---- Client-side pagination (collection-health tables) ----

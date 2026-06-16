@@ -1,11 +1,4 @@
-{% from "partials/_macros.html" import card_header, pagination_bar %}
-
-{% set verdict_cls = {
-  'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
-  'suspicious': 'bg-amber-900/40 text-amber-300 border border-amber-900/60',
-  'unknown':    'bg-slate-700/40 text-slate-300 border border-slate-600',
-  'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
-} %}
+{% from "partials/_macros.html" import card_header, pagination_bar, verdict_pill %}
 
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
   {{ card_header("network flows — tcpdump aggregator (by destination)") }}
@@ -21,6 +14,7 @@
            name="q"
            value="{{ flows.q }}"
            placeholder="search IP / host / process"
+           aria-label="search network flows by IP, host or process"
            autocomplete="off"
            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-48 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
            hx-get="/fragments/network-flows"
@@ -30,6 +24,7 @@
            hx-vals='{"page": 1}'>
 
     <select name="verdict"
+            aria-label="filter network flows by verdict"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/network-flows"
             hx-target="#network-flows"
@@ -44,6 +39,7 @@
     </select>
 
     <select name="per_page"
+            aria-label="rows per page"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/network-flows"
             hx-target="#network-flows"
@@ -88,6 +84,7 @@
     </div>
 
     {# ----- one row per destination IP (grouped / summed) ----- #}
+    <div class="overflow-x-auto">
     <table class="w-full text-xs">
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -105,17 +102,8 @@
         {% for f in flows.rows %}
           <tr class="hover:bg-slate-800/40 transition-colors [&>td]:align-top">
             <td class="py-2">
-              {% if f.verdict %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px]
-                             font-semibold uppercase tracking-wider
-                             {{ verdict_cls.get(f.verdict, verdict_cls['unknown']) }}">
-                  {{ f.verdict }}{% if f.confidence is not none %}
-                    <span class="ml-1 opacity-70">{{ "%.0f"|format(f.confidence * 100) }}%</span>
-                  {% endif %}
-                </span>
-              {% else %}
-                <span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>
-              {% endif %}
+              {% if f.verdict %}{{ verdict_pill(f.verdict, f.confidence) }}
+              {% else %}<span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>{% endif %}
             </td>
             <td class="py-2">
               <div class="leading-snug space-y-0.5">
@@ -188,6 +176,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
 
     {{ pagination_bar("network-flows", flows.page, flows.total_pages, flows.total, flows.rows|length, flows.per_page, per_page_options) }}
   {% elif flows %}

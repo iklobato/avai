@@ -1,11 +1,4 @@
-{% from "partials/_macros.html" import card_header, pagination_bar %}
-
-{% set verdict_cls = {
-  'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
-  'suspicious': 'bg-amber-900/40 text-amber-300 border border-amber-900/60',
-  'unknown':    'bg-slate-700/40 text-slate-300 border border-slate-600',
-  'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
-} %}
+{% from "partials/_macros.html" import card_header, pagination_bar, verdict_pill %}
 
 {# bind-scope badge: how reachable the listener is — the key threat signal #}
 {% set scope_cls = {
@@ -32,6 +25,7 @@
            name="q"
            value="{{ ports.q }}"
            placeholder="search process / port"
+           aria-label="search listening ports by process or port"
            autocomplete="off"
            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-48 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
            hx-get="/fragments/listening-ports"
@@ -41,6 +35,7 @@
            hx-vals='{"page": 1}'>
 
     <select name="verdict"
+            aria-label="filter listening ports by verdict"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/listening-ports"
             hx-target="#listening-ports"
@@ -55,6 +50,7 @@
     </select>
 
     <select name="scope_filter"
+            aria-label="filter listening ports by bind scope"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/listening-ports"
             hx-target="#listening-ports"
@@ -68,6 +64,7 @@
     </select>
 
     <select name="per_page"
+            aria-label="rows per page"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/listening-ports"
             hx-target="#listening-ports"
@@ -104,6 +101,7 @@
     </div>
 
     {# ----- one row per (port, process) listening socket ----- #}
+    <div class="overflow-x-auto">
     <table class="w-full text-xs">
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -123,17 +121,8 @@
           <tr class="hover:bg-slate-800/40 transition-colors [&>td]:align-top">
             {# verdict #}
             <td class="py-2">
-              {% if p.verdict %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px]
-                             font-semibold uppercase tracking-wider
-                             {{ verdict_cls.get(p.verdict, verdict_cls['unknown']) }}">
-                  {{ p.verdict }}{% if p.confidence is not none %}
-                    <span class="ml-1 opacity-70">{{ "%.0f"|format(p.confidence * 100) }}%</span>
-                  {% endif %}
-                </span>
-              {% else %}
-                <span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>
-              {% endif %}
+              {% if p.verdict %}{{ verdict_pill(p.verdict, p.confidence) }}
+              {% else %}<span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>{% endif %}
             </td>
             {# port #}
             <td class="py-2 mono text-slate-200 whitespace-nowrap">:{{ p.port if p.port is not none else "—" }}</td>
@@ -212,6 +201,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
 
     {{ pagination_bar("listening-ports", ports.page, ports.total_pages, ports.total, ports.rows|length, ports.per_page, per_page_options) }}
   {% elif ports %}

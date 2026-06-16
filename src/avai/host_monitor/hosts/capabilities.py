@@ -26,6 +26,12 @@ class FilesystemLayout(Protocol):
         """Directories to scan for setuid/setgid binaries."""
         ...
 
+    def app_executables(self) -> list[Path]:
+        """Individual application main executables to file-scan (macOS app
+        bundles' ``Contents/MacOS/*``); ``[]`` where the OS has no such
+        concept. Files, not directories — the scanner does not walk them."""
+        ...
+
     def home_dirs(self) -> list[Path]:
         """Per-user home directories (for ``~/.ssh/authorized_keys`` etc.)."""
         ...

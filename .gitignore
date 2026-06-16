@@ -34,3 +34,8 @@ venv/
 # Playwright MCP verification artifacts
 .playwright-mcp/
 *-resources.png
+
+# Opt-in YARA-Forge pack fetched by scripts/update_rules.py — never ship
+# in the wheel/sdist (mixed-license, needs a crypto-enabled yara). Users
+# fetch it post-install for their own environment.
+src/avai/rules/vendor/

@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 # differs, because the canonical `avai` slot is blocked by PyPI's
 # name-similarity policy.
 name = "avai-monitor"
-version = "0.5.0"
+version = "0.6.0"
 description = "macOS / Linux host-security telemetry collector with an LLM threat judge and a single-page web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -62,6 +62,9 @@ dependencies = [
     # back to escaping — article HTML renders as literal text in production.
     "markdown>=3.5",
     "bleach>=6.0",
+    # YARA signature scanning (FileScanCollector). Wheels bundle libyara for
+    # manylinux + macOS, so no separate system install is needed on those.
+    "yara-python>=4.5",
 ]
 
 [project.optional-dependencies]
@@ -93,9 +96,13 @@ Issues = "https://github.com/iklobato/avai/issues"
 [tool.hatch.build.targets.wheel]
 # packages = ["src/avai"] is enough — hatchling walks the directory
 # and includes every file (Python and otherwise), so prompts.toml,
-# templates/, and static/ end up under avai/ in the wheel
-# automatically.
+# templates/, static/, and the bundled rules/ (EICAR + deny-list) end up
+# under avai/ in the wheel automatically.
 packages = ["src/avai"]
+# The opt-in YARA-Forge pack is fetched into rules/vendor/ post-install;
+# it is mixed-license and needs a crypto-enabled yara, so it must never
+# ride along in a published artifact.
+exclude = ["src/avai/rules/vendor/**"]
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -105,3 +112,4 @@ include = [
     "docker-compose.yml",
     "pyproject.toml",
 ]
+exclude = ["src/avai/rules/vendor/**"]

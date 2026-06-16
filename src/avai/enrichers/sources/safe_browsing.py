@@ -3,6 +3,7 @@
 Requires ``GOOGLE_SAFE_BROWSING_API_KEY``. Free tier: 10k req/day.
 https://developers.google.com/safe-browsing/v4/lookup-api
 """
+
 from __future__ import annotations
 
 import os
@@ -19,23 +20,25 @@ from avai.enrichers.http import HttpClient
 
 _URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
 
-from avai import __version__ as _AVAI_VERSION
+from avai import __version__ as _AVAI_VERSION  # noqa: E402  (late: avoid import cycle)
 
 _CLIENT_INFO = {
-    "clientId":      "avai-monitor",
+    "clientId": "avai-monitor",
     "clientVersion": _AVAI_VERSION,
 }
 _THREAT_TYPES = [
-    "MALWARE", "SOCIAL_ENGINEERING", "UNWANTED_SOFTWARE",
+    "MALWARE",
+    "SOCIAL_ENGINEERING",
+    "UNWANTED_SOFTWARE",
     "POTENTIALLY_HARMFUL_APPLICATION",
 ]
 
 
 class SafeBrowsingEnricher(Enricher):
-    name           = "safe_browsing"
+    name = "safe_browsing"
     supports_types = frozenset({IndicatorType.URL})
     requires_token: ClassVar[Optional[str]] = "GOOGLE_SAFE_BROWSING_API_KEY"
-    ttl_hours      = 12
+    ttl_hours = 12
 
     def __init__(self, http: Optional[HttpClient] = None):
         self._http = http or HttpClient()
@@ -47,9 +50,9 @@ class SafeBrowsingEnricher(Enricher):
             "client": _CLIENT_INFO,
             "threatInfo": {
                 "threatTypes": _THREAT_TYPES,
-                "platformTypes":    ["ANY_PLATFORM"],
+                "platformTypes": ["ANY_PLATFORM"],
                 "threatEntryTypes": ["URL"],
-                "threatEntries":    [{"url": indicator.value}],
+                "threatEntries": [{"url": indicator.value}],
             },
         }
         resp = self._http.post(f"{_URL}?key={self._key}", json=payload)
@@ -61,10 +64,10 @@ class SafeBrowsingEnricher(Enricher):
             return None
         types = sorted({m.get("threatType") for m in matches if m.get("threatType")})
         return Evidence(
-            source       = self.name,
-            indicator    = indicator,
-            verdict_hint = VerdictHint.MALICIOUS,
-            confidence   = 0.95,
-            summary      = f"Google Safe Browsing: matches={types}",
-            details      = {"matches": matches[:5]},
+            source=self.name,
+            indicator=indicator,
+            verdict_hint=VerdictHint.MALICIOUS,
+            confidence=0.95,
+            summary=f"Google Safe Browsing: matches={types}",
+            details={"matches": matches[:5]},
         )

@@ -9,6 +9,7 @@ Decoupled from any one source so every enricher can call the same
 ``client.get(...)`` / ``client.post(...)`` and the framework owns
 the politeness rules.
 """
+
 from __future__ import annotations
 
 import logging
@@ -24,12 +25,12 @@ from avai.enrichers.base import RateLimitedError
 
 LOG = logging.getLogger("avai.enrichers.http")
 
-from avai import __version__ as _AVAI_VERSION
+from avai import __version__ as _AVAI_VERSION  # noqa: E402  (late: avoid import cycle)
 
 _USER_AGENT = f"avai-monitor/{_AVAI_VERSION} (+https://github.com/iklobato/avai)"
 _DEFAULT_TIMEOUT = 8.0
-_RETRY_STATUS    = (500, 502, 503, 504)
-_RETRY_BACKOFFS  = (0.4, 1.2, 3.0)  # seconds, jittered ±25%
+_RETRY_STATUS = (500, 502, 503, 504)
+_RETRY_BACKOFFS = (0.4, 1.2, 3.0)  # seconds, jittered ±25%
 
 
 class _TokenBucket:
@@ -40,8 +41,8 @@ class _TokenBucket:
 
     def __init__(self, rate_per_second: float):
         self._period = 1.0 / max(rate_per_second, 0.01)
-        self._last   = 0.0
-        self._lock   = threading.Lock()
+        self._last = 0.0
+        self._lock = threading.Lock()
 
     def take(self) -> None:
         with self._lock:
@@ -70,20 +71,30 @@ class HttpClient:
 
     # -- public verbs -----------------------------------------------------
 
-    def get(self, url: str, *,
-            headers: Optional[Mapping[str, str]] = None,
-            params: Optional[Mapping[str, Any]] = None,
-            timeout: float = _DEFAULT_TIMEOUT) -> requests.Response:
-        return self._request("GET", url, headers=headers, params=params,
-                             timeout=timeout)
+    def get(
+        self,
+        url: str,
+        *,
+        headers: Optional[Mapping[str, str]] = None,
+        params: Optional[Mapping[str, Any]] = None,
+        timeout: float = _DEFAULT_TIMEOUT,
+    ) -> requests.Response:
+        return self._request(
+            "GET", url, headers=headers, params=params, timeout=timeout
+        )
 
-    def post(self, url: str, *,
-             headers: Optional[Mapping[str, str]] = None,
-             data: Optional[Any] = None,
-             json: Optional[Any] = None,
-             timeout: float = _DEFAULT_TIMEOUT) -> requests.Response:
-        return self._request("POST", url, headers=headers, data=data,
-                             json=json, timeout=timeout)
+    def post(
+        self,
+        url: str,
+        *,
+        headers: Optional[Mapping[str, str]] = None,
+        data: Optional[Any] = None,
+        json: Optional[Any] = None,
+        timeout: float = _DEFAULT_TIMEOUT,
+    ) -> requests.Response:
+        return self._request(
+            "POST", url, headers=headers, data=data, json=json, timeout=timeout
+        )
 
     # -- internals --------------------------------------------------------
 
@@ -108,8 +119,9 @@ class HttpClient:
                 resp = self._session.request(method, url, **kw)
             except requests.RequestException as exc:
                 last_exc = exc
-                LOG.debug("http %s %s attempt %d failed: %s",
-                          method, url, attempt + 1, exc)
+                LOG.debug(
+                    "http %s %s attempt %d failed: %s", method, url, attempt + 1, exc
+                )
                 continue
             if resp.status_code == 429:
                 # 429 with Retry-After: respect a small one, give up on
@@ -124,8 +136,7 @@ class HttpClient:
                     continue
                 raise RateLimitedError(f"{host} returned 429")
             if resp.status_code in _RETRY_STATUS:
-                last_exc = requests.HTTPError(
-                    f"{resp.status_code} from {host}")
+                last_exc = requests.HTTPError(f"{resp.status_code} from {host}")
                 continue
             return resp
 

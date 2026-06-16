@@ -9,10 +9,16 @@ from __future__ import annotations
 
 from avai.host_monitor.hosts import HostFactory
 from avai.host_monitor.hosts.windows import (
+    WindowsBluetoothCollector,
     WindowsHost,
     WindowsInstalledAppsCollector,
     WindowsLaunchItemsCollector,
     WindowsPrivilegedAccounts,
+    WindowsSystemIntegrityCollector,
+    WindowsUsbDevicesCollector,
+    WindowsWifiCollector,
+    WinSecurityAuthParser,
+    WinSecurityExecParser,
 )
 from avai.host_monitor.prompts import Prompts
 
@@ -129,19 +135,195 @@ class TestWindowsHostWiring:
     def test_factory_resolves_windows(self):
         assert isinstance(HostFactory.create("Windows"), WindowsHost)
 
-    def test_collector_set_composes_out_unix_only(self):
+    def test_collector_set_includes_windows_native(self):
         collectors = WindowsHost().snapshot_collectors(
             Prompts(system="", user_template="")
         )
         names = {c.name for c in collectors}
         assert {"processes", "installed_apps", "launch_items", "hosts_file"} <= names
-        # No setuid / quarantine / device collectors on Windows.
+        # Windows-native posture + device collectors are wired.
+        assert {
+            "system_integrity",
+            "usb_devices",
+            "bluetooth_devices",
+            "wifi_state",
+        } <= names
+        # Still no Unix-only concepts on Windows.
         assert "setuid_files" not in names
         assert "quarantine_events" not in names
-        assert "usb_devices" not in names
 
-    def test_no_streaming_collectors_yet(self):
-        assert (
-            WindowsHost().streaming_collectors(Prompts(system="", user_template=""))
-            == []
+    def test_streaming_collectors_assembled(self):
+        collectors = WindowsHost().streaming_collectors(
+            Prompts(system="", user_template="")
         )
+        names = {c.name for c in collectors}
+        assert names == {"auth_events", "process_exec_events"}
+        # Both feed the shared row models so the dashboard treats every OS
+        # identically.
+        models = {c.model.__name__ for c in collectors}
+        assert models == {"AuthEventRow", "ProcessExecRow"}
+
+
+class TestSystemIntegrityParser:
+    def test_maps_posture_into_macos_shaped_row(self):
+        data = {
+            "defender": {"RealTimeProtectionEnabled": True, "AntivirusEnabled": True},
+            "firewall": [
+                {"Name": "Domain", "Enabled": "True"},
+                {"Name": "Public", "Enabled": False},
+            ],
+            "bitlocker": {"MountPoint": "C:", "ProtectionStatus": 1},
+            "secureboot": True,
+            "rdp_deny": 0,
+            "winrm": "Running",
+        }
+        row = WindowsSystemIntegrityCollector._row_from_status(data)
+        assert row["filevault_active"] == 1  # BitLocker protected
+        assert row["firewall_global_state"] == 1  # at least one profile on
+        assert row["gatekeeper_assessments_enabled"] == 1  # Defender/SecureBoot
+        assert row["remote_login_enabled"] == 1  # RDP accepting
+        assert row["remote_management_enabled"] == 1  # WinRM running
+
+    def test_all_off_posture(self):
+        data = {
+            "defender": {"RealTimeProtectionEnabled": False},
+            "firewall": {"Name": "Public", "Enabled": False},
+            "bitlocker": None,
+            "secureboot": False,
+            "rdp_deny": 1,
+            "winrm": "Stopped",
+        }
+        row = WindowsSystemIntegrityCollector._row_from_status(data)
+        assert row["filevault_active"] == 0
+        assert row["firewall_global_state"] == 0
+        assert row["gatekeeper_assessments_enabled"] == 0
+        assert row["remote_login_enabled"] == 0
+        assert row["remote_management_enabled"] == 0
+
+    def test_non_dict_is_none(self):
+        assert WindowsSystemIntegrityCollector._row_from_status(None) is None
+
+
+class TestUsbDevicesParser:
+    def test_ids_parsed_from_instance(self):
+        data = {
+            "FriendlyName": "USB Mass Storage Device",
+            "InstanceId": "USB\\VID_0781&PID_5583\\0123456789",
+            "Manufacturer": "SanDisk",
+            "Status": "OK",
+        }
+        rows = WindowsUsbDevicesCollector._rows_from_json(data)
+        assert len(rows) == 1
+        assert rows[0]["vendor_id"] == "0781"
+        assert rows[0]["product_id"] == "5583"
+        assert rows[0]["name"] == "USB Mass Storage Device"
+
+    def test_missing_ids_are_none(self):
+        rows = WindowsUsbDevicesCollector._rows_from_json(
+            {"FriendlyName": "Hub", "InstanceId": "USB\\ROOT_HUB30\\4&abc"}
+        )
+        assert rows[0]["vendor_id"] is None
+        assert rows[0]["product_id"] is None
+
+    def test_none_is_empty(self):
+        assert WindowsUsbDevicesCollector._rows_from_json(None) == []
+
+
+class TestBluetoothParser:
+    def test_address_and_connected(self):
+        data = {
+            "FriendlyName": "WH-1000XM4",
+            "InstanceId": "BTHENUM\\Dev_AABBCCDDEEFF\\7&x",
+            "Status": "OK",
+        }
+        rows = WindowsBluetoothCollector._rows_from_json(data)
+        assert rows[0]["address"] == "AABBCCDDEEFF"
+        assert rows[0]["connected"] == 1
+        assert rows[0]["paired"] == 1
+
+    def test_disconnected_present_device(self):
+        rows = WindowsBluetoothCollector._rows_from_json(
+            {"FriendlyName": "Mouse", "InstanceId": "x", "Status": "Unknown"}
+        )
+        assert rows[0]["connected"] == 0
+        assert rows[0]["address"] is None
+
+
+class TestWifiParser:
+    _NETSH = """\
+There is 1 interface on the system:
+
+    Name                   : Wi-Fi
+    State                  : connected
+    SSID                   : HomeNet
+    BSSID                  : 00:11:22:33:44:55
+    Authentication         : WPA2-Personal
+    Channel                : 36
+"""
+
+    def test_parses_interface_block(self):
+        rows = WindowsWifiCollector._rows_from_netsh(self._NETSH)
+        assert len(rows) == 1
+        assert rows[0]["interface"] == "Wi-Fi"
+        assert rows[0]["ssid"] == "HomeNet"
+        # The MAC's own colons survive single-split partition.
+        assert rows[0]["bssid"] == "00:11:22:33:44:55"
+        assert rows[0]["security"] == "WPA2-Personal"
+        assert rows[0]["channel"] == "36"
+
+    def test_preamble_without_name_is_skipped(self):
+        assert WindowsWifiCollector._rows_from_netsh("There is 0 interfaces\n") == []
+
+    def test_empty_is_empty(self):
+        assert WindowsWifiCollector._rows_from_netsh("") == []
+
+
+class TestStreamingParsers:
+    def test_auth_event_to_row(self):
+        event = {
+            "TimeCreated": "2026-06-16T12:00:00.000000+00:00",
+            "Id": 4625,
+            "Provider": "Microsoft-Windows-Security-Auditing",
+            "ProcessId": 612,
+            "RecordId": 99,
+            "Message": "An account failed to log on.",
+        }
+        row = WinSecurityAuthParser().parse(event)
+        assert row["event_timestamp"] == "2026-06-16T12:00:00.000000+00:00"
+        assert row["subsystem"] == "Security"
+        assert row["category"] == "4625"
+        assert row["event_type"] == "event_id=4625"
+        assert row["pid"] == 612
+        assert "failed to log on" in row["event_message"]
+
+    def test_auth_event_missing_pid_is_none(self):
+        row = WinSecurityAuthParser().parse({"Id": 4624, "ProcessId": None})
+        assert row["pid"] is None
+
+    def test_exec_event_to_row_with_hex_pids(self):
+        event = {
+            "TimeCreated": "2026-06-16T12:00:01+00:00",
+            "RecordId": 100,
+            "Data": {
+                "NewProcessId": "0x1a4",
+                "ProcessId": "0x4",
+                "NewProcessName": "C:\\Windows\\System32\\cmd.exe",
+                "ParentProcessName": "C:\\Windows\\explorer.exe",
+                "CommandLine": "cmd.exe /c whoami",
+                "SubjectUserName": "alice",
+            },
+        }
+        row = WinSecurityExecParser().parse(event)
+        assert row["event_type"] == "exec"
+        assert row["pid"] == 420  # 0x1a4
+        assert row["ppid"] == 4
+        assert row["exe_path"] == "C:\\Windows\\System32\\cmd.exe"
+        assert row["parent_path"] == "C:\\Windows\\explorer.exe"
+        assert row["username"] == "alice"
+        assert "/c whoami" in row["exe_args_json"]
+
+    def test_exec_event_empty_data(self):
+        row = WinSecurityExecParser().parse({"Data": {}})
+        assert row["exe_path"] is None
+        assert row["exe_args_json"] is None
+        assert row["pid"] is None

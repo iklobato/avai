@@ -12,6 +12,7 @@ from ..collectors import (
     DiskUsageCollector,
     DnsQueriesCollector,
     FileIntegrityCollector,
+    FileScanCollector,
     HostResourcesCollector,
     HostsFileCollector,
     InstalledAppsCollector,
@@ -82,6 +83,25 @@ class MacOSFilesystemLayout:
 
     def privileged_bin_dirs(self) -> list[Path]:
         return [Path(d) for d in self._BIN_DIRS]
+
+    def app_executables(self) -> list[Path]:
+        # The bundle's main binary lives at <App>.app/Contents/MacOS/*.
+        # Globbing per-bundle bounds this to the app count (~hundreds),
+        # not the ~150k resource files a full /Applications walk would hit.
+        app_roots = [Path("/Applications")] + [
+            home / "Applications" for home in self.home_dirs()
+        ]
+        out: list[Path] = []
+        for root in app_roots:
+            try:
+                # is_dir() re-raises EACCES (e.g. /var/root/Applications when
+                # not root), so it must sit inside the guard, not before it.
+                if not root.is_dir():
+                    continue
+                out += [p for p in root.glob("*.app/Contents/MacOS/*") if p.is_file()]
+            except OSError:
+                continue
+        return out
 
     def home_dirs(self) -> list[Path]:
         homes: list[Path] = []
@@ -179,6 +199,7 @@ class MacOSHost:
             BrowserExtensionsCollector(judge_hints=h("browser_extensions")),
             SystemIntegrityCollector(judge_hints=h("system_integrity")),
             FileIntegrityCollector(judge_hints=h("file_integrity")),
+            FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),
             InstalledAppsCollector(judge_hints=h("installed_apps")),
             MountsCollector(judge_hints=h("mounts")),
             SetuidFilesCollector(judge_hints=h("setuid_files"), fs=self._fs),

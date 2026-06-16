@@ -1,0 +1,8 @@
+# avai offline known-bad hash deny-list.
+#
+# One hex digest per line (md5, sha1, or sha256). Blank lines and any
+# text after a '#' are ignored. A hash listed here yields an instant
+# MALICIOUS verdict from the local_denylist enricher — no network call.
+#
+# This file ships empty. Point AVAI_HASH_DENYLIST at a maintained feed,
+# or append your own known-bad hashes below.

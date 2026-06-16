@@ -14,6 +14,7 @@ from ..collectors import (
     DiskUsageCollector,
     DnsQueriesCollector,
     FileIntegrityCollector,
+    FileScanCollector,
     HostResourcesCollector,
     HostsFileCollector,
     LinuxAuthEventsCollector,
@@ -87,6 +88,11 @@ class LinuxFilesystemLayout:
 
     def privileged_bin_dirs(self) -> list[Path]:
         return [HostPaths.translate(d) for d in self._BIN_DIRS]
+
+    def app_executables(self) -> list[Path]:
+        # No macOS-style app bundles on Linux; /opt is already covered by
+        # privileged_bin_dirs, so there's nothing extra to enumerate here.
+        return []
 
     def home_dirs(self) -> list[Path]:
         homes: list[Path] = []
@@ -226,6 +232,7 @@ class LinuxHost:
             ),
             LinuxSystemIntegrityCollector(judge_hints=h("system_integrity")),
             FileIntegrityCollector(judge_hints=h("file_integrity"), watched=watched),
+            FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),
             LinuxInstalledAppsCollector(judge_hints=h("installed_apps")),
             MountsCollector(judge_hints=h("mounts")),
             SetuidFilesCollector(judge_hints=h("setuid_files"), fs=self._fs),

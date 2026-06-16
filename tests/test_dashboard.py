@@ -187,6 +187,8 @@ class TestDashboardEndpoints:
             "/fragments/verdicts",
             "/fragments/collection",
             "/fragments/network",
+            "/fragments/network-topology",
+            "/fragments/network-exposure",
             "/fragments/vulnerabilities",
         ],
     )
@@ -216,7 +218,235 @@ class TestDashboardEndpoints:
         assert "listening ports" in body
         assert "outbound flows" in body
         assert "dns queries" in body
+        assert "topology" in body
+        assert "exposure" in body
         assert "js-net-tab" in body
+
+    def test_network_exposure_renders_rows_with_verdicts(self, client):
+        # A configured proxy and an active remote login session (with a
+        # verdict joined on content_hash/collector) must surface in the
+        # exposure panel.
+        from avai.host_monitor import (
+            CollectionRun,
+            Judgement,
+            LoginSessionRow,
+            ProxyConfigRow,
+        )
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                ProxyConfigRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="p1",
+                    scope="https",
+                    host="10.0.0.9",
+                    port="8080",
+                )
+            )
+            s.add(
+                LoginSessionRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="l1",
+                    user="root",
+                    tty="pts/0",
+                    source="203.0.113.7",
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="l1",
+                    collector="login_sessions",
+                    verdict="malicious",
+                    category="access",
+                    confidence=0.8,
+                    reasoning="remote root login from unknown IP",
+                    remediation="kill session",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/network-exposure").data.decode()
+        assert "10.0.0.9" in body  # proxy host
+        assert "203.0.113.7" in body  # login source
+        assert "malicious" in body  # joined verdict
+        assert "remote root login from unknown IP" in body  # reasoning
+
+        # search filter narrows to matching rows only
+        filtered = client.get("/fragments/network-exposure?q=10.0.0.9").data.decode()
+        assert "10.0.0.9" in filtered
+        assert "203.0.113.7" not in filtered
+
+    def test_network_panel_is_an_accessible_tablist(self, client):
+        # WAI-ARIA tabs pattern: the tab strip must be a tablist of tabs that
+        # control the shared panel, with exactly one tab pre-selected.
+        body = client.get("/fragments/network").data.decode()
+        assert 'role="tablist"' in body
+        assert 'role="tab"' in body
+        assert 'role="tabpanel"' in body
+        assert 'aria-controls="network-content"' in body
+        # exactly one selected tab (the first), the rest are not
+        assert body.count('aria-selected="true"') == 1
+        assert 'aria-selected="false"' in body
+
+    def test_filter_controls_have_accessible_labels(self, client):
+        # WCAG 1.3.1/3.3.2 — placeholder is not a label. Every search box and
+        # select in the data panels must carry an aria-label. The panels only
+        # render their filter bar once a run exists, so seed one first.
+        from avai.host_monitor import CollectionRun
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.commit()
+
+        for path in (
+            "/fragments/dns-queries",
+            "/fragments/listening-ports",
+            "/fragments/findings",
+            "/fragments/network-topology",
+            "/fragments/network-exposure",
+        ):
+            body = client.get(path).data.decode()
+            assert "aria-label=" in body, f"{path} has an unlabelled control"
+
+    def test_dns_pill_routes_through_shared_macro_with_confidence(self, client):
+        # Regression for centralising the verdict palette: the per-partial
+        # colour maps were removed in favour of the shared verdict_pill macro,
+        # which must still render the verdict text AND the confidence suffix.
+        from avai.host_monitor import CollectionRun, DnsQueryRow, Judgement
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                DnsQueryRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="d1",
+                    qname="evil.example.com",
+                    qtype="A",
+                    server_ip="9.9.9.9",
+                    process="curl",
+                    count=3,
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="d1",
+                    collector="dns_queries",
+                    verdict="malicious",
+                    category="c2",
+                    confidence=0.91,
+                    reasoning="known bad domain",
+                    remediation="block",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/dns-queries").data.decode()
+        assert "evil.example.com" in body
+        assert "malicious" in body  # pill verdict text
+        assert "91%" in body  # confidence suffix from the shared macro
+
+    def test_network_topology_renders_rows_with_verdicts(self, client):
+        # A configured resolver and an ARP entry (with a verdict joined on
+        # content_hash/collector) must surface in the topology panel.
+        from avai.host_monitor import (
+            ArpEntryRow,
+            CollectionRun,
+            DnsResolverRow,
+            Judgement,
+        )
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                DnsResolverRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="r1",
+                    server="9.9.9.9",
+                    scope="scutil",
+                    search="lan",
+                    interface="en0",
+                )
+            )
+            s.add(
+                ArpEntryRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="a1",
+                    ip="192.168.1.1",
+                    mac="de:ad:be:ef:00:01",
+                    interface="en0",
+                    flags="",
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="a1",
+                    collector="arp_table",
+                    verdict="suspicious",
+                    category="mitm",
+                    confidence=0.6,
+                    reasoning="new mac for the gateway",
+                    remediation="verify",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/network-topology").data.decode()
+        assert "9.9.9.9" in body  # resolver
+        assert "de:ad:be:ef:00:01" in body  # arp mac
+        assert "suspicious" in body  # joined verdict
+        assert "new mac for the gateway" in body  # reasoning
+
+        # search filter narrows to matching rows only
+        filtered = client.get("/fragments/network-topology?q=9.9.9.9").data.decode()
+        assert "9.9.9.9" in filtered
+        assert "de:ad:be:ef:00:01" not in filtered
 
     def test_vulnerabilities_panel_renders_cves_and_kev(self, client):
         import json as _json
@@ -780,7 +1010,7 @@ class TestLatestRunFallback:
 
     def _sink(self, tmp_path):
         engine = create_engine(
-            f"sqlite:///{tmp_path/'r.db'}", connect_args={"check_same_thread": False}
+            f"sqlite:///{tmp_path / 'r.db'}", connect_args={"check_same_thread": False}
         )
         s = Sink(engine)
         s.setup()

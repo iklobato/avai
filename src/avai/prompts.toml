@@ -271,6 +271,16 @@ Watched files are credentials / shell init / SSH config / sudoers / \
 suspicious. A missing file that previously existed is suspicious.\
 """
 
+file_scan = """\
+A YARA rule matched this file — strong evidence, but not a final verdict. \
+Weigh the rule name / tags (what capability or family it signals) and any \
+attached hash threat-intel (VirusTotal, MalwareBazaar, the local \
+deny-list). A match on a signed, OS-shipped binary in a standard bin dir \
+is often a generic/heuristic rule firing on a benign tool — treat with \
+more skepticism than a match on a freshly downloaded file or an unsigned \
+binary in an app bundle.\
+"""
+
 installed_apps = """\
 Flag: apps outside /Applications and ~/Applications (unusual install \
 location); bundle IDs that don't match the app name; bundle IDs that \

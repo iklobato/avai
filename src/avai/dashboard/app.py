@@ -45,7 +45,9 @@ from .queries import (
     latest_risk,
     latest_run,
     listening_ports,
+    network_exposure,
     network_flows,
+    network_topology,
     new_alerts,
     persistence_tampering,
     recent_runs,
@@ -504,6 +506,38 @@ def fragment_dns_queries():
                 else None
             ),
             per_page_options=PER_PAGE_OPTIONS,
+        )
+
+
+@app.route("/fragments/network-topology")
+def fragment_network_topology():
+    verdict = request.args.get("verdict", "")
+    q = request.args.get("q", "")
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_network_topology.html",
+            topo=(
+                network_topology(s, latest.run_id, verdict=verdict, q=q)
+                if latest
+                else None
+            ),
+        )
+
+
+@app.route("/fragments/network-exposure")
+def fragment_network_exposure():
+    verdict = request.args.get("verdict", "")
+    q = request.args.get("q", "")
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_network_exposure.html",
+            expo=(
+                network_exposure(s, latest.run_id, verdict=verdict, q=q)
+                if latest
+                else None
+            ),
         )
 
 

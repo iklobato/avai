@@ -40,8 +40,8 @@ def engine():
 class TestDiscoverEnricherClasses:
     def test_returns_all_known_sources(self):
         names = {c.name for c in discover_enricher_classes()}
-        # Expected total: 9 keyless + 3 abuse.ch + 6 keyed = 18.
-        assert len(names) == 18
+        # Expected total: 10 keyless + 3 abuse.ch + 6 keyed = 19.
+        assert len(names) == 19
         # Spot-check membership.
         assert {"malware_bazaar", "virustotal", "cisa_kev", "ipwhois_geo"}.issubset(
             names
@@ -59,7 +59,7 @@ class TestDiscoverEnricherClasses:
 class TestBuildDefaultChain:
     def test_with_no_tokens_only_keyless_sources_register(self, engine):
         chain = build_default_chain(engine, _Base)
-        # 9 keyless enrichers; the rest are gated.
+        # 10 keyless enrichers; the rest are gated.
         assert sorted(chain.sources) == sorted(
             [
                 "circl_hashlookup",
@@ -71,6 +71,7 @@ class TestBuildDefaultChain:
                 "endoflife",
                 "crtsh",
                 "ipwhois_geo",
+                "local_denylist",
             ]
         )
 
@@ -120,4 +121,4 @@ class TestBuildDefaultChain:
         ):
             monkeypatch.setenv(var, "fake")
         chain = build_default_chain(engine, _Base)
-        assert len(chain.sources) == 18
+        assert len(chain.sources) == 19
