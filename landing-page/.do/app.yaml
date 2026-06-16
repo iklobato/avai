@@ -12,7 +12,10 @@
 #
 # Secrets to inject at deploy:
 #   AUTOSEO_WEBHOOK_TOKEN  the shared Bearer/HMAC secret
-#   DATABASE_URL           postgresql://avai_app:<pw>@<cluster-host>:25060/avai?sslmode=require
+#   DATABASE_URL           postgresql://avai_app:<pw>@<cluster-host>:25060/avai
+#                          (NO ?sslmode= — node-postgres v8.13+ treats sslmode
+#                          as verify-full and rejects DO's self-signed chain;
+#                          DATABASE_SSL=require below drives TLS instead.)
 # The avai-landing app is already a trusted source on the DB cluster.
 name: avai-landing
 region: nyc
@@ -52,6 +55,11 @@ services:
         scope: RUN_TIME
         type: SECRET
         value: REPLACE_AT_DEPLOY
+      # Force TLS without CA verification (DO managed PG uses a self-signed
+      # chain). lib/db.ts reads this; keep sslmode OUT of DATABASE_URL.
+      - key: DATABASE_SSL
+        scope: RUN_TIME
+        value: require
 
 ingress:
   rules:
