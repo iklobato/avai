@@ -1,0 +1,35 @@
+avai bundled detection rules
+============================
+
+This directory holds the YARA rules the FileScanCollector compiles, plus
+the offline hash deny-list the local_denylist enricher reads.
+
+Contents shipped in the repo
+----------------------------
+- eicar.yar         Baseline EICAR test-file rule (avai-authored, MIT).
+                    Guarantees scanning is functional out of the box.
+- hash_denylist.txt Empty deny-list template (avai-authored, MIT).
+
+Curated rule pack (vendor/) — NOT yet committed
+-----------------------------------------------
+A curated pack (YARA-Forge "core") is fetched into ./vendor/ by
+`scripts/update_rules.py`, which pins an exact upstream release for
+reproducibility. The pack is intentionally NOT committed to this repo yet.
+
+LICENSING — read before committing the pack
+--------------------------------------------
+avai itself is MIT. YARA-Forge aggregates community rules under MIXED
+licenses, some copyleft. Those rules are NOT relicensed under MIT: when
+the pack is vendored, its upstream LICENSE / attribution files are kept
+alongside it under ./vendor/, and this NOTICE points at them. Shipping the
+pack is a deliberate licensing decision that needs a human sign-off — do
+not commit ./vendor/ until that review is done.
+
+Refreshing the pack
+-------------------
+    python scripts/update_rules.py            # fetch the pinned release
+    python scripts/update_rules.py --version X.Y.Z   # bump the pin
+
+Users can always drop their own *.yar / *.yara files in this directory
+(or set AVAI_YARA_RULES_DIR) — uncompilable files are skipped with a
+warning, never silently, and never disable the rest of the ruleset.

@@ -300,6 +300,21 @@ class FileIntegrityExtractor(IndicatorExtractor):
             )
 
 
+class FileScanExtractor(IndicatorExtractor):
+    """YARA-matched files — enrich the file's own sha256 so a rule hit
+    converges with hash threat-intel (VirusTotal / MalwareBazaar / CIRCL /
+    the local deny-list) on the same finding."""
+
+    def extract(self, row):
+        digest = row.get("sha256")
+        if isinstance(digest, str) and len(digest) == 64:
+            yield Indicator(
+                IndicatorType.SHA256,
+                digest,
+                context={"path": str(row.get("path") or "")},
+            )
+
+
 def _share_server(remote: str) -> str | None:
     """Pull the server host out of a share path: ``//server/share``,
     ``\\\\server\\share`` (SMB) or ``server:/export`` (NFS)."""
@@ -405,6 +420,7 @@ EXTRACTORS: dict[str, IndicatorExtractor] = {
     "system_integrity": SystemIntegrityExtractor(),
     "process_exec_events": ProcessExecEventExtractor(),
     "file_integrity": FileIntegrityExtractor(),
+    "file_scan": FileScanExtractor(),
     "dns_resolvers": DnsResolverExtractor(),
     "proxy_config": ProxyConfigExtractor(),
     "network_shares": NetworkShareExtractor(),

@@ -360,6 +360,18 @@ class FileIntegrityRow(_RowBase):
     exists_flag: Mapped[Optional[int]]
 
 
+class FileScanRow(_RowBase):
+    __tablename__ = "file_scan"
+    path: Mapped[str] = mapped_column(index=True)
+    sha256: Mapped[Optional[str]] = mapped_column(index=True)
+    rule: Mapped[Optional[str]]
+    namespace: Mapped[Optional[str]]
+    tags_json: Mapped[Optional[str]]
+    size: Mapped[Optional[int]]
+    mtime: Mapped[Optional[float]]
+    scan_source: Mapped[Optional[str]]
+
+
 class InstalledAppRow(_RowBase):
     __tablename__ = "installed_apps"
     path: Mapped[str]

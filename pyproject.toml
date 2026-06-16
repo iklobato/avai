@@ -62,6 +62,9 @@ dependencies = [
     # back to escaping — article HTML renders as literal text in production.
     "markdown>=3.5",
     "bleach>=6.0",
+    # YARA signature scanning (FileScanCollector). Wheels bundle libyara for
+    # manylinux + macOS, so no separate system install is needed on those.
+    "yara-python>=4.5",
 ]
 
 [project.optional-dependencies]

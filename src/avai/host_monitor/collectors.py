@@ -24,6 +24,8 @@ except ImportError:
     sys.stderr.write("Required: pip install psutil\n")
     sys.exit(2)
 
+import yara
+
 from . import constants
 from .constants import (
     APP_INFO_KEYS,
@@ -40,6 +42,7 @@ from .models import (
     DiskUsageRow,
     DnsQueryRow,
     FileIntegrityRow,
+    FileScanRow,
     HostResourceRow,
     HostsFileRow,
     InstalledAppRow,
@@ -1259,6 +1262,181 @@ class FileIntegrityCollector(SnapshotCollector):
             "gid": None,
             "exists_flag": 0,
         }
+
+
+def _compile_yara_rules(rules_dir: Path):
+    """Compile every ``*.yar`` / ``*.yara`` under ``rules_dir`` into one
+    :class:`yara.Rules`. Returns ``None`` when the directory is absent or
+    holds no compilable rules.
+
+    Each file is validated independently first and uncompilable ones are
+    skipped with a warning, so a single malformed rule in a bundled pack
+    can't disable scanning entirely. Per-file namespaces keep rule
+    identifiers from colliding across files in the combined compile.
+    """
+    if not rules_dir.is_dir():
+        return None
+    filepaths: dict[str, str] = {}
+    for path in sorted(rules_dir.rglob("*")):
+        if path.suffix.lower() not in (".yar", ".yara") or not path.is_file():
+            continue
+        try:
+            yara.compile(filepath=str(path))
+        except yara.Error as exc:
+            constants.LOG.warning("yara: skipping uncompilable rules %s: %s", path, exc)
+            continue
+        namespace = path.stem
+        unique = namespace
+        suffix = 1
+        while unique in filepaths:
+            unique = f"{namespace}_{suffix}"
+            suffix += 1
+        filepaths[unique] = str(path)
+    if not filepaths:
+        return None
+    try:
+        return yara.compile(filepaths=filepaths)
+    except yara.Error as exc:
+        constants.LOG.warning("yara: combined compile failed: %s", exc)
+        return None
+
+
+class FileScanCollector(SnapshotCollector):
+    """Signature scanning: match YARA rules against a bounded set of
+    high-signal files and emit one row per ``(file, matched rule)``.
+
+    A rule hit is strong evidence the LLM judge weighs alongside any
+    threat-intel on the file's hash (the matched file's sha256 is also
+    enriched). avai stays observe-only — nothing is quarantined or killed.
+
+    Targets are deliberately bounded (see ``constants.YARA_*``): a full
+    disk walk is infeasible (~150k files under ``/Applications`` alone), so
+    the scanner walks the same small, security-relevant corners other
+    collectors already trust — privileged bin dirs and application
+    executables — plus *recently modified* Downloads, where freshly
+    delivered payloads land.
+    """
+
+    name = "file_scan"
+    model = FileScanRow
+    judge_fields = ("path", "sha256", "rule", "namespace", "tags_json")
+
+    _SECONDS_PER_DAY = 86400
+
+    def __init__(
+        self,
+        judge_hints: str = "",
+        fs: "FilesystemLayout" = None,
+        rules_dir: Optional[Path] = None,
+        clock: Optional[Clock] = None,
+    ):
+        super().__init__(judge_hints=judge_hints)
+        self._fs = fs
+        self._rules_dir = Path(rules_dir) if rules_dir else constants.YARA_RULES_DIR
+        self._clock = clock or Clock()
+        self._rules = None  # compiled once, lazily
+        self._compiled = False
+
+    def _ruleset(self):
+        if not self._compiled:
+            self._rules = _compile_yara_rules(self._rules_dir)
+            self._compiled = True
+        return self._rules
+
+    def collect(self):
+        rules = self._ruleset()
+        if rules is None:
+            return
+        scanned = 0
+        for path, source in self._targets():
+            if scanned >= constants.YARA_MAX_FILES_PER_CYCLE:
+                return
+            yield from self._scan_file(path, source, rules)
+            scanned += 1  # count every scan attempt, matched or not
+
+    def _targets(self):
+        """Yield ``(path, scan_source)`` for each file to scan, deduped by
+        path. Bounded by construction; the per-cycle cap is enforced by the
+        caller. No ``fs`` ⇒ nothing to scan."""
+        if self._fs is None:
+            return
+        seen: set[str] = set()
+
+        def _fresh(path: Path) -> bool:
+            sp = str(path)
+            if sp in seen:
+                return False
+            seen.add(sp)
+            return True
+
+        # 1) privileged bin dirs — recursive, but a small file set.
+        for base in self._fs.privileged_bin_dirs():
+            # is_dir() re-raises EACCES, so guard it together with the walk.
+            try:
+                if not base.is_dir():
+                    continue
+                files = list(base.rglob("*"))
+            except OSError:
+                continue
+            for p in files:
+                if _fresh(p):
+                    yield p, "bin_dirs"
+        # 2) application executables (macOS bundles; [] elsewhere).
+        for p in self._fs.app_executables():
+            if _fresh(p):
+                yield p, "app_bundle"
+        # 3) recently modified Downloads in each home.
+        cutoff = self._recent_cutoff()
+        for home in self._fs.home_dirs():
+            downloads = home / "Downloads"
+            try:
+                if not downloads.is_dir():
+                    continue
+                files = list(downloads.rglob("*"))
+            except OSError:
+                continue
+            for p in files:
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        continue
+                except (PermissionError, OSError):
+                    continue
+                if _fresh(p):
+                    yield p, "downloads"
+
+    def _recent_cutoff(self) -> float:
+        now = datetime.fromisoformat(self._clock.now_iso()).timestamp()
+        return now - constants.YARA_DOWNLOADS_RECENT_DAYS * self._SECONDS_PER_DAY
+
+    def _scan_file(self, path: Path, source: str, rules):
+        try:
+            if not path.is_file():
+                return
+            st = path.stat()  # follow symlinks: size must reflect bytes read
+        except (PermissionError, OSError):
+            return
+        if st.st_size > constants.YARA_MAX_FILE_BYTES:
+            return
+        try:
+            matches = rules.match(str(path), timeout=constants.YARA_MATCH_TIMEOUT_S)
+        except yara.Error:
+            # Unreadable, vanished mid-scan, or match timeout — skip this
+            # file and keep scanning the rest.
+            return
+        if not matches:
+            return
+        sha = Digest.sha256_file(path)
+        for m in matches:
+            yield {
+                "path": str(path),
+                "sha256": sha,
+                "rule": m.rule,
+                "namespace": m.namespace,
+                "tags_json": json.dumps(list(m.tags)),
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+                "scan_source": source,
+            }
 
 
 class InstalledAppsCollector(SnapshotCollector):
