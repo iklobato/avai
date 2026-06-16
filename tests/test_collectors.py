@@ -15,6 +15,7 @@ was in `HostPaths.for_home()` returning [] and the caller doing
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,11 +24,21 @@ import avai.host_monitor as hm
 from avai.host_monitor import LinuxLaunchItemsCollector
 from avai.host_monitor.runtime import HostPaths
 
+# HOST_PREFIX path translation, the Linux launch_items collector, and the
+# journald-dir probe all assume POSIX path semantics and a Linux filesystem
+# layout (forward-slash joins, /etc, systemd unit dirs). On Windows
+# pathlib produces backslash WindowsPaths and the assertions don't hold —
+# the behaviour under test never runs there, so these classes are skipped.
+_linux_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX path / Linux collector behaviour"
+)
+
 # ---------------------------------------------------------------------------
 # host_path — absolute-path translation under HOST_PREFIX
 # ---------------------------------------------------------------------------
 
 
+@_linux_only
 class TestHostPath:
     def test_passthrough_without_prefix(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
@@ -48,6 +59,7 @@ class TestHostPath:
 # ---------------------------------------------------------------------------
 
 
+@_linux_only
 class TestHostPathsForHome:
     def test_absolute_template_returns_single_translated_path(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
@@ -105,6 +117,7 @@ def _write_unit(prefix: Path, rel_dir: str, name: str, body: str) -> None:
     (d / name).write_text(body, encoding="utf-8")
 
 
+@_linux_only
 class TestLinuxLaunchItemsCollect:
     def test_does_not_crash_when_no_home_or_root_mounted(self, tmp_path, monkeypatch):
         """THE regression test. Container mode with HOST_PREFIX set but
@@ -281,6 +294,7 @@ class TestCronRows:
 # ---------------------------------------------------------------------------
 
 
+@_linux_only
 class TestLinuxAuthEventsJournalDir:
     def _directory_arg(self, cmd):
         return cmd[cmd.index("--directory") + 1] if "--directory" in cmd else None
@@ -307,7 +321,9 @@ class TestLinuxAuthEventsJournalDir:
         cmd = hm.LinuxAuthEventsCollector()._cmd()
         assert self._directory_arg(cmd) == str(runtime)
 
-    def test_no_directory_flag_when_no_host_journal_present(self, monkeypatch, tmp_path):
+    def test_no_directory_flag_when_no_host_journal_present(
+        self, monkeypatch, tmp_path
+    ):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         cmd = hm.LinuxAuthEventsCollector()._cmd()
         assert "--directory" not in cmd

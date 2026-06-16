@@ -41,7 +41,13 @@ class _TokenBucket:
 
     def __init__(self, rate_per_second: float):
         self._period = 1.0 / max(rate_per_second, 0.01)
-        self._last = 0.0
+        # The bucket starts full: the first take() must never wait. ``0.0``
+        # is wrong because ``time.monotonic()`` counts from an arbitrary
+        # epoch (system uptime on Linux) — on a low-uptime host where
+        # ``monotonic() < period`` the first call would sleep up to a full
+        # period (hours for a slow source). ``-inf`` makes the first wait
+        # unconditionally negative, then real pacing kicks in from take().
+        self._last = float("-inf")
         self._lock = threading.Lock()
 
     def take(self) -> None:
