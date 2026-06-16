@@ -1,3 +1,6 @@
+// Hard guard: importing this module (the pg pool + connection string) into a
+// Client Component is a build error. The DB layer is server-only.
+import "server-only";
 import { Pool, type PoolConfig } from "pg";
 
 // Single process-wide pool, stashed on globalThis so Next dev's hot-reload

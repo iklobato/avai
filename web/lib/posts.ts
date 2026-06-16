@@ -1,3 +1,4 @@
+import "server-only";
 import { ensureSchema, query } from "./db";
 
 // One row of autoseo_blog_posts. JSON columns come back already parsed by pg.

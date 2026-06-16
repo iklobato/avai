@@ -17,7 +17,8 @@
     "pg": "^8.13.1",
     "react": "19.0.0",
     "react-dom": "19.0.0",
-    "sanitize-html": "^2.14.0"
+    "sanitize-html": "^2.14.0",
+    "server-only": "^0.0.1"
   },
   "devDependencies": {
     "@tailwindcss/typography": "^0.5.16",
