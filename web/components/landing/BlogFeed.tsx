@@ -1,14 +1,14 @@
 import Link from "next/link";
-import { listPosts } from "@/lib/posts";
+import { listFeed } from "@/lib/feed";
 
-// Native latest-articles feed. Replaces the old third-party Soro embed; pulls
-// the newest posts straight from our own Postgres.
+// Native latest-articles feed (replaces the old third-party Soro script embed).
+// Pulls the newest posts from BOTH providers — our AutoSEO posts in Postgres
+// and Soro's hosted articles — merged newest-first.
 export async function BlogFeed() {
-  let posts: Awaited<ReturnType<typeof listPosts>> = [];
+  let posts: Awaited<ReturnType<typeof listFeed>> = [];
   try {
-    posts = await listPosts(3);
+    posts = await listFeed(3);
   } catch {
-    // If the DB is unreachable, the landing page still renders without the feed.
     posts = [];
   }
 
@@ -32,15 +32,13 @@ export async function BlogFeed() {
         <div className="mt-8 grid gap-4 md:grid-cols-3">
           {posts.map((post) => (
             <Link
-              key={post.id}
+              key={`${post.source}:${post.slug}`}
               href={`/blog/${post.slug}`}
               className="card p-5"
             >
               <h3 className="font-semibold text-slate-100">{post.title}</h3>
-              {post.meta_description ? (
-                <p className="mt-2 text-sm text-slate-400">
-                  {post.meta_description}
-                </p>
+              {post.excerpt ? (
+                <p className="mt-2 text-sm text-slate-400">{post.excerpt}</p>
               ) : null}
             </Link>
           ))}

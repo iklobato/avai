@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { Metadata } from "next";
-import { PostCard } from "@/components/blog/PostCard";
-import { listPosts } from "@/lib/posts";
+import { FeedCard } from "@/components/blog/FeedCard";
+import { listFeed } from "@/lib/feed";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 };
 
 export default async function BlogIndex() {
-  const posts = await listPosts();
+  const items = await listFeed();
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
       <Link
@@ -25,12 +25,12 @@ export default async function BlogIndex() {
       <p className="mt-2 text-slate-400">
         Notes on what avai checks, why it matters, and how to read your results.
       </p>
-      {posts.length === 0 ? (
+      {items.length === 0 ? (
         <p className="mt-8 text-slate-500">No posts yet.</p>
       ) : (
         <ul className="mt-8 space-y-4">
-          {posts.map((post) => (
-            <PostCard key={post.id} post={post} />
+          {items.map((item) => (
+            <FeedCard key={`${item.source}:${item.slug}`} item={item} />
           ))}
         </ul>
       )}

@@ -1,5 +1,5 @@
 import type { MetadataRoute } from "next";
-import { listPosts } from "@/lib/posts";
+import { listFeed } from "@/lib/feed";
 
 const BASE = "https://getavai.com";
 
@@ -9,18 +9,17 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${BASE}/blog`, changeFrequency: "weekly", priority: 0.8 },
   ];
   try {
-    const posts = await listPosts();
-    for (const post of posts) {
-      const last = post.updated_at ?? post.received_at;
+    const items = await listFeed();
+    for (const item of items) {
       entries.push({
-        url: `${BASE}/blog/${post.slug}`,
-        lastModified: last ? new Date(last) : undefined,
+        url: `${BASE}/blog/${item.slug}`,
+        lastModified: item.iso ? new Date(item.iso) : undefined,
         changeFrequency: "monthly",
         priority: 0.6,
       });
     }
   } catch {
-    // DB unreachable at build/request time — still emit the static URLs.
+    // Sources unreachable — still emit the static URLs.
   }
   return entries;
 }
