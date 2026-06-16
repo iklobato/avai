@@ -19,11 +19,8 @@ venv/
 /build/
 *.egg-info/
 
-# Landing-page screenshots/logo must ship with the site (global gitignore excludes assets/)
-!landing-page/assets/
-!landing-page/assets/**
-
-# Next.js app (web/) ships the same screenshots/logo from public/assets
+# Next.js app (web/) ships the screenshots/logo from public/assets
+# (global gitignore excludes assets/)
 !web/public/assets/
 !web/public/assets/**
 
