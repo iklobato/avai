@@ -27,6 +27,34 @@ npm run dev       # http://localhost:3000
 
 ## Deploy
 
-App Platform service built from `web/Dockerfile` (standalone output). See
-`landing-page/.do/app.yaml` for the single-service spec with the existing
-managed-DB cluster attached.
+App Platform service built from `web/Dockerfile` (standalone output). The
+single-service spec is `landing-page/.do/app.yaml` (app `avai-landing`,
+getavai.com). Apply with a local copy that has the real secrets:
+
+```bash
+doctl apps update b7308f12-6cd4-4c0f-b248-e82f558b40f5 --spec <local-copy>
+```
+
+### One-time database setup (managed Postgres cluster `db-postgresql-nyc3-86715`)
+
+The app uses an isolated `avai` database + `avai_app` user in the shared
+cluster. Because Postgres 15+ locks down the `public` schema, the app user must
+be granted privileges once (run as `doadmin` against the `avai` db):
+
+```sql
+GRANT USAGE, CREATE ON SCHEMA public TO avai_app;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO avai_app;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO avai_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO avai_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO avai_app;
+```
+
+The table itself is auto-created on first DB access (`ensureSchema()`), so no
+migration step is required after the grant. The app is registered as a trusted
+source on the cluster.
+
+### SSL note
+
+`DATABASE_URL` must NOT contain `?sslmode=` — node-postgres 8.13+ treats
+`sslmode=require` as `verify-full` and rejects the managed DB's self-signed
+chain. TLS is driven by `DATABASE_SSL=require` (see `lib/db.ts`).
