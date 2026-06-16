@@ -10,7 +10,6 @@ fakes that record calls and return canned ``Response`` objects.
 """
 from __future__ import annotations
 
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
