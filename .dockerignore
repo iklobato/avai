@@ -49,7 +49,7 @@ dist/
 build/
 tests/
 docs/
-landing-page/
+web/
 *.png
 .coverage
 .pytest_cache/

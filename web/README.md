@@ -28,7 +28,7 @@ npm run dev       # http://localhost:3000
 ## Deploy
 
 App Platform service built from `web/Dockerfile` (standalone output). The
-single-service spec is `landing-page/.do/app.yaml` (app `avai-landing`,
+single-service spec is `web/.do/app.yaml` (app `avai-landing`,
 getavai.com). Apply with a local copy that has the real secrets:
 
 ```bash
