@@ -1,4 +1,7 @@
-{% macro verdict_pill(verdict) %}
+{# The single source of truth for verdict pills — colour + markup. Pass an
+   optional confidence (0–1) to append a "NN%" suffix. Mirrors the
+   --verdict-* CSS tokens and the VERDICT_HEX JS map in dashboard.html. #}
+{% macro verdict_pill(verdict, confidence=none) %}
   {% set styles = {
     'malicious':  'bg-red-900/40 text-red-300 border-red-900/60',
     'suspicious': 'bg-amber-900/40 text-amber-300 border-amber-900/60',
@@ -6,7 +9,7 @@
     'benign':     'bg-emerald-900/40 text-emerald-300 border-emerald-900/60',
   } %}
   <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider {{ styles.get(verdict, 'bg-slate-700/40 text-slate-300 border-slate-600') }}">
-    {{ verdict }}
+    {{ verdict }}{% if confidence is not none %}<span class="ml-1 opacity-70">{{ "%.0f"|format(confidence * 100) }}%</span>{% endif %}
   </span>
 {% endmacro %}
 
@@ -27,6 +30,7 @@
 {% macro pagination_bar(section, page, total_pages, total, count, per_page, per_page_options) %}
 <div class="flex items-center justify-between gap-3 mt-3 pt-3 border-t border-slate-800 text-xs">
   <button type="button"
+          aria-label="previous page"
           class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
           {% if page <= 1 %}disabled{% endif %}
           hx-get="/fragments/{{ section }}"
@@ -41,6 +45,7 @@
     <span class="text-slate-500">page {{ page }} / {{ total_pages }}</span>
   </div>
   <button type="button"
+          aria-label="next page"
           class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
           {% if page >= total_pages %}disabled{% endif %}
           hx-get="/fragments/{{ section }}"

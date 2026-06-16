@@ -4,6 +4,7 @@
   {{ card_header("collector errors (latest run)") }}
   {% if errors %}
     <div class="js-paged" data-pg="errors" data-page-size="8">
+    <div class="overflow-x-auto">
     <table class="w-full text-xs">
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -40,6 +41,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     <div class="js-pager"></div>
     </div>
   {% else %}

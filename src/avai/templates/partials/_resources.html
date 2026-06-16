@@ -91,6 +91,7 @@
     {# ---- disk usage (df) ---- #}
     <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">disk usage</div>
     {% if disks %}
+      <div class="overflow-x-auto">
       <table class="w-full text-sm">
         <thead>
           <tr class="text-[10px] uppercase tracking-wider text-slate-500 text-left">
@@ -125,6 +126,7 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
     {% else %}
       <div class="text-slate-500 italic text-sm">no filesystems reported in latest run</div>
     {% endif %}

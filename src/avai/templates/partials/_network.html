@@ -2,15 +2,23 @@
    loads its existing fragment into the shared content area via HTMX. The
    first tab loads on render. #}
 {% set tabs = [
-  ('listening-ports', 'listening ports'),
-  ('network-flows',   'outbound flows'),
-  ('dns-queries',     'dns queries'),
+  ('listening-ports',  'listening ports'),
+  ('network-flows',    'outbound flows'),
+  ('dns-queries',      'dns queries'),
+  ('network-topology', 'topology'),
+  ('network-exposure', 'exposure'),
 ] %}
 
 <div>
-  <div class="flex items-center gap-1 mb-3 border-b border-slate-800">
+  <div class="flex items-center gap-1 mb-3 border-b border-slate-800"
+       role="tablist" aria-label="network views">
     {% for slug, label in tabs %}
       <button type="button"
+              id="tab-{{ slug }}"
+              role="tab"
+              aria-controls="network-content"
+              aria-selected="{{ 'true' if loop.first else 'false' }}"
+              tabindex="{{ '0' if loop.first else '-1' }}"
               class="js-net-tab px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors
                      {% if loop.first %}border-sky-500 text-slate-100{% else %}border-transparent text-slate-500 hover:text-slate-300{% endif %}"
               data-net-tab="{{ slug }}"
@@ -22,7 +30,7 @@
       </button>
     {% endfor %}
   </div>
-  <div id="network-content">
+  <div id="network-content" role="tabpanel" tabindex="0" aria-labelledby="tab-listening-ports">
     <div class="bg-slate-900 border border-slate-800 rounded-lg p-6 text-slate-500 italic">loading…</div>
   </div>
 </div>
