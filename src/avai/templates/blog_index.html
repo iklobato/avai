@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blog</title>
+  <style>
+    body { max-width: 760px; margin: 2rem auto; padding: 0 1rem;
+           font-family: system-ui, -apple-system, sans-serif; line-height: 1.6; color: #1a1a1a; }
+    h1 { font-size: 2rem; }
+    ul { list-style: none; padding: 0; }
+    li { margin: 1rem 0; padding-bottom: 1rem; border-bottom: 1px solid #eee; }
+    a { color: #2563eb; text-decoration: none; font-size: 1.2rem; font-weight: 600; }
+    .desc { color: #4b5563; margin: .25rem 0 0; }
+    .date { color: #9ca3af; font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <h1>Blog</h1>
+  {% if not posts %}<p>No posts yet.</p>{% endif %}
+  <ul>
+    {% for post in posts %}
+    <li>
+      <a href="/blog/{{ post.slug }}">{{ post.title }}</a>
+      {% if post.published_at %}<span class="date"> · {{ post.published_at }}</span>{% endif %}
+      {% if post.meta_description %}<p class="desc">{{ post.meta_description }}</p>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</body>
+</html>
