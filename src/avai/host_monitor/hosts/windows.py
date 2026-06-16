@@ -12,12 +12,13 @@ Windows machine before relying on it.
 Design: gathering goes through the injected :class:`CommandRunner` seam
 (no ``winreg``/``wmi`` Python modules, so this file imports cleanly on any
 OS and adds no dependencies). Each collector is ``gather -> pure parse``,
-mirroring the macOS/Linux adapters.
+mirroring the macOS/Linux adapters. Streaming uses the shared
+:class:`JsonLineStreamSource` loop fed by a PowerShell ``RecordId``-keyed
+poll over the Security event log (PowerShell has no native log ``-Follow``).
 
-Composed OUT on Windows (no analog, or not yet implemented): setuid_files,
-quarantine_events, mdm_profiles, kernel/system extensions, usb/bluetooth/
-wifi devices, system_integrity. These are simply not assembled — never a
-runtime branch.
+Composed OUT on Windows (no analog): setuid_files, quarantine_events,
+mdm_profiles, kernel/system extensions, promiscuous_ifaces. These are
+simply not assembled — never a runtime branch.
 """
 
 from __future__ import annotations
@@ -25,8 +26,9 @@ from __future__ import annotations
 import csv
 import io
 import json
+import threading
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 from ..collectors import (
     DiskUsageCollector,
@@ -52,7 +54,16 @@ from ..exposure_collectors import (
     WindowsSessionParser,
     WindowsSharesParser,
 )
-from ..models import InstalledAppRow, LaunchItemRow
+from ..models import (
+    AuthEventRow,
+    BluetoothDeviceRow,
+    InstalledAppRow,
+    LaunchItemRow,
+    ProcessExecRow,
+    SystemIntegrityRow,
+    UsbDeviceRow,
+    WifiStateRow,
+)
 from ..net_collectors import (
     ArpTableCollector,
     DnsResolversCollector,
@@ -70,7 +81,7 @@ from ..persistence_collectors import (
     WindowsDriverParser,
 )
 from ..prompts import Prompts
-from ..runtime import CommandRunner, CommandSnapshot
+from ..runtime import CommandRunner, CommandSnapshot, JsonLineStreamSource
 
 # A path guaranteed not to exist, handed to collectors that read a file
 # Windows doesn't have (e.g. sudoers) so their shared parser yields nothing
@@ -84,6 +95,11 @@ class WindowsFilesystemLayout:
     def privileged_bin_dirs(self) -> list[Path]:
         # No setuid concept on Windows; SetuidFilesCollector is composed
         # out, so this is never called — return empty for completeness.
+        return []
+
+    def app_executables(self) -> list[Path]:
+        # No macOS-style app bundles; FileScanCollector isn't wired on
+        # Windows. Present so the FilesystemLayout shape stays complete.
         return []
 
     def home_dirs(self) -> list[Path]:
@@ -325,6 +341,438 @@ class WindowsLaunchItemsCollector(SnapshotCollector):
         return rows
 
 
+class WindowsSystemIntegrityCollector(SnapshotCollector):
+    """Windows security posture mapped into the macOS-shaped
+    ``system_integrity`` row (same columns, so the dashboard renders it
+    unchanged), mirroring :class:`LinuxSystemIntegrityCollector`:
+
+    - ``filevault_active``          → any BitLocker volume protected.
+    - ``firewall_global_state``     → any Windows Firewall profile enabled.
+    - ``gatekeeper_assessments_*``  → Defender real-time protection on OR
+                                      Secure Boot enabled (closest "code is
+                                      vetted before it runs" analog).
+    - ``remote_login_enabled``      → RDP accepting connections
+                                      (``fDenyTSConnections=0``).
+    - ``screen_sharing_enabled``    → same RDP flag.
+    - ``remote_management_enabled`` → WinRM service running (the Windows
+                                      analog of Apple Remote Desktop).
+
+    Raw posture (Defender, firewall profiles, BitLocker, Secure Boot, RDP,
+    WinRM) is preserved in ``raw_json`` for the judge.
+    """
+
+    name = "system_integrity"
+    model = SystemIntegrityRow
+    judge_fields = (
+        "filevault_active",
+        "firewall_global_state",
+        "gatekeeper_assessments_enabled",
+        "remote_login_enabled",
+        "screen_sharing_enabled",
+        "remote_management_enabled",
+    )
+
+    _PS = (
+        "$o=[ordered]@{};"
+        "$o.defender=try{Get-MpComputerStatus|"
+        "Select-Object RealTimeProtectionEnabled,AntivirusEnabled}catch{$null};"
+        "$o.firewall=try{Get-NetFirewallProfile|"
+        "Select-Object Name,Enabled}catch{$null};"
+        "$o.bitlocker=try{Get-BitLockerVolume|"
+        "Select-Object MountPoint,ProtectionStatus}catch{$null};"
+        "$o.secureboot=try{[bool](Confirm-SecureBootUEFI)}catch{$null};"
+        "$o.rdp_deny=try{(Get-ItemProperty "
+        "'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' "
+        "-Name fDenyTSConnections).fDenyTSConnections}catch{$null};"
+        "$o.winrm=try{(Get-Service WinRM).Status.ToString()}catch{$null};"
+        "[pscustomobject]$o|ConvertTo-Json -Compress -Depth 4"
+    )
+
+    def __init__(self, runner: CommandRunner, judge_hints: str = ""):
+        super().__init__(judge_hints=judge_hints)
+        self._runner = runner
+
+    def collect(self):
+        try:
+            data = self._runner.json(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", self._PS]
+            )
+        except (RuntimeError, json.JSONDecodeError):
+            return
+        row = self._row_from_status(data)
+        if row is not None:
+            yield row
+
+    @staticmethod
+    def _row_from_status(data) -> Optional[dict]:
+        """Pure parser. ConvertTo-Json emits a bare object for a single
+        firewall profile / BitLocker volume and a list for many; normalise
+        both, and treat bool / 'True' / 1 alike."""
+        if not isinstance(data, dict):
+            return None
+
+        def _truthy(value) -> bool:
+            return str(value).strip().lower() in ("true", "1", "on")
+
+        def _as_list(value) -> list:
+            if value is None:
+                return []
+            return value if isinstance(value, list) else [value]
+
+        firewall_on = any(
+            _truthy((p or {}).get("Enabled")) for p in _as_list(data.get("firewall"))
+        )
+        bitlocker_on = any(
+            str((v or {}).get("ProtectionStatus")) in ("1", "On")
+            for v in _as_list(data.get("bitlocker"))
+        )
+        defender = data.get("defender") or {}
+        realtime = _truthy(defender.get("RealTimeProtectionEnabled"))
+        secureboot = data.get("secureboot") is True
+        rdp_on = str(data.get("rdp_deny")) == "0"
+        winrm_on = str(data.get("winrm")).strip().lower() == "running"
+        return {
+            "filevault_active": int(bitlocker_on),
+            "firewall_global_state": int(firewall_on),
+            "firewall_stealth": None,
+            "firewall_logging": None,
+            "gatekeeper_assessments_enabled": int(realtime or secureboot),
+            "remote_login_enabled": int(rdp_on),
+            "screen_sharing_enabled": int(rdp_on),
+            "remote_management_enabled": int(winrm_on),
+            "raw_json": json.dumps(data),
+        }
+
+
+class WindowsUsbDevicesCollector(SnapshotCollector):
+    """Present USB devices via ``Get-PnpDevice -Class USB``. Vendor/product
+    IDs are parsed from the PnP ``InstanceId`` (``USB\\VID_xxxx&PID_yyyy\\..``),
+    filling the same columns :class:`LinuxUsbDevicesCollector` reads from
+    sysfs."""
+
+    name = "usb_devices"
+    model = UsbDeviceRow
+    judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
+
+    _PS = (
+        "Get-PnpDevice -PresentOnly -Class USB -ErrorAction SilentlyContinue | "
+        "Select-Object FriendlyName,InstanceId,Manufacturer,Status | "
+        "ConvertTo-Json -Compress"
+    )
+
+    def __init__(self, runner: CommandRunner, judge_hints: str = ""):
+        super().__init__(judge_hints=judge_hints)
+        self._runner = runner
+
+    def collect(self):
+        try:
+            data = self._runner.json(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", self._PS]
+            )
+        except (RuntimeError, json.JSONDecodeError):
+            return
+        yield from self._rows_from_json(data)
+
+    @staticmethod
+    def _rows_from_json(data) -> list[dict]:
+        if data is None:
+            return []
+        items = data if isinstance(data, list) else [data]
+        rows = []
+        for obj in items:
+            if not isinstance(obj, dict):
+                continue
+            instance = obj.get("InstanceId") or ""
+            vid, pid = WindowsUsbDevicesCollector._ids_from_instance(instance)
+            rows.append(
+                {
+                    "name": obj.get("FriendlyName"),
+                    "vendor_id": vid,
+                    "product_id": pid,
+                    "serial_number": None,
+                    "manufacturer": obj.get("Manufacturer"),
+                    "location_id": instance or None,
+                    "speed": None,
+                    "raw_json": json.dumps(obj),
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _ids_from_instance(instance: str) -> tuple[Optional[str], Optional[str]]:
+        vid = pid = None
+        for token in instance.replace("\\", "&").split("&"):
+            if token.startswith("VID_"):
+                vid = token[4:]
+            elif token.startswith("PID_"):
+                pid = token[4:]
+        return vid, pid
+
+
+class WindowsBluetoothCollector(SnapshotCollector):
+    """Present Bluetooth devices via ``Get-PnpDevice -Class Bluetooth``.
+    Presence implies paired; ``Status == 'OK'`` implies connected. The MAC
+    is parsed from the ``DEV_<mac>`` segment of the ``InstanceId``."""
+
+    name = "bluetooth_devices"
+    model = BluetoothDeviceRow
+    judge_fields = ("name", "address", "minor_type")
+
+    _PS = (
+        "Get-PnpDevice -PresentOnly -Class Bluetooth -ErrorAction SilentlyContinue | "
+        "Select-Object FriendlyName,InstanceId,Status | ConvertTo-Json -Compress"
+    )
+
+    def __init__(self, runner: CommandRunner, judge_hints: str = ""):
+        super().__init__(judge_hints=judge_hints)
+        self._runner = runner
+
+    def collect(self):
+        try:
+            data = self._runner.json(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", self._PS]
+            )
+        except (RuntimeError, json.JSONDecodeError):
+            return
+        yield from self._rows_from_json(data)
+
+    @staticmethod
+    def _rows_from_json(data) -> list[dict]:
+        if data is None:
+            return []
+        items = data if isinstance(data, list) else [data]
+        rows = []
+        for obj in items:
+            if not isinstance(obj, dict):
+                continue
+            instance = obj.get("InstanceId") or ""
+            rows.append(
+                {
+                    "name": obj.get("FriendlyName"),
+                    "address": WindowsBluetoothCollector._addr_from_instance(instance),
+                    "connected": int(str(obj.get("Status")).upper() == "OK"),
+                    "paired": 1,
+                    "minor_type": None,
+                    "raw_json": json.dumps(obj),
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _addr_from_instance(instance: str) -> Optional[str]:
+        # BTHENUM instance IDs carry the MAC in a ``Dev_<mac>`` segment;
+        # match case-insensitively (Windows renders it ``Dev_``).
+        for token in instance.replace("\\", "&").split("&"):
+            if token.upper().startswith("DEV_"):
+                return token[4:]
+        return None
+
+
+class WindowsWifiCollector(SnapshotCollector):
+    """Wireless interface state via ``netsh wlan show interfaces`` (text,
+    not JSON — netsh has no JSON mode). One row per interface block,
+    mirroring :class:`LinuxWifiCollector`'s columns."""
+
+    name = "wifi_state"
+    model = WifiStateRow
+    judge_fields = ("ssid", "bssid", "security")
+
+    def __init__(self, runner: CommandRunner, judge_hints: str = ""):
+        super().__init__(judge_hints=judge_hints)
+        self._runner = runner
+
+    def collect(self):
+        out = self._runner.text(["netsh", "wlan", "show", "interfaces"], timeout=15)
+        yield from self._rows_from_netsh(out)
+
+    @staticmethod
+    def _rows_from_netsh(text: str) -> list[dict]:
+        """Pure parser. ``netsh`` prints ``key : value`` lines, one blank
+        line between interface blocks. Only blocks carrying a ``Name`` are
+        real interfaces (the leading 'There is N interface...' preamble has
+        none)."""
+        rows: list[dict] = []
+        block: dict[str, str] = {}
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line:
+                rows.append(WindowsWifiCollector._row(block))
+                block = {}
+                continue
+            key, sep, value = line.partition(":")
+            if sep:
+                block[key.strip().lower()] = value.strip()
+        rows.append(WindowsWifiCollector._row(block))
+        return [r for r in rows if r]
+
+    @staticmethod
+    def _row(block: dict) -> dict:
+        if not block.get("name"):
+            return {}
+        return {
+            "interface": block.get("name"),
+            "ssid": block.get("ssid") or None,
+            "bssid": block.get("bssid") or None,
+            "channel": block.get("channel") or None,
+            "security": block.get("authentication") or None,
+            "raw_json": json.dumps(block),
+        }
+
+
+class WinSecurityAuthParser:
+    """Strategy: a Windows Security-log event (as emitted by the
+    ``auth_events`` poll loop) → :class:`AuthEventRow` dict. Mirrors
+    :class:`JournalAuthParser` so the dashboard treats all OSes alike."""
+
+    def parse(self, event: dict) -> dict:
+        try:
+            pid = (
+                int(event["ProcessId"]) if event.get("ProcessId") is not None else None
+            )
+        except (TypeError, ValueError):
+            pid = None
+        event_id = event.get("Id")
+        return {
+            "event_timestamp": event.get("TimeCreated"),
+            "process": event.get("Provider"),
+            "subsystem": "Security",
+            "category": str(event_id or ""),
+            "event_type": f"event_id={event_id}",
+            "event_message": event.get("Message"),
+            "pid": pid,
+            "raw_json": json.dumps(event),
+        }
+
+
+class WinSecurityExecParser:
+    """Strategy: a Windows 4688 process-creation event (with its
+    ``EventData`` flattened to a name→value object) → :class:`ProcessExecRow`
+    dict. Mirrors :class:`EsloggerExecParser` / :class:`AuditExecParser`."""
+
+    def parse(self, event: dict) -> dict:
+        data = event.get("Data") or {}
+        cmdline = data.get("CommandLine")
+        return {
+            "event_timestamp": event.get("TimeCreated"),
+            "event_type": "exec",
+            "pid": self._pid(data.get("NewProcessId")),
+            "ppid": self._pid(data.get("ProcessId")),
+            "uid": None,
+            "username": data.get("SubjectUserName"),
+            "exe_path": data.get("NewProcessName"),
+            "exe_args_json": json.dumps([cmdline]) if cmdline else None,
+            "parent_path": data.get("ParentProcessName"),
+            "signing_id": None,
+            "raw_json": json.dumps(event),
+        }
+
+    @staticmethod
+    def _pid(value) -> Optional[int]:
+        # 4688 EventData renders PIDs as hex strings ("0x1a4"); be liberal.
+        if value is None:
+            return None
+        s = str(value)
+        try:
+            return int(s, 16) if s.lower().startswith("0x") else int(s)
+        except (TypeError, ValueError):
+            return None
+
+
+class WindowsAuthEventsCollector(StreamingCollector):
+    """Windows equivalent of :class:`LinuxAuthEventsCollector`. Tails the
+    Security event log for logon / privilege / account-management events and
+    yields :class:`AuthEventRow`-shaped rows.
+
+    PowerShell has no native ``-Follow`` for event logs, so ``_cmd`` runs a
+    ``RecordId``-keyed poll loop that emits one compact JSON object per new
+    event — exactly the NDJSON contract :class:`JsonLineStreamSource`
+    consumes. Requires the Security-log audit policy that records these IDs
+    (interactive-logon auditing is on by default).
+    """
+
+    name = "auth_events"
+    model = AuthEventRow
+    judge_enabled = True
+    judge_fields = ("process", "subsystem", "event_message")
+
+    # Logon success/failure, logoff, special-privilege logon, account
+    # created, member added to a security-enabled (local/global/universal)
+    # group.
+    _EVENT_IDS = "4624,4625,4634,4647,4672,4720,4728,4732,4756"
+
+    _PS = (
+        "$f=@{LogName='Security';Id=@(" + _EVENT_IDS + ")};"
+        "$last=(Get-WinEvent -FilterHashtable $f -MaxEvents 1 "
+        "-ErrorAction SilentlyContinue).RecordId;"
+        "if($null -eq $last){$last=0};"
+        "while($true){"
+        "Start-Sleep -Seconds 2;"
+        "$evs=Get-WinEvent -FilterHashtable $f -ErrorAction SilentlyContinue|"
+        "Where-Object{$_.RecordId -gt $last}|Sort-Object RecordId;"
+        "foreach($e in $evs){"
+        "$last=$e.RecordId;"
+        "[pscustomobject]@{"
+        "TimeCreated=$e.TimeCreated.ToString('o');Id=$e.Id;"
+        "Provider=$e.ProviderName;ProcessId=$e.ProcessId;"
+        "RecordId=$e.RecordId;Message=$e.Message}|"
+        "ConvertTo-Json -Compress}}"
+    )
+
+    def _cmd(self) -> list[str]:
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", self._PS]
+
+    def stream(self, stop_event: threading.Event):
+        source = JsonLineStreamSource(
+            self._cmd(), WinSecurityAuthParser(), killer_name="winevent-auth-killer"
+        )
+        yield from source.stream(stop_event)
+
+
+class WindowsProcessExecCollector(StreamingCollector):
+    """Windows equivalent of :class:`MacosProcessExecCollector` /
+    :class:`LinuxProcessExecCollector`. Tails Security event 4688 (process
+    creation) and yields :class:`ProcessExecRow`-shaped rows.
+
+    Requires the 'Audit Process Creation' policy, and the
+    ``ProcessCreationIncludeCmdLine_Enabled`` policy for the ``CommandLine``
+    field. Same ``RecordId``-keyed poll loop as
+    :class:`WindowsAuthEventsCollector`; each event's ``EventData`` is
+    flattened to a name→value object so the parser is a pure dict transform.
+    """
+
+    name = "process_exec_events"
+    model = ProcessExecRow
+    judge_enabled = True
+    judge_fields = ("exe_path", "exe_args_json", "parent_path", "username")
+
+    _PS = (
+        "$f=@{LogName='Security';Id=4688};"
+        "$last=(Get-WinEvent -FilterHashtable $f -MaxEvents 1 "
+        "-ErrorAction SilentlyContinue).RecordId;"
+        "if($null -eq $last){$last=0};"
+        "while($true){"
+        "Start-Sleep -Seconds 2;"
+        "$evs=Get-WinEvent -FilterHashtable $f -ErrorAction SilentlyContinue|"
+        "Where-Object{$_.RecordId -gt $last}|Sort-Object RecordId;"
+        "foreach($e in $evs){"
+        "$last=$e.RecordId;"
+        "$x=[xml]$e.ToXml();$d=@{};"
+        "foreach($n in $x.Event.EventData.Data){$d[$n.Name]=$n.'#text'};"
+        "[pscustomobject]@{TimeCreated=$e.TimeCreated.ToString('o');"
+        "RecordId=$e.RecordId;Data=$d}|ConvertTo-Json -Compress -Depth 4"
+        "}}"
+    )
+
+    def _cmd(self) -> list[str]:
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", self._PS]
+
+    def stream(self, stop_event: threading.Event):
+        source = JsonLineStreamSource(
+            self._cmd(), WinSecurityExecParser(), killer_name="winevent-exec-killer"
+        )
+        yield from source.stream(stop_event)
+
+
 class WindowsHost:
     """Composition root for Windows.
 
@@ -451,6 +899,13 @@ class WindowsHost:
                 judge_hints=h("kernel_modules"),
             ),
             SshKnownHostsCollector(judge_hints=h("ssh_known_hosts"), fs=self._fs),
+            # Security posture & devices (Windows-native gathers).
+            WindowsSystemIntegrityCollector(
+                self._runner, judge_hints=h("system_integrity")
+            ),
+            WindowsUsbDevicesCollector(self._runner, judge_hints=h("usb_devices")),
+            WindowsBluetoothCollector(self._runner, judge_hints=h("bluetooth_devices")),
+            WindowsWifiCollector(self._runner, judge_hints=h("wifi_state")),
         ]
 
     def _ps(self, script: str, parser) -> CommandSnapshot:
@@ -462,6 +917,8 @@ class WindowsHost:
         )
 
     def streaming_collectors(self, prompts: Prompts) -> list[StreamingCollector]:
-        # Windows Event Log / Sysmon streaming is the remaining work; no
-        # streaming collectors are assembled yet.
-        return []
+        h = prompts.hint_for
+        return [
+            WindowsAuthEventsCollector(judge_hints=h("auth_events")),
+            WindowsProcessExecCollector(judge_hints=h("process_exec_events")),
+        ]
