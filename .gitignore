@@ -23,6 +23,14 @@ venv/
 !landing-page/assets/
 !landing-page/assets/**
 
+# Next.js app (web/) ships the same screenshots/logo from public/assets
+!web/public/assets/
+!web/public/assets/**
+
+# web/lib is application source, not a build artifact (global gitignore has lib/)
+!web/lib/
+!web/lib/**
+
 # local secrets — never commit
 .env
 
