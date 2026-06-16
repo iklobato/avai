@@ -23,9 +23,10 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-# Pinned YARA-Forge release. Bump deliberately (and re-run the licensing
-# review) rather than tracking "latest".
-DEFAULT_VERSION = "20250901"
+# Pinned YARA-Forge release (tags are date-stamped YYYYMMDD). Bump
+# deliberately (and re-run the licensing review) rather than tracking
+# "latest".
+DEFAULT_VERSION = "20260614"
 ASSET = "yara-forge-rules-core.zip"
 _URL = "https://github.com/YARAHQ/yara-forge/releases/download/{version}/" + ASSET
 

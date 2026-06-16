@@ -1264,6 +1264,20 @@ class FileIntegrityCollector(SnapshotCollector):
         }
 
 
+def _crypto_hint(exc: "yara.Error") -> str:
+    """Append an actionable hint when a ruleset fails to compile because
+    this yara build lacks OpenSSL (the PyPI wheel does) — pe.imphash() /
+    hash.* then read as 'invalid field name'. Empty for any other error."""
+    msg = str(exc).lower()
+    if "imphash" in msg or ("invalid field name" in msg and "md5" in msg):
+        return (
+            " — these rules need a crypto-enabled yara (pe.imphash / hash.*);"
+            " the PyPI yara-python wheel is built without it. See"
+            " avai/rules/NOTICE."
+        )
+    return ""
+
+
 def _compile_yara_rules(rules_dir: Path):
     """Compile every ``*.yar`` / ``*.yara`` under ``rules_dir`` into one
     :class:`yara.Rules`. Returns ``None`` when the directory is absent or
@@ -1283,7 +1297,12 @@ def _compile_yara_rules(rules_dir: Path):
         try:
             yara.compile(filepath=str(path))
         except yara.Error as exc:
-            constants.LOG.warning("yara: skipping uncompilable rules %s: %s", path, exc)
+            constants.LOG.warning(
+                "yara: skipping uncompilable rules %s: %s%s",
+                path,
+                exc,
+                _crypto_hint(exc),
+            )
             continue
         namespace = path.stem
         unique = namespace

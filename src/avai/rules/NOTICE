@@ -10,11 +10,24 @@ Contents shipped in the repo
                     Guarantees scanning is functional out of the box.
 - hash_denylist.txt Empty deny-list template (avai-authored, MIT).
 
-Curated rule pack (vendor/) — NOT yet committed
------------------------------------------------
+Curated rule pack (vendor/) — opt-in, never shipped
+---------------------------------------------------
 A curated pack (YARA-Forge "core") is fetched into ./vendor/ by
 `scripts/update_rules.py`, which pins an exact upstream release for
-reproducibility. The pack is intentionally NOT committed to this repo yet.
+reproducibility. It is intentionally NOT committed to this repo and NOT
+included in the published wheel/sdist (see the exclude in pyproject.toml):
+users fetch it post-install for their own environment.
+
+REQUIRES a crypto-enabled yara
+------------------------------
+~200 rules in the pack use pe.imphash() and the hash.* module, which need
+a yara built with OpenSSL. The PyPI `yara-python` wheel is built WITHOUT
+crypto, so on a stock `pip install` those functions don't compile — and
+because the pack is one consolidated file, that makes the whole pack
+fail to load (the collector logs a warning and falls back to the bundled
+EICAR rule). To use the pack, install a crypto-enabled yara (e.g. build
+`yara-python` against a libyara with OpenSSL, or use a distro/homebrew
+yara with the bindings) before running update_rules.py.
 
 LICENSING — read before committing the pack
 --------------------------------------------

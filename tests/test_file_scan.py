@@ -13,12 +13,18 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import yara
+
 import avai.host_monitor.constants as C
 from avai.enrichers.base import Indicator, IndicatorType, VerdictHint
 from avai.enrichers.indicators import extract_indicators
 from avai.enrichers.registry import discover_enricher_classes
 from avai.enrichers.sources.local_denylist import LocalHashDenylistEnricher
-from avai.host_monitor.collectors import FileScanCollector, _compile_yara_rules
+from avai.host_monitor.collectors import (
+    FileScanCollector,
+    _compile_yara_rules,
+    _crypto_hint,
+)
 
 _MARKER = "AVAITESTMATCH"
 _RULE = 'rule avai_test {{ strings: $a = "{m}" condition: $a }}'.format(m=_MARKER)
@@ -183,6 +189,15 @@ class TestFileScanCollector:
     def test_bundled_eicar_rules_compile(self):
         # Guards against a broken shipped rule silently disabling scanning.
         assert _compile_yara_rules(C.YARA_RULES_DIR) is not None
+
+
+class TestCryptoHint:
+    def test_imphash_error_gets_actionable_hint(self):
+        hint = _crypto_hint(yara.Error('invalid field name "imphash"'))
+        assert "crypto-enabled yara" in hint and "NOTICE" in hint
+
+    def test_unrelated_error_gets_no_hint(self):
+        assert _crypto_hint(yara.Error("syntax error, unexpected '}'")) == ""
 
 
 # ---------------------------------------------------------------------------
