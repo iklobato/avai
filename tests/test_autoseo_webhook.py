@@ -246,3 +246,17 @@ class TestBlogRoutes:
         r = client.get("/blog")
         assert r.status_code == 200
         assert b"ten-seo-strategies" in r.data
+
+    def test_blog_csp_allows_external_https_images(self, client):
+        # Articles embed external CDN images in content_html; the blog pages
+        # must relax img-src so they aren't blocked.
+        _post(client, _article())
+        for path in ("/blog", "/blog/ten-seo-strategies"):
+            csp = client.get(path).headers.get("Content-Security-Policy", "")
+            assert "img-src 'self' https: data:" in csp, path
+
+    def test_dashboard_keeps_strict_csp(self, client):
+        # The relaxed policy must not leak to the dashboard's own pages.
+        csp = client.get("/").headers.get("Content-Security-Policy", "")
+        assert "img-src 'self' data:;" in csp
+        assert "https:" not in csp.split("img-src")[1].split(";")[0]

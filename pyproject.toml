@@ -57,6 +57,11 @@ dependencies = [
     # Schema migrations (indexes / future changes) applied on monitor startup
     # and via `avai migrate`.
     "alembic>=1.13",
+    # HTML/Markdown rendering for the dashboard narrative and the AutoSEO blog.
+    # Without these, render_markdown and the blog's _safe_html silently fall
+    # back to escaping — article HTML renders as literal text in production.
+    "markdown>=3.5",
+    "bleach>=6.0",
 ]
 
 [project.optional-dependencies]

@@ -455,6 +455,29 @@ def _faq_jsonld(faq_schema_json: Optional[str]) -> Optional[Markup]:
     return Markup(json.dumps(doc))
 
 
+# Published articles embed external CDN images in content_html (only the hero
+# and infographic are downloaded locally), so the dashboard's strict
+# img-src 'self' CSP would block them. Relax the policy to allow https images
+# for the public blog only — the dashboard's own pages keep the strict CSP.
+# Registered after app's _security_headers, so this runs first (Flask runs
+# after_request in reverse order) and sets the header before its setdefault.
+_BLOG_CSP = (
+    "default-src 'self'; "
+    "img-src 'self' https: data:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'"
+)
+
+
+@app.after_request
+def _blog_csp(response):
+    if request.path == "/blog" or request.path.startswith("/blog/"):
+        response.headers["Content-Security-Policy"] = _BLOG_CSP
+    return response
+
+
 @app.route("/blog")
 def autoseo_blog_index():
     with Session(_rw_engine()) as session:
