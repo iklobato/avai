@@ -786,9 +786,3 @@ def control_maintenance(action):
         abort(400)
     queue_command(action)
     return _control_panel()
-
-
-# Imported for its side effect: registers the AutoSEO webhook (/webhooks/autoseo)
-# and the public /blog routes on `app`. Kept at the bottom so `app` is fully
-# defined before autoseo.py does `from .app import app`.
-from . import autoseo  # noqa: E402,F401
