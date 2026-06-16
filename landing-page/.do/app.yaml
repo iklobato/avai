@@ -68,13 +68,17 @@ services:
         value: https://www.getavai.com
 
 # Path routing: more specific prefixes first, the static site catches the rest.
+# preserve_path_prefix is REQUIRED — App Platform strips the matched prefix by
+# default, which would forward /blog as / (Flask then served the dashboard) and
+# /webhooks/autoseo as /autoseo (404). Keeping the prefix lets Flask's own
+# routes (/blog, /webhooks/autoseo, /static/...) match.
 ingress:
   rules:
-    - component: { name: webhook }
+    - component: { name: webhook, preserve_path_prefix: true }
       match: { path: { prefix: /blog } }
-    - component: { name: webhook }
+    - component: { name: webhook, preserve_path_prefix: true }
       match: { path: { prefix: /webhooks } }
-    - component: { name: webhook }
+    - component: { name: webhook, preserve_path_prefix: true }
       match: { path: { prefix: /static } }
     - component: { name: web }
       match: { path: { prefix: / } }
