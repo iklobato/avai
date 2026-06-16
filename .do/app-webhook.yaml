@@ -1,0 +1,53 @@
+# DigitalOcean App Platform — avai webhook SERVICE (not a static site).
+#
+# Runs the Flask dashboard image (which now serves POST /webhooks/autoseo and
+# the /blog routes) as a long-running service. Builds from the repo Dockerfile,
+# whose default CMD already binds 0.0.0.0:8765.
+#
+# Deploy:  doctl apps create --spec .do/app-webhook.yaml
+# Update:  doctl apps update <APP_ID> --spec .do/app-webhook.yaml
+#
+# CAVEAT — ephemeral storage: App Platform service filesystems do NOT persist
+# across deploys/restarts. The SQLite DB (/data/avai.db) and downloaded images
+# (static/blog/...) are wiped on every redeploy. Fine for validating the live
+# webhook; for durable content, back it with a managed DB + object storage.
+name: avai-webhook
+region: nyc
+
+services:
+  - name: webhook
+    dockerfile_path: Dockerfile
+    source_dir: /
+    github:
+      repo: iklobato/avai
+      branch: main
+      deploy_on_push: true
+    http_port: 8765
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /blog
+      initial_delay_seconds: 15
+      period_seconds: 30
+      timeout_seconds: 5
+      failure_threshold: 3
+    envs:
+      # Real value injected at deploy time — NEVER commit the token.
+      # Set with: doctl apps update <id> --spec ... after editing a local copy,
+      # or via the DO console (Settings -> webhook -> Environment Variables).
+      - key: AUTOSEO_WEBHOOK_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_AT_DEPLOY
+      - key: AUTOSEO_SITE_URL
+        scope: RUN_TIME
+        value: https://api.getavai.com
+
+# Custom domain. Requires a CNAME at GoDaddy:
+#   api.getavai.com  CNAME  <the app's *.ondigitalocean.app ingress>
+# Until that resolves, the app is still reachable (with TLS) at its default
+# ondigitalocean.app ingress — set AUTOSEO_SITE_URL to that interim URL if you
+# want /blog links to resolve before the CNAME is live.
+domains:
+  - domain: api.getavai.com
+    type: PRIMARY
