@@ -23,6 +23,10 @@ venv/
 !landing-page/assets/
 !landing-page/assets/**
 
+# Next.js app (web/) ships the same screenshots/logo from public/assets
+!web/public/assets/
+!web/public/assets/**
+
 # local secrets — never commit
 .env
 
