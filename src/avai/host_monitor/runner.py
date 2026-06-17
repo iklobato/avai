@@ -2,22 +2,51 @@
 
 from __future__ import annotations
 
+import bisect
 import json
 import os
+import platform
 import socket
 import threading
 import time
+from dataclasses import replace
 from typing import Optional
 
 from .collectors import Collector, SnapshotCollector, StreamingCollector
-from .constants import _CORRELATED_COLLECTOR, DEFAULT_BASELINE_MIN_RUNS, LOG
-from .enums import Verdict
+from .constants import (
+    _CORRELATED_COLLECTOR,
+    _FILE_SCAN_COLLECTOR,
+    _LAUNCH_ITEM_COLLECTOR,
+    DEFAULT_BASELINE_MIN_RUNS,
+    LOG,
+)
+from .enums import FeedbackLabel, Verdict
 from .judge import Judge, NullJudge
 from .narrator import IncidentNarrator
 from .risk import compute_risk_score
 from .runtime import Clock, Digest
 from .sink import Sink
 from .streaming import StreamingWorker
+
+# Minimum presence window (runs since first seen) before an artifact that
+# misses runs is called "intermittent" — below this it's just freshly seen.
+_MIN_DRIFT_WINDOW = 3
+
+# Bound second-pass LLM work per collector per cycle so a pathological batch
+# can't fan out into unbounded verify / investigate calls.
+_MAX_VERIFY_PER_COLLECTOR = 10
+_MAX_INVESTIGATE_PER_COLLECTOR = 10
+
+# How many of the host's other non-benign findings to hand the investigator
+# as situational context.
+_HOST_CONTEXT_LIMIT = 15
+
+# How an operator-feedback label reads in the ground-truth block fed to the
+# judge. Keyed by the raw stored label.
+_FEEDBACK_PHRASE = {
+    FeedbackLabel.FALSE_POSITIVE.value: "a FALSE POSITIVE (benign)",
+    FeedbackLabel.CONFIRMED.value: "CONFIRMED malicious",
+}
 
 
 class Runner:
@@ -37,6 +66,9 @@ class Runner:
         enrichment_chain=None,
         baseline_min_runs: int = DEFAULT_BASELINE_MIN_RUNS,
         narrator: "Optional[IncidentNarrator]" = None,
+        coverage=None,
+        verifier=None,
+        investigator=None,
     ):
         self.sink = sink
         self.snapshot_collectors = snapshot_collectors
@@ -47,6 +79,12 @@ class Runner:
         self.baseline_min_runs = baseline_min_runs
         # Optional second-stage incident-digest LLM. None ⇒ disabled.
         self.narrator = narrator
+        # Optional second-stage YARA ruleset-coverage assessor. None ⇒ disabled.
+        self.coverage = coverage
+        # Optional skeptic that re-checks malicious verdicts. None ⇒ disabled.
+        self.verifier = verifier
+        # Optional deep re-judge for unknown findings. None ⇒ disabled.
+        self.investigator = investigator
         self._streaming_workers: list[StreamingWorker] = []
         self.shutdown_event = threading.Event()
         # Optional threat-intel enrichment between collection and judging.
@@ -110,10 +148,7 @@ class Runner:
     def _dispatch_command(self, cmd: Optional[str]) -> str:
         if cmd == "prune":
             stats = self.sink.prune_to_size(self.max_db_bytes or 0)
-            return (
-                f"pruned runs={stats['runs_pruned']} "
-                f"events={stats['events_pruned']}"
-            )
+            return f"pruned runs={stats['runs_pruned']} events={stats['events_pruned']}"
         if cmd == "clear":
             return f"cleared {self.sink.clear_data()} rows"
         if cmd == "rejudge":
@@ -148,6 +183,9 @@ class Runner:
         # Refresh the control cache so --once and the daemon loop both honour
         # disabled-collector / judge / enrich toggles set from the dashboard.
         self._refresh_control()
+        # Apply any operator corrections before judging so this cycle's
+        # narrative / risk reflect the fixed verdicts.
+        self._apply_feedback()
         run_id, started = self.sink.start_run(socket.gethostname(), self.lookback_min)
         # Snapshot the host's baseline state once: it can't change mid-cycle
         # (the current run isn't completed yet), and every collector shares
@@ -192,6 +230,9 @@ class Runner:
             self._generate_risk_score(run_id, started)
             # Persist the file scanner's ruleset summary for the dashboard.
             self._write_yara_status()
+            # Assess whether the loaded ruleset covers this host (LLM, opt-in).
+            if self.coverage is not None:
+                self._generate_coverage(run_id, started)
         self.sink.end_run(ok, failed)
 
         # Rotation: keep the DB under the configured size cap by pruning
@@ -250,37 +291,122 @@ class Runner:
             return
         cutoff = host_baseline["cutoff_at"]
         established = host_baseline["established"]
+        # Run timeline (incl. the in-progress run) to size each artifact's
+        # presence window — how many runs have happened since it first
+        # appeared. Fetched once; an artifact present in fewer runs than its
+        # window has come and gone (intermittent), a sharper drift signal than
+        # the novelty bit alone.
+        try:
+            timeline = self.sink.run_started_ats()
+        except Exception as exc:
+            LOG.warning("baseline: run timeline fetch failed: %s", exc)
+            timeline = []
         for entry in unjudged:
             seen = fs_map.get(entry.get("content_hash"))
             if seen is None:
                 continue
             first_seen, times_seen = seen
             novel = bool(established and cutoff is not None and first_seen > cutoff)
+            window = (
+                len(timeline) - bisect.bisect_left(timeline, first_seen)
+                if timeline
+                else 0
+            )
+            # Needs at least a few runs of window to distinguish flapping from
+            # a freshly-seen artifact.
+            intermittent = window >= _MIN_DRIFT_WINDOW and times_seen < window
             entry["baseline"] = {
                 "first_seen": first_seen,
                 "times_seen": times_seen,
                 "host_runs": host_baseline["total_runs"],
                 "baseline_established": established,
                 "novel": novel,
+                "intermittent": intermittent,
             }
 
     def _attach_correlation(
         self, c: Collector, unjudged: list[dict], rows: list[dict], run_id: str
     ) -> None:
-        """Attach a ``related`` object to each ``processes`` entry in-place:
-        the process's listening ports, outbound flows, remote connections,
-        DNS queries and exec lineage, correlated by PID (DNS by process
-        name). This lets the judge score the process *with its behaviour*
-        instead of in isolation — a novel binary that is also beaconing to
-        a flagged IP is a far stronger signal than either row alone.
+        """Attach a ``related`` object — the artifact's listening ports,
+        outbound flows, remote connections, DNS queries and exec lineage,
+        correlated by PID (DNS by process name) — so the judge scores it
+        *with its behaviour* instead of in isolation. A novel binary (or a
+        launch item) that is also beaconing to a flagged IP is a far stronger
+        signal than either row alone.
 
-        Only the ``processes`` collector is correlated; flows/DNS keep their
-        own independent verdicts. The unjudged projection has no PID (its
-        content_hash is over name/exe/cmdline/username), so we map
-        content_hash → PIDs/names via the full ``rows``, exactly as
-        ``_enrich_entries`` maps evidence."""
-        if c.name != _CORRELATED_COLLECTOR or not unjudged:
+        Correlated collectors:
+        - ``processes``: PID/name come straight from the collector's rows.
+        - ``launch_items``: the unjudged entry has no PID, so we resolve each
+          item's ``program`` to the live process(es) running it, then use
+          those PIDs.
+        Other collectors keep their own independent verdicts."""
+        if not unjudged or c.name not in (
+            _CORRELATED_COLLECTOR,
+            _LAUNCH_ITEM_COLLECTOR,
+        ):
             return
+        try:
+            since = self.sink.prior_run_started_at(run_id)
+        except Exception as exc:
+            LOG.warning("correlation: prior_run(%s) failed: %s", c.name, exc)
+            return
+        pids_by_hash, names_by_hash = self._behavior_pid_map(c, rows, since)
+        all_pids = sorted({p for s in pids_by_hash.values() for p in s})
+        all_names = sorted({n for s in names_by_hash.values() for n in s})
+        if not all_pids and not all_names:
+            return
+        try:
+            ctx = self.sink.correlation_context(all_pids, all_names, since)
+        except Exception as exc:
+            LOG.warning("correlation: context(%s) failed: %s", c.name, exc)
+            return
+        for entry in unjudged:
+            h = entry.get("content_hash")
+            related = self._related_from_ctx(
+                ctx, pids_by_hash.get(h, set()), names_by_hash.get(h, set())
+            )
+            if related:
+                entry["related"] = related
+
+    def _behavior_pid_map(
+        self, c: Collector, rows: list[dict], since: Optional[str]
+    ) -> tuple[dict, dict]:
+        """content_hash → (PIDs, names) for a correlatable collector, or two
+        empty maps for anything else. Dispatches on the collector instead of
+        branching at each call site."""
+        if c.name == _CORRELATED_COLLECTOR:
+            return self._process_pid_map(rows)
+        if c.name == _LAUNCH_ITEM_COLLECTOR:
+            return self._launch_item_pid_map(rows, since)
+        return {}, {}
+
+    @staticmethod
+    def _related_from_ctx(ctx: dict, pids: set, names: set) -> dict:
+        """Assemble the ``related`` behaviour object for one artifact from a
+        correlation context, bounded per kind. Shared by per-cycle correlation
+        and the investigator's full-history bundle."""
+        related: dict = {}
+        ports = [p for pid in pids for p in ctx["ports"].get(pid, [])]
+        flows = [f for pid in pids for f in ctx["flows"].get(pid, [])]
+        conns = [cc for pid in pids for cc in ctx["conns"].get(pid, [])]
+        dns = [d for n in names for d in ctx["dns"].get(n, [])]
+        execs = [ctx["exec"][pid] for pid in pids if pid in ctx["exec"]]
+        if ports:
+            related["listening_ports"] = ports[:10]
+        if flows:
+            related["outbound_flows"] = flows[:10]
+        if conns:
+            related["remote_connections"] = conns[:10]
+        if dns:
+            related["dns_queries"] = dns[:15]
+        if execs:
+            related["exec_lineage"] = execs[0]
+        return related
+
+    @staticmethod
+    def _process_pid_map(rows: list[dict]) -> tuple[dict, dict]:
+        """content_hash → (PIDs, names) from the processes rows' own
+        pid/name fields."""
         pids_by_hash: dict[str, set] = {}
         names_by_hash: dict[str, set] = {}
         for r in rows:
@@ -291,36 +417,77 @@ class Runner:
                 pids_by_hash.setdefault(h, set()).add(r["pid"])
             if r.get("name"):
                 names_by_hash.setdefault(h, set()).add(r["name"])
-        all_pids = sorted({p for s in pids_by_hash.values() for p in s})
-        all_names = sorted({n for s in names_by_hash.values() for n in s})
+        return pids_by_hash, names_by_hash
+
+    def _launch_item_pid_map(
+        self, rows: list[dict], since: Optional[str]
+    ) -> tuple[dict, dict]:
+        """content_hash → (PIDs, names) for launch items: resolve each item's
+        ``program`` to the live process(es) running it (via the process
+        snapshot at/after ``since``), so a persistence entry is judged with
+        the behaviour of the process it spawns. names carry the program
+        basename so DNS-by-process-name correlation still applies."""
+        programs_by_hash: dict[str, set] = {}
+        for r in rows:
+            h = r.get("content_hash")
+            prog = r.get("program")
+            if isinstance(h, str) and h and isinstance(prog, str) and prog:
+                programs_by_hash.setdefault(h, set()).add(prog)
+        all_programs = sorted({p for s in programs_by_hash.values() for p in s})
         try:
-            since = self.sink.prior_run_started_at(run_id)
-            ctx = self.sink.correlation_context(all_pids, all_names, since)
+            pids_for_exe = self.sink.pids_by_executable(all_programs, since)
         except Exception as exc:
-            LOG.warning("correlation: context(%s) failed: %s", c.name, exc)
+            LOG.warning("correlation: pids_by_executable failed: %s", exc)
+            pids_for_exe = {}
+        pids_by_hash: dict[str, set] = {}
+        names_by_hash: dict[str, set] = {}
+        for h, progs in programs_by_hash.items():
+            for prog in progs:
+                for pid in pids_for_exe.get(prog, ()):
+                    pids_by_hash.setdefault(h, set()).add(pid)
+                names_by_hash.setdefault(h, set()).add(prog.rsplit("/", 1)[-1])
+        return pids_by_hash, names_by_hash
+
+    def _attach_yara_context(
+        self, c: Collector, unjudged: list[dict], rows: list[dict]
+    ) -> None:
+        """Attach the matched rule's own metadata and a redacted sample of
+        the matched bytes to each ``file_scan`` entry in-place, so the judge
+        can triage false positives and attribute the rule instead of seeing
+        only the rule name + tags.
+
+        Both fields live on the collector ``rows`` but not in ``judge_fields``
+        (so they don't affect the content_hash); we map content_hash → row
+        exactly as ``_enrich_entries`` maps evidence, then surface ``meta_json``
+        as ``rule_meta`` and ``strings_json`` as ``matched_strings``."""
+        if c.name != _FILE_SCAN_COLLECTOR or not unjudged:
             return
+        rows_by_hash: dict[str, dict] = {}
+        for r in rows:
+            h = r.get("content_hash")
+            if isinstance(h, str) and h and h not in rows_by_hash:
+                rows_by_hash[h] = r
         for entry in unjudged:
-            h = entry.get("content_hash")
-            pids = pids_by_hash.get(h, set())
-            names = names_by_hash.get(h, set())
-            related: dict = {}
-            ports = [p for pid in pids for p in ctx["ports"].get(pid, [])]
-            flows = [f for pid in pids for f in ctx["flows"].get(pid, [])]
-            conns = [cc for pid in pids for cc in ctx["conns"].get(pid, [])]
-            dns = [d for n in names for d in ctx["dns"].get(n, [])]
-            execs = [ctx["exec"][pid] for pid in pids if pid in ctx["exec"]]
-            if ports:
-                related["listening_ports"] = ports[:10]
-            if flows:
-                related["outbound_flows"] = flows[:10]
-            if conns:
-                related["remote_connections"] = conns[:10]
-            if dns:
-                related["dns_queries"] = dns[:15]
-            if execs:
-                related["exec_lineage"] = execs[0]
-            if related:
-                entry["related"] = related
+            row = rows_by_hash.get(entry.get("content_hash"))
+            if row is None:
+                continue
+            meta = self._loads_or_none(row.get("meta_json"))
+            if isinstance(meta, dict) and meta:
+                entry["rule_meta"] = meta
+            strings = self._loads_or_none(row.get("strings_json"))
+            if isinstance(strings, list) and strings:
+                entry["matched_strings"] = strings
+
+    @staticmethod
+    def _loads_or_none(raw):
+        """Parse a JSON column value, returning None on absence/garbage so a
+        malformed row can't break the judge wiring."""
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
 
     @staticmethod
     def _judgment_context(unjudged: list[dict]) -> dict:
@@ -341,6 +508,163 @@ class Runner:
             if parts:
                 ctx[h] = parts
         return ctx
+
+    def _verify_judgments(
+        self, collector: str, judgments: list, unjudged: list[dict]
+    ) -> list:
+        """Re-check each ``malicious`` verdict with the independent skeptic; a
+        refuted verdict is downgraded to ``suspicious`` (still flagged for
+        review, not asserted as an active threat). No-op without a verifier;
+        bounded per collector so a batch of malicious can't fan out."""
+        if self.verifier is None or not judgments:
+            return judgments
+        by_hash = {e.get("content_hash"): e for e in unjudged if e.get("content_hash")}
+        out: list = []
+        checked = 0
+        for j in judgments:
+            if j.verdict != Verdict.MALICIOUS or checked >= _MAX_VERIFY_PER_COLLECTOR:
+                out.append(j)
+                continue
+            checked += 1
+            entry = by_hash.get(j.content_hash, {})
+            finding = {
+                "collector": collector,
+                "verdict": str(j.verdict),
+                "category": str(j.category),
+                "reasoning": j.reasoning,
+                **{k: v for k, v in entry.items() if k != "content_hash"},
+            }
+            result = self.verifier.verify(finding)
+            if result and result["refuted"]:
+                out.append(
+                    replace(
+                        j,
+                        verdict=Verdict.SUSPICIOUS,
+                        reasoning=(
+                            f"[verifier downgraded malicious→suspicious] "
+                            f"{result['reasoning']} · original: {j.reasoning}"
+                        )[:500],
+                    )
+                )
+                LOG.info(
+                    "verifier downgraded collector=%s reason=%s",
+                    collector,
+                    result["reasoning"][:120],
+                )
+            else:
+                out.append(j)
+        return out
+
+    def _apply_feedback(self) -> None:
+        """Pin operator corrections onto their findings' verdicts. Best-effort
+        — a feedback failure must not stop the cycle."""
+        try:
+            n = self.sink.apply_feedback()
+        except Exception:
+            LOG.exception("apply_feedback failed")
+            return
+        if n:
+            LOG.info("applied %d operator feedback correction(s)", n)
+
+    def _judge_hints(self, collector_name: str, base_hints: str) -> str:
+        """Append this host's recent operator feedback for the collector to
+        the static hints as ground-truth examples, so the judge classifies
+        matching artifacts the same way. Returns the base hints unchanged when
+        there's no feedback."""
+        try:
+            examples = self.sink.feedback_examples(collector_name)
+        except Exception as exc:
+            LOG.warning("feedback_examples(%s) failed: %s", collector_name, exc)
+            return base_hints
+        if not examples:
+            return base_hints
+        lines = []
+        for e in examples:
+            artifact = (e.get("artifact") or "").strip() or "(unnamed artifact)"
+            phrase = _FEEDBACK_PHRASE.get(e.get("label"), e.get("label"))
+            note = f" note: {e['note']}" if e.get("note") else ""
+            lines.append(f'- "{artifact}" was marked {phrase} by the operator.{note}')
+        return base_hints + (
+            "\nOperator feedback for this host (ground truth — apply the same "
+            "judgement to these and closely-matching artifacts):\n" + "\n".join(lines)
+        )
+
+    def _investigate_unknowns(
+        self, c: Collector, judgments: list, unjudged: list[dict], rows: list[dict]
+    ) -> list:
+        """Re-judge each ``unknown`` verdict with a richer, deliberately
+        gathered bundle: the artifact's FULL-HISTORY correlated behaviour (not
+        just the previous cycle) plus the host's other non-benign findings.
+        A committed verdict replaces the unknown. No-op without an
+        investigator; bounded per collector. Snapshot collectors only — their
+        ``rows`` are needed to resolve behaviour."""
+        if self.investigator is None or not judgments:
+            return judgments
+        by_hash = {e.get("content_hash"): e for e in unjudged if e.get("content_hash")}
+        # Full history: since=None drops the previous-cycle time bound.
+        pids_by_hash, names_by_hash = self._behavior_pid_map(c, rows, None)
+        all_pids = sorted({p for s in pids_by_hash.values() for p in s})
+        all_names = sorted({n for s in names_by_hash.values() for n in s})
+        ctx = None
+        host_context: list = []
+        out: list = []
+        investigated = 0
+        for j in judgments:
+            stop = investigated >= _MAX_INVESTIGATE_PER_COLLECTOR
+            if j.verdict != Verdict.UNKNOWN or stop:
+                out.append(j)
+                continue
+            investigated += 1
+            if ctx is None:  # gather the shared context once, on first unknown
+                ctx = self._full_history_context(all_pids, all_names)
+                host_context = self._host_context()
+            entry = by_hash.get(j.content_hash, {})
+            finding = {k: v for k, v in entry.items() if k != "content_hash"}
+            related_full = self._related_from_ctx(
+                ctx,
+                pids_by_hash.get(j.content_hash, set()),
+                names_by_hash.get(j.content_hash, set()),
+            )
+            if related_full:
+                finding["related_full"] = related_full
+            others = [h for h in host_context if h["content_hash"] != j.content_hash]
+            if others:
+                finding["host_context"] = others
+            result = self.investigator.investigate(c.name, finding)
+            if result and result["verdict"] != Verdict.UNKNOWN:
+                out.append(
+                    replace(
+                        j,
+                        verdict=result["verdict"],
+                        category=result["category"],
+                        confidence=result["confidence"],
+                        reasoning=f"[investigated] {result['reasoning']}"[:500],
+                        remediation=result["remediation"],
+                    )
+                )
+                LOG.info(
+                    "investigator resolved collector=%s unknown→%s",
+                    c.name,
+                    str(result["verdict"]),
+                )
+            else:
+                out.append(j)
+        return out
+
+    def _full_history_context(self, pids: list, names: list) -> dict:
+        """Correlation context over all retained history (since=None)."""
+        try:
+            return self.sink.correlation_context(pids, names, None)
+        except Exception as exc:
+            LOG.warning("investigate: full-history context failed: %s", exc)
+            return {"ports": {}, "flows": {}, "conns": {}, "dns": {}, "exec": {}}
+
+    def _host_context(self) -> list:
+        try:
+            return self.sink.recent_nonbenign(_HOST_CONTEXT_LIMIT)
+        except Exception as exc:
+            LOG.warning("investigate: host context failed: %s", exc)
+            return []
 
     def _run_collector(
         self, c: SnapshotCollector, run_id: str, started: str, host_baseline: dict
@@ -365,7 +689,11 @@ class Runner:
                 enriched_indicators = self._enrich_entries(c, unjudged, rows)
                 self._annotate_baseline(c, unjudged, host_baseline)
                 self._attach_correlation(c, unjudged, rows, run_id)
-                judgments = self.judge.judge(c.name, c.judge_hints, unjudged)
+                self._attach_yara_context(c, unjudged, rows)
+                hints = self._judge_hints(c.name, c.judge_hints)
+                judgments = self.judge.judge(c.name, hints, unjudged)
+                judgments = self._verify_judgments(c.name, judgments, unjudged)
+                judgments = self._investigate_unknowns(c, judgments, unjudged, rows)
                 self.sink.write_judgments(
                     judgments, context=self._judgment_context(unjudged)
                 )
@@ -460,7 +788,9 @@ class Runner:
                 continue
             self._annotate_baseline(c, unjudged, host_baseline)
             try:
-                judgments = self.judge.judge(c.name, c.judge_hints, unjudged)
+                hints = self._judge_hints(c.name, c.judge_hints)
+                judgments = self.judge.judge(c.name, hints, unjudged)
+                judgments = self._verify_judgments(c.name, judgments, unjudged)
                 self.sink.write_judgments(
                     judgments, context=self._judgment_context(unjudged)
                 )
@@ -572,6 +902,71 @@ class Runner:
             self.sink.write_yara_rules(stats.get("inventory") or [])
         except Exception as exc:  # noqa: BLE001
             LOG.warning("yara_status: write failed: %s", exc)
+
+    def _generate_coverage(self, run_id: str, started: str) -> None:
+        """Assess whether the loaded YARA ruleset covers this host's threat
+        surface and store the result — but only when the ruleset has changed
+        since the last assessment, so we don't re-spend tokens on a ruleset
+        that's static within a process. Never raises (best-effort)."""
+        try:
+            ruleset = self.sink.read_yara_status()
+        except Exception as exc:
+            LOG.warning("coverage: read_yara_status failed: %s", exc)
+            return
+        if not ruleset or not ruleset.get("rules_loaded"):
+            return
+        fingerprint = self._ruleset_fingerprint(ruleset)
+        try:
+            if self.sink.latest_yara_coverage_fingerprint() == fingerprint:
+                return  # ruleset unchanged since the last assessment
+        except Exception:
+            pass  # comparison is an optimisation; fall through and assess
+        try:
+            host = self.sink.coverage_profile(run_id)
+        except Exception as exc:
+            LOG.warning("coverage: profile failed: %s", exc)
+            return
+        host["platform"] = platform.system()
+        host["hostname"] = socket.gethostname()
+        result = self.coverage.assess(ruleset, host)
+        if not result:
+            return
+        try:
+            self.sink.write_yara_coverage(
+                {
+                    "created_at": Clock().now_iso(),
+                    "run_id": run_id,
+                    "model": self.coverage.model,
+                    "posture": result["posture"],
+                    "headline": result["headline"],
+                    "summary": result["summary"],
+                    "gaps_json": json.dumps(result["gaps"]),
+                    "recommendations_json": json.dumps(result["recommendations"]),
+                    "ruleset_fingerprint": fingerprint,
+                }
+            )
+            LOG.info(
+                "coverage posture=%s gaps=%d recommendations=%d",
+                result["posture"],
+                len(result["gaps"]),
+                len(result["recommendations"]),
+            )
+        except Exception as exc:
+            LOG.warning("coverage: write failed: %s", exc)
+
+    @staticmethod
+    def _ruleset_fingerprint(ruleset: dict) -> str:
+        """Stable signature of the loaded ruleset — its rule count, per-source
+        counts, and category set. Changes only when the rules actually change,
+        gating regeneration of the (token-costing) coverage assessment."""
+        return json.dumps(
+            {
+                "rules": ruleset.get("rules_loaded"),
+                "sources": sorted((ruleset.get("sources") or {}).items()),
+                "cats": sorted((ruleset.get("by_category") or {}).keys()),
+            },
+            sort_keys=True,
+        )
 
     @staticmethod
     def _risk_explanation(result: dict, prev) -> str:

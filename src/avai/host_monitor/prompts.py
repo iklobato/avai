@@ -1,4 +1,5 @@
 """Prompt-file loading (per-collector judge hints)."""
+
 from __future__ import annotations
 
 import tomllib
@@ -23,6 +24,12 @@ class Prompts:
     collector_hints: dict[str, str] = field(default_factory=dict)
     narrator_system: str = ""
     narrator_user_template: str = ""
+    coverage_system: str = ""
+    coverage_user_template: str = ""
+    verifier_system: str = ""
+    verifier_user_template: str = ""
+    investigator_system: str = ""
+    investigator_user_template: str = ""
 
     @classmethod
     def load(cls, path: Path) -> "Prompts":
@@ -38,12 +45,25 @@ class Prompts:
         narrator_system = Template(narrator.get("system", "")).safe_substitute(
             categories=", ".join(str(c) for c in ThreatCategory),
         )
+        coverage = data.get("yara_coverage") or {}
+        verifier = data.get("verifier") or {}
+        investigator = data.get("investigator") or {}
+        investigator_system = Template(investigator.get("system", "")).safe_substitute(
+            verdicts=" | ".join(str(v) for v in Verdict),
+            categories=", ".join(str(c) for c in ThreatCategory),
+        )
         return cls(
             system=system,
             user_template=judge.get("user_template", ""),
             collector_hints=dict(data.get("collector_hints") or {}),
             narrator_system=narrator_system,
             narrator_user_template=narrator.get("user_template", ""),
+            coverage_system=coverage.get("system", ""),
+            coverage_user_template=coverage.get("user_template", ""),
+            verifier_system=verifier.get("system", ""),
+            verifier_user_template=verifier.get("user_template", ""),
+            investigator_system=investigator_system,
+            investigator_user_template=investigator.get("user_template", ""),
         )
 
     def hint_for(self, collector_name: str) -> str:

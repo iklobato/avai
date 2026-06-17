@@ -658,6 +658,69 @@ class TestDashboardEndpoints:
         # the KEV/critical package must rank before the EOL OS
         assert body.index("openssl@3.0.2") < body.index("macos@12")
 
+    def test_vulnerabilities_flags_and_prioritises_reachable_software(self, client):
+        import json as _json
+
+        from avai.dashboard import Base
+        from avai.enrichers.cache import register_schema
+        from avai.host_monitor import CollectionRun, ListeningPortRow
+
+        model = register_schema(Base)
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            # A completed run where nginx is listening (exposed on the host).
+            s.add(
+                CollectionRun(
+                    run_id="run-x",
+                    started_at="2026-06-01T00:00:00Z",
+                    finished_at="2026-06-01T00:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                ListeningPortRow(
+                    run_id="run-x",
+                    collected_at="2026-06-01T00:00:00Z",
+                    process_name="nginx",
+                    laddr_ip="0.0.0.0",
+                    laddr_port=443,
+                )
+            )
+            # Exposed nginx (CVSS 5.0) vs higher-CVSS openssl that isn't present.
+            for pkg, cve, score in [
+                ("nginx@1.20", "CVE-2024-2000", 5.0),
+                ("openssl@3.0.2", "CVE-2024-3000", 9.0),
+            ]:
+                s.add(
+                    model(
+                        source="osv",
+                        indicator_type="package",
+                        indicator_value=pkg,
+                        verdict_hint="suspicious",
+                        confidence=0.6,
+                        summary="OSV",
+                        details_json=_json.dumps({"vuln_ids": [cve]}),
+                        fetched_at="2026-06-01T00:00:00Z",
+                    )
+                )
+                s.add(
+                    model(
+                        source="nvd",
+                        indicator_type="cve",
+                        indicator_value=cve,
+                        verdict_hint="malicious",
+                        confidence=0.7,
+                        summary=f"NVD: CVSS={score}",
+                        details_json=_json.dumps({"cvss31": {"baseScore": score}}),
+                        fetched_at="2026-06-01T00:00:00Z",
+                    )
+                )
+            s.commit()
+        body = client.get("/fragments/vulnerabilities").data.decode()
+        assert "exposed" in body  # the reachable-software badge rendered
+        # exposed nginx outranks the higher-CVSS but not-present openssl
+        assert body.index("nginx@1.20") < body.index("openssl@3.0.2")
+
     def test_incident_fragment_empty_shows_placeholder(self, client):
         r = client.get("/fragments/incident")
         assert r.status_code == 200
@@ -1267,5 +1330,49 @@ class TestControlPlane:
         monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
         r = client.post(
             "/control/maintenance/bogus", headers={"X-Avai-Token": "secret"}
+        )
+        assert r.status_code == 400
+
+
+class TestFeedbackEndpoint:
+    _HASH = "a" * 64
+
+    def test_records_feedback_with_token(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post(
+            f"/feedback/processes/{self._HASH}/false_positive",
+            data={"artifact": "curl", "note": "dev tool"},
+            headers={"X-Avai-Token": "secret"},
+        )
+        assert r.status_code == 200
+        assert b"recorded" in r.data
+        from avai.host_monitor import FeedbackRow
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            row = s.get(FeedbackRow, (self._HASH, "processes"))
+        assert row is not None
+        assert row.label == "false_positive"
+        assert row.artifact == "curl"
+        assert row.note == "dev tool"
+        assert row.applied == 0  # monitor applies it next cycle
+
+    def test_rejected_without_token(self, client, monkeypatch):
+        monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
+        r = client.post(f"/feedback/processes/{self._HASH}/false_positive")
+        assert r.status_code == 403
+
+    def test_bad_label_is_400(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post(
+            f"/feedback/processes/{self._HASH}/bogus",
+            headers={"X-Avai-Token": "secret"},
+        )
+        assert r.status_code == 400
+
+    def test_unknown_collector_is_400(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post(
+            f"/feedback/not_a_collector/{self._HASH}/confirmed",
+            headers={"X-Avai-Token": "secret"},
         )
         assert r.status_code == 400

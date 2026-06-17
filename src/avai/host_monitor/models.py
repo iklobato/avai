@@ -110,6 +110,31 @@ class RiskScoreRow(Base):
     explanation: Mapped[Optional[str]]
 
 
+class YaraCoverageRow(Base):
+    """One LLM assessment of how well the loaded YARA ruleset covers THIS
+    host's threat surface (the ruleset's category mix weighed against the
+    host's platform + inventory). The dashboard shows the most recent row.
+    ``ruleset_fingerprint`` is the signature of the ruleset the assessment
+    was made against — compared cycle-to-cycle so we only regenerate when
+    the loaded ruleset actually changes (it's static within a process)."""
+
+    __tablename__ = "yara_coverage"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    created_at: Mapped[str] = mapped_column(index=True)
+    run_id: Mapped[Optional[str]]
+    model: Mapped[str]
+    # well_covered | partial | thin
+    posture: Mapped[str]
+    headline: Mapped[str]
+    summary: Mapped[Optional[str]]
+    # JSON arrays the dashboard renders:
+    #   gaps_json:            [{"area","detail"}]
+    #   recommendations_json: [{"action","detail"}]
+    gaps_json: Mapped[Optional[str]]
+    recommendations_json: Mapped[Optional[str]]
+    ruleset_fingerprint: Mapped[Optional[str]]
+
+
 class StreamingSession(Base):
     """One row per StreamingWorker lifetime. Rows produced by a streaming
     collector reference this via ``run_id`` (same column as snapshot
@@ -123,6 +148,28 @@ class StreamingSession(Base):
     started_at: Mapped[str]
     finished_at: Mapped[Optional[str]]
     row_count: Mapped[int] = mapped_column(default=0)
+
+
+class FeedbackRow(Base):
+    """One operator correction on a finding, keyed like :class:`Judgement`
+    (content_hash + collector). The read-only dashboard writes these; the
+    monitor (a) applies the correction to the existing verdict and (b) feeds
+    recent corrections back to the judge as host-specific ground-truth so
+    closely-matching future artifacts are classified the same way.
+
+    ``artifact`` is the human display string captured at click time (the
+    dashboard has it; the monitor would otherwise have to re-derive it).
+    ``applied`` flips to 1 once the monitor has corrected the verdict — the
+    row is kept regardless, since the future-guidance use reads all rows."""
+
+    __tablename__ = "feedback"
+    content_hash: Mapped[str] = mapped_column(primary_key=True)
+    collector: Mapped[str] = mapped_column(primary_key=True)
+    label: Mapped[str]  # FeedbackLabel
+    note: Mapped[Optional[str]]
+    artifact: Mapped[Optional[str]]
+    created_at: Mapped[str] = mapped_column(index=True)
+    applied: Mapped[int] = mapped_column(default=0)
 
 
 class ControlState(Base):
@@ -402,6 +449,12 @@ class FileScanRow(_RowBase):
     namespace: Mapped[Optional[str]]
     tags_json: Mapped[Optional[str]]
     meta_json: Mapped[Optional[str]]
+    # Redacted, bounded sample of the bytes that actually matched the rule
+    # ([{id, offset, text|hex, truncated}]). Lets the judge tell a
+    # substantive hit (a real C2 URL / mutex) from a generic substring (a
+    # likely false positive). Not part of judge_fields, so it never changes
+    # the content_hash.
+    strings_json: Mapped[Optional[str]]
     size: Mapped[Optional[int]]
     mtime: Mapped[Optional[float]]
     scan_source: Mapped[Optional[str]]

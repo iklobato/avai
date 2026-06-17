@@ -316,6 +316,30 @@
                       last seen: <span class="text-slate-600 italic">never observed since judgement was first recorded</span>
                     {% endif %}
                   </div>
+
+                  {# ----- operator feedback: corrects this verdict + teaches
+                     the judge for this host (applied on the next cycle) ----- #}
+                  <div class="pt-2 border-t border-slate-800/60">
+                    <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">operator feedback</div>
+                    <div id="feedback-{{ idx }}" class="flex items-center gap-2">
+                      <button type="button"
+                              class="px-2 py-0.5 rounded border border-amber-800 bg-amber-900/30 text-amber-300 text-[10px] uppercase tracking-wider hover:bg-amber-900/50 transition-colors"
+                              hx-post="/feedback/{{ f.collector }}/{{ f.content_hash }}/false_positive"
+                              hx-target="#feedback-{{ idx }}"
+                              hx-swap="innerHTML"
+                              hx-vals='{"artifact": {{ (f.artifact or "")|tojson }}}'>
+                        mark false positive
+                      </button>
+                      <button type="button"
+                              class="px-2 py-0.5 rounded border border-red-800 bg-red-900/30 text-red-300 text-[10px] uppercase tracking-wider hover:bg-red-900/50 transition-colors"
+                              hx-post="/feedback/{{ f.collector }}/{{ f.content_hash }}/confirmed"
+                              hx-target="#feedback-{{ idx }}"
+                              hx-swap="innerHTML"
+                              hx-vals='{"artifact": {{ (f.artifact or "")|tojson }}}'>
+                        confirm threat
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </td>
             </tr>
