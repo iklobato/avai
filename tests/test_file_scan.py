@@ -275,6 +275,88 @@ class TestYaraExternals:
         assert any(r["rule"] == "good" for r in rows)
 
 
+class TestMatchedStrings:
+    """The collector surfaces a bounded, redacted sample of the matched bytes
+    so the judge can triage substantive hits vs generic-substring FPs."""
+
+    def _rules(self, tmp_path: Path, body: str) -> Path:
+        d = tmp_path / "rules"
+        d.mkdir()
+        (d / "s.yar").write_text(body)
+        return d
+
+    def _scan(self, tmp_path: Path, rules: Path, name: str, write):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        f = bindir / name
+        write(f)
+        return list(
+            FileScanCollector(fs=_FakeFs(bin_dirs=[bindir]), rules_dir=rules).collect()
+        )
+
+    def test_printable_match_rendered_as_text(self, tmp_path):
+        rows = self._scan(
+            tmp_path,
+            _rules_dir(tmp_path),
+            "evil.bin",
+            lambda f: f.write_text(_MARKER),
+        )
+        strings = json.loads(rows[0]["strings_json"])
+        assert strings
+        s = strings[0]
+        assert s["id"] == "$a"
+        assert s["offset"] == 0
+        assert s["text"] == _MARKER
+        assert s["truncated"] is False
+        assert "hex" not in s
+
+    def test_binary_match_rendered_as_hex(self, tmp_path):
+        rules = self._rules(
+            tmp_path, "rule b { strings: $a = { DE AD BE EF } condition: $a }"
+        )
+        rows = self._scan(
+            tmp_path,
+            rules,
+            "x.bin",
+            lambda f: f.write_bytes(b"\x00\xde\xad\xbe\xef\x00"),
+        )
+        s = json.loads(rows[0]["strings_json"])[0]
+        assert s["hex"] == "deadbeef"
+        assert s["offset"] == 1
+        assert "text" not in s
+
+    def test_long_match_is_truncated(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(C, "YARA_MATCH_STRING_MAX_BYTES", 4)
+        marker = "ABCDEFGHIJ"
+        rules = self._rules(
+            tmp_path, f'rule l {{ strings: $a = "{marker}" condition: $a }}'
+        )
+        rows = self._scan(tmp_path, rules, "x.bin", lambda f: f.write_text(marker))
+        s = json.loads(rows[0]["strings_json"])[0]
+        assert s["text"] == "ABCD"
+        assert s["truncated"] is True
+
+    def test_instance_count_is_capped(self, tmp_path, monkeypatch):
+        # The marker repeats 3×; the cap must bound how many we surface.
+        monkeypatch.setattr(C, "YARA_MAX_MATCH_STRINGS", 1)
+        rows = self._scan(
+            tmp_path,
+            _rules_dir(tmp_path),
+            "x.bin",
+            lambda f: f.write_text(" ".join([_MARKER] * 3)),
+        )
+        assert len(json.loads(rows[0]["strings_json"])) == 1
+
+    def test_clean_scan_has_no_strings_rows(self, tmp_path):
+        rows = self._scan(
+            tmp_path,
+            _rules_dir(tmp_path),
+            "clean.bin",
+            lambda f: f.write_text("benign content"),
+        )
+        assert rows == []
+
+
 class TestFileType:
     def test_detects_known_magics(self, tmp_path):
         cases = {

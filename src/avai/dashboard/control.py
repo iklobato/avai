@@ -17,7 +17,7 @@ from sqlalchemy import create_engine, event, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from avai.host_monitor import ControlState
+from avai.host_monitor import ControlState, FeedbackRow
 
 _write_engine_cache: dict[str, object] = {}
 _write_engine_lock = threading.Lock()
@@ -99,6 +99,45 @@ def set_collector(name: str, enabled: bool) -> None:
         }
         current.discard(name) if enabled else current.add(name)
         row.disabled_collectors = ",".join(sorted(current)) or None
+        session.commit()
+
+
+def record_feedback(
+    *,
+    content_hash: str,
+    collector: str,
+    label: str,
+    note: str | None,
+    artifact: str | None,
+) -> None:
+    """Persist an operator correction on a finding (latest-wins per finding).
+    The monitor picks it up next cycle — applies it to the verdict and feeds
+    it back to the judge. This is the one telemetry-adjacent table the
+    dashboard writes; the monitor remains the sole writer of findings."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with Session(_write_engine()) as session:
+        session.execute(
+            sqlite_insert(FeedbackRow)
+            .values(
+                content_hash=content_hash,
+                collector=collector,
+                label=label,
+                note=note,
+                artifact=artifact,
+                created_at=now,
+                applied=0,
+            )
+            .on_conflict_do_update(
+                index_elements=["content_hash", "collector"],
+                set_={
+                    "label": label,
+                    "note": note,
+                    "artifact": artifact,
+                    "created_at": now,
+                    "applied": 0,
+                },
+            )
+        )
         session.commit()
 
 

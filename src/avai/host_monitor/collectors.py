@@ -260,7 +260,13 @@ class ProcessCollector(SnapshotCollector):
 class NetworkConnectionsCollector(SnapshotCollector):
     name = "network_connections"
     model = NetworkConnectionRow
-    judge_enabled = False  # too high churn; aggregate behaviourally instead
+    # Judged on the remote-endpoint identity. Dedup over (remote ip, port,
+    # status) collapses the many sockets to one verdict per peer (judged once
+    # ever via content_hash), and threat-intel for the remote IP is attached
+    # by enrichment. tcpdump `network_flows` cover active outbound traffic;
+    # this catches established/idle remote peers a capture window can miss.
+    # Private/loopback/no-remote rows collapse to a single benign entry.
+    judge_fields = ("raddr_ip", "raddr_port", "status")
 
     def collect(self):
         for c in PsutilConnections.inet():
@@ -1328,6 +1334,57 @@ def _file_type(path: Path) -> str:
     return ""
 
 
+def _redact_one_match(identifier: str, offset: int, data: bytes) -> dict:
+    """Render one matched byte run for the judge: printable runs as ``text``,
+    anything else as ``hex``, truncated to ``YARA_MATCH_STRING_MAX_BYTES`` so
+    a large or binary match can't bloat the prompt/DB or leak a full payload."""
+    raw = bytes(data or b"")
+    truncated = len(raw) > constants.YARA_MATCH_STRING_MAX_BYTES
+    raw = raw[: constants.YARA_MATCH_STRING_MAX_BYTES]
+    printable = sum(1 for b in raw if 0x20 <= b < 0x7F)
+    out = {"id": identifier, "offset": int(offset), "truncated": truncated}
+    if raw and printable / len(raw) >= 0.8:
+        out["text"] = raw.decode("ascii", "replace")
+    else:
+        out["hex"] = raw.hex()
+    return out
+
+
+def _redact_match_strings(match) -> list[dict]:
+    """A bounded, redacted view of the bytes a YARA match fired on.
+
+    Tolerant of both yara-python string-match shapes: the >=4.3 object form
+    (``StringMatch`` with ``.identifier`` + ``.instances`` carrying
+    ``.offset`` / ``.matched_data``) and the legacy ``(offset, identifier,
+    data)`` tuple. Capped at ``YARA_MAX_MATCH_STRINGS`` entries total — a
+    broad rule on a big binary can otherwise report thousands of instances."""
+    cap = constants.YARA_MAX_MATCH_STRINGS
+    out: list[dict] = []
+    for sm in getattr(match, "strings", None) or []:
+        instances = getattr(sm, "instances", None)
+        if instances is not None:  # modern object API
+            identifier = getattr(sm, "identifier", "")
+            for inst in instances:
+                out.append(
+                    _redact_one_match(
+                        identifier,
+                        getattr(inst, "offset", 0),
+                        getattr(inst, "matched_data", b""),
+                    )
+                )
+                if len(out) >= cap:
+                    return out
+        else:  # legacy tuple API: (offset, identifier, data)
+            try:
+                offset, identifier, data = sm
+            except (TypeError, ValueError):
+                continue
+            out.append(_redact_one_match(identifier, offset, data))
+            if len(out) >= cap:
+                return out
+    return out
+
+
 def _rule_source(path: Path, rules_dir: Path) -> str:
     """Label a rule file by where it came from: top-level files are
     ``bundled``; a vendored pack file (``vendor/<name>/…``) is ``<name>``."""
@@ -1579,6 +1636,10 @@ class FileScanCollector(SnapshotCollector):
                 # finding to satisfy the signature-base DRL attribution
                 # obligation and to give the judge/dashboard rule context.
                 "meta_json": json.dumps(m.meta, default=str),
+                # Redacted sample of the bytes that matched — lets the judge
+                # tell a substantive hit from a generic substring (false
+                # positive). Bounded by the YARA_MATCH_STRING* caps.
+                "strings_json": json.dumps(_redact_match_strings(m)),
                 "size": st.st_size,
                 "mtime": st.st_mtime,
                 "scan_source": source,

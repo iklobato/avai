@@ -68,6 +68,7 @@ from avai.host_monitor import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
+    YaraCoverageRow,
     YaraStatusRow,
 )
 
@@ -116,6 +117,7 @@ COLLECTOR_MODELS = {
 
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "processes": ("name", "exe"),
+    "network_connections": ("raddr_ip", "raddr_port"),
     "network_flows": ("dst_ip", "dst_port"),
     "dns_queries": ("qname", "qtype"),
     "ssh_authorized_keys": ("owner", "fingerprint"),
@@ -355,14 +357,62 @@ def risk_trend(session: Session, limit: int = 30) -> list[int]:
 _VULN_SOURCES = ("osv", "nvd", "cisa_kev", "github_advisory", "endoflife")
 
 
+def _normalize_software(name: str) -> str:
+    """Reduce a software/package/exe string to a comparable base token:
+    drop the ``@version`` suffix, take the path basename, strip a ``.app``
+    suffix. ``"openssl@3.0.2"`` → ``"openssl"``; ``"/usr/sbin/nginx"`` →
+    ``"nginx"``; ``"Firefox.app"`` → ``"firefox"``."""
+    base = str(name or "").split("@", 1)[0].strip().lower()
+    base = base.rsplit("/", 1)[-1]
+    if base.endswith(".app"):
+        base = base[:-4]
+    return base
+
+
+def _software_presence(session: Session, run_id) -> tuple[set, set]:
+    """``(running, exposed)`` normalized software names for ``run_id``:
+    ``running`` from the process snapshot (name + exe basename), ``exposed``
+    from the listening-port owners. Used to tell whether a vulnerable package
+    is actually present and reachable on the host, not just installed."""
+    running: set = set()
+    exposed: set = set()
+    if run_id is None:
+        return running, exposed
+    present = _existing_tables(session)
+    if "processes" in present:
+        for name, exe in session.execute(
+            select(ProcessRow.name, ProcessRow.exe).where(ProcessRow.run_id == run_id)
+        ).all():
+            if name:
+                running.add(_normalize_software(name))
+            if exe:
+                running.add(_normalize_software(exe))
+    if "listening_ports" in present:
+        for pname in session.execute(
+            select(ListeningPortRow.process_name).where(
+                ListeningPortRow.run_id == run_id
+            )
+        ).scalars():
+            if pname:
+                exposed.add(_normalize_software(pname))
+    running.discard("")
+    exposed.discard("")
+    return running, exposed
+
+
 def vulnerabilities(session: Session) -> list[dict]:
     """Aggregate the CVE / EOL evidence the enrichment chain already
-    collected into a prioritised 'patch me' list (KEV → has-CVE → EOL).
-    Reads the enrichment_evidence cache; [] if it isn't present."""
+    collected into a prioritised 'patch me' list. Each item is flagged with
+    whether the vulnerable software is actually ``running`` and/or ``exposed``
+    (listening) on the host, and the list is prioritised
+    KEV → exposed → running → CVSS → has-CVE → EOL — actively-exploited and
+    reachable first. Reads the enrichment_evidence cache; [] if absent."""
     if "enrichment_evidence" not in _existing_tables(session):
         return []
     from avai.enrichers.cache import register_schema
 
+    latest = latest_run(session)
+    running, exposed = _software_presence(session, latest.run_id if latest else None)
     model = register_schema(Base)
     rows = session.execute(
         select(
@@ -425,6 +475,7 @@ def vulnerabilities(session: Session) -> list[dict]:
         ]
         kev = any(c["kev"] for c in cves)
         cvss = max((c["cvss"] for c in cves if c["cvss"] is not None), default=None)
+        base = _normalize_software(ival)
         items.append(
             {
                 "software": ival,
@@ -434,12 +485,18 @@ def vulnerabilities(session: Session) -> list[dict]:
                 "cvss": cvss,
                 "eol": eol,
                 "summary": summary or "",
+                # Is this vulnerable software actually present on the host?
+                "running": base in running,
+                "exposed": base in exposed,
             }
         )
-    # prioritise: actively-exploited (KEV) → highest CVSS → has-CVE → EOL
+    # prioritise: actively-exploited (KEV) → reachable (exposed) → present
+    # (running) → highest CVSS → has-CVE → EOL.
     items.sort(
         key=lambda i: (
             not i["kev"],
+            not i["exposed"],
+            not i["running"],
             -(i["cvss"] or 0.0),
             not i["cves"],
             not i["eol"],
@@ -1697,9 +1754,32 @@ def file_scan(
         ]
     return {
         "status": yara_status(session),
+        "coverage": yara_coverage(session),
         "matches": matches,
         "verdict": verdict,
         "q": q,
+    }
+
+
+def yara_coverage(session: Session) -> "dict | None":
+    """The most recent LLM assessment of how well the loaded ruleset covers
+    this host (posture / headline / summary / gaps / recommendations). None
+    when the assessor has never run or its table predates this DB."""
+    if YaraCoverageRow.__tablename__ not in _existing_tables(session):
+        return None
+    row = session.execute(
+        select(YaraCoverageRow).order_by(desc(YaraCoverageRow.created_at)).limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return {
+        "posture": row.posture,
+        "headline": row.headline,
+        "summary": row.summary,
+        "gaps": json.loads(row.gaps_json or "[]"),
+        "recommendations": json.loads(row.recommendations_json or "[]"),
+        "created_at": row.created_at,
+        "model": row.model,
     }
 
 

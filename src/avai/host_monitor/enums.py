@@ -29,6 +29,13 @@ class ThreatCategory(StrEnum):
     RECONNAISSANCE = "reconnaissance"
 
 
+class FeedbackLabel(StrEnum):
+    """Operator correction on a finding, fed back into judging."""
+
+    FALSE_POSITIVE = "false_positive"
+    CONFIRMED = "confirmed"
+
+
 class LaunchScope(StrEnum):
     USER_AGENT = "user_agent"
     SYSTEM_AGENT = "system_agent"

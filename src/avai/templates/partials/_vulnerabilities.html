@@ -23,7 +23,20 @@
         <tbody class="divide-y divide-slate-800/80 [&>tr:nth-child(even)]:bg-slate-950/40">
           {% for v in vulns %}
             <tr class="hover:bg-slate-800/40 transition-colors">
-              <td class="px-3 py-2 align-top font-mono text-xs text-slate-200 break-all">{{ v.software }}</td>
+              <td class="px-3 py-2 align-top font-mono text-xs text-slate-200 break-all">
+                {{ v.software }}
+                {% if v.exposed or v.running %}
+                  <div class="mt-1 flex flex-wrap gap-1">
+                    {% if v.exposed %}
+                      <span class="inline-flex items-center px-1.5 py-0.5 rounded border border-red-800 bg-red-900/30 text-red-300 text-[9px] font-semibold uppercase tracking-wider"
+                            title="A process for this software is listening on a port — reachable">exposed</span>
+                    {% elif v.running %}
+                      <span class="inline-flex items-center px-1.5 py-0.5 rounded border border-amber-800 bg-amber-900/30 text-amber-300 text-[9px] font-semibold uppercase tracking-wider"
+                            title="This software is currently running on the host">running</span>
+                    {% endif %}
+                  </div>
+                {% endif %}
+              </td>
               <td class="px-3 py-2 align-top text-xs text-slate-300">
                 {% if v.cves %}
                   <div class="flex flex-wrap gap-1.5">
