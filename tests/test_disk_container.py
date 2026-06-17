@@ -11,7 +11,10 @@ and the three modes (native / container-no-rootfs / container-rootfs).
 
 from __future__ import annotations
 
+import sys
 from collections import namedtuple
+
+import pytest
 
 import avai.host_monitor.constants as constants
 from avai.host_monitor.runtime import probes
@@ -21,6 +24,15 @@ from avai.host_monitor.runtime.probes import (
     _parse_mounts,
     _statvfs_usage,
     _unescape_mount_field,
+)
+
+# DiskMetrics container mode is Linux-specific: it parses /proc-style mount
+# tables and measures filesystems via os.statvfs (absent on Windows) through
+# the $HOST_PREFIX/rootfs mount. None of it runs on Windows, so the suite
+# would only fail there on an AttributeError, not a real regression.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Linux container disk-metrics; no os.statvfs on Windows",
 )
 
 
