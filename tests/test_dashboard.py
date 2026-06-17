@@ -341,6 +341,77 @@ class TestDashboardEndpoints:
         assert "/usr/local/bin/dropper" in body  # the scanned path
         assert "malicious" in body
 
+    def test_file_scan_panel_renders_ruleset_summary_and_matches(self, client):
+        # The File Scan panel shows the persisted ruleset summary (counts,
+        # sources, categories) AND this run's matches with rule/path/author.
+        from avai.host_monitor import CollectionRun, FileScanRow, Judgement, Sink
+
+        Sink(_engine_rw(app.config["DB_PATH"])).write_yara_status(
+            {
+                "rules_loaded": 5292,
+                "files_loaded": 656,
+                "files_skipped": 95,
+                "rules_dir": "/x",
+                "sources": {"signature-base": 655, "bundled": 1},
+                "skip_reasons": {"needs crypto-enabled yara": 95},
+                "by_category": {"apt": 260, "gen": 156},
+            }
+        )
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                FileScanRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="fs1",
+                    path="/usr/bin/evil",
+                    sha256="a" * 64,
+                    rule="SUSP_Just_EICAR",
+                    namespace="thor",
+                    tags_json='["FILE"]',
+                    meta_json='{"author": "Florian Roth"}',
+                    scan_source="bin_dirs",
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="fs1",
+                    collector="file_scan",
+                    verdict="malicious",
+                    category="execution",
+                    confidence=0.9,
+                    reasoning="matched a known dropper pattern",
+                    remediation="quarantine",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/file-scan").data.decode()
+        # ruleset summary
+        assert "5,292" in body and "rules loaded" in body
+        assert "signature-base" in body
+        assert "apt" in body  # category breakdown
+        # the match
+        assert "SUSP_Just_EICAR" in body
+        assert "/usr/bin/evil" in body
+        assert "Florian Roth" in body  # author attribution
+        assert "malicious" in body
+
+    def test_file_scan_panel_empty_db_shows_not_compiled(self, client):
+        body = client.get("/fragments/file-scan").data.decode()
+        assert "hasn't compiled" in body  # graceful empty state
+
     def test_network_panel_is_an_accessible_tablist(self, client):
         # WAI-ARIA tabs pattern: the tab strip must be a tablist of tabs that
         # control the shared panel, with exactly one tab pre-selected.

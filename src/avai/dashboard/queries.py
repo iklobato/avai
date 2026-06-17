@@ -68,6 +68,7 @@ from avai.host_monitor import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
+    YaraStatusRow,
 )
 
 COLLECTOR_MODELS = {
@@ -1632,6 +1633,73 @@ def network_exposure(
         "verdict": verdict,
         "q": q,
         "any": bool(proxies or shares or sessions or promisc),
+    }
+
+
+def yara_status(session: Session) -> "dict | None":
+    """The file scanner's compiled-ruleset summary (single row, written by
+    the monitor). ``None`` when the scanner has never compiled — e.g. a DB
+    from before the monitor ran the file_scan collector."""
+    if YaraStatusRow.__tablename__ not in _existing_tables(session):
+        return None
+    row = session.get(YaraStatusRow, 1)
+    if row is None:
+        return None
+    by_category = json.loads(row.by_category_json or "{}")
+    return {
+        "compiled_at": row.compiled_at,
+        "rules_loaded": row.rules_loaded,
+        "files_loaded": row.files_loaded,
+        "files_skipped": row.files_skipped,
+        "rules_dir": row.rules_dir,
+        "sources": json.loads(row.sources_json or "{}"),
+        "skip_reasons": json.loads(row.skip_reasons_json or "{}"),
+        # Top categories descending — the long tail isn't worth the pixels.
+        "top_categories": sorted(
+            by_category.items(), key=lambda kv: kv[1], reverse=True
+        )[:12],
+        "category_count": len(by_category),
+    }
+
+
+def file_scan(
+    session: Session,
+    run_id: str,
+    verdict: str = "",
+    q: str = "",
+    limit: int = 500,
+) -> dict:
+    """The File Scan panel: the compiled-ruleset summary plus this run's
+    YARA matches (file_scan rows annotated with their LLM verdict), each
+    carrying the matched rule's author parsed from its meta for attribution.
+    """
+    matches = _collector_rows_with_verdict(
+        session,
+        run_id,
+        FileScanRow,
+        "file_scan",
+        ("rule", "path", "sha256", "scan_source", "tags_json", "meta_json"),
+        limit,
+    )
+    for m in matches:
+        meta = json.loads(m.get("meta_json") or "{}")
+        m["author"] = meta.get("author") or ""
+    if verdict:
+        matches = [m for m in matches if m.get("verdict") == verdict]
+    if q:
+        ql = q.lower()
+        matches = [
+            m
+            for m in matches
+            if any(
+                ql in str(m.get(f) or "").lower() for f in ("rule", "path", "author")
+            )
+        ]
+    return {
+        "status": yara_status(session),
+        "matches": matches,
+        "verdict": verdict,
+        "q": q,
     }
 
 

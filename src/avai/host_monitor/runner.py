@@ -190,6 +190,8 @@ class Runner:
                 self._generate_narrative(run_id, started)
             # Deterministic posture score — always computed (no LLM needed).
             self._generate_risk_score(run_id, started)
+            # Persist the file scanner's ruleset summary for the dashboard.
+            self._write_yara_status()
         self.sink.end_run(ok, failed)
 
         # Rotation: keep the DB under the configured size cap by pruning
@@ -550,6 +552,25 @@ class Runner:
             LOG.info("risk score=%d grade=%s", result["score"], result["grade"])
         except Exception as exc:
             LOG.warning("risk: write failed: %s", exc)
+
+    def _write_yara_status(self) -> None:
+        """Persist the file scanner's last compile summary (rules loaded /
+        skipped / by source / category) so the read-only dashboard can show
+        the ruleset. Best-effort — never raises."""
+        stats = next(
+            (
+                c.compile_stats
+                for c in self.snapshot_collectors
+                if getattr(c, "compile_stats", None) is not None
+            ),
+            None,
+        )
+        if stats is None:
+            return
+        try:
+            self.sink.write_yara_status(stats)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("yara_status: write failed: %s", exc)
 
     @staticmethod
     def _risk_explanation(result: dict, prev) -> str:

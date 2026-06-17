@@ -41,7 +41,7 @@ def _cmd_rules(rules_dir: Path, do_list: bool) -> int:
     user-facing answer to 'which rules are available?'. Read-only; no DB."""
     from .host_monitor.collectors import _compile_yara_rules
 
-    rules = _compile_yara_rules(rules_dir)
+    rules, _stats = _compile_yara_rules(rules_dir)
     if rules is None:
         print(f"avai: no compilable YARA rules under {rules_dir}", file=sys.stderr)
         return 1

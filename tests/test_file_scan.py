@@ -190,7 +190,10 @@ class TestFileScanCollector:
 
     def test_bundled_eicar_rules_compile(self):
         # Guards against a broken shipped rule silently disabling scanning.
-        assert _compile_yara_rules(C.YARA_RULES_DIR) is not None
+        rules, stats = _compile_yara_rules(C.YARA_RULES_DIR)
+        assert rules is not None
+        assert stats["rules_loaded"] >= 1
+        assert "bundled" in stats["sources"]
 
 
 class TestYaraExternals:

@@ -301,6 +301,12 @@
              hx-trigger="load, every 60s"
              hx-swap="innerHTML"></section>
 
+    {# ---------- file scan (YARA ruleset + matches) ---------- #}
+    <section id="file-scan-panel"
+             hx-get="/fragments/file-scan"
+             hx-trigger="load, every 60s"
+             hx-swap="innerHTML"></section>
+
     {# ---------- auth events (unified log stream) ---------- #}
     <section id="auth-events"
              hx-get="/fragments/auth-events"

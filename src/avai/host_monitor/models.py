@@ -360,6 +360,24 @@ class FileIntegrityRow(_RowBase):
     exists_flag: Mapped[Optional[int]]
 
 
+class YaraStatusRow(Base):
+    """Single-row (id=1) snapshot of the file scanner's compiled ruleset,
+    written by the monitor each cycle so the read-only dashboard can show
+    what's loaded (the compiled rules live only in the monitor's memory and
+    are never otherwise persisted)."""
+
+    __tablename__ = "yara_status"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    compiled_at: Mapped[Optional[str]]
+    rules_loaded: Mapped[Optional[int]]
+    files_loaded: Mapped[Optional[int]]
+    files_skipped: Mapped[Optional[int]]
+    rules_dir: Mapped[Optional[str]]
+    sources_json: Mapped[Optional[str]]  # {"bundled": 1, "signature-base": 651}
+    skip_reasons_json: Mapped[Optional[str]]  # {"crypto": 95}
+    by_category_json: Mapped[Optional[str]]  # {"apt": 315, "gen": 170, ...}
+
+
 class FileScanRow(_RowBase):
     __tablename__ = "file_scan"
     path: Mapped[str] = mapped_column(index=True)

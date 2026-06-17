@@ -1328,10 +1328,22 @@ def _file_type(path: Path) -> str:
     return ""
 
 
+def _rule_source(path: Path, rules_dir: Path) -> str:
+    """Label a rule file by where it came from: top-level files are
+    ``bundled``; a vendored pack file (``vendor/<name>/…``) is ``<name>``."""
+    try:
+        parts = path.relative_to(rules_dir).parts
+    except ValueError:
+        return "other"
+    return "bundled" if len(parts) == 1 else parts[-2]
+
+
 def _compile_yara_rules(rules_dir: Path):
     """Compile every ``*.yar`` / ``*.yara`` under ``rules_dir`` into one
-    :class:`yara.Rules`. Returns ``None`` when the directory is absent or
-    holds no compilable rules.
+    :class:`yara.Rules`. Returns ``(rules, stats)`` — ``rules`` is ``None``
+    when the directory is absent or holds no compilable rules; ``stats`` is
+    always a summary dict (counts, sources, skip reasons, per-category) for
+    the dashboard's File Scan panel.
 
     Each file is validated independently first and uncompilable ones are
     skipped with a warning, so a single malformed rule in a fetched pack
@@ -1341,17 +1353,29 @@ def _compile_yara_rules(rules_dir: Path):
     files. ``_YARA_EXTERNALS`` is supplied so rules referencing scanner
     externals (filename/filepath/extension/filetype/…) compile.
     """
+    stats = {
+        "rules_loaded": 0,
+        "files_loaded": 0,
+        "files_skipped": 0,
+        "skip_reasons": {},
+        "by_category": {},
+        "sources": {},
+        "rules_dir": str(rules_dir),
+    }
     if not rules_dir.is_dir():
-        return None
+        return None, stats
     filepaths: dict[str, str] = {}
-    skipped = 0
+    skip_reasons: dict[str, int] = {}
+    by_category: dict[str, int] = {}
+    sources: dict[str, int] = {}
     for path in sorted(rules_dir.rglob("*")):
         if path.suffix.lower() not in (".yar", ".yara") or not path.is_file():
             continue
         try:
             yara.compile(filepath=str(path), externals=_YARA_EXTERNALS)
         except yara.Error as exc:
-            skipped += 1
+            reason = "needs crypto-enabled yara" if _crypto_hint(exc) else "other"
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
             constants.LOG.warning(
                 "yara: skipping uncompilable rules %s: %s%s",
                 path,
@@ -1366,23 +1390,35 @@ def _compile_yara_rules(rules_dir: Path):
             unique = f"{namespace}_{suffix}"
             suffix += 1
         filepaths[unique] = str(path)
+        category = path.stem.split("_", 1)[0]
+        by_category[category] = by_category.get(category, 0) + 1
+        source = _rule_source(path, rules_dir)
+        sources[source] = sources.get(source, 0) + 1
+    stats.update(
+        files_loaded=len(filepaths),
+        files_skipped=sum(skip_reasons.values()),
+        skip_reasons=skip_reasons,
+        by_category=by_category,
+        sources=sources,
+    )
     if not filepaths:
-        return None
+        return None, stats
     try:
         compiled = yara.compile(filepaths=filepaths, externals=_YARA_EXTERNALS)
     except yara.Error as exc:
         constants.LOG.warning("yara: combined compile failed: %s", exc)
-        return None
+        return None, stats
+    stats["rules_loaded"] = sum(1 for _ in compiled)
     # One-line visibility into what the scanner actually loaded — the only
     # place rule counts surface, since there's no per-match log.
     constants.LOG.info(
         "yara: loaded %d rules from %d files (skipped %d) under %s",
-        sum(1 for _ in compiled),
-        len(filepaths),
-        skipped,
+        stats["rules_loaded"],
+        stats["files_loaded"],
+        stats["files_skipped"],
         rules_dir,
     )
-    return compiled
+    return compiled, stats
 
 
 class FileScanCollector(SnapshotCollector):
@@ -1420,10 +1456,13 @@ class FileScanCollector(SnapshotCollector):
         self._clock = clock or Clock()
         self._rules = None  # compiled once, lazily
         self._compiled = False
+        # Ruleset summary from the last compile — read by the Runner to
+        # persist yara_status for the dashboard. None until first collect().
+        self.compile_stats: Optional[dict] = None
 
     def _ruleset(self):
         if not self._compiled:
-            self._rules = _compile_yara_rules(self._rules_dir)
+            self._rules, self.compile_stats = _compile_yara_rules(self._rules_dir)
             self._compiled = True
         return self._rules
 
