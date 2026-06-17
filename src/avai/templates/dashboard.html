@@ -37,6 +37,15 @@
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
+    /* responsive tables — scroll horizontally on narrow screens */
+    @media (max-width: 767px) {
+      table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+      }
+    }
   </style>
 </head>
 <body class="bg-slate-950 text-slate-200 font-sans antialiased min-h-screen">
