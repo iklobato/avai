@@ -3,6 +3,14 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.7.1] — 2026-06-17
+
+### Changed
+- **The Docker image runs the monitor and the dashboard together by default.** A plain `docker run -p 8765:8765 -v "$PWD":/data iklob1/avai` now starts both roles under supervisord, so the dashboard is populated out of the box instead of showing an empty database. They share `/data/avai.db` (the monitor writes; the dashboard reads it live), each streams to the container's stdout/stderr, and supervisord restarts either one if it exits. Override the command to run a single role (`… iklob1/avai avai dashboard` or `… avai monitor`). For full host visibility on Linux, still add `--pid=host --network=host`; the LLM judge still needs a credential (`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) or it falls back to NullJudge.
+
+### Fixed
+- **The dashboard no longer crashes when `/etc/hosts` can't be replaced** (e.g. in a container, where it's a bind-mounted file and `os.replace` fails with `EBUSY`). The hosts-file writer now surfaces OS-level write failures as `HostsError`, so the optional `avai.local` mapping degrades to a quiet notice — as its docstring already promised — instead of taking down the server. `avai install-hosts` likewise reports a clean error rather than a traceback.
+
 ## [0.7.0] — 2026-06-17
 
 ### Changed

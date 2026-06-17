@@ -134,7 +134,7 @@ malicious/suspicious findings.
 
 **Built to stay out of your way**
 
-- **One `docker run`** — the same image is both the dashboard and the monitor.
+- **One `docker run`** — one image runs the monitor *and* the dashboard together (via supervisord), so it's populated out of the box.
 - **No agent contract, no SIEM, no cloud control plane** — it runs on your host.
 - **Dedup by content hash** — the same artifact is never sent to the LLM twice.
 - **Just a SQLite file** — point the dashboard at any `avai.db`, on any OS.
@@ -172,13 +172,18 @@ Full reference below: [What's collected](#whats-collected-one-line-summary) ·
 
 | Run | Command | Where it makes sense |
 |---|---|---|
-| Dashboard (default) | `docker run iklob1/avai` | any host — read-only Flask + HTMX on :8765 |
-| Monitor | `docker run ... iklob1/avai avai monitor ...` | **Linux hosts only** — needs `pid=host`, `network=host`, and host filesystem bind-mounts |
+| Monitor + dashboard (default) | `docker run -p 8765:8765 -v "$PWD":/data iklob1/avai` | any host — runs both under supervisord; dashboard on :8765 populated by the in-container monitor |
+| Full host visibility (Linux) | `docker run --pid=host --network=host ... iklob1/avai` | **Linux hosts** — the in-container monitor sees the real host |
+| Single role | `docker run ... iklob1/avai avai dashboard` (or `avai monitor`) | run just one role (e.g. dashboard against an existing `avai.db`, or a monitor-only container) |
 
-The image's default `CMD` is the dashboard. Override the command at
-`docker run` / compose level to run the monitor instead. Native install
-is also possible (`pip install avai-monitor`, then `avai monitor` /
-`avai dashboard`) but is not the documented path.
+The image's default `CMD` runs both roles together via supervisord (they
+share `/data/avai.db` — the monitor writes, the dashboard reads it live —
+and either is auto-restarted if it exits). Override the command to run a
+single role. The LLM judge still needs a credential at runtime
+(`-e CLAUDE_CODE_OAUTH_TOKEN=…` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`);
+without one the monitor falls back to NullJudge (collection only). Native
+install also works: `pip install avai-monitor`, then `avai monitor` /
+`avai dashboard`.
 
 The image carries a `HEALTHCHECK` against the dashboard's
 `/api/notifications/new` endpoint — `starting → healthy` in ~10 s on
