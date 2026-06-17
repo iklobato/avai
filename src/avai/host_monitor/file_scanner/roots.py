@@ -154,13 +154,18 @@ class ExclusionPolicy(Protocol):
 class PseudoFsExclusion:
     """Reject kernel/virtual filesystems that hold no real files to scan
     (``/proc``, ``/sys``, ``/dev``) — walking them is pure waste and can
-    hang on device nodes."""
+    hang on device nodes.
 
-    _DENY = ("/proc", "/sys", "/dev")
+    Matches on the first path segment (``parts[1]`` after the root anchor)
+    rather than a string prefix, so ``/processes`` is not mistaken for
+    ``/proc`` and the rule is independent of the OS path separator.
+    """
+
+    _DENY = frozenset({"proc", "sys", "dev"})
 
     def permits(self, path: Path) -> bool:
-        text = str(path)
-        return not any(text == d or text.startswith(d + "/") for d in self._DENY)
+        parts = path.parts
+        return not (len(parts) >= 2 and parts[1] in self._DENY)
 
 
 class CompositeExclusion:
