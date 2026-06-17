@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Fetch a pinned YARA-Forge "core" rule pack into src/avai/rules/vendor/.
+"""Fetch a pinned, opt-in YARA rule pack into src/avai/rules/vendor/<source>/.
 
-Pulls an exact, pinned upstream release (reproducible) and extracts its
-``.yar`` / ``.yara`` files plus the upstream LICENSE/attribution into the
-vendor directory, which the FileScanCollector then compiles alongside the
-bundled baseline rules.
+The FileScanCollector compiles every ``*.yar`` / ``*.yara`` it finds under
+the rules dir, so a fetched pack is picked up automatically. Packs are
+NOT committed and NOT shipped in the wheel (see src/avai/rules/NOTICE);
+they're opt-in per environment. Stdlib only; no third-party deps.
 
-The pack is intentionally not committed to the repo by default — see
-src/avai/rules/NOTICE for the licensing sign-off this requires. Stdlib
-only; no third-party deps.
+    python scripts/update_rules.py                       # signature-base (default)
+    python scripts/update_rules.py --source yara-forge   # YARA-Forge core
+    python scripts/update_rules.py --ref <sha-or-tag>    # override the pin
 
-    python scripts/update_rules.py                  # fetch the pinned release
-    python scripts/update_rules.py --version 20250901   # bump the pin
+signature-base rules need a crypto-enabled yara for the imphash/hash.*
+rules; the rest compile on the stock PyPI wheel (the collector skips the
+uncompilable files individually). See src/avai/rules/NOTICE.
 """
 
 from __future__ import annotations
@@ -19,48 +20,104 @@ from __future__ import annotations
 import argparse
 import io
 import sys
+import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
 
-# Pinned YARA-Forge release (tags are date-stamped YYYYMMDD). Bump
-# deliberately (and re-run the licensing review) rather than tracking
-# "latest".
-DEFAULT_VERSION = "20260614"
-ASSET = "yara-forge-rules-core.zip"
-_URL = "https://github.com/YARAHQ/yara-forge/releases/download/{version}/" + ASSET
-
 _RULES_DIR = Path(__file__).resolve().parent.parent / "src" / "avai" / "rules"
 _VENDOR_DIR = _RULES_DIR / "vendor"
-
 _RULE_SUFFIXES = (".yar", ".yara")
-_KEEP_ALSO = ("license", "notice", "readme")  # attribution files, lowercased stem match
+_ATTRIBUTION_STEMS = ("license", "notice", "readme")  # lowercased stem match
 
 
-def _download(version: str) -> bytes:
-    url = _URL.format(version=version)
+# Each source pins an exact upstream ref for reproducibility. Bump a pin
+# deliberately (and re-check attribution) rather than tracking "latest".
+class _Source:
+    def __init__(self, name, url, archive, ref, member_filter):
+        self.name = name
+        self.url = url  # may contain {ref}
+        self.archive = archive  # "zip" | "tar.gz"
+        self.ref = ref
+        self.member_filter = member_filter  # (member_name) -> bool
+
+
+def _signature_base_member(name: str) -> bool:
+    # Keep yara/*.yar|*.yara rules and the top-level LICENSE for attribution.
+    p = Path(name)
+    if "/yara/" in name and p.suffix.lower() in _RULE_SUFFIXES:
+        return True
+    return p.stem.lower() in _ATTRIBUTION_STEMS and p.suffix.lower() in (
+        "",
+        ".txt",
+        ".md",
+    )
+
+
+def _yara_forge_member(name: str) -> bool:
+    p = Path(name)
+    return p.suffix.lower() in _RULE_SUFFIXES or p.stem.lower() in _ATTRIBUTION_STEMS
+
+
+SOURCES = {
+    # Florian Roth's signature-base — individual .yar files, DRL 1.1 (permits
+    # MIT bundling with attribution). Fetched as a tarball at a pinned commit.
+    "signature-base": _Source(
+        name="signature-base",
+        url="https://github.com/Neo23x0/signature-base/archive/{ref}.tar.gz",
+        archive="tar.gz",
+        ref="3b78d4102c12e6059ff71a6157909f1e4d3e3450",  # 2026-06-15
+        member_filter=_signature_base_member,
+    ),
+    # YARA-Forge "core" — one consolidated .yar, mixed-license (needs a
+    # sign-off before committing). Released as a date-stamped zip.
+    "yara-forge": _Source(
+        name="yara-forge",
+        url="https://github.com/YARAHQ/yara-forge/releases/download/{ref}/yara-forge-rules-core.zip",
+        archive="zip",
+        ref="20260614",
+        member_filter=_yara_forge_member,
+    ),
+}
+
+
+def _download(url: str) -> bytes:
     print(f"fetching {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "avai-update-rules"})
-    with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310 (pinned host)
+    with urllib.request.urlopen(req, timeout=180) as resp:  # noqa: S310 (pinned host)
         return resp.read()
 
 
-def _extract(blob: bytes, dest: Path) -> int:
-    dest.mkdir(parents=True, exist_ok=True)
+def _safe_target(dest: Path, member_name: str) -> Path:
+    """Flatten a member to ``dest/<basename>``, refusing empty / traversal
+    names (zip-slip / tar-slip)."""
+    base = Path(member_name).name
+    if not base or base in (".", ".."):
+        raise ValueError(f"unsafe member name: {member_name!r}")
+    return dest / base
+
+
+def _extract_zip(blob: bytes, dest: Path, keep) -> int:
     written = 0
     with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        for member in zf.namelist():
-            name = Path(member).name
-            if not name:
+        for name in zf.namelist():
+            if name.endswith("/") or not keep(name):
                 continue
-            stem = Path(name).stem.lower()
-            is_rule = Path(name).suffix.lower() in _RULE_SUFFIXES
-            is_attribution = any(k in stem for k in _KEEP_ALSO)
-            if not (is_rule or is_attribution):
+            _safe_target(dest, name).write_bytes(zf.read(name))
+            written += 1
+    return written
+
+
+def _extract_tar_gz(blob: bytes, dest: Path, keep) -> int:
+    written = 0
+    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
+        for member in tf.getmembers():
+            if not member.isfile() or not keep(member.name):
                 continue
-            # Flatten into dest; never honour absolute or parent paths (zip-slip).
-            target = dest / name
-            target.write_bytes(zf.read(member))
+            src = tf.extractfile(member)
+            if src is None:
+                continue
+            _safe_target(dest, member.name).write_bytes(src.read())
             written += 1
     return written
 
@@ -68,18 +125,29 @@ def _extract(blob: bytes, dest: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--version", default=DEFAULT_VERSION, help="YARA-Forge release tag"
+        "--source",
+        choices=sorted(SOURCES),
+        default="signature-base",
+        help="which rule pack to fetch (default: signature-base)",
     )
+    parser.add_argument("--ref", help="override the pinned commit/tag")
     args = parser.parse_args()
 
+    source = SOURCES[args.source]
+    ref = args.ref or source.ref
+    dest = _VENDOR_DIR / source.name
+    dest.mkdir(parents=True, exist_ok=True)
+
     try:
-        blob = _download(args.version)
+        blob = _download(source.url.format(ref=ref))
     except OSError as exc:
         print(f"download failed: {exc}", file=sys.stderr)
         return 1
-    count = _extract(blob, _VENDOR_DIR)
-    print(f"wrote {count} file(s) to {_VENDOR_DIR}")
-    print("Review licensing (src/avai/rules/NOTICE) before committing vendor/.")
+
+    extractor = _extract_tar_gz if source.archive == "tar.gz" else _extract_zip
+    count = extractor(blob, dest, source.member_filter)
+    print(f"wrote {count} file(s) to {dest}")
+    print("Opt-in pack: not committed, not shipped. See src/avai/rules/NOTICE.")
     return 0
 
 

@@ -367,6 +367,7 @@ class FileScanRow(_RowBase):
     rule: Mapped[Optional[str]]
     namespace: Mapped[Optional[str]]
     tags_json: Mapped[Optional[str]]
+    meta_json: Mapped[Optional[str]]
     size: Mapped[Optional[int]]
     mtime: Mapped[Optional[float]]
     scan_source: Mapped[Optional[str]]

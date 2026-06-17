@@ -10,39 +10,56 @@ Contents shipped in the repo
                     Guarantees scanning is functional out of the box.
 - hash_denylist.txt Empty deny-list template (avai-authored, MIT).
 
-Curated rule pack (vendor/) — opt-in, never shipped
----------------------------------------------------
-A curated pack (YARA-Forge "core") is fetched into ./vendor/ by
-`scripts/update_rules.py`, which pins an exact upstream release for
-reproducibility. It is intentionally NOT committed to this repo and NOT
-included in the published wheel/sdist (see the exclude in pyproject.toml):
-users fetch it post-install for their own environment.
+Opt-in rule packs (vendor/<source>/) — never shipped
+----------------------------------------------------
+`scripts/update_rules.py` fetches a pinned pack into ./vendor/<source>/.
+Packs are NOT committed and NOT in the published wheel/sdist (gitignored +
+excluded in pyproject.toml); users fetch them post-install per environment.
 
-REQUIRES a crypto-enabled yara
-------------------------------
-~200 rules in the pack use pe.imphash() and the hash.* module, which need
-a yara built with OpenSSL. The PyPI `yara-python` wheel is built WITHOUT
-crypto, so on a stock `pip install` those functions don't compile — and
-because the pack is one consolidated file, that makes the whole pack
-fail to load (the collector logs a warning and falls back to the bundled
-EICAR rule). To use the pack, install a crypto-enabled yara (e.g. build
-`yara-python` against a libyara with OpenSSL, or use a distro/homebrew
-yara with the bindings) before running update_rules.py.
+    python scripts/update_rules.py                      # signature-base (default)
+    python scripts/update_rules.py --source yara-forge  # YARA-Forge core
+    python scripts/update_rules.py --ref <sha-or-tag>   # bump the pin
 
-LICENSING — read before committing the pack
---------------------------------------------
-avai itself is MIT. YARA-Forge aggregates community rules under MIXED
-licenses, some copyleft. Those rules are NOT relicensed under MIT: when
-the pack is vendored, its upstream LICENSE / attribution files are kept
-alongside it under ./vendor/, and this NOTICE points at them. Shipping the
-pack is a deliberate licensing decision that needs a human sign-off — do
-not commit ./vendor/ until that review is done.
+1) signature-base (Neo23x0/signature-base) — RECOMMENDED
+--------------------------------------------------------
+Florian Roth's signature-base. Hundreds of individual *.yar files, so the
+collector's per-file compile degrades gracefully: on the measured snapshot
+~651 of 746 files (≈87%, ~5,250 rules) compile on the stock PyPI yara; the
+~95 that use pe.imphash()/hash.* are skipped individually (they need a
+crypto-enabled yara — see below) rather than taking the whole pack down.
 
-Refreshing the pack
--------------------
-    python scripts/update_rules.py            # fetch the pinned release
-    python scripts/update_rules.py --version X.Y.Z   # bump the pin
+Its rules expect scanner EXTERNAL VARIABLES (filename, filepath, extension,
+filetype, md5, owner) — without them yara raises "undefined identifier".
+avai supplies them (empty placeholders at compile, real per-file values at
+match), mirroring LOKI/THOR, so the rules compile and match.
 
-Users can always drop their own *.yar / *.yara files in this directory
-(or set AVAI_YARA_RULES_DIR) — uncompilable files are skipped with a
-warning, never silently, and never disable the rest of the ruleset.
+LICENSE: Detection Rule License (DRL) 1.1. It PERMITS commercial use and
+bundling in an MIT project, BUT requires: preserve author identification,
+provide a link to the source, include the license notice, and — when rules
+are applied to data — retain author info in the match output. avai keeps
+the upstream LICENSE under ./vendor/signature-base/ and stores each matched
+rule's meta (author/reference) on the finding (file_scan.meta_json) to
+honour the attribution-on-match obligation. The pack stays opt-in/unshipped
+regardless.
+
+2) YARA-Forge core (YARAHQ/yara-forge)
+--------------------------------------
+One consolidated *.yar, MIXED licenses (some copyleft) — needs a human
+sign-off before being committed/shipped anywhere. Because it is a single
+file, one unsupported construct (pe.imphash on a crypto-less yara) makes
+the WHOLE pack fail to load. Prefer signature-base unless you specifically
+need YARA-Forge's aggregation.
+
+Crypto-enabled yara (for imphash / hash.* rules)
+------------------------------------------------
+The PyPI `yara-python` wheel is built WITHOUT OpenSSL, so pe.imphash() and
+the hash.* module read as "invalid field name" and those rule files are
+skipped (the collector logs an actionable hint). To load them, install a
+yara built with OpenSSL (e.g. build yara-python against a libyara with
+crypto, or use a distro/homebrew yara with the bindings).
+
+Custom rules
+------------
+Drop your own *.yar / *.yara in this directory (or point AVAI_YARA_RULES_DIR
+elsewhere) — uncompilable files are skipped with a warning, never silently,
+and never disable the rest of the ruleset.
