@@ -37,7 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # avai itself.
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install '.[judge]' \
+RUN pip install '.' \
  && mkdir -p /data
 
 EXPOSE 8765

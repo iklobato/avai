@@ -494,7 +494,7 @@ the simplest way to watch a server is to install it natively and let
 it see everything directly:
 
 ```sh
-pip install 'avai-monitor[judge]'          # [judge] pulls litellm + anthropic
+pip install avai-monitor                    # includes the LLM judge (litellm + anthropic)
 export ANTHROPIC_API_KEY=sk-ant-...         # or CLAUDE_CODE_OAUTH_TOKEN
 export ABUSE_CH_AUTH_KEY=...                # optional, free — adds 3 sources
 

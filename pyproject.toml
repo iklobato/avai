@@ -9,7 +9,7 @@ build-backend = "hatchling.build"
 # differs, because the canonical `avai` slot is blocked by PyPI's
 # name-similarity policy.
 name = "avai-monitor"
-version = "0.6.0"
+version = "0.7.0"
 description = "macOS / Linux host-security telemetry collector with an LLM threat judge and a single-page web dashboard."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -65,14 +65,14 @@ dependencies = [
     # YARA signature scanning (FileScanCollector). Wheels bundle libyara for
     # manylinux + macOS, so no separate system install is needed on those.
     "yara-python>=4.5",
-]
-
-[project.optional-dependencies]
-# Pull these in with: pip install 'avai-monitor[judge]'
-judge = [
+    # The LLM threat judge is core, so its providers ship by default — a plain
+    # `pip install avai-monitor` runs the judge (you still supply an API key /
+    # OAuth token at runtime; without one it falls back to NullJudge).
     "litellm>=1.0",
     "anthropic>=0.30",
 ]
+
+[project.optional-dependencies]
 dev = [
     "build>=1.0",
     "twine>=5.0",

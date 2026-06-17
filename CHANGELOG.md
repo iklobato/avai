@@ -3,6 +3,11 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.7.0] — 2026-06-17
+
+### Changed
+- **The LLM threat judge ships by default.** `litellm` and `anthropic` moved from the optional `[judge]` extra into the base dependencies, so a plain `pip install avai-monitor` installs the judge — the core feature — with no extra to remember. The `[judge]` extra has been removed; `pip install 'avai-monitor[judge]'` should become `pip install avai-monitor` (the Docker image, README, landing page, and CI were updated to match). A runtime credential (`CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) is still required to judge; without one the monitor falls back to `NullJudge` as before. Note: this enlarges the default install footprint (litellm + anthropic and their transitive deps).
+
 ## [0.6.0] — 2026-06-17
 
 ### Added
