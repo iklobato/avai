@@ -3,6 +3,24 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.6.0] — 2026-06-17
+
+### Added
+- **Dashboard UI/UX overhaul.** A sticky in-page section jump-nav and an above-the-fold triage strip (posture grade, active malicious/suspicious counts, monitor online/offline) put the "is this host compromised?" answer first. Width-filling layouts replace the wasted right-hand space: monitor control becomes a two-column *operate | manage* panel, overview verdict-totals spans two columns with proportional legend bars, and the YARA file-scan summary uses stat tiles plus a 2-up category bar list. A single reusable `btn()` macro (primary/secondary/success/warning/destructive) gives every button one radius, 36 px tap target, and hover/active/disabled/focus states. New visualizations: a per-core CPU heatmap strip, a ranked YARA category bar list, filled system-integrity status pills, and a clear monitor-offline badge. No colour values were changed.
+- **Auth-events subsystem tablist.** The *auth events — aggregated patterns* panel gains a WAI-ARIA subsystem tablist (per-tab event counts, roving-tabindex keyboard navigation) in place of the subsystem dropdown and the static per-subsystem summary cards.
+- **Deepened LLM judgement pipeline** (#25), including `exposed` / `running` reachability context surfaced on the vulnerabilities panel.
+
+### Changed
+- **Auth-events aggregation is cached and grouped by `content_hash`.** A short-TTL result cache, a shared per-subsystem summary cache, and grouping on the indexed `content_hash` (verified 1:1 with the previous four-column key) cut warm/poll loads from ~5.8 s to ~2 ms and cold first-loads from ~3.5 s to ~2.2 s, so subsystem-tab switching is instant.
+- **Keyboard focus ring made authoritative.** The global `:focus-visible` outline now wins over controls carrying Tailwind's `focus:outline-none`, so keyboard focus is never suppressed (same colour as before).
+- **Demo seeder fills every panel.** `tools/seed_demo_db.py` now also populates `host_resources`, `disk_usage`, and the YARA `yara_status` / `file_scan` tables so the System Resources, Disk Usage, and File Scan panels render with data.
+
+### Fixed
+- **Stray page-level horizontal scroll** eliminated with a root `overflow-x` guard on `<html>` (keeps the sticky header working); every wide table and tab strip retains its own internal horizontal scroll.
+
+### Removed
+- **The standalone "YARA rules — browse the loaded ruleset" panel** (its `/fragments/yara-rules` route, query, and template). YARA matches remain in the File Scan panel.
+
 ## [0.5.0] — 2026-06-09
 
 ### Added
