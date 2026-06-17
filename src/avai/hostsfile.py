@@ -232,9 +232,17 @@ def _validate_hostname(hostname: str) -> None:
 def _atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` via a same-directory temp file + ``os.replace``
     so a crash mid-write can't leave a truncated hosts file. Preserves the
-    existing file mode (hosts files are world-readable, 0644)."""
-    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".avai-hosts-")
+    existing file mode (hosts files are world-readable, 0644).
+
+    Any OS-level write failure (no privilege, parent unwritable, or — in a
+    container — the bind-mounted ``/etc/hosts`` that ``os.replace`` can't
+    replace, EBUSY) is surfaced as :class:`HostsError` so callers degrade
+    gracefully instead of crashing on a raw ``OSError``."""
+    try:
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".avai-hosts-")
+    except OSError as e:
+        raise HostsError(f"could not update {path}: {e}") from e
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
@@ -242,6 +250,16 @@ def _atomic_write(path: Path, text: str) -> None:
             os.fsync(handle.fileno())
         os.chmod(tmp, mode)
         os.replace(tmp, path)
+    except OSError as e:
+        # The target can be unwritable for reasons beyond privilege — e.g. in a
+        # container /etc/hosts is a bind-mounted file, so os.replace() onto it
+        # fails with EBUSY. Surface as HostsError so callers (the dashboard
+        # banner, `install-hosts`) degrade gracefully instead of crashing.
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise HostsError(f"could not update {path}: {e}") from e
     except BaseException:
         try:
             os.unlink(tmp)

@@ -254,16 +254,20 @@ def test_atomic_write_replaces_content(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["hosts"]
 
 
-def test_atomic_write_leaves_no_temp_on_failure(tmp_path, monkeypatch):
+def test_atomic_write_wraps_os_error_and_cleans_up(tmp_path, monkeypatch):
+    """A failing os.replace (e.g. EBUSY on a container's bind-mounted
+    /etc/hosts) is surfaced as HostsError — not a raw OSError that would
+    crash the dashboard — and the temp file is cleaned up."""
     from avai import hostsfile
 
     target = tmp_path / "hosts"
     target.write_text("old\n")
 
     def _boom(*_a, **_k):
-        raise OSError("disk full")
+        raise OSError(16, "Device or resource busy")
 
     monkeypatch.setattr(os, "replace", _boom)
-    with pytest.raises(OSError):
+    with pytest.raises(hostsfile.HostsError):
         hostsfile._atomic_write(target, "new\n")
     assert [p.name for p in tmp_path.iterdir()] == ["hosts"]  # temp cleaned up
+    assert target.read_text() == "old\n"  # original untouched
