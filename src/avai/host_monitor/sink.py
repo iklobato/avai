@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -58,6 +59,14 @@ if TYPE_CHECKING:
 # through WAL checkpoints on a large DB without losing a batch.
 _BUSY_TIMEOUT_MS = 30_000
 
+# The monitor commonly runs as root (deep host inspection) while the dashboard
+# runs unprivileged; both write the same SQLite file (the dashboard's only write
+# is the control_state row). Group-writable dir + files let a same-group user
+# write — and SQLite needs to create the -wal/-shm siblings in the dir, so the
+# directory itself must be group-writable, not just the db file.
+_DB_DIR_MODE = 0o775  # rwxrwxr-x
+_DB_FILE_MODE = 0o664  # rw-rw-r--
+
 
 class Sink:
     """SQLAlchemy repository — owns schema, run lifecycle, writes, lookups."""
@@ -92,16 +101,30 @@ class Sink:
                 raise
             LOG.info("create_all raced with another bootstrap (continuing): %s", e)
         _migrate_add_columns(self.engine)
+        # An in-memory DB is per-connection and ephemeral: create_all already
+        # built the full head schema in-process, and Alembic (which opens its
+        # own connection) would see an empty DB. There's no "update" path to
+        # migrate, so skip it — file DBs below get the real upgrade.
+        db_file = self.engine.url.database
+        if not db_file or db_file == ":memory:":
+            return
         # Apply Alembic migrations (indexes / future schema changes). The DB
         # was just built by create_all, so this stamps the baseline and runs
-        # only the incremental migrations on top. Best-effort: a migration
-        # failure must not stop the monitor from collecting.
-        try:
-            from avai.db_migrate import upgrade_to_head
+        # only the incremental migrations on top. This must run on every start
+        # so a freshly-updated build reaches head before serving — and if it
+        # can't (e.g. a read-only DB owned by another user), we fail loudly
+        # rather than silently serve on a stale schema and 500 later.
+        from avai.db_migrate import upgrade_to_head
 
+        try:
             upgrade_to_head(str(self.engine.url))
-        except Exception:
-            LOG.exception("alembic migration failed (continuing)")
+        except Exception as e:
+            raise RuntimeError(
+                f"database migration to head failed for {self.engine.url}: {e}. "
+                "If this is 'readonly database', the DB is owned by another user "
+                "(run the monitor as the owner so it can migrate + chmod it)."
+            ) from e
+        _relax_db_permissions(Path(db_file))
 
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
         run_id = str(uuid.uuid4())
@@ -909,6 +932,27 @@ def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     # documented SQLite remedy for multi-connection write contention.
     cur.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
     cur.close()
+
+
+def _relax_db_permissions(db_path: Path) -> None:
+    """Make the DB dir + files group-writable so a root monitor and a
+    same-group unprivileged dashboard can both write (the dashboard's only
+    write is the control_state row). Best-effort: only the owner may chmod,
+    so the non-owning process no-ops — the owning (root) monitor sets the
+    mode, which is what unblocks the dashboard."""
+    targets = [
+        (db_path.parent, _DB_DIR_MODE),
+        (db_path, _DB_FILE_MODE),
+        (db_path.with_name(db_path.name + "-wal"), _DB_FILE_MODE),
+        (db_path.with_name(db_path.name + "-shm"), _DB_FILE_MODE),
+    ]
+    for path, mode in targets:
+        if not path.exists():
+            continue
+        try:
+            os.chmod(path, mode)
+        except PermissionError:
+            pass  # not the owner; the owning process sets the mode
 
 
 def _migrate_add_columns(engine: Engine) -> None:

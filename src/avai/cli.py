@@ -27,6 +27,11 @@ usage:
   avai rules [--list]         show the YARA ruleset the file scanner
                               loads (counts; --list prints every rule).
 
+  avai install-hosts [--remove] [--hostname NAME]
+                              map avai.local -> 127.0.0.1 in the OS hosts
+                              file so the dashboard is reachable by name
+                              (needs sudo / Administrator). --remove undoes it.
+
   avai --version              print the installed package version
   avai --help                 this message
 """
@@ -53,6 +58,33 @@ def _cmd_rules(rules_dir: Path, do_list: bool) -> int:
             print(f"  {r.identifier}" + (f"  [{tags}]" if tags else ""))
     else:
         print("  (run with --list to print every rule identifier)")
+    return 0
+
+
+def _cmd_install_hosts(hostname: str, remove: bool) -> int:
+    """Add/remove the ``hostname -> 127.0.0.1`` mapping in the OS hosts file.
+    Privileged + platform-specific work lives in :mod:`avai.hostsfile`; here we
+    just translate its typed errors into a friendly message + exit code."""
+    from .hostsfile import HostsError, HostsPermissionError, HostsRegistrar, Outcome
+
+    try:
+        registrar = HostsRegistrar.for_current_platform()
+        outcome = registrar.remove(hostname) if remove else registrar.install(hostname)
+    except HostsPermissionError as e:
+        print(f"avai: {e.hint}", file=sys.stderr)
+        return 1
+    except HostsError as e:
+        print(f"avai: {e}", file=sys.stderr)
+        return 1
+
+    notices = {
+        Outcome.CREATED: f"avai: mapped {hostname} -> loopback (IPv4 + IPv6) in {registrar.hosts_path}",
+        Outcome.REMOVED: f"avai: removed {hostname} from {registrar.hosts_path}",
+        Outcome.UNCHANGED: f"avai: {hostname} already "
+        + ("absent" if remove else "mapped")
+        + " — no change",
+    }
+    print(notices[outcome])
     return 0
 
 
@@ -103,6 +135,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         a = p.parse_args(rest)
         return _cmd_rules(Path(a.rules_dir), a.list)
+
+    if cmd == "install-hosts":
+        import argparse
+
+        from .hostsfile import DASHBOARD_HOSTNAME
+
+        p = argparse.ArgumentParser(
+            prog="avai install-hosts",
+            description="Map a hostname (default avai.local) to 127.0.0.1 in the "
+            "OS hosts file so the dashboard is reachable by name.",
+        )
+        p.add_argument("--hostname", default=DASHBOARD_HOSTNAME)
+        p.add_argument(
+            "--remove",
+            action="store_true",
+            help="remove the mapping instead of adding it",
+        )
+        a = p.parse_args(rest)
+        return _cmd_install_hosts(a.hostname, a.remove)
 
     if cmd == "migrate":
         import argparse

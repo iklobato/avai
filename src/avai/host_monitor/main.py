@@ -151,6 +151,12 @@ def main() -> int:
     )
     logging.Formatter.converter = time.gmtime
 
+    # The monitor often runs as root while the dashboard runs unprivileged;
+    # both write the same SQLite file. A group-friendly umask makes the DB dir
+    # and the files SQLite creates (db, -wal, -shm) group-writable so a
+    # same-group dashboard can write the control_state row. _relax_db_permissions
+    # fixes already-existing files; this covers ones created from here on.
+    os.umask(0o002)
     db_path = Path(args.db).expanduser()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
