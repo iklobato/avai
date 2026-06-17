@@ -115,23 +115,27 @@ export default async function BlogPost({ params }: { params: Params }) {
           <p className="mt-2 text-sm text-slate-500">{article.dateLabel}</p>
         ) : null}
         {article.heroImage ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            className="mt-6 w-full rounded-lg"
-            src={article.heroImage}
-            alt={article.heroAlt ?? article.title}
-          />
+          <Link href="/" className="mt-6 block" aria-label="Go to homepage">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              className="w-full rounded-lg"
+              src={article.heroImage}
+              alt={article.heroAlt ?? article.title}
+            />
+          </Link>
         ) : null}
         <div className="mt-6">
           <ArticleBody html={article.contentHtml} />
         </div>
         {article.infographic ? (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            className="mt-8 w-full rounded-lg"
-            src={article.infographic}
-            alt={`${article.title} infographic`}
-          />
+          <Link href="/" className="mt-8 block" aria-label="Go to homepage">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              className="w-full rounded-lg"
+              src={article.infographic}
+              alt={`${article.title} infographic`}
+            />
+          </Link>
         ) : null}
       </article>
     </main>
