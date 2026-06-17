@@ -68,7 +68,6 @@ from avai.host_monitor import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
-    YaraRuleRow,
     YaraStatusRow,
 )
 
@@ -1701,105 +1700,6 @@ def file_scan(
         "matches": matches,
         "verdict": verdict,
         "q": q,
-    }
-
-
-def yara_rules(
-    session: Session,
-    run_id: str | None,
-    q: str = "",
-    source: str = "",
-    page: int = 1,
-    per_page: int = 50,
-) -> dict:
-    """Paginated, searchable view of the YARA rules that actually produced a
-    match in ``run_id`` — only rules with findings, not the full loaded
-    inventory. Each row carries its hit count and is enriched with the rule's
-    inventory metadata (tags / source / category / author) when available, so a
-    match is never dropped just because the inventory isn't persisted. Empty
-    when nothing matched in the run."""
-    per_page = max(1, min(per_page, 200))
-    empty = {
-        "items": [],
-        "total": 0,
-        "page": 1,
-        "per_page": per_page,
-        "total_pages": 1,
-        "q": q,
-        "source": source,
-        "source_options": [],
-    }
-    tables = _existing_tables(session)
-    if run_id is None or FileScanRow.__tablename__ not in tables:
-        return empty
-
-    match_counts = dict(
-        session.execute(
-            select(FileScanRow.rule, func.count())
-            .where(FileScanRow.run_id == run_id, FileScanRow.rule.is_not(None))
-            .group_by(FileScanRow.rule)
-        ).all()
-    )
-    if not match_counts:
-        return empty
-
-    inventory = {}
-    if YaraRuleRow.__tablename__ in tables:
-        inventory = {
-            r.identifier: r
-            for r in session.execute(
-                select(YaraRuleRow).where(
-                    YaraRuleRow.identifier.in_(list(match_counts))
-                )
-            ).scalars()
-        }
-
-    items = []
-    for rule_id, count in match_counts.items():
-        meta = inventory.get(rule_id)
-        items.append(
-            {
-                "identifier": rule_id,
-                "tags": getattr(meta, "tags", None),
-                "author": getattr(meta, "author", None),
-                "source": getattr(meta, "source", None),
-                "category": getattr(meta, "category", None),
-                "matches": count,
-            }
-        )
-
-    # Built from the full matched set, before filters, so the dropdown stays
-    # complete regardless of the current selection.
-    source_options = sorted({it["source"] for it in items if it["source"]})
-
-    if source:
-        items = [it for it in items if it["source"] == source]
-    if q:
-        ql = q.lower()
-        items = [
-            it
-            for it in items
-            if any(
-                ql in str(it.get(f) or "").lower()
-                for f in ("identifier", "tags", "author")
-            )
-        ]
-    # Findings-first: most hits at the top, then alphabetical.
-    items.sort(key=lambda it: (-it["matches"], it["identifier"]))
-
-    total = len(items)
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-    start = (page - 1) * per_page
-    return {
-        "items": items[start : start + per_page],
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
-        "q": q,
-        "source": source,
-        "source_options": source_options,
     }
 
 

@@ -412,98 +412,11 @@ class TestDashboardEndpoints:
         body = client.get("/fragments/file-scan").data.decode()
         assert "hasn't compiled" in body  # graceful empty state
 
-    def test_yara_rules_panel_lists_only_matched_rules_with_counts(self, client):
-        from avai.host_monitor import CollectionRun, FileScanRow, Sink
-
-        sink = Sink(_engine_rw(app.config["DB_PATH"]))
-        # Inventory metadata for three rules — but only two of them match below.
-        sink.write_yara_rules(
-            [
-                {
-                    "identifier": "APT_Backdoor_Foo",
-                    "tags": "APT",
-                    "author": "Florian Roth",
-                    "source": "signature-base",
-                    "category": "apt",
-                },
-                {
-                    "identifier": "eicar_test_file",
-                    "tags": "",
-                    "author": "avai",
-                    "source": "bundled",
-                    "category": "eicar",
-                },
-                {
-                    "identifier": "Never_Matched_Rule",
-                    "tags": "",
-                    "author": "avai",
-                    "source": "bundled",
-                    "category": "gen",
-                },
-            ]
-        )
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
-            s.add(
-                CollectionRun(
-                    run_id="run1",
-                    started_at="2026-05-30T12:00:00Z",
-                    finished_at="2026-05-30T12:01:00Z",
-                    hostname="h",
-                    lookback_min=5,
-                )
-            )
-            # APT_Backdoor_Foo hits twice, eicar once → findings-first ordering.
-            for i, (rule, path) in enumerate(
-                [
-                    ("APT_Backdoor_Foo", "/usr/bin/a"),
-                    ("APT_Backdoor_Foo", "/usr/bin/b"),
-                    ("eicar_test_file", "/tmp/eicar"),
-                ]
-            ):
-                s.add(
-                    FileScanRow(
-                        run_id="run1",
-                        collected_at="2026-05-30T12:00:00Z",
-                        content_hash=f"fs{i}",
-                        path=path,
-                        sha256="a" * 64,
-                        rule=rule,
-                        scan_source="bin_dirs",
-                    )
-                )
-            s.commit()
-
-        body = client.get("/fragments/yara-rules").data.decode()
-        # only rules that matched appear; the unmatched inventory rule does not
-        assert "APT_Backdoor_Foo" in body
-        assert "eicar_test_file" in body
-        assert "Never_Matched_Rule" not in body
-        assert "Florian Roth" in body  # enriched from the inventory metadata
-        assert "of 2" in body and "matched rules" in body
-        # findings-first: the 2-hit rule sorts above the 1-hit rule
-        assert body.index("APT_Backdoor_Foo") < body.index("eicar_test_file")
-
-        # search narrows by identifier
-        narrowed = client.get("/fragments/yara-rules?q=backdoor").data.decode()
-        assert "APT_Backdoor_Foo" in narrowed
-        assert "eicar_test_file" not in narrowed
-
-        # source filter narrows
-        filtered = client.get("/fragments/yara-rules?source=bundled").data.decode()
-        assert "eicar_test_file" in filtered
-        assert "APT_Backdoor_Foo" not in filtered
-
-    def test_yara_rules_panel_empty_when_nothing_matched(self, client):
-        # Inventory present but no matches → the panel shows nothing, not the
-        # full ruleset.
-        from avai.host_monitor import Sink
-
-        Sink(_engine_rw(app.config["DB_PATH"])).write_yara_rules(
-            [{"identifier": "Some_Rule", "source": "bundled"}]
-        )
-        body = client.get("/fragments/yara-rules").data.decode()
-        assert "Some_Rule" not in body
-        assert "no YARA rules matched in the latest scan" in body
+    def test_yara_rules_panel_is_removed(self, client):
+        # The dedicated YARA rule-browser panel was removed; YARA matches live
+        # only in the File Scan panel now.
+        assert client.get("/fragments/yara-rules").status_code == 404
+        assert b"yara-rules-panel" not in client.get("/").data
 
     def test_network_panel_is_an_accessible_tablist(self, client):
         # WAI-ARIA tabs pattern: the tab strip must be a tablist of tabs that
