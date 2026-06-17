@@ -4935,12 +4935,14 @@ def build_judge(args, prompts: Prompts) -> Judge:
         return NullJudge()
     has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
     has_api_key = bool(
-        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("DEEPSEEK_API_KEY")
     )
     if not has_oauth and not has_api_key:
         LOG.warning(
             "no LLM credentials in environment "
-            "(CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY / OPENAI_API_KEY) — "
+            "(CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY) — "
             "threat judging disabled"
         )
         return NullJudge()
