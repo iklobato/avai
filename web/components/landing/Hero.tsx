@@ -32,15 +32,20 @@ export function Hero() {
       <div className="mx-auto mt-8 max-w-xl">
         <div className="card flex items-start justify-between gap-3 p-4 text-left">
           <pre className="mono overflow-x-auto text-sm text-slate-200">
-            <code>{`$ pip install 'avai-monitor[judge]'
-$ sudo avai monitor &
-$ avai dashboard`}</code>
+            <code>{`$ docker run -p 8765:8765 -v "$PWD":/data iklob1/avai
+# dashboard on http://localhost:8765`}</code>
           </pre>
           <CopyButton />
         </div>
+        <p className="mx-auto mt-3 max-w-xl text-sm text-slate-500">
+          Prefer native?{" "}
+          <code className="mono text-slate-400">
+            pip install &apos;avai-monitor[judge]&apos;
+          </code>
+        </p>
         <a
           href="https://github.com/iklobato/avai"
-          className="mt-3 inline-block text-sm text-accent hover:underline"
+          className="mt-2 inline-block text-sm text-accent hover:underline"
         >
           or read the source →
         </a>

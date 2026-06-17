@@ -2,9 +2,7 @@
 
 import { useState } from "react";
 
-const INSTALL = `pip install 'avai-monitor[judge]'
-sudo avai monitor &
-avai dashboard`;
+const INSTALL = `docker run -p 8765:8765 -v "$PWD":/data iklob1/avai`;
 
 export function CopyButton() {
   const [copied, setCopied] = useState(false);
