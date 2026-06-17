@@ -1344,12 +1344,14 @@ def _compile_yara_rules(rules_dir: Path):
     if not rules_dir.is_dir():
         return None
     filepaths: dict[str, str] = {}
+    skipped = 0
     for path in sorted(rules_dir.rglob("*")):
         if path.suffix.lower() not in (".yar", ".yara") or not path.is_file():
             continue
         try:
             yara.compile(filepath=str(path), externals=_YARA_EXTERNALS)
         except yara.Error as exc:
+            skipped += 1
             constants.LOG.warning(
                 "yara: skipping uncompilable rules %s: %s%s",
                 path,
@@ -1367,10 +1369,20 @@ def _compile_yara_rules(rules_dir: Path):
     if not filepaths:
         return None
     try:
-        return yara.compile(filepaths=filepaths, externals=_YARA_EXTERNALS)
+        compiled = yara.compile(filepaths=filepaths, externals=_YARA_EXTERNALS)
     except yara.Error as exc:
         constants.LOG.warning("yara: combined compile failed: %s", exc)
         return None
+    # One-line visibility into what the scanner actually loaded — the only
+    # place rule counts surface, since there's no per-match log.
+    constants.LOG.info(
+        "yara: loaded %d rules from %d files (skipped %d) under %s",
+        sum(1 for _ in compiled),
+        len(filepaths),
+        skipped,
+        rules_dir,
+    )
+    return compiled
 
 
 class FileScanCollector(SnapshotCollector):

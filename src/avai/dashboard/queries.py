@@ -37,6 +37,7 @@ from avai.host_monitor import (
     DnsQueryRow,
     DnsResolverRow,
     FileIntegrityRow,
+    FileScanRow,
     HostResourceRow,
     HostsFileRow,
     IncidentNarrativeRow,
@@ -88,6 +89,7 @@ COLLECTOR_MODELS = {
     "system_integrity": SystemIntegrityRow,
     "auth_events": AuthEventRow,
     "file_integrity": FileIntegrityRow,
+    "file_scan": FileScanRow,
     "installed_apps": InstalledAppRow,
     # Phase 4
     "process_exec_events": ProcessExecRow,
@@ -127,6 +129,7 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "browser_extensions": ("name", "browser"),
     "system_integrity": (),
     "file_integrity": ("path",),
+    "file_scan": ("rule", "path"),
     "installed_apps": ("name", "bundle_id"),
     # Phase 4
     "process_exec_events": ("exe_path", "parent_path"),

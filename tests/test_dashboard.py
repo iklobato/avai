@@ -290,6 +290,57 @@ class TestDashboardEndpoints:
         assert "10.0.0.9" in filtered
         assert "203.0.113.7" not in filtered
 
+    def test_file_scan_finding_renders_rule_and_path(self, client):
+        # A YARA match (file_scan collector) must render its rule + path in
+        # the findings table — regression for file_scan missing from the
+        # dashboard's COLLECTOR_MODELS / DISPLAY_FIELDS maps.
+        from avai.host_monitor import CollectionRun, FileScanRow, Judgement
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                FileScanRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="fs1",
+                    path="/usr/local/bin/dropper",
+                    sha256="a" * 64,
+                    rule="SUSP_Dropper_Gen",
+                    namespace="gen_dropper",
+                    tags_json='["FILE"]',
+                    meta_json='{"author": "Florian Roth"}',
+                    scan_source="bin_dirs",
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="fs1",
+                    collector="file_scan",
+                    verdict="malicious",
+                    category="execution",
+                    confidence=0.9,
+                    reasoning="YARA rule matched a known dropper pattern",
+                    remediation="quarantine the binary",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/findings").data.decode()
+        assert "SUSP_Dropper_Gen" in body  # the matched rule name
+        assert "/usr/local/bin/dropper" in body  # the scanned path
+        assert "malicious" in body
+
     def test_network_panel_is_an_accessible_tablist(self, client):
         # WAI-ARIA tabs pattern: the tab strip must be a tablist of tabs that
         # control the shared panel, with exactly one tab pre-selected.
