@@ -382,13 +382,13 @@ export function GetStarted() {
     {
       title: "pip (macOS or Linux)",
       tag: "",
-      body: "pip install 'avai-monitor[judge]'",
+      body: "pip install avai-monitor",
     },
   ];
   const recipes = [
     {
       title: "🔑 Turn on the AI verdicts",
-      body: "Set your LLM key and run with [judge].",
+      body: "Set your LLM key (the judge ships by default) and run.",
     },
     {
       title: "🖥️ Watch a Linux server, keep it running",

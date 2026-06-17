@@ -39,9 +39,7 @@ export function Hero() {
         </div>
         <p className="mx-auto mt-3 max-w-xl text-sm text-slate-500">
           Prefer native?{" "}
-          <code className="mono text-slate-400">
-            pip install &apos;avai-monitor[judge]&apos;
-          </code>
+          <code className="mono text-slate-400">pip install avai-monitor</code>
         </p>
         <a
           href="https://github.com/iklobato/avai"
