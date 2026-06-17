@@ -26,6 +26,11 @@ except ImportError:
 
 import yara
 
+try:
+    import pwd  # POSIX only; used to resolve file owner for YARA externals
+except ImportError:  # pragma: no cover - Windows has no pwd module
+    pwd = None
+
 from . import constants
 from .constants import (
     APP_INFO_KEYS,
@@ -1269,12 +1274,57 @@ def _crypto_hint(exc: "yara.Error") -> str:
     this yara build lacks OpenSSL (the PyPI wheel does) — pe.imphash() /
     hash.* then read as 'invalid field name'. Empty for any other error."""
     msg = str(exc).lower()
-    if "imphash" in msg or ("invalid field name" in msg and "md5" in msg):
+    _hashish = ("md5", "sha1", "sha256", "checksum", "imphash")
+    if "imphash" in msg or (
+        "invalid field name" in msg and any(h in msg for h in _hashish)
+    ):
         return (
             " — these rules need a crypto-enabled yara (pe.imphash / hash.*);"
             " the PyPI yara-python wheel is built without it. See"
             " avai/rules/NOTICE."
         )
+    return ""
+
+
+# External variables that LOKI / THOR (and thus the signature-base rules)
+# expect. Defined at compile time with empty placeholders so rules that
+# reference them compile; the real per-file values are supplied at match
+# time (see FileScanCollector._match_externals). Without these, many
+# signature-base rules fail to compile with "undefined identifier".
+_YARA_EXTERNALS = {
+    "filename": "",
+    "filepath": "",
+    "extension": "",
+    "filetype": "",
+    "md5": "",
+    "owner": "",
+}
+
+
+def _file_type(path: Path) -> str:
+    """Best-effort ``filetype`` external from leading magic bytes, using the
+    labels signature-base rules compare against. Only the structural binary
+    types are detected reliably (EXE/ELF/MACH-O/MDMP); LOKI's content-derived
+    script labels (Python/PHP/VBS/…) are left empty rather than guessed."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+    except OSError:
+        return ""
+    if head[:2] == b"MZ":
+        return "EXE"
+    if head[:4] == b"\x7fELF":
+        return "ELF"
+    if head[:4] in (
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+    ):
+        return "MACH-O"
+    if head[:4] == b"MDMP":
+        return "MDMP"
     return ""
 
 
@@ -1284,9 +1334,12 @@ def _compile_yara_rules(rules_dir: Path):
     holds no compilable rules.
 
     Each file is validated independently first and uncompilable ones are
-    skipped with a warning, so a single malformed rule in a bundled pack
-    can't disable scanning entirely. Per-file namespaces keep rule
-    identifiers from colliding across files in the combined compile.
+    skipped with a warning, so a single malformed rule in a fetched pack
+    can't disable scanning entirely (signature-base's per-file layout makes
+    this graceful: only the imphash/hash.* files skip on a crypto-less
+    yara). Per-file namespaces keep rule identifiers from colliding across
+    files. ``_YARA_EXTERNALS`` is supplied so rules referencing scanner
+    externals (filename/filepath/extension/filetype/…) compile.
     """
     if not rules_dir.is_dir():
         return None
@@ -1295,7 +1348,7 @@ def _compile_yara_rules(rules_dir: Path):
         if path.suffix.lower() not in (".yar", ".yara") or not path.is_file():
             continue
         try:
-            yara.compile(filepath=str(path))
+            yara.compile(filepath=str(path), externals=_YARA_EXTERNALS)
         except yara.Error as exc:
             constants.LOG.warning(
                 "yara: skipping uncompilable rules %s: %s%s",
@@ -1314,7 +1367,7 @@ def _compile_yara_rules(rules_dir: Path):
     if not filepaths:
         return None
     try:
-        return yara.compile(filepaths=filepaths)
+        return yara.compile(filepaths=filepaths, externals=_YARA_EXTERNALS)
     except yara.Error as exc:
         constants.LOG.warning("yara: combined compile failed: %s", exc)
         return None
@@ -1437,7 +1490,11 @@ class FileScanCollector(SnapshotCollector):
         if st.st_size > constants.YARA_MAX_FILE_BYTES:
             return
         try:
-            matches = rules.match(str(path), timeout=constants.YARA_MATCH_TIMEOUT_S)
+            matches = rules.match(
+                str(path),
+                externals=self._match_externals(path, st),
+                timeout=constants.YARA_MATCH_TIMEOUT_S,
+            )
         except yara.Error:
             # Unreadable, vanished mid-scan, or match timeout — skip this
             # file and keep scanning the rest.
@@ -1452,10 +1509,34 @@ class FileScanCollector(SnapshotCollector):
                 "rule": m.rule,
                 "namespace": m.namespace,
                 "tags_json": json.dumps(list(m.tags)),
+                # Rule meta (author/reference/description) — retained on the
+                # finding to satisfy the signature-base DRL attribution
+                # obligation and to give the judge/dashboard rule context.
+                "meta_json": json.dumps(m.meta, default=str),
                 "size": st.st_size,
                 "mtime": st.st_mtime,
                 "scan_source": source,
             }
+
+    @staticmethod
+    def _match_externals(path: Path, st) -> dict:
+        """Per-file values for the scanner externals signature-base rules
+        read. ``md5`` is intentionally empty — no rule compares it — so no
+        per-file hashing is forced just to populate an unused variable."""
+        owner = ""
+        if pwd is not None:
+            try:
+                owner = pwd.getpwuid(st.st_uid).pw_name
+            except (KeyError, OSError):
+                owner = ""
+        return {
+            "filename": path.name,
+            "filepath": str(path),
+            "extension": path.suffix.lower(),
+            "filetype": _file_type(path),
+            "md5": "",
+            "owner": owner,
+        }
 
 
 class InstalledAppsCollector(SnapshotCollector):

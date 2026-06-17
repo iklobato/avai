@@ -10,6 +10,7 @@ broken shipped rule disabling scanning.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from avai.host_monitor.collectors import (
     FileScanCollector,
     _compile_yara_rules,
     _crypto_hint,
+    _file_type,
 )
 
 _MARKER = "AVAITESTMATCH"
@@ -189,6 +191,98 @@ class TestFileScanCollector:
     def test_bundled_eicar_rules_compile(self):
         # Guards against a broken shipped rule silently disabling scanning.
         assert _compile_yara_rules(C.YARA_RULES_DIR) is not None
+
+
+class TestYaraExternals:
+    """signature-base rules reference scanner externals; the collector must
+    define them at compile and supply real per-file values at match."""
+
+    def _rules(self, tmp_path: Path, body: str) -> Path:
+        d = tmp_path / "rules"
+        d.mkdir()
+        (d / "ext.yar").write_text(body)
+        return d
+
+    def test_filename_external_compiles_and_matches(self, tmp_path):
+        # Without externals support this rule fails to compile
+        # ("undefined identifier"); it must compile AND gate on the name.
+        rules = self._rules(tmp_path, 'rule t { condition: filename == "evil.bin" }')
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "evil.bin").write_text("anything")
+        (bindir / "innocent.txt").write_text("anything")
+        rows = list(
+            FileScanCollector(fs=_FakeFs(bin_dirs=[bindir]), rules_dir=rules).collect()
+        )
+        assert [Path(r["path"]).name for r in rows] == ["evil.bin"]
+
+    def test_filetype_external_gates_on_magic(self, tmp_path):
+        rules = self._rules(tmp_path, 'rule t { condition: filetype == "EXE" }')
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "real.exe").write_bytes(b"MZ\x90\x00binary")
+        (bindir / "notes.txt").write_text("plain text, not an exe")
+        rows = list(
+            FileScanCollector(fs=_FakeFs(bin_dirs=[bindir]), rules_dir=rules).collect()
+        )
+        assert [Path(r["path"]).name for r in rows] == ["real.exe"]
+
+    def test_meta_retained_on_finding(self, tmp_path):
+        rules = self._rules(
+            tmp_path,
+            'rule t { meta: author = "Jane Doe" reference = "https://x" '
+            f'strings: $a = "{_MARKER}" condition: $a }}',
+        )
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "evil.bin").write_text(_MARKER)
+        rows = list(
+            FileScanCollector(fs=_FakeFs(bin_dirs=[bindir]), rules_dir=rules).collect()
+        )
+        assert len(rows) == 1
+        meta = json.loads(rows[0]["meta_json"])
+        assert meta["author"] == "Jane Doe"
+        assert meta["reference"] == "https://x"
+
+    def test_crypto_rule_file_does_not_disable_others(self, tmp_path):
+        # A hash.* rule file (needs crypto yara) sits beside a plain rule.
+        # The plain rule must still compile and match regardless of whether
+        # this yara build has crypto (skip) or not (compiles, just no match).
+        d = tmp_path / "rules"
+        d.mkdir()
+        (d / "good.yar").write_text(
+            f'rule good {{ strings: $a = "{_MARKER}" condition: $a }}'
+        )
+        (d / "crypto.yar").write_text(
+            'import "hash"\nrule c { condition: hash.md5(0, filesize) == "x" }'
+        )
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "evil.bin").write_text(_MARKER)
+        rows = list(
+            FileScanCollector(fs=_FakeFs(bin_dirs=[bindir]), rules_dir=d).collect()
+        )
+        assert any(r["rule"] == "good" for r in rows)
+
+
+class TestFileType:
+    def test_detects_known_magics(self, tmp_path):
+        cases = {
+            b"MZ\x90\x00": "EXE",
+            b"\x7fELF\x02\x01": "ELF",
+            b"\xcf\xfa\xed\xfe": "MACH-O",
+            b"MDMP\x93\xa7": "MDMP",
+        }
+        for header, expected in cases.items():
+            f = tmp_path / f"f_{expected}"
+            f.write_bytes(header + b"\x00\x00\x00\x00")
+            assert _file_type(f) == expected
+
+    def test_unknown_and_unreadable_return_empty(self, tmp_path):
+        text = tmp_path / "plain.txt"
+        text.write_text("just text")
+        assert _file_type(text) == ""
+        assert _file_type(tmp_path / "does-not-exist") == ""
 
 
 class TestCryptoHint:
