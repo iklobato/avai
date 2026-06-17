@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 
 from avai.db_migrate import _config, upgrade_to_head
 from avai.host_monitor import Base, Sink
@@ -53,7 +55,24 @@ def test_sink_setup_applies_migrations(tmp_path):
     Sink(create_engine(f"sqlite:///{db}")).setup()
     assert set(_IDX) <= _indexes(db)
     assert "control_state" in _tables(db)
-    assert _version(db) == "0008_yara_rule"
+    assert _version(db) == "0011_feedback"
+
+
+def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path, monkeypatch):
+    """A pending migration that can't be applied (e.g. a read-only DB owned by
+    another user) must abort startup with a clear error rather than silently
+    serving on a stale schema and 500ing on the first write later."""
+    import avai.db_migrate as db_migrate
+
+    def _readonly(_url):
+        raise OperationalError(
+            "attempt to write a readonly database", None, Exception()
+        )
+
+    monkeypatch.setattr(db_migrate, "upgrade_to_head", _readonly)
+    db = str(tmp_path / "ro.db")
+    with pytest.raises(RuntimeError, match="migration to head failed"):
+        Sink(create_engine(f"sqlite:///{db}")).setup()
 
 
 def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
@@ -74,7 +93,7 @@ def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
 
     upgrade_to_head(f"sqlite:///{db}")  # stamps baseline then adds indexes
     assert set(_IDX) <= _indexes(db)
-    assert _version(db) == "0008_yara_rule"
+    assert _version(db) == "0011_feedback"
 
 
 def test_downgrade_then_upgrade_roundtrip(tmp_path):
@@ -107,7 +126,7 @@ def test_control_state_migration_roundtrip(tmp_path):
 
     command.upgrade(_config(f"sqlite:///{db}"), "head")
     assert "control_state" in _tables(db)
-    assert _version(db) == "0008_yara_rule"
+    assert _version(db) == "0011_feedback"
 
     command.downgrade(_config(f"sqlite:///{db}"), "0002_perf_indexes")
     assert "control_state" not in _tables(db)

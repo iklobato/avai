@@ -79,7 +79,7 @@ from .constants import (
     WATCHED_FILES,
     WATCHED_FILES_LINUX,
 )
-from .enums import Browser, LaunchScope, ThreatCategory, Verdict
+from .enums import Browser, FeedbackLabel, LaunchScope, ThreatCategory, Verdict
 from .hosts import FilesystemLayout, Host, HostFactory, PrivilegedAccounts
 from .judge import (
     AnthropicOAuthClient,
@@ -106,6 +106,7 @@ from .models import (
     DiskUsageRow,
     DnsQueryRow,
     DnsResolverRow,
+    FeedbackRow,
     FileIntegrityRow,
     FileScanRow,
     HostResourceRow,
@@ -139,6 +140,7 @@ from .models import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
+    YaraCoverageRow,
     YaraRuleRow,
     YaraStatusRow,
     _RowBase,
@@ -217,6 +219,8 @@ __all__ = [
     "DEFAULT_PROMPTS_PATH",
     "DnsQueriesCollector",
     "DnsQueryRow",
+    "FeedbackLabel",
+    "FeedbackRow",
     "DnsResolverRow",
     "FileIntegrityCollector",
     "FileIntegrityRow",
@@ -308,6 +312,7 @@ __all__ = [
     "WATCHED_FILES_LINUX",
     "WifiCollector",
     "WifiStateRow",
+    "YaraCoverageRow",
     "YaraRuleRow",
     "YaraStatusRow",
     "_CORRELATED_COLLECTOR",

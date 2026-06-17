@@ -24,13 +24,16 @@ from .constants import (
     DEFAULT_PROMPTS_PATH,
     LOG,
 )
+from .coverage import build_coverage_assessor
 from .hosts import HostFactory
+from .investigator import build_investigator
 from .judge import build_judge
 from .models import Base
 from .narrator import build_narrator
 from .prompts import Prompts
 from .runner import Runner
 from .sink import Sink
+from .verifier import build_verifier
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -80,7 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prompts-file",
         default=str(DEFAULT_PROMPTS_PATH),
-        help=f"Path to prompts TOML " f"(default: {DEFAULT_PROMPTS_PATH})",
+        help=f"Path to prompts TOML (default: {DEFAULT_PROMPTS_PATH})",
     )
     parser.add_argument(
         "--baseline-runs",
@@ -103,6 +106,27 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_NARRATIVE_MODEL,
         help=f"Model id for the incident narrator (default: "
         f"{DEFAULT_NARRATIVE_MODEL}, i.e. the judge model).",
+    )
+    parser.add_argument(
+        "--no-coverage",
+        action="store_true",
+        help="Disable the YARA ruleset-coverage assessment (the second-stage "
+        "LLM that judges whether the loaded rules cover this host's threat "
+        "surface). Uses --narrative-model.",
+    )
+    parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Disable the malicious-verdict verifier (the skeptic second pass "
+        "that downgrades unsupported malicious verdicts to suspicious). Uses "
+        "--judge-model.",
+    )
+    parser.add_argument(
+        "--no-investigate",
+        action="store_true",
+        help="Disable the unknown-finding investigator (the deep second pass "
+        "that re-judges unknown verdicts with full-history context). Uses "
+        "--judge-model.",
     )
     parser.add_argument(
         "--no-streaming",
@@ -151,6 +175,12 @@ def main() -> int:
     )
     logging.Formatter.converter = time.gmtime
 
+    # The monitor often runs as root while the dashboard runs unprivileged;
+    # both write the same SQLite file. A group-friendly umask makes the DB dir
+    # and the files SQLite creates (db, -wal, -shm) group-writable so a
+    # same-group dashboard can write the control_state row. _relax_db_permissions
+    # fixes already-existing files; this covers ones created from here on.
+    os.umask(0o002)
     db_path = Path(args.db).expanduser()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -164,13 +194,20 @@ def main() -> int:
 
     judge = build_judge(args, prompts)
     narrator = build_narrator(args, prompts)
+    coverage = build_coverage_assessor(args, prompts)
+    verifier = build_verifier(args, prompts)
+    investigator = build_investigator(args, prompts)
     LOG.info(
-        "starting host_monitor db=%s interval=%ds lookback=%dm judge=%s narrator=%s",
+        "starting host_monitor db=%s interval=%ds lookback=%dm judge=%s "
+        "narrator=%s coverage=%s verify=%s investigate=%s",
         db_path,
         args.interval,
         args.lookback_min,
         type(judge).__name__,
         type(narrator).__name__ if narrator else "off",
+        type(coverage).__name__ if coverage else "off",
+        type(verifier).__name__ if verifier else "off",
+        type(investigator).__name__ if investigator else "off",
     )
 
     # check_same_thread=False allows the connection pool to hand
@@ -210,6 +247,9 @@ def main() -> int:
             enrichment_chain=enrichment_chain,
             baseline_min_runs=max(1, args.baseline_runs),
             narrator=narrator,
+            coverage=coverage,
+            verifier=verifier,
+            investigator=investigator,
         )
         runner.setup()
         # Seed the cooperative control row with this run's settings so the

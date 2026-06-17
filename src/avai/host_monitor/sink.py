@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -24,25 +25,33 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .constants import LOG
-from .enums import Verdict
+from .enums import FeedbackLabel, Verdict
 from .judge import Judgment
 from .models import (
     AuthEventRow,
     Base,
+    BrowserExtensionRow,
     CollectionRun,
     CollectorErrorRow,
     ControlState,
     DnsQueryRow,
+    FeedbackRow,
     IncidentNarrativeRow,
+    InstalledAppRow,
     Judgement,
+    KernelExtensionRow,
+    LaunchItemRow,
     ListeningPortRow,
     NetworkConnectionRow,
     NetworkFlowRow,
     PrivilegeConfigRow,
     ProcessExecRow,
+    ProcessRow,
     RiskScoreRow,
     StreamingSession,
+    SystemExtensionRow,
     SystemIntegrityRow,
+    YaraCoverageRow,
     YaraRuleRow,
     YaraStatusRow,
     _RowBase,
@@ -57,6 +66,21 @@ if TYPE_CHECKING:
 # snapshot loop and streaming-worker threads can serialise their writes
 # through WAL checkpoints on a large DB without losing a batch.
 _BUSY_TIMEOUT_MS = 30_000
+
+# The monitor commonly runs as root (deep host inspection) while the dashboard
+# runs unprivileged; both write the same SQLite file (the dashboard's only write
+# is the control_state row). Group-writable dir + files let a same-group user
+# write — and SQLite needs to create the -wal/-shm siblings in the dir, so the
+# directory itself must be group-writable, not just the db file.
+_DB_DIR_MODE = 0o775  # rwxrwxr-x
+_DB_FILE_MODE = 0o664  # rw-rw-r--
+
+# Operator feedback label → the verdict the monitor pins on the corrected
+# finding. Keyed by the raw string so lookup on a stored label is exact.
+_FEEDBACK_VERDICT = {
+    FeedbackLabel.FALSE_POSITIVE.value: str(Verdict.BENIGN),
+    FeedbackLabel.CONFIRMED.value: str(Verdict.MALICIOUS),
+}
 
 
 class Sink:
@@ -92,16 +116,30 @@ class Sink:
                 raise
             LOG.info("create_all raced with another bootstrap (continuing): %s", e)
         _migrate_add_columns(self.engine)
+        # An in-memory DB is per-connection and ephemeral: create_all already
+        # built the full head schema in-process, and Alembic (which opens its
+        # own connection) would see an empty DB. There's no "update" path to
+        # migrate, so skip it — file DBs below get the real upgrade.
+        db_file = self.engine.url.database
+        if not db_file or db_file == ":memory:":
+            return
         # Apply Alembic migrations (indexes / future schema changes). The DB
         # was just built by create_all, so this stamps the baseline and runs
-        # only the incremental migrations on top. Best-effort: a migration
-        # failure must not stop the monitor from collecting.
-        try:
-            from avai.db_migrate import upgrade_to_head
+        # only the incremental migrations on top. This must run on every start
+        # so a freshly-updated build reaches head before serving — and if it
+        # can't (e.g. a read-only DB owned by another user), we fail loudly
+        # rather than silently serve on a stale schema and 500 later.
+        from avai.db_migrate import upgrade_to_head
 
+        try:
             upgrade_to_head(str(self.engine.url))
-        except Exception:
-            LOG.exception("alembic migration failed (continuing)")
+        except Exception as e:
+            raise RuntimeError(
+                f"database migration to head failed for {self.engine.url}: {e}. "
+                "If this is 'readonly database', the DB is owned by another user "
+                "(run the monitor as the owner so it can migrate + chmod it)."
+            ) from e
+        _relax_db_permissions(Path(db_file))
 
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
         run_id = str(uuid.uuid4())
@@ -223,6 +261,37 @@ class Sink:
                 .limit(1)
                 .offset(n - 1)
             ).scalar_one_or_none()
+
+    def pids_by_executable(
+        self, exes: list[str], since: Optional[str] = None
+    ) -> dict[str, set]:
+        """Map each executable path to the set of PIDs running it, from the
+        process snapshot at/after ``since``. Resolves a launch item's
+        ``program`` to the live process it spawned, so persistence can be
+        correlated with that process's runtime behaviour."""
+        out: dict[str, set] = {}
+        if not exes:
+            return out
+        stmt = select(ProcessRow.exe, ProcessRow.pid).where(ProcessRow.exe.in_(exes))
+        if since:
+            stmt = stmt.where(ProcessRow.collected_at >= since)
+        with Session(self.engine) as session:
+            for exe, pid in session.execute(stmt).all():
+                if exe and pid is not None:
+                    out.setdefault(exe, set()).add(pid)
+        return out
+
+    def run_started_ats(self) -> list[str]:
+        """Every run's ``started_at`` (including the in-progress run),
+        ascending — the timeline used to size an artifact's presence window
+        for the intermittent/persistent drift signal. ISO strings sort
+        lexicographically, so the caller can bisect directly."""
+        with Session(self.engine) as session:
+            return list(
+                session.execute(
+                    select(CollectionRun.started_at).order_by(CollectionRun.started_at)
+                ).scalars()
+            )
 
     def first_seen_map(
         self, model: type[_RowBase], content_hashes: list[str]
@@ -464,6 +533,86 @@ class Sink:
                 for r in session.execute(stmt).all()
             ]
 
+    # -- operator feedback --------------------------------------------------
+
+    def apply_feedback(self) -> int:
+        """Apply each not-yet-applied operator correction to its finding's
+        verdict (false_positive → benign, confirmed → malicious) and mark it
+        applied. Idempotent; a row whose finding no longer exists updates
+        nothing but is still marked. Returns the number processed."""
+        applied = 0
+        with Session(self.engine) as session:
+            pending = (
+                session.execute(select(FeedbackRow).where(FeedbackRow.applied == 0))
+                .scalars()
+                .all()
+            )
+            for fb in pending:
+                verdict = _FEEDBACK_VERDICT.get(fb.label)
+                if verdict is not None:
+                    reasoning = f"[operator: {fb.label}]"
+                    if fb.note:
+                        reasoning = f"{reasoning} {fb.note}"
+                    session.execute(
+                        update(Judgement)
+                        .where(
+                            Judgement.content_hash == fb.content_hash,
+                            Judgement.collector == fb.collector,
+                        )
+                        .values(
+                            verdict=verdict, confidence=1.0, reasoning=reasoning[:500]
+                        )
+                    )
+                fb.applied = 1
+                applied += 1
+            session.commit()
+        return applied
+
+    def feedback_examples(self, collector: str, limit: int = 10) -> list[dict]:
+        """Recent operator corrections for a collector as
+        ``[{artifact, label, note}]`` — host-specific ground-truth the judge
+        is shown so it classifies matching artifacts the same way."""
+        stmt = (
+            select(FeedbackRow.artifact, FeedbackRow.label, FeedbackRow.note)
+            .where(FeedbackRow.collector == collector)
+            .order_by(FeedbackRow.created_at.desc())
+            .limit(limit)
+        )
+        with Session(self.engine) as session:
+            return [
+                {"artifact": artifact, "label": label, "note": note}
+                for artifact, label, note in session.execute(stmt).all()
+            ]
+
+    def recent_nonbenign(self, limit: int = 15) -> list[dict]:
+        """Most recent non-benign judgments as compact dicts — the host's
+        situational context for the investigator (what else is flagged here)."""
+        stmt = (
+            select(
+                Judgement.content_hash,
+                Judgement.collector,
+                Judgement.verdict,
+                Judgement.category,
+                Judgement.reasoning,
+            )
+            .where(
+                Judgement.verdict.in_([str(Verdict.MALICIOUS), str(Verdict.SUSPICIOUS)])
+            )
+            .order_by(Judgement.created_at.desc())
+            .limit(limit)
+        )
+        with Session(self.engine) as session:
+            return [
+                {
+                    "content_hash": r[0],
+                    "collector": r[1],
+                    "verdict": r[2],
+                    "category": r[3],
+                    "reasoning": r[4],
+                }
+                for r in session.execute(stmt).all()
+            ]
+
     def latest_narrative_finding_hashes(self) -> Optional[str]:
         """``finding_hashes`` of the most recent narrative, or None. Used to
         skip regeneration when the active-finding set is unchanged."""
@@ -568,6 +717,71 @@ class Sink:
             session.execute(delete(YaraRuleRow))
             if inventory:
                 session.execute(sqlite_insert(YaraRuleRow), inventory)
+            session.commit()
+
+    # -- yara coverage assessment -------------------------------------------
+
+    # Inventory tables describing the host's attack surface — the host side
+    # of the coverage assessment (ruleset categories weighed against these).
+    _COVERAGE_INVENTORY = {
+        "processes": ProcessRow,
+        "installed_apps": InstalledAppRow,
+        "launch_items": LaunchItemRow,
+        "browser_extensions": BrowserExtensionRow,
+        "kernel_extensions": KernelExtensionRow,
+        "system_extensions": SystemExtensionRow,
+        "listening_ports": ListeningPortRow,
+    }
+
+    def read_yara_status(self) -> Optional[dict]:
+        """The persisted compiled-ruleset summary (single row), or None. The
+        coverage assessor reads this rather than the collector's in-memory
+        compile stats so it stays decoupled from the scan cycle."""
+        with Session(self.engine) as session:
+            row = session.get(YaraStatusRow, 1)
+        if row is None:
+            return None
+        return {
+            "rules_loaded": row.rules_loaded,
+            "files_loaded": row.files_loaded,
+            "files_skipped": row.files_skipped,
+            "rules_dir": row.rules_dir,
+            "sources": json.loads(row.sources_json or "{}"),
+            "skip_reasons": json.loads(row.skip_reasons_json or "{}"),
+            "by_category": json.loads(row.by_category_json or "{}"),
+        }
+
+    def coverage_profile(self, run_id: str) -> dict:
+        """Per-collector row counts for ``run_id`` over the inventory tables —
+        a compact picture of the host's attack surface for the coverage
+        assessment (e.g. how many apps / launch items / extensions exist)."""
+        counts: dict[str, int] = {}
+        with Session(self.engine) as session:
+            for name, model in self._COVERAGE_INVENTORY.items():
+                counts[name] = int(
+                    session.execute(
+                        select(func.count())
+                        .select_from(model)
+                        .where(model.run_id == run_id)
+                    ).scalar()
+                    or 0
+                )
+        return counts
+
+    def latest_yara_coverage_fingerprint(self) -> Optional[str]:
+        """``ruleset_fingerprint`` of the most recent assessment, or None.
+        Compared to the current ruleset so we skip regeneration when the
+        loaded rules are unchanged."""
+        with Session(self.engine) as session:
+            return session.execute(
+                select(YaraCoverageRow.ruleset_fingerprint)
+                .order_by(YaraCoverageRow.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+    def write_yara_coverage(self, row: dict) -> None:
+        with Session(self.engine) as session:
+            session.add(YaraCoverageRow(**row))
             session.commit()
 
     def database_size_bytes(self) -> int:
@@ -909,6 +1123,27 @@ def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     # documented SQLite remedy for multi-connection write contention.
     cur.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
     cur.close()
+
+
+def _relax_db_permissions(db_path: Path) -> None:
+    """Make the DB dir + files group-writable so a root monitor and a
+    same-group unprivileged dashboard can both write (the dashboard's only
+    write is the control_state row). Best-effort: only the owner may chmod,
+    so the non-owning process no-ops — the owning (root) monitor sets the
+    mode, which is what unblocks the dashboard."""
+    targets = [
+        (db_path.parent, _DB_DIR_MODE),
+        (db_path, _DB_FILE_MODE),
+        (db_path.with_name(db_path.name + "-wal"), _DB_FILE_MODE),
+        (db_path.with_name(db_path.name + "-shm"), _DB_FILE_MODE),
+    ]
+    for path, mode in targets:
+        if not path.exists():
+            continue
+        try:
+            os.chmod(path, mode)
+        except PermissionError:
+            pass  # not the owner; the owning process sets the mode
 
 
 def _migrate_add_columns(engine: Engine) -> None:

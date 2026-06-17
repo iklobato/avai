@@ -11,44 +11,70 @@
   {# ===== Ruleset summary ===== #}
   {% set st = data.status if data else none %}
   {% if st and st.rules_loaded %}
-    <div class="mb-5">
-      <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1">
-        <div>
-          <span class="text-2xl font-semibold text-slate-100">{{ "{:,}".format(st.rules_loaded) }}</span>
-          <span class="text-slate-500 text-xs ml-1">rules loaded</span>
+    {# Width-aware summary: a stats column (metric tiles + sources) on the
+       left, the category breakdown spanning the remaining two columns. #}
+    <div class="mb-5 grid grid-cols-1 lg:grid-cols-3 gap-x-8 gap-y-5">
+
+      {# ----- left: ruleset stats ----- #}
+      <div class="space-y-3">
+        <div class="grid grid-cols-2 gap-3">
+          <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+            <div class="text-xl font-semibold text-slate-100 tabular-nums">{{ "{:,}".format(st.rules_loaded) }}</div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">rules loaded</div>
+          </div>
+          <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+            <div class="text-xl font-semibold text-slate-100 tabular-nums">{{ "{:,}".format(st.files_loaded) }}</div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">files</div>
+          </div>
+          <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+            <div class="text-xl font-semibold tabular-nums {{ 'text-amber-300' if st.files_skipped else 'text-slate-100' }}">{{ "{:,}".format(st.files_skipped or 0) }}</div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">skipped</div>
+            {% if st.files_skipped and st.skip_reasons %}
+              <div class="mt-1 text-[10px] text-slate-600 leading-snug">
+                {% for reason, n in st.skip_reasons.items() %}{{ n }} {{ reason }}{% if not loop.last %} · {% endif %}{% endfor %}
+              </div>
+            {% endif %}
+          </div>
+          <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
+            <div class="text-xl font-semibold text-slate-100 tabular-nums">{{ st.category_count or (st.top_categories | length) }}</div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-500">categories</div>
+          </div>
         </div>
-        <div class="text-xs text-slate-400">
-          {{ st.files_loaded }} files
-          {% if st.files_skipped %}
-            · <span class="text-amber-300">{{ st.files_skipped }} skipped</span>
-            {% for reason, n in st.skip_reasons.items() %}
-              <span class="text-slate-500">({{ n }} {{ reason }})</span>
-            {% endfor %}
-          {% endif %}
-        </div>
+
+        {% if st.sources %}
+          <div>
+            <div class="text-[10px] uppercase tracking-wider text-slate-600 mb-1.5">sources</div>
+            <div class="flex flex-wrap gap-1.5">
+              {% for name, n in st.sources.items() %}
+                <span class="bg-slate-800 border border-slate-700 rounded-md px-2 py-0.5 text-[11px] text-slate-300">
+                  {{ name }} <span class="text-slate-500">{{ "{:,}".format(n) }}</span>
+                </span>
+              {% endfor %}
+            </div>
+          </div>
+        {% endif %}
+
         {% if st.compiled_at %}
           <div class="text-[10px] uppercase tracking-wider text-slate-600">compiled {{ st.compiled_at }}</div>
         {% endif %}
       </div>
 
-      {% if st.sources %}
-        <div class="mt-2 flex flex-wrap gap-1.5">
-          {% for name, n in st.sources.items() %}
-            <span class="bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-[11px] text-slate-300">
-              {{ name }} <span class="text-slate-500">{{ "{:,}".format(n) }}</span>
-            </span>
-          {% endfor %}
-        </div>
-      {% endif %}
-
+      {# ----- right (2 cols): category breakdown, laid out 2-up ----- #}
       {% if st.top_categories %}
-        <div class="mt-2">
-          <div class="text-[10px] uppercase tracking-wider text-slate-600 mb-1">
+        {% set cat_max = (st.top_categories | map('last') | max) or 1 %}
+        <div class="lg:col-span-2">
+          <div class="text-[10px] uppercase tracking-wider text-slate-600 mb-1.5">
             top categories{% if st.category_count > st.top_categories|length %} (of {{ st.category_count }}){% endif %}
           </div>
-          <div class="flex flex-wrap gap-1.5">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-1.5">
             {% for name, n in st.top_categories %}
-              <span class="text-[11px] text-slate-400 font-mono">{{ name }}<span class="text-slate-600">·{{ n }}</span></span>
+              <div class="flex items-center gap-2 text-[11px]">
+                <span class="w-20 shrink-0 text-right font-mono text-slate-400 truncate" title="{{ name }}">{{ name }}</span>
+                <div class="flex-1 h-2 rounded bg-slate-800/70 overflow-hidden">
+                  <div class="h-full bg-sky-500/60" style="width: {{ [(n / cat_max * 100) | round(0, 'floor'), 2] | max }}%"></div>
+                </div>
+                <span class="w-10 shrink-0 text-right font-mono tabular-nums text-slate-500">{{ "{:,}".format(n) }}</span>
+              </div>
             {% endfor %}
           </div>
         </div>
@@ -63,6 +89,55 @@
     <div class="mb-5 text-slate-500 text-xs italic">
       the file scanner hasn't compiled a ruleset yet — wait for a collection
       cycle to complete.
+    </div>
+  {% endif %}
+
+  {# ===== Coverage assessment (LLM: does the ruleset fit this host?) ===== #}
+  {% set cov = data.coverage if data else none %}
+  {% if cov %}
+    {% set posture_class = {"well_covered": "text-emerald-300 border-emerald-700/60 bg-emerald-900/20",
+                             "partial": "text-amber-300 border-amber-700/60 bg-amber-900/20",
+                             "thin": "text-rose-300 border-rose-700/60 bg-rose-900/20"} %}
+    <div class="mb-5 border border-slate-800 rounded-lg p-4 bg-slate-900/40">
+      <div class="flex items-center gap-2 mb-1">
+        <span class="text-[10px] uppercase tracking-wider rounded px-1.5 py-0.5 border {{ posture_class.get(cov.posture, 'text-slate-300 border-slate-700') }}">
+          {{ cov.posture.replace("_", " ") }}
+        </span>
+        <span class="text-[10px] uppercase tracking-wider text-slate-600">ruleset coverage</span>
+      </div>
+      <div class="text-sm font-medium text-slate-100">{{ cov.headline }}</div>
+      {% if cov.summary %}<div class="text-xs text-slate-400 mt-1">{{ cov.summary }}</div>{% endif %}
+
+      {% if cov.gaps %}
+        <div class="mt-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-600 mb-1">gaps</div>
+          <ul class="space-y-1">
+            {% for g in cov.gaps %}
+              <li class="text-xs text-slate-300">
+                <span class="text-slate-200 font-medium">{{ g.area }}</span>
+                {% if g.detail %}<span class="text-slate-500"> — {{ g.detail }}</span>{% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+
+      {% if cov.recommendations %}
+        <div class="mt-3">
+          <div class="text-[10px] uppercase tracking-wider text-slate-600 mb-1">recommendations</div>
+          <ul class="space-y-1">
+            {% for r in cov.recommendations %}
+              <li class="text-xs text-slate-300">
+                <span class="text-slate-200 font-medium">{{ r.action }}</span>
+                {% if r.detail %}<span class="text-slate-500"> — {{ r.detail }}</span>{% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+      {% if cov.created_at %}
+        <div class="text-[10px] uppercase tracking-wider text-slate-600 mt-3">assessed {{ cov.created_at }}</div>
+      {% endif %}
     </div>
   {% endif %}
 
@@ -112,7 +187,7 @@
           <th class="text-left font-semibold pb-2 w-1/4">why</th>
         </tr>
       </thead>
-      <tbody class="divide-y divide-slate-800/80">
+      <tbody class="divide-y divide-slate-800/80 [&>tr:nth-child(even)]:bg-slate-950/40">
         {% for m in data.matches %}
           <tr class="hover:bg-slate-800/40 transition-colors">
             <td class="py-2">

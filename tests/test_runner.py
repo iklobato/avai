@@ -9,6 +9,8 @@ just the methods that mediate enrichment + judging.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -26,6 +28,7 @@ from avai.host_monitor import (
     DEFAULT_BASELINE_MIN_RUNS,
     Base,
     CollectionRun,
+    FileScanRow,
     NullJudge,
     ProcessRow,
     Runner,
@@ -413,6 +416,30 @@ class TestAnnotateBaseline:
         runner._annotate_baseline(_ProcStub(), unjudged, bl)
         assert "baseline" not in unjudged[0]
 
+    def test_intermittent_flagged_for_flapping_artifact(self, sink):
+        # 5 runs. "steady" appears every run; "flap" only in runs 0 and 2
+        # (present in fewer runs than its window → flapping); "fresh" only in
+        # the last run (window too short to call intermittent).
+        for ts in _TS[:5]:
+            _add_run(sink, ts)
+        for ts in _TS[:5]:
+            _add_proc(sink, ts, ts, "steady")
+        for ts in (_TS[0], _TS[2]):
+            _add_proc(sink, ts, ts, "flap")
+        _add_proc(sink, _TS[4], _TS[4], "fresh")
+
+        runner = Runner(sink, [], [], NullJudge(), 5, baseline_min_runs=2)
+        bl = runner._host_baseline()
+        unjudged = [
+            {"content_hash": Digest.of_row({"name": n}, ("name",)), "name": n}
+            for n in ("steady", "flap", "fresh")
+        ]
+        runner._annotate_baseline(_ProcStub(), unjudged, bl)
+        steady, flap, fresh = unjudged
+        assert flap["baseline"]["intermittent"] is True
+        assert steady["baseline"]["intermittent"] is False  # present every run
+        assert fresh["baseline"]["intermittent"] is False  # window too short
+
 
 # ---------------------------------------------------------------------------
 # Process-story correlation
@@ -509,6 +536,65 @@ class TestAttachCorrelation:
             "signed": None,
             "exe": "/tmp/evil",
         }
+
+    def test_launch_items_correlate_via_program_to_process(self, sink):
+        # A launch item has no PID; its program is resolved to the live
+        # process running it, then that process's behaviour is attached.
+        from avai.host_monitor import LaunchItemRow, NetworkFlowRow, ProcessRow
+
+        self._setup_two_runs(sink)
+        _w(
+            sink,
+            ProcessRow,
+            pid=42,
+            name="foo",
+            exe="/usr/local/bin/foo",
+            run_id=_TS[0],
+            collected_at=_TS[0],
+        )
+        _w(
+            sink,
+            NetworkFlowRow,
+            pid=42,
+            dst_ip="9.9.9.9",
+            dst_port=443,
+            service="https",
+            packets=99,
+            run_id=_TS[0],
+            collected_at=_TS[0],
+        )
+
+        class _LaunchStub:
+            name = "launch_items"
+            model = LaunchItemRow
+            judge_fields = ("label", "program")
+            judge_hints = ""
+
+        h = "launch-hash"
+        rows = [{"content_hash": h, "program": "/usr/local/bin/foo", "label": "com.x"}]
+        unjudged = [{"content_hash": h, "label": "com.x"}]
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        runner._attach_correlation(_LaunchStub(), unjudged, rows, _TS[1])
+        rel = unjudged[0]["related"]
+        assert rel["outbound_flows"][0]["dst"] == "9.9.9.9:443"
+        assert rel["outbound_flows"][0]["packets"] == 99
+
+    def test_launch_item_without_running_program_gets_no_related(self, sink):
+        from avai.host_monitor import LaunchItemRow
+
+        self._setup_two_runs(sink)
+
+        class _LaunchStub:
+            name = "launch_items"
+            model = LaunchItemRow
+            judge_fields = ("label", "program")
+            judge_hints = ""
+
+        rows = [{"content_hash": "h", "program": "/never/running", "label": "com.y"}]
+        unjudged = [{"content_hash": "h", "label": "com.y"}]
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        runner._attach_correlation(_LaunchStub(), unjudged, rows, _TS[1])
+        assert "related" not in unjudged[0]
 
     def test_non_process_collector_is_not_correlated(self, sink):
         from avai.host_monitor import ListeningPortRow
@@ -1217,3 +1303,547 @@ class TestControlLoop:
         runner.run_forever(300)
         assert calls == [1]  # scan-now forced a cycle despite pause
         assert sink.read_control()["scan_now_applied"] == 1
+
+
+class _FileScanStub:
+    name = "file_scan"
+    model = FileScanRow
+    judge_enabled = True
+    judge_fields = ("path", "sha256", "rule", "namespace", "tags_json")
+    judge_hints = ""
+
+
+class TestAttachYaraContext:
+    """The Runner surfaces a YARA hit's rule meta + matched bytes to the
+    judge without touching the content_hash (they aren't judge_fields)."""
+
+    def _runner(self, sink):
+        return Runner(sink, [], [], _RecordingJudge(), 5)
+
+    def test_attaches_meta_and_strings_from_row(self, sink):
+        runner = self._runner(sink)
+        h = "hash-1"
+        rows = [
+            {
+                "content_hash": h,
+                "meta_json": json.dumps(
+                    {"author": "Jane", "description": "APT42 implant loader"}
+                ),
+                "strings_json": json.dumps(
+                    [{"id": "$c2", "offset": 16, "text": "http://evil.example/x"}]
+                ),
+            }
+        ]
+        unjudged = [{"content_hash": h, "rule": "apt42_loader"}]
+        runner._attach_yara_context(_FileScanStub(), unjudged, rows)
+        assert unjudged[0]["rule_meta"]["description"] == "APT42 implant loader"
+        assert unjudged[0]["matched_strings"][0]["text"] == "http://evil.example/x"
+
+    def test_other_collectors_are_untouched(self, sink):
+        runner = self._runner(sink)
+        unjudged = [{"content_hash": "h", "name": "x"}]
+        # _StubCollector.name is "processes" — not the file_scan collector.
+        runner._attach_yara_context(
+            _StubCollector(), unjudged, [{"content_hash": "h", "meta_json": "{}"}]
+        )
+        assert "rule_meta" not in unjudged[0]
+        assert "matched_strings" not in unjudged[0]
+
+    def test_missing_and_malformed_json_is_tolerated(self, sink):
+        runner = self._runner(sink)
+        h = "hash-2"
+        # No meta, malformed strings — neither key should be attached, no raise.
+        rows = [{"content_hash": h, "strings_json": "{not json"}]
+        unjudged = [{"content_hash": h, "rule": "r"}]
+        runner._attach_yara_context(_FileScanStub(), unjudged, rows)
+        assert "rule_meta" not in unjudged[0]
+        assert "matched_strings" not in unjudged[0]
+
+    def test_entry_without_matching_row_is_skipped(self, sink):
+        runner = self._runner(sink)
+        unjudged = [{"content_hash": "absent", "rule": "r"}]
+        runner._attach_yara_context(
+            _FileScanStub(), unjudged, [{"content_hash": "other", "meta_json": "{}"}]
+        )
+        assert "rule_meta" not in unjudged[0]
+
+
+# ---------------------------------------------------------------------------
+# YARA ruleset-coverage assessment
+# ---------------------------------------------------------------------------
+
+
+class _FakeAssessor:
+    model = "fake-cov-model"
+
+    def __init__(self, result=None):
+        self.calls = []
+        self._result = result or {
+            "posture": "thin",
+            "headline": "Windows-centric ruleset on a Mac",
+            "summary": "Few macOS rules for this host's surface.",
+            "gaps": [{"area": "macOS persistence", "detail": "no LaunchAgent rules"}],
+            "recommendations": [
+                {"action": "fetch signature-base", "detail": "adds macOS coverage"}
+            ],
+        }
+
+    def assess(self, ruleset, host):
+        self.calls.append((ruleset, host))
+        return self._result
+
+
+def _seed_yara_status(sink, rules_loaded=10, sources=None, by_category=None):
+    sink.write_yara_status(
+        {
+            "rules_loaded": rules_loaded,
+            "files_loaded": rules_loaded,
+            "files_skipped": 0,
+            "rules_dir": "/rules",
+            "sources": sources or {"bundled": rules_loaded},
+            "skip_reasons": {},
+            "by_category": by_category or {"gen": rules_loaded},
+        }
+    )
+
+
+def _latest_coverage_row(sink):
+    from sqlalchemy import desc, select
+
+    from avai.host_monitor import YaraCoverageRow
+
+    with Session(sink.engine) as s:
+        return (
+            s.execute(
+                select(YaraCoverageRow).order_by(desc(YaraCoverageRow.created_at))
+            )
+            .scalars()
+            .first()
+        )
+
+
+class TestGenerateCoverage:
+    def _runner(self, sink, assessor):
+        return Runner(sink, [], [], NullJudge(), 5, coverage=assessor)
+
+    def test_no_ruleset_no_assessment(self, sink):
+        a = _FakeAssessor()
+        self._runner(sink, a)._generate_coverage("run-1", _TS[1])
+        assert a.calls == []
+        assert sink.latest_yara_coverage_fingerprint() is None
+
+    def test_zero_rules_no_assessment(self, sink):
+        _seed_yara_status(sink, rules_loaded=0)
+        a = _FakeAssessor()
+        self._runner(sink, a)._generate_coverage("run-1", _TS[1])
+        assert a.calls == []
+
+    def test_assessment_generated_and_stored(self, sink):
+        _seed_yara_status(sink)
+        a = _FakeAssessor()
+        self._runner(sink, a)._generate_coverage("run-1", _TS[1])
+        assert len(a.calls) == 1
+        # The host profile passed carries the platform + inventory counts.
+        _ruleset, host = a.calls[0]
+        assert "platform" in host and "processes" in host
+        row = _latest_coverage_row(sink)
+        assert row.posture == "thin"
+        assert row.headline.startswith("Windows-centric")
+        assert json.loads(row.gaps_json)[0]["area"] == "macOS persistence"
+        assert row.ruleset_fingerprint  # stored for dedup
+
+    def test_unchanged_ruleset_not_regenerated(self, sink):
+        _seed_yara_status(sink)
+        a = _FakeAssessor()
+        r = self._runner(sink, a)
+        r._generate_coverage("run-1", _TS[1])
+        r._generate_coverage("run-2", _TS[1])
+        assert len(a.calls) == 1  # same ruleset fingerprint → skipped
+
+    def test_changed_ruleset_regenerates(self, sink):
+        _seed_yara_status(sink, rules_loaded=10)
+        a = _FakeAssessor()
+        r = self._runner(sink, a)
+        r._generate_coverage("run-1", _TS[1])
+        _seed_yara_status(sink, rules_loaded=99)  # ruleset changed
+        r._generate_coverage("run-2", _TS[1])
+        assert len(a.calls) == 2
+
+
+class TestYaraCoverageAssessor:
+    def _assessor(self, payload):
+        from avai.host_monitor import DEFAULT_PROMPTS_PATH, Prompts
+        from avai.host_monitor.coverage import YaraCoverageAssessor
+
+        class _FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def complete_structured(self, **kw):
+                self.calls.append(kw)
+                return payload
+
+        return YaraCoverageAssessor(
+            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=_FakeClient()
+        )
+
+    _RULESET = {"rules_loaded": 5, "sources": {"bundled": 5}, "by_category": {"gen": 5}}
+
+    def test_prompt_section_loads(self):
+        from avai.host_monitor import DEFAULT_PROMPTS_PATH, Prompts
+
+        p = Prompts.load(DEFAULT_PROMPTS_PATH)
+        assert p.coverage_system and "$ruleset" in p.coverage_user_template
+
+    def test_empty_ruleset_returns_none_without_calling_llm(self):
+        a = self._assessor({"posture": "thin", "headline": "h", "summary": "s"})
+        assert a.assess({}, {"platform": "Darwin"}) is None
+        assert a.assess({"rules_loaded": 0}, {}) is None
+
+    def test_bad_posture_falls_back_to_partial(self):
+        a = self._assessor(
+            {
+                "posture": "fortified",
+                "headline": "h",
+                "summary": "s",
+                "gaps": [],
+                "recommendations": [],
+            }
+        )
+        out = a.assess(self._RULESET, {"platform": "Darwin"})
+        assert out["posture"] == "partial"
+
+    def test_missing_headline_returns_none(self):
+        a = self._assessor({"posture": "thin", "summary": "s", "gaps": []})
+        assert a.assess(self._RULESET, {}) is None
+
+    def test_gaps_and_recommendations_normalised(self):
+        a = self._assessor(
+            {
+                "posture": "thin",
+                "headline": "h",
+                "summary": "s",
+                "gaps": [
+                    {"area": "macOS", "detail": "d"},
+                    {"detail": "no area → dropped"},
+                ],
+                "recommendations": [
+                    {"action": "fetch pack", "detail": "d"},
+                    {"detail": "no action → dropped"},
+                ],
+            }
+        )
+        out = a.assess(self._RULESET, {"platform": "Darwin"})
+        assert len(out["gaps"]) == 1 and out["gaps"][0]["area"] == "macOS"
+        assert len(out["recommendations"]) == 1
+        assert out["recommendations"][0]["action"] == "fetch pack"
+
+
+# ---------------------------------------------------------------------------
+# Malicious-verdict verifier (adversarial second pass)
+# ---------------------------------------------------------------------------
+
+
+def _mk_judgment(h, verdict, collector="processes"):
+    from avai.host_monitor import Judgment, ThreatCategory
+
+    return Judgment(
+        content_hash=h,
+        collector=collector,
+        verdict=verdict,
+        category=ThreatCategory.PERSISTENCE,
+        confidence=0.9,
+        reasoning="original reason",
+        remediation="",
+        model="m",
+        created_at="2026-01-01T00:00:00Z",
+    )
+
+
+class _FakeVerifier:
+    def __init__(self, refuted):
+        self._refuted = refuted
+        self.calls = []
+
+    def verify(self, finding):
+        self.calls.append(finding)
+        return {"refuted": self._refuted, "reasoning": "skeptic says so"}
+
+
+class TestVerifyJudgments:
+    def _runner(self, sink, verifier=None):
+        return Runner(sink, [], [], NullJudge(), 5, verifier=verifier)
+
+    def test_refuted_malicious_downgraded_to_suspicious(self, sink):
+        from avai.host_monitor import Verdict
+
+        v = _FakeVerifier(refuted=True)
+        j = _mk_judgment("h1", Verdict.MALICIOUS)
+        out = self._runner(sink, v)._verify_judgments(
+            "processes", [j], [{"content_hash": "h1", "name": "x"}]
+        )
+        assert out[0].verdict == Verdict.SUSPICIOUS
+        assert "downgraded" in out[0].reasoning
+        assert "original reason" in out[0].reasoning  # original preserved
+        assert len(v.calls) == 1
+
+    def test_unrefuted_malicious_is_kept(self, sink):
+        from avai.host_monitor import Verdict
+
+        v = _FakeVerifier(refuted=False)
+        j = _mk_judgment("h1", Verdict.MALICIOUS)
+        out = self._runner(sink, v)._verify_judgments(
+            "processes", [j], [{"content_hash": "h1"}]
+        )
+        assert out[0].verdict == Verdict.MALICIOUS
+        assert len(v.calls) == 1
+
+    def test_non_malicious_is_not_verified(self, sink):
+        from avai.host_monitor import Verdict
+
+        v = _FakeVerifier(refuted=True)
+        j = _mk_judgment("h1", Verdict.SUSPICIOUS)
+        out = self._runner(sink, v)._verify_judgments("processes", [j], [])
+        assert out[0].verdict == Verdict.SUSPICIOUS
+        assert v.calls == []  # skeptic only runs on malicious
+
+    def test_no_verifier_is_noop(self, sink):
+        from avai.host_monitor import Verdict
+
+        j = _mk_judgment("h1", Verdict.MALICIOUS)
+        out = self._runner(sink)._verify_judgments("processes", [j], [])
+        assert out[0].verdict == Verdict.MALICIOUS
+
+
+class TestMaliciousVerdictVerifier:
+    def _verifier(self, payload):
+        from avai.host_monitor import DEFAULT_PROMPTS_PATH, Prompts
+        from avai.host_monitor.verifier import MaliciousVerdictVerifier
+
+        class _FakeClient:
+            def __init__(self):
+                self.calls = []
+
+            def complete_structured(self, **kw):
+                self.calls.append(kw)
+                return payload
+
+        return MaliciousVerdictVerifier(
+            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=_FakeClient()
+        )
+
+    def test_refuted_true_parsed(self):
+        out = self._verifier(
+            {"refuted": True, "reasoning": "signed Apple binary"}
+        ).verify({"artifact": "x"})
+        assert out["refuted"] is True
+        assert "signed" in out["reasoning"]
+
+    def test_missing_fields_default_to_not_refuted(self):
+        # Absent/garbled output must not silently downgrade a verdict.
+        out = self._verifier({}).verify({"artifact": "x"})
+        assert out["refuted"] is False
+
+
+# ---------------------------------------------------------------------------
+# Unknown-finding investigator (deep re-judge)
+# ---------------------------------------------------------------------------
+
+
+class _FakeInvestigator:
+    def __init__(self, verdict, category=None):
+        from avai.host_monitor import ThreatCategory
+
+        self._verdict = verdict
+        self._category = category or ThreatCategory.COMMAND_AND_CONTROL
+        self.calls = []
+
+    def investigate(self, collector, finding):
+        self.calls.append((collector, finding))
+        return {
+            "verdict": self._verdict,
+            "category": self._category,
+            "confidence": 0.8,
+            "reasoning": "deep look decided it",
+            "remediation": "do x",
+        }
+
+
+class TestInvestigateUnknowns:
+    def _runner(self, sink, investigator=None):
+        return Runner(sink, [], [], NullJudge(), 5, investigator=investigator)
+
+    def test_unknown_resolved_replaces_verdict(self, sink):
+        from avai.host_monitor import Verdict
+
+        inv = _FakeInvestigator(Verdict.MALICIOUS)
+        j = _mk_judgment("h1", Verdict.UNKNOWN)
+        out = self._runner(sink, inv)._investigate_unknowns(
+            _ProcStub(), [j], [{"content_hash": "h1", "name": "evil"}], []
+        )
+        assert out[0].verdict == Verdict.MALICIOUS
+        assert out[0].reasoning.startswith("[investigated]")
+        assert len(inv.calls) == 1
+
+    def test_unknown_kept_when_still_unknown(self, sink):
+        from avai.host_monitor import Verdict
+
+        inv = _FakeInvestigator(Verdict.UNKNOWN)
+        j = _mk_judgment("h1", Verdict.UNKNOWN)
+        out = self._runner(sink, inv)._investigate_unknowns(
+            _ProcStub(), [j], [{"content_hash": "h1"}], []
+        )
+        assert out[0].verdict == Verdict.UNKNOWN
+        assert len(inv.calls) == 1  # investigated, but couldn't commit
+
+    def test_non_unknown_not_investigated(self, sink):
+        from avai.host_monitor import Verdict
+
+        inv = _FakeInvestigator(Verdict.MALICIOUS)
+        j = _mk_judgment("h1", Verdict.SUSPICIOUS)
+        out = self._runner(sink, inv)._investigate_unknowns(_ProcStub(), [j], [], [])
+        assert out[0].verdict == Verdict.SUSPICIOUS
+        assert inv.calls == []
+
+    def test_no_investigator_is_noop(self, sink):
+        from avai.host_monitor import Verdict
+
+        j = _mk_judgment("h1", Verdict.UNKNOWN)
+        out = self._runner(sink)._investigate_unknowns(_ProcStub(), [j], [], [])
+        assert out[0].verdict == Verdict.UNKNOWN
+
+    def test_finding_carries_full_history_behaviour(self, sink):
+        from avai.host_monitor import NetworkFlowRow, Verdict
+
+        # A flow for pid 42 in history (no run-time bound applies under
+        # investigation), resolved via the process row passed in.
+        _w(
+            sink,
+            NetworkFlowRow,
+            pid=42,
+            dst_ip="9.9.9.9",
+            dst_port=443,
+            service="https",
+            packets=5,
+            run_id="r0",
+            collected_at=_TS[0],
+        )
+        inv = _FakeInvestigator(Verdict.MALICIOUS)
+        j = _mk_judgment("h1", Verdict.UNKNOWN)
+        rows = [{"content_hash": "h1", "pid": 42, "name": "evil"}]
+        self._runner(sink, inv)._investigate_unknowns(
+            _ProcStub(), [j], [{"content_hash": "h1", "name": "evil"}], rows
+        )
+        _collector, finding = inv.calls[0]
+        assert finding["related_full"]["outbound_flows"][0]["dst"] == "9.9.9.9:443"
+
+
+class TestUnknownFindingInvestigator:
+    def _inv(self, payload):
+        from avai.host_monitor import DEFAULT_PROMPTS_PATH, Prompts
+        from avai.host_monitor.investigator import UnknownFindingInvestigator
+
+        class _FakeClient:
+            def complete_structured(self, **kw):
+                return payload
+
+        return UnknownFindingInvestigator(
+            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=_FakeClient()
+        )
+
+    def test_parses_and_clamps(self):
+        from avai.host_monitor import ThreatCategory, Verdict
+
+        out = self._inv(
+            {
+                "verdict": "malicious",
+                "category": "command_and_control",
+                "confidence": 1.5,
+                "reasoning": "r",
+                "remediation": "x",
+            }
+        ).investigate("processes", {"a": 1})
+        assert out["verdict"] == Verdict.MALICIOUS
+        assert out["category"] == ThreatCategory.COMMAND_AND_CONTROL
+        assert out["confidence"] == 1.0  # clamped to [0,1]
+
+    def test_bad_verdict_coerces_to_unknown(self):
+        from avai.host_monitor import Verdict
+
+        out = self._inv(
+            {
+                "verdict": "scary",
+                "category": "nope",
+                "confidence": 0.5,
+                "reasoning": "r",
+                "remediation": "",
+            }
+        ).investigate("processes", {})
+        assert out["verdict"] == Verdict.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Operator feedback loop
+# ---------------------------------------------------------------------------
+
+
+def _add_feedback(sink, h, collector, label, note=None, artifact=None, applied=0):
+    from avai.host_monitor import FeedbackRow
+
+    with Session(sink.engine) as s:
+        s.add(
+            FeedbackRow(
+                content_hash=h,
+                collector=collector,
+                label=label,
+                note=note,
+                artifact=artifact,
+                created_at="2026-01-01T00:00:00Z",
+                applied=applied,
+            )
+        )
+        s.commit()
+
+
+class TestFeedback:
+    def test_apply_feedback_flips_to_benign_and_marks_applied(self, sink):
+        from avai.host_monitor import Judgement, Verdict
+
+        _add_judgement(sink, "h1", "malicious", last_seen=_TS[1])
+        _add_feedback(sink, "h1", "processes", "false_positive", note="known dev tool")
+        assert sink.apply_feedback() == 1
+        with Session(sink.engine) as s:
+            row = s.get(Judgement, ("h1", "processes"))
+        assert row.verdict == str(Verdict.BENIGN)
+        assert "operator" in row.reasoning and "known dev tool" in row.reasoning
+        assert sink.apply_feedback() == 0  # already applied → not reprocessed
+
+    def test_apply_feedback_confirmed_to_malicious(self, sink):
+        from avai.host_monitor import Judgement, Verdict
+
+        _add_judgement(sink, "h2", "suspicious", last_seen=_TS[1])
+        _add_feedback(sink, "h2", "processes", "confirmed")
+        sink.apply_feedback()
+        with Session(sink.engine) as s:
+            row = s.get(Judgement, ("h2", "processes"))
+        assert row.verdict == str(Verdict.MALICIOUS)
+
+    def test_feedback_examples_scoped_to_collector(self, sink):
+        _add_feedback(sink, "h1", "processes", "false_positive", artifact="curl")
+        ex = sink.feedback_examples("processes")
+        assert ex and ex[0]["artifact"] == "curl"
+        assert ex[0]["label"] == "false_positive"
+        assert sink.feedback_examples("dns_queries") == []
+
+    def test_judge_hints_appends_ground_truth_block(self, sink):
+        _add_feedback(
+            sink, "h1", "processes", "false_positive", artifact="curl", note="dev tool"
+        )
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        hints = runner._judge_hints("processes", "BASE HINTS")
+        assert hints.startswith("BASE HINTS")
+        assert "curl" in hints and "FALSE POSITIVE" in hints and "dev tool" in hints
+
+    def test_judge_hints_unchanged_without_feedback(self, sink):
+        runner = Runner(sink, [], [], NullJudge(), 5)
+        assert runner._judge_hints("processes", "BASE") == "BASE"

@@ -276,6 +276,31 @@ class TestIndicatorExtraction:
         assert out[0].type is IndicatorType.IPV4
         assert out[0].value == "8.8.8.8"
 
+    def test_network_connections_emits_from_raddr_ip_fields(self):
+        # The real collector emits raddr_ip/raddr_port (not a combined raddr
+        # string); enrichment must read those so the remote IP gets intel.
+        out = extract_indicators(
+            "network_connections",
+            {"raddr_ip": "1.2.3.4", "raddr_port": 4444, "status": "ESTABLISHED"},
+        )
+        assert len(out) == 1
+        assert out[0].type is IndicatorType.IPV4
+        assert out[0].value == "1.2.3.4"
+
+    def test_network_connections_private_raddr_ip_skipped(self):
+        out = extract_indicators(
+            "network_connections",
+            {"raddr_ip": "10.0.0.5", "raddr_port": 22, "status": "ESTABLISHED"},
+        )
+        assert out == []
+
+    def test_network_connections_no_remote_yields_nothing(self):
+        out = extract_indicators(
+            "network_connections",
+            {"raddr_ip": None, "raddr_port": None, "status": "LISTEN"},
+        )
+        assert out == []
+
     def test_unknown_collector_yields_nothing(self):
         out = extract_indicators("not_a_real_collector", {"x": 1})
         assert out == []

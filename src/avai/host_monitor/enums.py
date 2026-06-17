@@ -1,7 +1,8 @@
 """Typed categorical enums shared across the monitor."""
+
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 
 
 class Verdict(StrEnum):
@@ -28,12 +29,31 @@ class ThreatCategory(StrEnum):
     RECONNAISSANCE = "reconnaissance"
 
 
+class FeedbackLabel(StrEnum):
+    """Operator correction on a finding, fed back into judging."""
+
+    FALSE_POSITIVE = "false_positive"
+    CONFIRMED = "confirmed"
+
+
 class LaunchScope(StrEnum):
     USER_AGENT = "user_agent"
     SYSTEM_AGENT = "system_agent"
     SYSTEM_DAEMON = "system_daemon"
     APPLE_AGENT = "apple_agent"
     APPLE_DAEMON = "apple_daemon"
+
+
+class ScanTier(IntEnum):
+    """Security priority of a directory the YARA scanner walks — lower is
+    scanned first. ``IntEnum`` so :class:`ScanRoot` instances sort by tier
+    directly, highest-signal corners (privileged binaries, temp, launch
+    agents) ahead of the full-disk baseline sweep."""
+
+    CRITICAL = 0
+    HIGH = 1
+    MEDIUM = 2
+    BASELINE = 3
 
 
 class Browser(StrEnum):

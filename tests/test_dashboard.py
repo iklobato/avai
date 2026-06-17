@@ -202,10 +202,15 @@ class TestDashboardEndpoints:
         assert "posture score" in body
         assert "system integrity" in body
 
-    def test_verdicts_merges_donut_and_trend(self, client):
-        body = client.get("/fragments/verdicts").data.decode()
-        assert 'id="verdict-donut"' in body  # all-time totals donut
-        assert 'id="verdict-chart"' in body  # 12h trend canvas
+    def test_verdict_totals_donut_in_overview_trend_in_verdicts(self, client):
+        # De-duplicated: the all-time totals donut lives in the overview KPI
+        # row; the verdicts panel owns only the last-12h activity trend (the
+        # two used to share a duplicate id="verdict-donut").
+        overview = client.get("/fragments/overview").data.decode()
+        verdicts = client.get("/fragments/verdicts").data.decode()
+        assert "verdict-donut" in overview  # all-time totals donut
+        assert 'id="verdict-chart"' in verdicts  # 12h trend canvas
+        assert "verdict-donut" not in verdicts  # no longer duplicated here
 
     def test_collection_merges_runs_errors_rowcounts(self, client):
         body = client.get("/fragments/collection").data.decode()
@@ -412,47 +417,11 @@ class TestDashboardEndpoints:
         body = client.get("/fragments/file-scan").data.decode()
         assert "hasn't compiled" in body  # graceful empty state
 
-    def test_yara_rules_browser_lists_searches_and_filters(self, client):
-        from avai.host_monitor import Sink
-
-        Sink(_engine_rw(app.config["DB_PATH"])).write_yara_rules(
-            [
-                {
-                    "identifier": "APT_Backdoor_Foo",
-                    "tags": "APT",
-                    "author": "Florian Roth",
-                    "source": "signature-base",
-                    "category": "apt",
-                },
-                {
-                    "identifier": "eicar_test_file",
-                    "tags": "",
-                    "author": "avai",
-                    "source": "bundled",
-                    "category": "eicar",
-                },
-            ]
-        )
-        # lists all rules + the source filter options
-        body = client.get("/fragments/yara-rules").data.decode()
-        assert "APT_Backdoor_Foo" in body
-        assert "eicar_test_file" in body
-        assert "signature-base" in body  # source filter option
-        assert "of 2" in body and "rules" in body  # total count (1–2 of 2 rules)
-
-        # search narrows by identifier
-        s = client.get("/fragments/yara-rules?q=backdoor").data.decode()
-        assert "APT_Backdoor_Foo" in s
-        assert "eicar_test_file" not in s
-
-        # source filter narrows
-        f = client.get("/fragments/yara-rules?source=bundled").data.decode()
-        assert "eicar_test_file" in f
-        assert "APT_Backdoor_Foo" not in f
-
-    def test_yara_rules_empty_db_shows_no_inventory(self, client):
-        body = client.get("/fragments/yara-rules").data.decode()
-        assert "no rule inventory yet" in body
+    def test_yara_rules_panel_is_removed(self, client):
+        # The dedicated YARA rule-browser panel was removed; YARA matches live
+        # only in the File Scan panel now.
+        assert client.get("/fragments/yara-rules").status_code == 404
+        assert b"yara-rules-panel" not in client.get("/").data
 
     def test_network_panel_is_an_accessible_tablist(self, client):
         # WAI-ARIA tabs pattern: the tab strip must be a tablist of tabs that
@@ -693,6 +662,69 @@ class TestDashboardEndpoints:
         assert "macos@15" not in body  # benign filtered out
         # the KEV/critical package must rank before the EOL OS
         assert body.index("openssl@3.0.2") < body.index("macos@12")
+
+    def test_vulnerabilities_flags_and_prioritises_reachable_software(self, client):
+        import json as _json
+
+        from avai.dashboard import Base
+        from avai.enrichers.cache import register_schema
+        from avai.host_monitor import CollectionRun, ListeningPortRow
+
+        model = register_schema(Base)
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            # A completed run where nginx is listening (exposed on the host).
+            s.add(
+                CollectionRun(
+                    run_id="run-x",
+                    started_at="2026-06-01T00:00:00Z",
+                    finished_at="2026-06-01T00:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                ListeningPortRow(
+                    run_id="run-x",
+                    collected_at="2026-06-01T00:00:00Z",
+                    process_name="nginx",
+                    laddr_ip="0.0.0.0",
+                    laddr_port=443,
+                )
+            )
+            # Exposed nginx (CVSS 5.0) vs higher-CVSS openssl that isn't present.
+            for pkg, cve, score in [
+                ("nginx@1.20", "CVE-2024-2000", 5.0),
+                ("openssl@3.0.2", "CVE-2024-3000", 9.0),
+            ]:
+                s.add(
+                    model(
+                        source="osv",
+                        indicator_type="package",
+                        indicator_value=pkg,
+                        verdict_hint="suspicious",
+                        confidence=0.6,
+                        summary="OSV",
+                        details_json=_json.dumps({"vuln_ids": [cve]}),
+                        fetched_at="2026-06-01T00:00:00Z",
+                    )
+                )
+                s.add(
+                    model(
+                        source="nvd",
+                        indicator_type="cve",
+                        indicator_value=cve,
+                        verdict_hint="malicious",
+                        confidence=0.7,
+                        summary=f"NVD: CVSS={score}",
+                        details_json=_json.dumps({"cvss31": {"baseScore": score}}),
+                        fetched_at="2026-06-01T00:00:00Z",
+                    )
+                )
+            s.commit()
+        body = client.get("/fragments/vulnerabilities").data.decode()
+        assert "exposed" in body  # the reachable-software badge rendered
+        # exposed nginx outranks the higher-CVSS but not-present openssl
+        assert body.index("nginx@1.20") < body.index("openssl@3.0.2")
 
     def test_incident_fragment_empty_shows_placeholder(self, client):
         r = client.get("/fragments/incident")
@@ -1303,5 +1335,49 @@ class TestControlPlane:
         monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
         r = client.post(
             "/control/maintenance/bogus", headers={"X-Avai-Token": "secret"}
+        )
+        assert r.status_code == 400
+
+
+class TestFeedbackEndpoint:
+    _HASH = "a" * 64
+
+    def test_records_feedback_with_token(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post(
+            f"/feedback/processes/{self._HASH}/false_positive",
+            data={"artifact": "curl", "note": "dev tool"},
+            headers={"X-Avai-Token": "secret"},
+        )
+        assert r.status_code == 200
+        assert b"recorded" in r.data
+        from avai.host_monitor import FeedbackRow
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            row = s.get(FeedbackRow, (self._HASH, "processes"))
+        assert row is not None
+        assert row.label == "false_positive"
+        assert row.artifact == "curl"
+        assert row.note == "dev tool"
+        assert row.applied == 0  # monitor applies it next cycle
+
+    def test_rejected_without_token(self, client, monkeypatch):
+        monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
+        r = client.post(f"/feedback/processes/{self._HASH}/false_positive")
+        assert r.status_code == 403
+
+    def test_bad_label_is_400(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post(
+            f"/feedback/processes/{self._HASH}/bogus",
+            headers={"X-Avai-Token": "secret"},
+        )
+        assert r.status_code == 400
+
+    def test_unknown_collector_is_400(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post(
+            f"/feedback/not_a_collector/{self._HASH}/confirmed",
+            headers={"X-Avai-Token": "secret"},
         )
         assert r.status_code == 400

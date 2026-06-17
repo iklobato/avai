@@ -68,7 +68,7 @@ from avai.host_monitor import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
-    YaraRuleRow,
+    YaraCoverageRow,
     YaraStatusRow,
 )
 
@@ -117,6 +117,7 @@ COLLECTOR_MODELS = {
 
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "processes": ("name", "exe"),
+    "network_connections": ("raddr_ip", "raddr_port"),
     "network_flows": ("dst_ip", "dst_port"),
     "dns_queries": ("qname", "qtype"),
     "ssh_authorized_keys": ("owner", "fingerprint"),
@@ -356,14 +357,62 @@ def risk_trend(session: Session, limit: int = 30) -> list[int]:
 _VULN_SOURCES = ("osv", "nvd", "cisa_kev", "github_advisory", "endoflife")
 
 
+def _normalize_software(name: str) -> str:
+    """Reduce a software/package/exe string to a comparable base token:
+    drop the ``@version`` suffix, take the path basename, strip a ``.app``
+    suffix. ``"openssl@3.0.2"`` → ``"openssl"``; ``"/usr/sbin/nginx"`` →
+    ``"nginx"``; ``"Firefox.app"`` → ``"firefox"``."""
+    base = str(name or "").split("@", 1)[0].strip().lower()
+    base = base.rsplit("/", 1)[-1]
+    if base.endswith(".app"):
+        base = base[:-4]
+    return base
+
+
+def _software_presence(session: Session, run_id) -> tuple[set, set]:
+    """``(running, exposed)`` normalized software names for ``run_id``:
+    ``running`` from the process snapshot (name + exe basename), ``exposed``
+    from the listening-port owners. Used to tell whether a vulnerable package
+    is actually present and reachable on the host, not just installed."""
+    running: set = set()
+    exposed: set = set()
+    if run_id is None:
+        return running, exposed
+    present = _existing_tables(session)
+    if "processes" in present:
+        for name, exe in session.execute(
+            select(ProcessRow.name, ProcessRow.exe).where(ProcessRow.run_id == run_id)
+        ).all():
+            if name:
+                running.add(_normalize_software(name))
+            if exe:
+                running.add(_normalize_software(exe))
+    if "listening_ports" in present:
+        for pname in session.execute(
+            select(ListeningPortRow.process_name).where(
+                ListeningPortRow.run_id == run_id
+            )
+        ).scalars():
+            if pname:
+                exposed.add(_normalize_software(pname))
+    running.discard("")
+    exposed.discard("")
+    return running, exposed
+
+
 def vulnerabilities(session: Session) -> list[dict]:
     """Aggregate the CVE / EOL evidence the enrichment chain already
-    collected into a prioritised 'patch me' list (KEV → has-CVE → EOL).
-    Reads the enrichment_evidence cache; [] if it isn't present."""
+    collected into a prioritised 'patch me' list. Each item is flagged with
+    whether the vulnerable software is actually ``running`` and/or ``exposed``
+    (listening) on the host, and the list is prioritised
+    KEV → exposed → running → CVSS → has-CVE → EOL — actively-exploited and
+    reachable first. Reads the enrichment_evidence cache; [] if absent."""
     if "enrichment_evidence" not in _existing_tables(session):
         return []
     from avai.enrichers.cache import register_schema
 
+    latest = latest_run(session)
+    running, exposed = _software_presence(session, latest.run_id if latest else None)
     model = register_schema(Base)
     rows = session.execute(
         select(
@@ -426,6 +475,7 @@ def vulnerabilities(session: Session) -> list[dict]:
         ]
         kev = any(c["kev"] for c in cves)
         cvss = max((c["cvss"] for c in cves if c["cvss"] is not None), default=None)
+        base = _normalize_software(ival)
         items.append(
             {
                 "software": ival,
@@ -435,12 +485,18 @@ def vulnerabilities(session: Session) -> list[dict]:
                 "cvss": cvss,
                 "eol": eol,
                 "summary": summary or "",
+                # Is this vulnerable software actually present on the host?
+                "running": base in running,
+                "exposed": base in exposed,
             }
         )
-    # prioritise: actively-exploited (KEV) → highest CVSS → has-CVE → EOL
+    # prioritise: actively-exploited (KEV) → reachable (exposed) → present
+    # (running) → highest CVSS → has-CVE → EOL.
     items.sort(
         key=lambda i: (
             not i["kev"],
+            not i["exposed"],
+            not i["running"],
             -(i["cvss"] or 0.0),
             not i["cves"],
             not i["eol"],
@@ -1698,85 +1754,32 @@ def file_scan(
         ]
     return {
         "status": yara_status(session),
+        "coverage": yara_coverage(session),
         "matches": matches,
         "verdict": verdict,
         "q": q,
     }
 
 
-def yara_rules(
-    session: Session,
-    q: str = "",
-    source: str = "",
-    page: int = 1,
-    per_page: int = 50,
-) -> dict:
-    """Paginated, searchable inventory of the loaded YARA rules so the
-    dashboard can browse every rule (identifier / tags / author / source).
-    Empty when the monitor hasn't persisted the inventory yet."""
-    empty = {
-        "items": [],
-        "total": 0,
-        "page": 1,
-        "per_page": per_page,
-        "total_pages": 1,
-        "q": q,
-        "source": source,
-        "source_options": [],
-    }
-    if YaraRuleRow.__tablename__ not in _existing_tables(session):
-        return empty
-
-    stmt = select(YaraRuleRow)
-    if source:
-        stmt = stmt.where(YaraRuleRow.source == source)
-    if q:
-        like = f"%{q.lower()}%"
-        stmt = stmt.where(
-            or_(
-                func.lower(YaraRuleRow.identifier).like(like),
-                func.lower(func.coalesce(YaraRuleRow.tags, "")).like(like),
-                func.lower(func.coalesce(YaraRuleRow.author, "")).like(like),
-            )
-        )
-    total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    per_page = max(1, min(per_page, 200))
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-    rows = (
-        session.execute(
-            stmt.order_by(YaraRuleRow.identifier)
-            .offset((page - 1) * per_page)
-            .limit(per_page)
-        )
-        .scalars()
-        .all()
-    )
-    source_options = [
-        s
-        for (s,) in session.execute(
-            select(YaraRuleRow.source).distinct().order_by(YaraRuleRow.source)
-        )
-        if s
-    ]
+def yara_coverage(session: Session) -> "dict | None":
+    """The most recent LLM assessment of how well the loaded ruleset covers
+    this host (posture / headline / summary / gaps / recommendations). None
+    when the assessor has never run or its table predates this DB."""
+    if YaraCoverageRow.__tablename__ not in _existing_tables(session):
+        return None
+    row = session.execute(
+        select(YaraCoverageRow).order_by(desc(YaraCoverageRow.created_at)).limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        return None
     return {
-        "items": [
-            {
-                "identifier": r.identifier,
-                "tags": r.tags,
-                "author": r.author,
-                "source": r.source,
-                "category": r.category,
-            }
-            for r in rows
-        ],
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
-        "q": q,
-        "source": source,
-        "source_options": source_options,
+        "posture": row.posture,
+        "headline": row.headline,
+        "summary": row.summary,
+        "gaps": json.loads(row.gaps_json or "[]"),
+        "recommendations": json.loads(row.recommendations_json or "[]"),
+        "created_at": row.created_at,
+        "model": row.model,
     }
 
 
@@ -1896,10 +1899,63 @@ AUTH_SUBSYSTEM_OPTIONS = [
 ]
 
 
+def _auth_subsystem_tabs(summary: dict, total_events: int) -> list[dict]:
+    """Tab descriptors for the auth-events subsystem tablist: short label,
+    filter value, and event count (the "all" tab carries the grand total).
+    Counts come from the per-subsystem ``summary`` keyed by short label."""
+    tabs = []
+    for _label, val in AUTH_SUBSYSTEM_OPTIONS:
+        if not val:
+            tabs.append({"label": "all", "val": "", "count": total_events})
+            continue
+        short = _AUTH_SUBSYSTEM_LABELS.get(val, val.split(".")[-1])
+        tabs.append({"label": short, "val": val, "count": summary.get(short, 0)})
+    return tabs
+
+
 _AUTH_VERDICT_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3}
 
 
 _AUTH_AGG_WINDOW_HOURS = 24
+
+# Aggregating ~300k raw rows into ~80k patterns (GROUP BY + COUNT + page)
+# costs several seconds and is rerun on every subsystem-tab click and on the
+# panel's 30s poll. Cache the full result briefly so tab switching is instant;
+# the TTL is below the panel's poll cadence, so this never shows staler data
+# than the dashboard already does. Mirrors the _tables_cache pattern above.
+_AUTH_AGG_TTL = 15.0
+_auth_agg_cache: dict[tuple, tuple[float, dict]] = {}
+_auth_agg_cache_lock = threading.Lock()
+_AUTH_AGG_CACHE_MAX = 64
+
+# Per-subsystem summary is identical for every tab, so cache it per-DB
+# (filter-independent) and reuse it across all subsystem tabs.
+_auth_summary_cache: dict[str, tuple[float, tuple[dict, int]]] = {}
+_auth_summary_cache_lock = threading.Lock()
+
+
+def _auth_summary(session: Session, cutoff: str) -> tuple[dict, int]:
+    """Recent per-subsystem event counts (short label -> count) plus the grand
+    total, cached for ``_AUTH_AGG_TTL`` seconds and shared across all tabs."""
+    key = _cache_key(session)
+    hit = _auth_summary_cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _AUTH_AGG_TTL:
+        return hit[1]
+    summary_rows = session.execute(
+        select(AuthEventRow.subsystem, func.count().label("cnt"))
+        .where(AuthEventRow.event_timestamp >= cutoff)
+        .group_by(AuthEventRow.subsystem)
+        .order_by(func.count().desc())
+        .limit(12)
+    ).all()
+    summary = {
+        _AUTH_SUBSYSTEM_LABELS.get(s, (s or "(none)").split(".")[-1]): c
+        for s, c in summary_rows
+    }
+    value = (summary, sum(summary.values()))
+    with _auth_summary_cache_lock:
+        _auth_summary_cache[key] = (time.monotonic(), value)
+    return value
 
 
 def auth_events_aggregated(
@@ -1911,15 +1967,20 @@ def auth_events_aggregated(
     page: int = 1,
     per_page: int = DEFAULT_PER_PAGE,
 ):
-    """Auth events grouped by (content_hash, process, subsystem, event_message),
+    """Auth events grouped by content_hash (one pattern per unique log line),
     joined with LLM verdicts.  Collapses raw log lines into patterns; each
     pattern gets one judgment from the LLM judge.  Supports filtering by
     subsystem, verdict, and free-text search, and sorting by count or verdict
-    severity."""
+    severity.  Results are cached for ``_AUTH_AGG_TTL`` seconds (see above)."""
+    cache_key = (_cache_key(session), q, subsystem, verdict, sort, page, per_page)
+    cached = _auth_agg_cache.get(cache_key)
+    if cached is not None and time.monotonic() - cached[0] < _AUTH_AGG_TTL:
+        return cached[1]
+
     empty = {
         "rows": [],
         "summary": {},
-        "subsystem_options": AUTH_SUBSYSTEM_OPTIONS,
+        "subsystem_tabs": _auth_subsystem_tabs({}, 0),
         "total": 0,
         "total_events": 0,
         "page": 1,
@@ -1941,18 +2002,10 @@ def auth_events_aggregated(
     ).isoformat(timespec="seconds")
 
     # --- summary counts per subsystem (recent window) ---
-    summary_rows = session.execute(
-        select(AuthEventRow.subsystem, func.count().label("cnt"))
-        .where(AuthEventRow.event_timestamp >= cutoff)
-        .group_by(AuthEventRow.subsystem)
-        .order_by(func.count().desc())
-        .limit(12)
-    ).all()
-    summary = {
-        _AUTH_SUBSYSTEM_LABELS.get(s, (s or "(none)").split(".")[-1]): c
-        for s, c in summary_rows
-    }
-    total_events = sum(summary.values())
+    # Filter-independent (same for every tab), so cache it per-DB and share it
+    # across all subsystem tabs instead of recomputing the ~300k-row GROUP BY
+    # on each cold tab load.
+    summary, total_events = _auth_summary(session, cutoff)
 
     # --- aggregation: one row per unique (content_hash) pattern ---
     conds = [AuthEventRow.event_timestamp >= cutoff]
@@ -1967,27 +2020,24 @@ def auth_events_aggregated(
     if subsystem:
         conds.append(AuthEventRow.subsystem == subsystem)
 
-    group_cols = (
-        AuthEventRow.content_hash,
-        AuthEventRow.process,
-        AuthEventRow.subsystem,
-        AuthEventRow.event_message,
-    )
+    # Group by content_hash alone — it is 1:1 with (process, subsystem,
+    # event_message), so this yields identical patterns while grouping on the
+    # indexed column instead of sorting the long event_message text. The other
+    # display columns are functionally dependent, so min() returns their (sole)
+    # value.
     agg_sub = (
         select(
-            *group_cols,
+            AuthEventRow.content_hash,
+            func.min(AuthEventRow.process).label("process"),
+            func.min(AuthEventRow.subsystem).label("subsystem"),
+            func.min(AuthEventRow.event_message).label("event_message"),
             func.count().label("cnt"),
             func.max(AuthEventRow.event_timestamp).label("last_seen"),
         )
-        .group_by(*group_cols)
         .where(*conds)
-        if conds
-        else select(
-            *group_cols,
-            func.count().label("cnt"),
-            func.max(AuthEventRow.event_timestamp).label("last_seen"),
-        ).group_by(*group_cols)
-    ).subquery("agg")
+        .group_by(AuthEventRow.content_hash)
+        .subquery("agg")
+    )
 
     # Join with Judgement so each pattern carries its LLM verdict.
     outer = select(
@@ -2056,11 +2106,11 @@ def auth_events_aggregated(
             }
         )
 
-    return {
+    result = {
         "rows": rows,
         "summary": summary,
         "total_events": total_events,
-        "subsystem_options": AUTH_SUBSYSTEM_OPTIONS,
+        "subsystem_tabs": _auth_subsystem_tabs(summary, total_events),
         "total": total,
         "page": page,
         "per_page": per_page,
@@ -2070,6 +2120,12 @@ def auth_events_aggregated(
         "verdict": verdict,
         "sort": sort,
     }
+
+    with _auth_agg_cache_lock:
+        if len(_auth_agg_cache) >= _AUTH_AGG_CACHE_MAX:
+            _auth_agg_cache.clear()
+        _auth_agg_cache[cache_key] = (time.monotonic(), result)
+    return result
 
 
 def system_integrity(session: Session, run_id: str):

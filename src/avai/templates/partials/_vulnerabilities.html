@@ -1,7 +1,7 @@
 {% from "partials/_macros.html" import card_header %}
 
-<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
-  <div class="flex items-baseline justify-between mb-3">
+<div class="bg-slate-900 border border-slate-800 rounded-lg {{ 'p-5' if vulns else 'px-5 py-3' }}">
+  <div class="flex items-baseline justify-between {{ 'mb-3' if vulns else '' }}">
     {{ card_header("vulnerabilities — patch me (CVE / EOL)") }}
     {% if vulns %}
       <span class="text-[10px] font-mono text-slate-400">{{ vulns | length }} item(s)</span>
@@ -15,15 +15,28 @@
           <tr>
             <th class="px-3 py-2 text-left font-semibold">software</th>
             <th class="px-3 py-2 text-left font-semibold">vulnerabilities</th>
-            <th class="px-3 py-2 text-left font-semibold w-20">cvss</th>
+            <th class="px-3 py-2 text-right font-semibold w-20">cvss</th>
             <th class="px-3 py-2 text-left font-semibold w-20">flag</th>
             <th class="px-3 py-2 text-left font-semibold w-24">source</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-800/80">
+        <tbody class="divide-y divide-slate-800/80 [&>tr:nth-child(even)]:bg-slate-950/40">
           {% for v in vulns %}
-            <tr class="hover:bg-slate-800/40">
-              <td class="px-3 py-2 align-top font-mono text-xs text-slate-200 break-all">{{ v.software }}</td>
+            <tr class="hover:bg-slate-800/40 transition-colors">
+              <td class="px-3 py-2 align-top font-mono text-xs text-slate-200 break-all">
+                {{ v.software }}
+                {% if v.exposed or v.running %}
+                  <div class="mt-1 flex flex-wrap gap-1">
+                    {% if v.exposed %}
+                      <span class="inline-flex items-center px-1.5 py-0.5 rounded border border-red-800 bg-red-900/30 text-red-300 text-[9px] font-semibold uppercase tracking-wider"
+                            title="A process for this software is listening on a port — reachable">exposed</span>
+                    {% elif v.running %}
+                      <span class="inline-flex items-center px-1.5 py-0.5 rounded border border-amber-800 bg-amber-900/30 text-amber-300 text-[9px] font-semibold uppercase tracking-wider"
+                            title="This software is currently running on the host">running</span>
+                    {% endif %}
+                  </div>
+                {% endif %}
+              </td>
               <td class="px-3 py-2 align-top text-xs text-slate-300">
                 {% if v.cves %}
                   <div class="flex flex-wrap gap-1.5">
@@ -36,7 +49,7 @@
                 {% endif %}
                 {% if v.summary %}<div class="text-slate-500 mt-0.5">{{ v.summary }}</div>{% endif %}
               </td>
-              <td class="px-3 py-2 align-top font-mono text-xs {% if v.cvss and v.cvss >= 9 %}text-red-400{% elif v.cvss and v.cvss >= 7 %}text-amber-400{% else %}text-slate-300{% endif %} tabular-nums">{{ v.cvss if v.cvss is not none else '—' }}</td>
+              <td class="px-3 py-2 align-top text-right font-mono text-xs {% if v.cvss and v.cvss >= 9 %}text-red-400{% elif v.cvss and v.cvss >= 7 %}text-amber-400{% else %}text-slate-300{% endif %} tabular-nums">{{ v.cvss if v.cvss is not none else '—' }}</td>
               <td class="px-3 py-2 align-top">
                 {% if v.kev %}
                   <span class="inline-flex items-center px-1.5 py-0.5 rounded-full border border-red-800 bg-red-900/40 text-red-300 text-[9px] font-semibold uppercase tracking-wider"
@@ -54,10 +67,9 @@
       </table>
     </div>
   {% else %}
-    <div class="text-slate-500 italic text-sm">
-      no known vulnerabilities found yet — needs enrichment enabled and
-      installed-app / OS-version collection (OSV checks installed packages,
-      endoflife.date flags unsupported OSes).
+    <div class="flex items-center gap-2 text-xs text-slate-500">
+      <span class="w-1.5 h-1.5 rounded-full bg-slate-600 flex-shrink-0" aria-hidden="true"></span>
+      no known vulnerabilities found yet — needs enrichment enabled and installed-app / OS-version collection (OSV checks installed packages, endoflife.date flags unsupported OSes).
     </div>
   {% endif %}
 </div>
