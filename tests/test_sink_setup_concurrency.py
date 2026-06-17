@@ -10,13 +10,20 @@ container's startup. These tests pin that behaviour.
 
 from __future__ import annotations
 
+import os
+import stat
+
 import pytest
 from sqlalchemy import Column, Integer, String, create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 
 from avai.host_monitor import Sink
 from avai.host_monitor.models import Base
-from avai.host_monitor.sink import _is_benign_concurrent_ddl, _migrate_add_columns
+from avai.host_monitor.sink import (
+    _is_benign_concurrent_ddl,
+    _migrate_add_columns,
+    _relax_db_permissions,
+)
 
 
 class TestBenignConcurrentDDL:
@@ -55,10 +62,12 @@ class TestSetupTolerance:
         Sink(engine).setup()  # must not raise
 
     def test_create_all_race_is_swallowed(self, tmp_path, monkeypatch):
-        """A benign 'already exists' from create_all (a second process won
-        the race) is tolerated; setup still completes."""
+        """A benign 'already exists' from create_all (a second process won the
+        race, so the schema already exists) is tolerated; setup still completes
+        and migrations run against the already-present tables."""
         db = tmp_path / "t.db"
         engine = create_engine(f"sqlite:///{db}")
+        Sink(engine).setup()  # the winner already built the schema
 
         def _raise_exists(*_a, **_k):
             raise OperationalError("table runs already exists", None, Exception())
@@ -113,3 +122,37 @@ class TestSetupTolerance:
             assert {"id", "a", "b"} <= cols
         finally:
             Base.metadata.remove(Base.metadata.tables[table_name])
+
+
+class TestRelaxDbPermissions:
+    """The monitor often runs as root while the dashboard runs unprivileged;
+    both write the same SQLite file. setup() makes the dir + db files
+    group-writable so a same-group dashboard can write the control_state row."""
+
+    def test_setup_makes_db_group_writable(self, tmp_path):
+        db = tmp_path / "t.db"
+        Sink(create_engine(f"sqlite:///{db}")).setup()
+        assert stat.S_IMODE(db.stat().st_mode) & stat.S_IWGRP
+        assert stat.S_IMODE(tmp_path.stat().st_mode) & stat.S_IWGRP
+
+    def test_relax_covers_wal_and_shm_siblings(self, tmp_path):
+        db = tmp_path / "t.db"
+        db.write_bytes(b"")
+        for sibling in ("t.db-wal", "t.db-shm"):
+            (tmp_path / sibling).write_bytes(b"")
+            (tmp_path / sibling).chmod(0o600)
+        _relax_db_permissions(db)
+        for sibling in ("t.db-wal", "t.db-shm"):
+            assert stat.S_IMODE((tmp_path / sibling).stat().st_mode) & stat.S_IWGRP
+
+    def test_tolerates_permission_error_for_non_owner(self, tmp_path, monkeypatch):
+        """A dashboard running as a different user can't chmod the root-owned
+        DB; the failed chmod must be swallowed, not crash startup."""
+        db = tmp_path / "t.db"
+        db.write_bytes(b"")
+
+        def _denied(*_a, **_k):
+            raise PermissionError("not the owner")
+
+        monkeypatch.setattr(os, "chmod", _denied)
+        _relax_db_permissions(db)  # must not raise

@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 
 from avai.db_migrate import _config, upgrade_to_head
 from avai.host_monitor import Base, Sink
@@ -54,6 +56,23 @@ def test_sink_setup_applies_migrations(tmp_path):
     assert set(_IDX) <= _indexes(db)
     assert "control_state" in _tables(db)
     assert _version(db) == "0008_yara_rule"
+
+
+def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path, monkeypatch):
+    """A pending migration that can't be applied (e.g. a read-only DB owned by
+    another user) must abort startup with a clear error rather than silently
+    serving on a stale schema and 500ing on the first write later."""
+    import avai.db_migrate as db_migrate
+
+    def _readonly(_url):
+        raise OperationalError(
+            "attempt to write a readonly database", None, Exception()
+        )
+
+    monkeypatch.setattr(db_migrate, "upgrade_to_head", _readonly)
+    db = str(tmp_path / "ro.db")
+    with pytest.raises(RuntimeError, match="migration to head failed"):
+        Sink(create_engine(f"sqlite:///{db}")).setup()
 
 
 def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
