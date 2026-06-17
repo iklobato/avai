@@ -378,6 +378,22 @@ class YaraStatusRow(Base):
     by_category_json: Mapped[Optional[str]]  # {"apt": 315, "gen": 170, ...}
 
 
+class YaraRuleRow(Base):
+    """One row per compiled YARA rule — the loadable inventory the dashboard
+    lets you browse. Rewritten by the monitor whenever the rule count
+    changes (ruleset is static within a process)."""
+
+    __tablename__ = "yara_rule"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    identifier: Mapped[str] = mapped_column(index=True)
+    tags: Mapped[Optional[str]]
+    author: Mapped[Optional[str]]
+    source: Mapped[Optional[str]] = mapped_column(
+        index=True
+    )  # bundled / signature-base
+    category: Mapped[Optional[str]] = mapped_column(index=True)  # apt / gen / …
+
+
 class FileScanRow(_RowBase):
     __tablename__ = "file_scan"
     path: Mapped[str] = mapped_column(index=True)

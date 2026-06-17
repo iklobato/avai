@@ -569,6 +569,7 @@ class Runner:
             return
         try:
             self.sink.write_yara_status(stats)
+            self.sink.write_yara_rules(stats.get("inventory") or [])
         except Exception as exc:  # noqa: BLE001
             LOG.warning("yara_status: write failed: %s", exc)
 

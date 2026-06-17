@@ -139,6 +139,7 @@ from .models import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
+    YaraRuleRow,
     YaraStatusRow,
     _RowBase,
 )
@@ -307,6 +308,7 @@ __all__ = [
     "WATCHED_FILES_LINUX",
     "WifiCollector",
     "WifiStateRow",
+    "YaraRuleRow",
     "YaraStatusRow",
     "_CORRELATED_COLLECTOR",
     "_PKG_DIR",

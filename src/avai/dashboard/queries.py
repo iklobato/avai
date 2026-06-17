@@ -68,6 +68,7 @@ from avai.host_monitor import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
+    YaraRuleRow,
     YaraStatusRow,
 )
 
@@ -1700,6 +1701,82 @@ def file_scan(
         "matches": matches,
         "verdict": verdict,
         "q": q,
+    }
+
+
+def yara_rules(
+    session: Session,
+    q: str = "",
+    source: str = "",
+    page: int = 1,
+    per_page: int = 50,
+) -> dict:
+    """Paginated, searchable inventory of the loaded YARA rules so the
+    dashboard can browse every rule (identifier / tags / author / source).
+    Empty when the monitor hasn't persisted the inventory yet."""
+    empty = {
+        "items": [],
+        "total": 0,
+        "page": 1,
+        "per_page": per_page,
+        "total_pages": 1,
+        "q": q,
+        "source": source,
+        "source_options": [],
+    }
+    if YaraRuleRow.__tablename__ not in _existing_tables(session):
+        return empty
+
+    stmt = select(YaraRuleRow)
+    if source:
+        stmt = stmt.where(YaraRuleRow.source == source)
+    if q:
+        like = f"%{q.lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(YaraRuleRow.identifier).like(like),
+                func.lower(func.coalesce(YaraRuleRow.tags, "")).like(like),
+                func.lower(func.coalesce(YaraRuleRow.author, "")).like(like),
+            )
+        )
+    total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    per_page = max(1, min(per_page, 200))
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    rows = (
+        session.execute(
+            stmt.order_by(YaraRuleRow.identifier)
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+        .scalars()
+        .all()
+    )
+    source_options = [
+        s
+        for (s,) in session.execute(
+            select(YaraRuleRow.source).distinct().order_by(YaraRuleRow.source)
+        )
+        if s
+    ]
+    return {
+        "items": [
+            {
+                "identifier": r.identifier,
+                "tags": r.tags,
+                "author": r.author,
+                "source": r.source,
+                "category": r.category,
+            }
+            for r in rows
+        ],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "q": q,
+        "source": source,
+        "source_options": source_options,
     }
 
 

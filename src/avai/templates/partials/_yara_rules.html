@@ -1,0 +1,116 @@
+{% from "partials/_macros.html" import card_header %}
+
+{# Browsable inventory of every loaded YARA rule — searchable by identifier /
+   tag / author, filterable by source, paginated. Fed by the yara_rule table
+   the monitor writes when it compiles the ruleset. #}
+
+{% set hx = 'hx-get="/fragments/yara-rules" hx-target="#yara-rules" hx-swap="innerHTML" hx-include="#yara-rules-filters"' %}
+
+<div id="yara-rules" class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("YARA rules — browse the loaded ruleset") }}
+
+  {# ----- filter bar ----- #}
+  <form id="yara-rules-filters"
+        class="mb-3 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="hidden" name="page" value="{{ data.page }}">
+    <input type="search"
+           name="q"
+           value="{{ data.q }}"
+           placeholder="search rule / tag / author"
+           aria-label="search YARA rules by identifier, tag or author"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-64 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           {{ hx | safe }}
+           hx-vals='{"page": 1}'
+           hx-trigger="keyup changed delay:300ms, search">
+
+    <select name="source"
+            aria-label="filter YARA rules by source"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            {{ hx | safe }}
+            hx-vals='{"page": 1}'
+            hx-trigger="change">
+      <option value="" {% if data.source == "" %}selected{% endif %}>all sources</option>
+      {% for s in data.source_options %}
+        <option value="{{ s }}" {% if data.source == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="per_page"
+            aria-label="rules per page"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            {{ hx | safe }}
+            hx-vals='{"page": 1}'
+            hx-trigger="change">
+      {% for n in [25, 50, 100, 200] %}
+        <option value="{{ n }}" {% if n == data.per_page %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+
+    <span class="text-slate-500 ml-auto">
+      {% if data.total %}
+        {{ (data.page - 1) * data.per_page + 1 }}–{{ (data.page - 1) * data.per_page + data["items"]|length }}
+        of {{ "{:,}".format(data.total) }}
+      {% else %}0{% endif %} rules
+    </span>
+  </form>
+
+  {% if data["items"] %}
+    <div class="overflow-x-auto">
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+          <th class="text-left font-semibold pb-2">rule</th>
+          <th class="text-left font-semibold pb-2">tags</th>
+          <th class="text-left font-semibold pb-2">source</th>
+          <th class="text-left font-semibold pb-2">category</th>
+          <th class="text-left font-semibold pb-2">author</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for r in data["items"] %}
+          <tr class="hover:bg-slate-800/40 transition-colors">
+            <td class="py-2 font-mono text-slate-200 break-all">{{ r.identifier }}</td>
+            <td class="py-2 text-slate-400">{{ r.tags or "—" }}</td>
+            <td class="py-2 text-slate-500">{{ r.source or "—" }}</td>
+            <td class="py-2 text-slate-500 font-mono">{{ r.category or "—" }}</td>
+            <td class="py-2 text-slate-400 break-all">{{ r.author or "—" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+
+    {# ----- pagination ----- #}
+    <div class="pt-3 mt-2 border-t border-slate-800 flex items-center justify-between text-xs">
+      <button type="button"
+              class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              {% if data.page <= 1 %}disabled{% endif %}
+              {{ hx | safe }}
+              hx-vals='{"page": {{ data.page - 1 }}}'>← prev</button>
+
+      <div class="flex items-center gap-2 text-slate-400">
+        <span>page</span>
+        <span class="font-mono tabular-nums text-slate-200">{{ data.page }}</span>
+        <span>of</span>
+        <span class="font-mono tabular-nums">{{ data.total_pages }}</span>
+      </div>
+
+      <button type="button"
+              class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              {% if data.page >= data.total_pages %}disabled{% endif %}
+              {{ hx | safe }}
+              hx-vals='{"page": {{ data.page + 1 }}}'>next →</button>
+    </div>
+  {% else %}
+    <div class="text-slate-500 text-xs italic">
+      {% if data.q or data.source %}
+        no rules match the current filters.
+      {% else %}
+        no rule inventory yet — wait for a collection cycle to compile the
+        ruleset, or fetch a pack with <span class="font-mono">scripts/update_rules.py</span>.
+      {% endif %}
+    </div>
+  {% endif %}
+</div>

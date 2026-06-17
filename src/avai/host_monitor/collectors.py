@@ -1361,6 +1361,7 @@ def _compile_yara_rules(rules_dir: Path):
         "by_category": {},
         "sources": {},
         "rules_dir": str(rules_dir),
+        "inventory": [],  # one entry per rule, for the dashboard's rule browser
     }
     if not rules_dir.is_dir():
         return None, stats
@@ -1368,11 +1369,14 @@ def _compile_yara_rules(rules_dir: Path):
     skip_reasons: dict[str, int] = {}
     by_category: dict[str, int] = {}
     sources: dict[str, int] = {}
+    inventory: list[dict] = []
     for path in sorted(rules_dir.rglob("*")):
         if path.suffix.lower() not in (".yar", ".yara") or not path.is_file():
             continue
         try:
-            yara.compile(filepath=str(path), externals=_YARA_EXTERNALS)
+            # Iterate the per-file compile (otherwise discarded) to record each
+            # rule's identity for the inventory — no extra compile cost.
+            file_rules = yara.compile(filepath=str(path), externals=_YARA_EXTERNALS)
         except yara.Error as exc:
             reason = "needs crypto-enabled yara" if _crypto_hint(exc) else "other"
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
@@ -1394,12 +1398,23 @@ def _compile_yara_rules(rules_dir: Path):
         by_category[category] = by_category.get(category, 0) + 1
         source = _rule_source(path, rules_dir)
         sources[source] = sources.get(source, 0) + 1
+        for rule in file_rules:
+            inventory.append(
+                {
+                    "identifier": rule.identifier,
+                    "tags": " ".join(rule.tags),
+                    "author": str((rule.meta or {}).get("author") or ""),
+                    "source": source,
+                    "category": category,
+                }
+            )
     stats.update(
         files_loaded=len(filepaths),
         files_skipped=sum(skip_reasons.values()),
         skip_reasons=skip_reasons,
         by_category=by_category,
         sources=sources,
+        inventory=inventory,
     )
     if not filepaths:
         return None, stats

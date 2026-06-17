@@ -194,6 +194,13 @@ class TestFileScanCollector:
         assert rules is not None
         assert stats["rules_loaded"] >= 1
         assert "bundled" in stats["sources"]
+        # inventory carries one entry per rule, tagged with source/category
+        assert len(stats["inventory"]) == stats["rules_loaded"]
+        eicar = next(
+            e for e in stats["inventory"] if e["identifier"] == "eicar_test_file"
+        )
+        assert eicar["source"] == "bundled"
+        assert eicar["category"] == "eicar"
 
 
 class TestYaraExternals:
