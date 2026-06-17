@@ -26,8 +26,11 @@ from avai.host_monitor import (
     BluetoothDeviceRow,
     BrowserExtensionRow,
     CollectionRun,
+    DiskUsageRow,
     DnsQueryRow,
     FileIntegrityRow,
+    FileScanRow,
+    HostResourceRow,
     HostsFileRow,
     IncidentNarrativeRow,
     InstalledAppRow,
@@ -53,6 +56,7 @@ from avai.host_monitor import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
+    YaraStatusRow,
 )
 
 
@@ -714,6 +718,132 @@ def main() -> None:
         source_path="/etc/passwd",
     )
 
+    # ---- host_resources (System Resources tiles + trend; one row per run) ----
+    GiB = 1024**3
+    for i, (rid, st, _fin) in enumerate(runs):
+        cpu = [60, 64, 70, 66, 72, 68][i % 6]
+        per_core = [min(99, 40 + ((c * 17 + i * 11) % 55)) for c in range(16)]
+        rows.append(
+            HostResourceRow(
+                run_id=rid,
+                collected_at=st,
+                mem_total=64 * GiB,
+                mem_used=int(64 * GiB * 0.50),
+                mem_available=int(64 * GiB * 0.50),
+                mem_free=int(64 * GiB * 0.20),
+                mem_percent=50.0,
+                swap_total=2 * GiB,
+                swap_used=int(2 * GiB * 0.47),
+                swap_free=int(2 * GiB * 0.53),
+                swap_percent=47.0,
+                cpu_percent=float(cpu),
+                cpu_count_logical=16,
+                cpu_count_physical=8,
+                cpu_per_core_json=json.dumps(per_core),
+                load_1=4.66,
+                load_5=5.66,
+                load_15=5.27,
+                uptime_seconds=1_400_000,
+                tasks_total=789,
+                tasks_running=4,
+                threads_total=3881,
+            )
+        )
+
+    # ---- disk_usage (df table on the latest run) ----
+    cr(
+        DiskUsageRow,
+        device="/dev/disk3s1s1",
+        mountpoint="/",
+        fstype="apfs",
+        total=994 * GiB,
+        used=int(994 * GiB * 0.38),
+        free=int(994 * GiB * 0.62),
+        percent=38.0,
+    )
+    cr(
+        DiskUsageRow,
+        ch="disk_data",
+        device="/dev/disk3s5",
+        mountpoint="/System/Volumes/Data",
+        fstype="apfs",
+        total=994 * GiB,
+        used=int(994 * GiB * 0.57),
+        free=int(994 * GiB * 0.43),
+        percent=57.0,
+    )
+    cr(
+        DiskUsageRow,
+        ch="disk_backup",
+        device="/dev/disk4s1",
+        mountpoint="/Volumes/Backup",
+        fstype="hfs",
+        total=500 * GiB,
+        used=int(500 * GiB * 0.97),
+        free=int(500 * GiB * 0.03),
+        percent=97.0,
+    )
+
+    # ---- yara_status (File Scan ruleset summary, single row id=1) ----
+    rows.append(
+        YaraStatusRow(
+            id=1,
+            compiled_at=LATEST,
+            rules_loaded=5292,
+            files_loaded=656,
+            files_skipped=95,
+            rules_dir="/opt/avai/yara",
+            sources_json=json.dumps({"bundled": 1, "signature-base": 655}),
+            skip_reasons_json=json.dumps(
+                {"needs crypto-enabled yara": 82, "other": 13}
+            ),
+            by_category_json=json.dumps(
+                {
+                    "apt": 260,
+                    "gen": 156,
+                    "crime": 76,
+                    "mal": 46,
+                    "exploit": 31,
+                    "vuln": 22,
+                    "hacktool": 10,
+                    "suspicious": 8,
+                    "webshell": 7,
+                    "ransomware": 6,
+                    "generic": 4,
+                    "cn": 3,
+                }
+            ),
+        )
+    )
+
+    # ---- file_scan (YARA matches on the latest run) ----
+    cr(
+        FileScanRow,
+        ch="fs_eicar",
+        path=os.path.expanduser("~/Downloads/eicar.com"),
+        rule="eicar_test_file",
+        namespace="bundled",
+        scan_source="user_dirs",
+        sha256="e" * 64,
+        size=68,
+        meta_json=json.dumps(
+            {"author": "avai", "description": "EICAR antivirus test string"}
+        ),
+    )
+    cr(
+        FileScanRow,
+        ch="fs_hacktool",
+        path="/usr/local/bin/masscan",
+        rule="hacktool_multi_masscan",
+        namespace="signature-base",
+        scan_source="bin_dirs",
+        sha256="f" * 64,
+        size=2_400_000,
+        meta_json=json.dumps(
+            {"author": "@mimeframe", "description": "Masscan mass IP port scanner"}
+        ),
+    )
+
     # ---- auth_events (streaming) ----
     cr(
         AuthEventRow,
@@ -907,6 +1037,28 @@ def main() -> None:
         0.66,
         "Extension requests <all_urls> + webRequest + cookies.",
         "Review/remove the extension at chrome://extensions.",
+        cost=0.00006,
+    )
+    judge(
+        "fs_eicar",
+        "file_scan",
+        "malicious",
+        "test_signature",
+        0.99,
+        "EICAR test file matched a YARA rule — harmless test artifact, but "
+        "confirms the file scanner is working.",
+        "Delete the EICAR test file from ~/Downloads.",
+        cost=0.00005,
+    )
+    judge(
+        "fs_hacktool",
+        "file_scan",
+        "suspicious",
+        "hacktool",
+        0.7,
+        "masscan binary present — legitimate for pentesters, suspicious on a "
+        "general-purpose host.",
+        "Confirm masscan is expected; remove if not.",
         cost=0.00006,
     )
 
