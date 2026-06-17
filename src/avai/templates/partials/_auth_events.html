@@ -1,5 +1,9 @@
 {% from "partials/_macros.html" import card_header, pagination_bar, verdict_pill %}
 
+{# tracks which subsystem tab is active so the tabpanel can point its
+   aria-labelledby at it (set in the tablist loop below) #}
+{% set active_tab = namespace(id='auth-tab-0') %}
+
 {% set sub_cls = {
   'TCC':           'bg-sky-900/40 text-sky-300 border-sky-900/60',
   'securityd':     'bg-red-900/30 text-red-300 border-red-900/50',
@@ -13,22 +17,43 @@
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
   {{ card_header("auth events — aggregated patterns") }}
 
-  {% if events and events.summary %}
-    {# ----- summary cards ----- #}
-    <div class="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-4">
+  {% if events %}
+    {# ----- headline stats ----- #}
+    <div class="flex flex-wrap gap-2 mb-3">
       <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
-        <div class="font-mono text-slate-200 text-base">{{ "{:,}".format(events.total_events) }}</div>
+        <div class="font-mono text-slate-200 text-base tabular-nums">{{ "{:,}".format(events.total_events) }}</div>
         <div class="text-[10px] uppercase tracking-wider text-slate-500">total events</div>
       </div>
       <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
-        <div class="font-mono text-slate-200 text-base">{{ "{:,}".format(events.total) }}</div>
+        <div class="font-mono text-slate-200 text-base tabular-nums">{{ "{:,}".format(events.total) }}</div>
         <div class="text-[10px] uppercase tracking-wider text-slate-500">unique patterns</div>
       </div>
-      {% for label, cnt in events.summary.items() %}
-        <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
-          <div class="font-mono text-slate-200 text-base">{{ "{:,}".format(cnt) }}</div>
-          <div class="text-[10px] uppercase tracking-wider text-slate-500 truncate">{{ label }}</div>
-        </div>
+    </div>
+
+    {# ----- subsystem tabs: filter the table by subsystem; each tab shows its
+            event count so the breakdown is visible and interactive at once
+            (replaces the old static summary cards + subsystem dropdown). ----- #}
+    <div class="flex items-center gap-1 mb-4 border-b border-slate-800 overflow-x-auto"
+         role="tablist" aria-label="auth events by subsystem">
+      {% for tab in events.subsystem_tabs %}
+        {% set is_active = (tab.val == events.subsystem) %}
+        {% if is_active %}{% set active_tab.id = 'auth-tab-' ~ loop.index0 %}{% endif %}
+        <button type="button"
+                id="auth-tab-{{ loop.index0 }}"
+                role="tab"
+                aria-controls="auth-events-panel"
+                aria-selected="{{ 'true' if is_active else 'false' }}"
+                tabindex="{{ '0' if is_active else '-1' }}"
+                class="js-auth-tab whitespace-nowrap px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors
+                       {% if is_active %}border-sky-500 text-slate-100{% else %}border-transparent text-slate-500 hover:text-slate-300{% endif %}"
+                hx-get="/fragments/auth-events"
+                hx-target="#auth-events"
+                hx-swap="innerHTML"
+                hx-include="#auth-events-filters"
+                hx-vals='{"subsystem": "{{ tab.val }}", "page": 1}'>
+          {{ tab.label }}
+          {% if tab.count %}<span class="ml-1.5 font-mono tabular-nums text-[10px] {{ 'text-slate-400' if is_active else 'text-slate-600' }}">{{ "{:,}".format(tab.count) }}</span>{% endif %}
+        </button>
       {% endfor %}
     </div>
   {% endif %}
@@ -39,6 +64,9 @@
         onsubmit="return false;">
     <input type="hidden" name="page"  value="{{ events.page if events else 1 }}">
     <input type="hidden" name="sort"  value="{{ events.sort if events else 'count' }}">
+    {# subsystem is chosen via the tablist above; carried here so the search /
+       verdict / sort / per-page controls preserve the active subsystem #}
+    <input type="hidden" name="subsystem" value="{{ events.subsystem if events else '' }}">
 
     <input type="search"
            name="q"
@@ -52,21 +80,6 @@
            hx-include="#auth-events-filters"
            hx-trigger="keyup changed delay:300ms, search"
            hx-vals='{"page": 1}'>
-
-    <select name="subsystem"
-            aria-label="filter auth events by subsystem"
-            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
-            hx-get="/fragments/auth-events"
-            hx-target="#auth-events"
-            hx-include="#auth-events-filters"
-            hx-trigger="change"
-            hx-vals='{"page": 1}'>
-      {% if events %}
-        {% for label, val in events.subsystem_options %}
-          <option value="{{ val }}" {% if val == events.subsystem %}selected{% endif %}>{{ label }}</option>
-        {% endfor %}
-      {% endif %}
-    </select>
 
     <select name="verdict"
             aria-label="filter auth events by verdict"
@@ -114,6 +127,7 @@
     </span>
   </form>
 
+  <div id="auth-events-panel" role="tabpanel" tabindex="0" aria-labelledby="{{ active_tab.id }}">
   {% if events and events.rows %}
     <div class="overflow-x-auto">
     <table class="w-full text-xs">
@@ -179,4 +193,5 @@
   {% else %}
     <div class="text-slate-500 italic">no auth events yet — the monitor tails the macOS unified log; events appear as they occur</div>
   {% endif %}
+  </div>{# /auth-events-panel #}
 </div>

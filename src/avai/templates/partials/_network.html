@@ -10,7 +10,9 @@
 ] %}
 
 <div>
-  <div class="flex items-center gap-1 mb-3 border-b border-slate-800"
+  {# overflow-x-auto lets the tab row scroll on narrow screens instead of
+     overflowing the page (5 tabs don't fit under ~430px). #}
+  <div class="flex items-center gap-1 mb-3 border-b border-slate-800 overflow-x-auto"
        role="tablist" aria-label="network views">
     {% for slug, label in tabs %}
       <button type="button"

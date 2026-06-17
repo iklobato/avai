@@ -32,8 +32,8 @@
   'low':       'bg-slate-700/40 text-slate-300 border-slate-600',
 } %}
 
-<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
-  <div class="flex items-center justify-between mb-3">
+<div class="bg-slate-900 border border-slate-800 rounded-lg {{ 'p-5' if narrative else 'px-5 py-3' }}">
+  <div class="flex items-center justify-between {{ 'mb-3' if narrative else '' }}">
     {{ card_header("incident digest") }}
     {% if narrative %}
       <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider
@@ -105,9 +105,9 @@
       {% endif %}
     {% endif %}
   {% else %}
-    <div class="text-slate-500 italic">
-      no incident digest yet — generated once active suspicious/malicious
-      findings exist and the LLM judge is enabled.
+    <div class="flex items-center gap-2 text-xs text-slate-500">
+      <span class="w-1.5 h-1.5 rounded-full bg-slate-600 flex-shrink-0" aria-hidden="true"></span>
+      no incident digest yet — generated once active suspicious/malicious findings exist and the LLM judge is enabled.
     </div>
   {% endif %}
 </div>

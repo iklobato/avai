@@ -283,6 +283,26 @@ def index():
     return render_template("dashboard.html")
 
 
+@app.route("/fragments/triage")
+def fragment_triage():
+    """Above-the-fold triage strip: posture grade, active malicious/
+    suspicious finding counts, and monitor liveness."""
+    with _session() as s:
+        active_malicious = findings(
+            s, verdict="malicious", status="active", page=1, per_page=1
+        )["total"]
+        active_suspicious = findings(
+            s, verdict="suspicious", status="active", page=1, per_page=1
+        )["total"]
+        return render_template(
+            "partials/_triage.html",
+            risk=latest_risk(s),
+            active_malicious=active_malicious,
+            active_suspicious=active_suspicious,
+            alive=monitor_alive(read_control_state()),
+        )
+
+
 @app.route("/fragments/header-meta")
 def fragment_header_meta():
     with _session() as s:
@@ -352,11 +372,9 @@ def fragment_incident():
 
 @app.route("/fragments/verdicts")
 def fragment_verdicts():
-    """Merged verdicts panel: all-time totals donut + last-12h trend."""
-    with _session() as s:
-        return render_template(
-            "partials/_verdicts.html", verdict_counts=verdict_counts(s)
-        )
+    """Verdicts panel: last-12h activity trend. Cumulative totals live in
+    the overview donut, so this panel no longer duplicates them."""
+    return render_template("partials/_verdicts.html")
 
 
 @app.route("/fragments/posture")

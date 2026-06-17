@@ -12,7 +12,7 @@
       <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
         <div class="text-[10px] uppercase tracking-widest text-slate-500">memory</div>
         <div class="text-lg font-mono tabular-nums text-slate-100 mt-1">
-          {{ "%.0f"|format(r.mem_percent) if r.mem_percent is not none else "—" }}<span class="text-xs text-slate-500">%</span>
+          {{ "%.0f"|format(r.mem_percent) if r.mem_percent is not none else "—" }}<span class="text-sm text-slate-500 ml-0.5">%</span>
         </div>
         <div class="text-[11px] text-slate-400 font-mono">
           {{ r.mem_used | human_bytes }} / {{ r.mem_total | human_bytes }}
@@ -21,7 +21,7 @@
       <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
         <div class="text-[10px] uppercase tracking-widest text-slate-500">swap</div>
         <div class="text-lg font-mono tabular-nums text-slate-100 mt-1">
-          {{ "%.0f"|format(r.swap_percent) if r.swap_percent is not none else "—" }}<span class="text-xs text-slate-500">%</span>
+          {{ "%.0f"|format(r.swap_percent) if r.swap_percent is not none else "—" }}<span class="text-sm text-slate-500 ml-0.5">%</span>
         </div>
         <div class="text-[11px] text-slate-400 font-mono">
           {{ r.swap_used | human_bytes }} / {{ r.swap_total | human_bytes }}
@@ -30,7 +30,7 @@
       <div class="bg-slate-950/40 border border-slate-800 rounded-lg p-3">
         <div class="text-[10px] uppercase tracking-widest text-slate-500">cpu</div>
         <div class="text-lg font-mono tabular-nums text-slate-100 mt-1">
-          {{ "%.0f"|format(r.cpu_percent) if r.cpu_percent is not none else "—" }}<span class="text-xs text-slate-500">%</span>
+          {{ "%.0f"|format(r.cpu_percent) if r.cpu_percent is not none else "—" }}<span class="text-sm text-slate-500 ml-0.5">%</span>
         </div>
         <div class="text-[11px] text-slate-400 font-mono">
           {{ r.cpu_count_logical or "?" }} cores
@@ -74,15 +74,25 @@
       </div>
     </div>
 
-    {# ---- per-core breakdown ---- #}
+    {# ---- per-core breakdown: a mini bar-strip so a hot core stands out
+            at a glance (bar height + colour encode load; value on hover)
+            instead of 16 near-identical text chips you have to read. ---- #}
     {% if resources.per_core %}
       <div class="mb-5">
         <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">per-core cpu %</div>
-        <div class="flex flex-wrap gap-1.5">
+        <div class="flex flex-wrap items-end gap-1"
+             role="img"
+             aria-label="per-core cpu utilisation, {{ resources.per_core | length }} cores">
           {% for core in resources.per_core %}
-            <span class="text-[11px] font-mono tabular-nums text-slate-300 bg-slate-950/50 border border-slate-800 rounded px-1.5 py-0.5">
-              {{ loop.index0 }}: {{ "%.0f"|format(core) }}%
-            </span>
+            {% set p = core or 0 %}
+            <div class="flex flex-col items-center gap-1"
+                 title="core {{ loop.index0 }}: {{ "%.0f"|format(p) }}%">
+              <div class="w-4 h-12 rounded-sm bg-slate-800/70 overflow-hidden flex flex-col justify-end">
+                <div class="w-full {{ 'bg-red-500/80' if p >= 90 else ('bg-amber-500/80' if p >= 75 else 'bg-sky-500/70') }}"
+                     style="height: {{ [p, 3] | max }}%"></div>
+              </div>
+              <span class="text-[9px] font-mono text-slate-600 tabular-nums">{{ loop.index0 }}</span>
+            </div>
           {% endfor %}
         </div>
       </div>
@@ -103,10 +113,10 @@
             <th class="py-1 pl-3 w-28"></th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-800/80">
+        <tbody class="divide-y divide-slate-800/80 [&>tr:nth-child(even)]:bg-slate-950/40">
           {% for d in disks %}
             {% set pct = d.percent or 0 %}
-            <tr>
+            <tr class="hover:bg-slate-800/40 transition-colors">
               <td class="py-1.5 font-mono text-xs text-slate-300">{{ d.mountpoint }}</td>
               <td class="py-1.5 font-mono text-xs text-slate-500 truncate max-w-[10rem]" title="{{ d.device }}">{{ d.device }}</td>
               <td class="py-1.5 font-mono text-xs text-slate-500">{{ d.fstype }}</td>

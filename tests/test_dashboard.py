@@ -202,10 +202,15 @@ class TestDashboardEndpoints:
         assert "posture score" in body
         assert "system integrity" in body
 
-    def test_verdicts_merges_donut_and_trend(self, client):
-        body = client.get("/fragments/verdicts").data.decode()
-        assert 'id="verdict-donut"' in body  # all-time totals donut
-        assert 'id="verdict-chart"' in body  # 12h trend canvas
+    def test_verdict_totals_donut_in_overview_trend_in_verdicts(self, client):
+        # De-duplicated: the all-time totals donut lives in the overview KPI
+        # row; the verdicts panel owns only the last-12h activity trend (the
+        # two used to share a duplicate id="verdict-donut").
+        overview = client.get("/fragments/overview").data.decode()
+        verdicts = client.get("/fragments/verdicts").data.decode()
+        assert "verdict-donut" in overview  # all-time totals donut
+        assert 'id="verdict-chart"' in verdicts  # 12h trend canvas
+        assert "verdict-donut" not in verdicts  # no longer duplicated here
 
     def test_collection_merges_runs_errors_rowcounts(self, client):
         body = client.get("/fragments/collection").data.decode()
