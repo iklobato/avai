@@ -67,6 +67,36 @@ class TestDispatch:
         assert captured[1:] == ["--once", "--db", "/tmp/x"]
 
 
+class TestRulesCommand:
+    def _rules_dir(self, tmp_path):
+        d = tmp_path / "rules"
+        d.mkdir()
+        (d / "r.yar").write_text(
+            'rule demo_rule : DEMO { strings: $a = "x" condition: $a }'
+        )
+        return d
+
+    def test_rules_reports_count(self, tmp_path, capsys):
+        rc = main(["rules", "--rules-dir", str(self._rules_dir(tmp_path))])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "1 YARA rule(s) loaded" in out
+
+    def test_rules_list_prints_identifiers(self, tmp_path, capsys):
+        rc = main(["rules", "--rules-dir", str(self._rules_dir(tmp_path)), "--list"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "demo_rule" in out
+        assert "[DEMO]" in out  # tag rendered
+
+    def test_rules_empty_dir_returns_1(self, tmp_path, capsys):
+        empty = tmp_path / "empty"
+        empty.mkdir()
+        rc = main(["rules", "--rules-dir", str(empty)])
+        assert rc == 1
+        assert "no compilable YARA rules" in capsys.readouterr().err
+
+
 class TestUnknownCommand:
     def test_unknown_returns_exit_2_and_writes_to_stderr(self, capsys):
         rc = main(["bogus-command"])
