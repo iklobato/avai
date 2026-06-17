@@ -43,6 +43,7 @@ from .models import (
     RiskScoreRow,
     StreamingSession,
     SystemIntegrityRow,
+    YaraRuleRow,
     YaraStatusRow,
     _RowBase,
 )
@@ -553,6 +554,20 @@ class Sink:
                     by_category_json=json.dumps(stats.get("by_category") or {}),
                 )
             )
+            session.commit()
+
+    def write_yara_rules(self, inventory: list[dict]) -> None:
+        """Replace the browsable rule inventory. Skipped when the row count
+        already matches — the ruleset is static within a monitor process, so
+        this rewrites once (on first cycle / after a restart with changes)
+        rather than every cycle."""
+        with Session(self.engine) as session:
+            current = session.scalar(select(func.count()).select_from(YaraRuleRow))
+            if current == len(inventory):
+                return
+            session.execute(delete(YaraRuleRow))
+            if inventory:
+                session.execute(sqlite_insert(YaraRuleRow), inventory)
             session.commit()
 
     def database_size_bytes(self) -> int:

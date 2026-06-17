@@ -60,6 +60,7 @@ from .queries import (
     verdict_counts,
     verdict_timeseries,
     vulnerabilities,
+    yara_rules,
 )
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
@@ -670,6 +671,19 @@ def fragment_file_scan():
             data=(
                 file_scan(s, latest.run_id, verdict=verdict, q=q) if latest else None
             ),
+        )
+
+
+@app.route("/fragments/yara-rules")
+def fragment_yara_rules():
+    q = request.args.get("q", "")
+    source = request.args.get("source", "")
+    page = _int_arg("page", 1)
+    per_page = _int_arg("per_page", 50)
+    with _session() as s:
+        return render_template(
+            "partials/_yara_rules.html",
+            data=yara_rules(s, q=q, source=source, page=page, per_page=per_page),
         )
 
 
