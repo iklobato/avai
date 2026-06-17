@@ -126,11 +126,17 @@ class ProcessExtractor(IndicatorExtractor):
 
 class NetworkConnectionExtractor(IndicatorExtractor):
     def extract(self, row):
-        raddr = row.get("raddr")
-        if isinstance(raddr, str) and ":" in raddr:
-            host = raddr.rsplit(":", 1)[0]
-            if _is_ipv4(host) and not _is_private_ip(host):
-                yield Indicator(IndicatorType.IPV4, host, context={"raddr": raddr})
+        # The collector emits raddr_ip/raddr_port; older/synthetic rows may
+        # carry a combined "ip:port" raddr string — support both. IPv4-only
+        # by design (bracketed-IPv6 raddr strings parse to a non-IPv4 host
+        # and are skipped).
+        host = row.get("raddr_ip")
+        if not host:
+            raddr = row.get("raddr")
+            if isinstance(raddr, str) and ":" in raddr:
+                host = raddr.rsplit(":", 1)[0]
+        if isinstance(host, str) and _is_ipv4(host) and not _is_private_ip(host):
+            yield Indicator(IndicatorType.IPV4, host, context={"raddr_ip": host})
 
 
 class NetworkFlowExtractor(IndicatorExtractor):

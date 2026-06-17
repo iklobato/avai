@@ -40,6 +40,14 @@ DEFAULT_BASELINE_MIN_RUNS = 12
 
 _CORRELATED_COLLECTOR = "processes"
 
+# Collector whose findings carry YARA rule context (rule meta + matched
+# strings) the Runner attaches to the judge payload for FP triage.
+_FILE_SCAN_COLLECTOR = "file_scan"
+
+# Persistence collector whose entries are correlated with the runtime
+# behaviour of the process their program spawns (program → pid → story).
+_LAUNCH_ITEM_COLLECTOR = "launch_items"
+
 
 DEFAULT_NARRATIVE_MODEL = DEFAULT_JUDGE_MODEL
 
@@ -221,6 +229,15 @@ YARA_MAX_FILES_PER_CYCLE = 5000
 # payloads are the signal; re-hashing tens of thousands of old downloads
 # every cycle is not (measured: 12 recent vs 72k total).
 YARA_DOWNLOADS_RECENT_DAYS = 7
+
+# When a rule matches, surface a bounded, redacted sample of the bytes that
+# actually matched to the judge so it can tell a substantive hit (a real C2
+# URL / mutex / command line) from a generic substring (a likely false
+# positive). Caps keep binary blobs and pathological match counts out of the
+# prompt and the DB. A broad hunting rule on a big binary can yield thousands
+# of instances; 20 entries at 80 bytes each is enough context to triage.
+YARA_MAX_MATCH_STRINGS = 20
+YARA_MATCH_STRING_MAX_BYTES = 80
 
 # Offline known-bad hash deny-list consumed by LocalHashDenylistEnricher:
 # one hex digest (md5 / sha1 / sha256) per line, '#' comments allowed. An

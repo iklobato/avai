@@ -13,13 +13,14 @@ from flask import Flask, abort, jsonify, render_template, request
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from avai.host_monitor import CollectionRun
+from avai.host_monitor import CollectionRun, FeedbackLabel
 
 from .control import (
     bump_scan_now,
     monitor_alive,
     queue_command,
     read_control_state,
+    record_feedback,
     set_collector,
     set_paused,
     set_settings,
@@ -835,3 +836,27 @@ def control_maintenance(action):
         abort(400)
     queue_command(action)
     return _control_panel()
+
+
+_FEEDBACK_LABELS = {label.value for label in FeedbackLabel}
+
+
+@app.route("/feedback/<collector>/<content_hash>/<label>", methods=["POST"])
+@require_control_token
+def feedback_record(collector, content_hash, label):
+    """Record an operator correction on a finding. The monitor applies it to
+    the verdict and feeds it back to the judge next cycle, so the on-screen
+    verdict updates on the following refresh (not instantly)."""
+    if collector not in COLLECTOR_MODELS or label not in _FEEDBACK_LABELS:
+        abort(400)
+    record_feedback(
+        content_hash=content_hash,
+        collector=collector,
+        label=label,
+        note=(request.form.get("note", "").strip() or None),
+        artifact=(request.form.get("artifact", "").strip() or None),
+    )
+    return (
+        '<span class="text-emerald-400 text-[10px] uppercase tracking-wider">'
+        "✓ recorded — applies next cycle</span>"
+    )
