@@ -43,6 +43,7 @@ from .models import (
     RiskScoreRow,
     StreamingSession,
     SystemIntegrityRow,
+    YaraStatusRow,
     _RowBase,
 )
 from .runtime import Clock
@@ -533,6 +534,25 @@ class Sink:
     def write_risk_score(self, row: dict) -> None:
         with Session(self.engine) as session:
             session.add(RiskScoreRow(**row))
+            session.commit()
+
+    def write_yara_status(self, stats: dict) -> None:
+        """Upsert the single-row file-scanner ruleset summary (id=1) so the
+        read-only dashboard can show what's loaded."""
+        with Session(self.engine) as session:
+            session.merge(
+                YaraStatusRow(
+                    id=1,
+                    compiled_at=Clock().now_iso(),
+                    rules_loaded=stats.get("rules_loaded"),
+                    files_loaded=stats.get("files_loaded"),
+                    files_skipped=stats.get("files_skipped"),
+                    rules_dir=stats.get("rules_dir"),
+                    sources_json=json.dumps(stats.get("sources") or {}),
+                    skip_reasons_json=json.dumps(stats.get("skip_reasons") or {}),
+                    by_category_json=json.dumps(stats.get("by_category") or {}),
+                )
+            )
             session.commit()
 
     def database_size_bytes(self) -> int:

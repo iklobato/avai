@@ -38,6 +38,7 @@ from .queries import (
     cost_since,
     disk_usage,
     dns_queries,
+    file_scan,
     findings,
     host_resources,
     judged_since,
@@ -655,6 +656,20 @@ def fragment_findings():
             collector_options=collector_options(s),
             category_options=category_options(s),
             per_page_options=PER_PAGE_OPTIONS,
+        )
+
+
+@app.route("/fragments/file-scan")
+def fragment_file_scan():
+    verdict = request.args.get("verdict", "")
+    q = request.args.get("q", "")
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_file_scan.html",
+            data=(
+                file_scan(s, latest.run_id, verdict=verdict, q=q) if latest else None
+            ),
         )
 
 

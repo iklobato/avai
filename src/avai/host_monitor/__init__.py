@@ -139,6 +139,7 @@ from .models import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
+    YaraStatusRow,
     _RowBase,
 )
 from .narrator import IncidentNarrator, build_narrator
@@ -306,6 +307,7 @@ __all__ = [
     "WATCHED_FILES_LINUX",
     "WifiCollector",
     "WifiStateRow",
+    "YaraStatusRow",
     "_CORRELATED_COLLECTOR",
     "_PKG_DIR",
     "_RowBase",
