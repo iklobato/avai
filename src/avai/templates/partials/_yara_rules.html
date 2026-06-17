@@ -1,13 +1,14 @@
 {% from "partials/_macros.html" import card_header %}
 
-{# Browsable inventory of every loaded YARA rule — searchable by identifier /
-   tag / author, filterable by source, paginated. Fed by the yara_rule table
-   the monitor writes when it compiles the ruleset. #}
+{# The YARA rules that produced a match in the latest scan — only rules with
+   findings, not the full loaded inventory. Searchable by identifier / tag /
+   author, filterable by source, paginated, sorted by hit count. Fed by the
+   latest run's file_scan matches, enriched with yara_rule inventory metadata. #}
 
 {% set hx = 'hx-get="/fragments/yara-rules" hx-target="#yara-rules" hx-swap="innerHTML" hx-include="#yara-rules-filters"' %}
 
 <div id="yara-rules" class="bg-slate-900 border border-slate-800 rounded-lg p-5">
-  {{ card_header("YARA rules — browse the loaded ruleset") }}
+  {{ card_header("YARA rules — matched in the latest scan") }}
 
   {# ----- filter bar ----- #}
   <form id="yara-rules-filters"
@@ -52,7 +53,7 @@
       {% if data.total %}
         {{ (data.page - 1) * data.per_page + 1 }}–{{ (data.page - 1) * data.per_page + data["items"]|length }}
         of {{ "{:,}".format(data.total) }}
-      {% else %}0{% endif %} rules
+      {% else %}0{% endif %} matched rules
     </span>
   </form>
 
@@ -62,6 +63,7 @@
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
           <th class="text-left font-semibold pb-2">rule</th>
+          <th class="text-right font-semibold pb-2">matches</th>
           <th class="text-left font-semibold pb-2">tags</th>
           <th class="text-left font-semibold pb-2">source</th>
           <th class="text-left font-semibold pb-2">category</th>
@@ -72,6 +74,7 @@
         {% for r in data["items"] %}
           <tr class="hover:bg-slate-800/40 transition-colors">
             <td class="py-2 font-mono text-slate-200 break-all">{{ r.identifier }}</td>
+            <td class="py-2 text-right font-mono tabular-nums text-slate-200">{{ r.matches }}</td>
             <td class="py-2 text-slate-400">{{ r.tags or "—" }}</td>
             <td class="py-2 text-slate-500">{{ r.source or "—" }}</td>
             <td class="py-2 text-slate-500 font-mono">{{ r.category or "—" }}</td>
@@ -106,10 +109,9 @@
   {% else %}
     <div class="text-slate-500 text-xs italic">
       {% if data.q or data.source %}
-        no rules match the current filters.
+        no matched rules match the current filters.
       {% else %}
-        no rule inventory yet — wait for a collection cycle to compile the
-        ruleset, or fetch a pack with <span class="font-mono">scripts/update_rules.py</span>.
+        no YARA rules matched in the latest scan.
       {% endif %}
     </div>
   {% endif %}

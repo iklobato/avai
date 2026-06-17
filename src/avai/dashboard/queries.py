@@ -1706,14 +1706,19 @@ def file_scan(
 
 def yara_rules(
     session: Session,
+    run_id: str | None,
     q: str = "",
     source: str = "",
     page: int = 1,
     per_page: int = 50,
 ) -> dict:
-    """Paginated, searchable inventory of the loaded YARA rules so the
-    dashboard can browse every rule (identifier / tags / author / source).
-    Empty when the monitor hasn't persisted the inventory yet."""
+    """Paginated, searchable view of the YARA rules that actually produced a
+    match in ``run_id`` — only rules with findings, not the full loaded
+    inventory. Each row carries its hit count and is enriched with the rule's
+    inventory metadata (tags / source / category / author) when available, so a
+    match is never dropped just because the inventory isn't persisted. Empty
+    when nothing matched in the run."""
+    per_page = max(1, min(per_page, 200))
     empty = {
         "items": [],
         "total": 0,
@@ -1724,52 +1729,70 @@ def yara_rules(
         "source": source,
         "source_options": [],
     }
-    if YaraRuleRow.__tablename__ not in _existing_tables(session):
+    tables = _existing_tables(session)
+    if run_id is None or FileScanRow.__tablename__ not in tables:
         return empty
 
-    stmt = select(YaraRuleRow)
-    if source:
-        stmt = stmt.where(YaraRuleRow.source == source)
-    if q:
-        like = f"%{q.lower()}%"
-        stmt = stmt.where(
-            or_(
-                func.lower(YaraRuleRow.identifier).like(like),
-                func.lower(func.coalesce(YaraRuleRow.tags, "")).like(like),
-                func.lower(func.coalesce(YaraRuleRow.author, "")).like(like),
-            )
+    match_counts = dict(
+        session.execute(
+            select(FileScanRow.rule, func.count())
+            .where(FileScanRow.run_id == run_id, FileScanRow.rule.is_not(None))
+            .group_by(FileScanRow.rule)
+        ).all()
+    )
+    if not match_counts:
+        return empty
+
+    inventory = {}
+    if YaraRuleRow.__tablename__ in tables:
+        inventory = {
+            r.identifier: r
+            for r in session.execute(
+                select(YaraRuleRow).where(
+                    YaraRuleRow.identifier.in_(list(match_counts))
+                )
+            ).scalars()
+        }
+
+    items = []
+    for rule_id, count in match_counts.items():
+        meta = inventory.get(rule_id)
+        items.append(
+            {
+                "identifier": rule_id,
+                "tags": getattr(meta, "tags", None),
+                "author": getattr(meta, "author", None),
+                "source": getattr(meta, "source", None),
+                "category": getattr(meta, "category", None),
+                "matches": count,
+            }
         )
-    total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    per_page = max(1, min(per_page, 200))
+
+    # Built from the full matched set, before filters, so the dropdown stays
+    # complete regardless of the current selection.
+    source_options = sorted({it["source"] for it in items if it["source"]})
+
+    if source:
+        items = [it for it in items if it["source"] == source]
+    if q:
+        ql = q.lower()
+        items = [
+            it
+            for it in items
+            if any(
+                ql in str(it.get(f) or "").lower()
+                for f in ("identifier", "tags", "author")
+            )
+        ]
+    # Findings-first: most hits at the top, then alphabetical.
+    items.sort(key=lambda it: (-it["matches"], it["identifier"]))
+
+    total = len(items)
     total_pages = max(1, (total + per_page - 1) // per_page)
     page = max(1, min(page, total_pages))
-    rows = (
-        session.execute(
-            stmt.order_by(YaraRuleRow.identifier)
-            .offset((page - 1) * per_page)
-            .limit(per_page)
-        )
-        .scalars()
-        .all()
-    )
-    source_options = [
-        s
-        for (s,) in session.execute(
-            select(YaraRuleRow.source).distinct().order_by(YaraRuleRow.source)
-        )
-        if s
-    ]
+    start = (page - 1) * per_page
     return {
-        "items": [
-            {
-                "identifier": r.identifier,
-                "tags": r.tags,
-                "author": r.author,
-                "source": r.source,
-                "category": r.category,
-            }
-            for r in rows
-        ],
+        "items": items[start : start + per_page],
         "total": total,
         "page": page,
         "per_page": per_page,

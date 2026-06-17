@@ -681,9 +681,17 @@ def fragment_yara_rules():
     page = _int_arg("page", 1)
     per_page = _int_arg("per_page", 50)
     with _session() as s:
+        latest = latest_run(s)
         return render_template(
             "partials/_yara_rules.html",
-            data=yara_rules(s, q=q, source=source, page=page, per_page=per_page),
+            data=yara_rules(
+                s,
+                latest.run_id if latest else None,
+                q=q,
+                source=source,
+                page=page,
+                per_page=per_page,
+            ),
         )
 
 
