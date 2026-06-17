@@ -150,11 +150,15 @@ class TestRegistrar:
         assert hosts.exists()
 
     def test_write_preserves_file_mode(self, tmp_path):
+        # Assert preservation, not a hardcoded POSIX value: Windows has no
+        # real file modes (a writable file reports 0o666), so pin "unchanged"
+        # rather than "== 0o644".
         hosts = tmp_path / "hosts"
         hosts.write_text("127.0.0.1\tlocalhost\n")
         hosts.chmod(0o644)
+        before = stat.S_IMODE(hosts.stat().st_mode)
         HostsRegistrar(FakePlatform(hosts)).install()
-        assert stat.S_IMODE(hosts.stat().st_mode) == 0o644
+        assert stat.S_IMODE(hosts.stat().st_mode) == before
 
     def test_invalid_hostname_is_rejected_at_the_edge(self, tmp_path):
         registrar = HostsRegistrar(FakePlatform(tmp_path / "hosts"))
