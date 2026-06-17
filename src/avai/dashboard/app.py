@@ -60,7 +60,6 @@ from .queries import (
     verdict_counts,
     verdict_timeseries,
     vulnerabilities,
-    yara_rules,
 )
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
@@ -284,6 +283,26 @@ def index():
     return render_template("dashboard.html")
 
 
+@app.route("/fragments/triage")
+def fragment_triage():
+    """Above-the-fold triage strip: posture grade, active malicious/
+    suspicious finding counts, and monitor liveness."""
+    with _session() as s:
+        active_malicious = findings(
+            s, verdict="malicious", status="active", page=1, per_page=1
+        )["total"]
+        active_suspicious = findings(
+            s, verdict="suspicious", status="active", page=1, per_page=1
+        )["total"]
+        return render_template(
+            "partials/_triage.html",
+            risk=latest_risk(s),
+            active_malicious=active_malicious,
+            active_suspicious=active_suspicious,
+            alive=monitor_alive(read_control_state()),
+        )
+
+
 @app.route("/fragments/header-meta")
 def fragment_header_meta():
     with _session() as s:
@@ -353,11 +372,9 @@ def fragment_incident():
 
 @app.route("/fragments/verdicts")
 def fragment_verdicts():
-    """Merged verdicts panel: all-time totals donut + last-12h trend."""
-    with _session() as s:
-        return render_template(
-            "partials/_verdicts.html", verdict_counts=verdict_counts(s)
-        )
+    """Verdicts panel: last-12h activity trend. Cumulative totals live in
+    the overview donut, so this panel no longer duplicates them."""
+    return render_template("partials/_verdicts.html")
 
 
 @app.route("/fragments/posture")
@@ -671,19 +688,6 @@ def fragment_file_scan():
             data=(
                 file_scan(s, latest.run_id, verdict=verdict, q=q) if latest else None
             ),
-        )
-
-
-@app.route("/fragments/yara-rules")
-def fragment_yara_rules():
-    q = request.args.get("q", "")
-    source = request.args.get("source", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", 50)
-    with _session() as s:
-        return render_template(
-            "partials/_yara_rules.html",
-            data=yara_rules(s, q=q, source=source, page=page, per_page=per_page),
         )
 
 

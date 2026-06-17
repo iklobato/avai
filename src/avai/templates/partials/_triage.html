@@ -1,0 +1,71 @@
+{# Above-the-fold triage strip: the four "act now" signals the operator
+   needs at a glance — posture grade, active malicious/suspicious findings,
+   and whether the monitor is even running. Each segment links to the
+   section that explains it. Mirrors the grade palette in _risk.html. #}
+{% set grade_styles = {
+  'A': 'text-emerald-300 border-emerald-800 bg-emerald-900/30',
+  'B': 'text-lime-300 border-lime-800 bg-lime-900/30',
+  'C': 'text-amber-300 border-amber-800 bg-amber-900/30',
+  'D': 'text-orange-300 border-orange-800 bg-orange-900/30',
+  'F': 'text-red-300 border-red-800 bg-red-900/30',
+} %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg px-5 py-4
+            flex flex-wrap items-center gap-x-10 gap-y-4">
+
+  {# ----- posture grade ----- #}
+  <a href="#resources" class="flex items-center gap-3 group">
+    {% if risk %}
+      {% set gstyle = grade_styles.get(risk.grade, grade_styles['F']) %}
+      <div class="flex items-center justify-center w-12 h-12 rounded-xl border text-2xl font-bold {{ gstyle }}">
+        {{ risk.grade }}
+      </div>
+      <div>
+        <div class="text-[10px] uppercase tracking-widest text-slate-500">posture</div>
+        <div class="font-mono tabular-nums text-slate-200">
+          <span class="text-lg">{{ risk.score }}</span><span class="text-xs text-slate-500"> / 100</span>
+        </div>
+      </div>
+    {% else %}
+      <div class="flex items-center justify-center w-12 h-12 rounded-xl border border-slate-700 bg-slate-800/40 text-slate-500 text-2xl font-bold">—</div>
+      <div>
+        <div class="text-[10px] uppercase tracking-widest text-slate-500">posture</div>
+        <div class="text-xs text-slate-500">pending</div>
+      </div>
+    {% endif %}
+  </a>
+
+  {# ----- active malicious ----- #}
+  <a href="#findings" class="flex items-center gap-3 pl-10 border-l border-slate-800 group">
+    <span class="w-2.5 h-2.5 rounded-full {{ 'bg-red-500' if active_malicious else 'bg-slate-700' }}" aria-hidden="true"></span>
+    <div>
+      <div class="text-[10px] uppercase tracking-widest text-slate-500">active malicious</div>
+      <div class="text-2xl font-semibold tabular-nums {{ 'text-red-400' if active_malicious else 'text-slate-500' }}">{{ active_malicious }}</div>
+    </div>
+  </a>
+
+  {# ----- active suspicious ----- #}
+  <a href="#findings" class="flex items-center gap-3 pl-10 border-l border-slate-800 group">
+    <span class="w-2.5 h-2.5 rounded-full {{ 'bg-amber-500' if active_suspicious else 'bg-slate-700' }}" aria-hidden="true"></span>
+    <div>
+      <div class="text-[10px] uppercase tracking-widest text-slate-500">active suspicious</div>
+      <div class="text-2xl font-semibold tabular-nums {{ 'text-amber-400' if active_suspicious else 'text-slate-500' }}">{{ active_suspicious }}</div>
+    </div>
+  </a>
+
+  {# ----- monitor status ----- #}
+  <a href="#control" class="flex items-center gap-3 pl-10 border-l border-slate-800 ml-auto group">
+    <div class="text-right">
+      <div class="text-[10px] uppercase tracking-widest text-slate-500">monitor</div>
+      {% if alive %}
+        <div class="inline-flex items-center gap-1.5 text-emerald-300 text-sm font-semibold">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true"></span>online
+        </div>
+      {% else %}
+        <div class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-red-800 bg-red-900/40 text-red-300 text-xs font-semibold uppercase tracking-wider">
+          <span class="w-2 h-2 rounded-full bg-red-500" aria-hidden="true"></span>offline
+        </div>
+      {% endif %}
+    </div>
+  </a>
+</div>

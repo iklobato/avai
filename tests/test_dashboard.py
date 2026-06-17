@@ -412,48 +412,6 @@ class TestDashboardEndpoints:
         body = client.get("/fragments/file-scan").data.decode()
         assert "hasn't compiled" in body  # graceful empty state
 
-    def test_yara_rules_browser_lists_searches_and_filters(self, client):
-        from avai.host_monitor import Sink
-
-        Sink(_engine_rw(app.config["DB_PATH"])).write_yara_rules(
-            [
-                {
-                    "identifier": "APT_Backdoor_Foo",
-                    "tags": "APT",
-                    "author": "Florian Roth",
-                    "source": "signature-base",
-                    "category": "apt",
-                },
-                {
-                    "identifier": "eicar_test_file",
-                    "tags": "",
-                    "author": "avai",
-                    "source": "bundled",
-                    "category": "eicar",
-                },
-            ]
-        )
-        # lists all rules + the source filter options
-        body = client.get("/fragments/yara-rules").data.decode()
-        assert "APT_Backdoor_Foo" in body
-        assert "eicar_test_file" in body
-        assert "signature-base" in body  # source filter option
-        assert "of 2" in body and "rules" in body  # total count (1–2 of 2 rules)
-
-        # search narrows by identifier
-        s = client.get("/fragments/yara-rules?q=backdoor").data.decode()
-        assert "APT_Backdoor_Foo" in s
-        assert "eicar_test_file" not in s
-
-        # source filter narrows
-        f = client.get("/fragments/yara-rules?source=bundled").data.decode()
-        assert "eicar_test_file" in f
-        assert "APT_Backdoor_Foo" not in f
-
-    def test_yara_rules_empty_db_shows_no_inventory(self, client):
-        body = client.get("/fragments/yara-rules").data.decode()
-        assert "no rule inventory yet" in body
-
     def test_network_panel_is_an_accessible_tablist(self, client):
         # WAI-ARIA tabs pattern: the tab strip must be a tablist of tabs that
         # control the shared panel, with exactly one tab pre-selected.

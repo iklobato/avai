@@ -68,7 +68,6 @@ from avai.host_monitor import (
     SystemIntegrityRow,
     UsbDeviceRow,
     WifiStateRow,
-    YaraRuleRow,
     YaraStatusRow,
 )
 
@@ -1704,82 +1703,6 @@ def file_scan(
     }
 
 
-def yara_rules(
-    session: Session,
-    q: str = "",
-    source: str = "",
-    page: int = 1,
-    per_page: int = 50,
-) -> dict:
-    """Paginated, searchable inventory of the loaded YARA rules so the
-    dashboard can browse every rule (identifier / tags / author / source).
-    Empty when the monitor hasn't persisted the inventory yet."""
-    empty = {
-        "items": [],
-        "total": 0,
-        "page": 1,
-        "per_page": per_page,
-        "total_pages": 1,
-        "q": q,
-        "source": source,
-        "source_options": [],
-    }
-    if YaraRuleRow.__tablename__ not in _existing_tables(session):
-        return empty
-
-    stmt = select(YaraRuleRow)
-    if source:
-        stmt = stmt.where(YaraRuleRow.source == source)
-    if q:
-        like = f"%{q.lower()}%"
-        stmt = stmt.where(
-            or_(
-                func.lower(YaraRuleRow.identifier).like(like),
-                func.lower(func.coalesce(YaraRuleRow.tags, "")).like(like),
-                func.lower(func.coalesce(YaraRuleRow.author, "")).like(like),
-            )
-        )
-    total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    per_page = max(1, min(per_page, 200))
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-    rows = (
-        session.execute(
-            stmt.order_by(YaraRuleRow.identifier)
-            .offset((page - 1) * per_page)
-            .limit(per_page)
-        )
-        .scalars()
-        .all()
-    )
-    source_options = [
-        s
-        for (s,) in session.execute(
-            select(YaraRuleRow.source).distinct().order_by(YaraRuleRow.source)
-        )
-        if s
-    ]
-    return {
-        "items": [
-            {
-                "identifier": r.identifier,
-                "tags": r.tags,
-                "author": r.author,
-                "source": r.source,
-                "category": r.category,
-            }
-            for r in rows
-        ],
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
-        "q": q,
-        "source": source,
-        "source_options": source_options,
-    }
-
-
 def persistence_tampering(
     session: Session,
     run_id: str,
@@ -1896,10 +1819,63 @@ AUTH_SUBSYSTEM_OPTIONS = [
 ]
 
 
+def _auth_subsystem_tabs(summary: dict, total_events: int) -> list[dict]:
+    """Tab descriptors for the auth-events subsystem tablist: short label,
+    filter value, and event count (the "all" tab carries the grand total).
+    Counts come from the per-subsystem ``summary`` keyed by short label."""
+    tabs = []
+    for _label, val in AUTH_SUBSYSTEM_OPTIONS:
+        if not val:
+            tabs.append({"label": "all", "val": "", "count": total_events})
+            continue
+        short = _AUTH_SUBSYSTEM_LABELS.get(val, val.split(".")[-1])
+        tabs.append({"label": short, "val": val, "count": summary.get(short, 0)})
+    return tabs
+
+
 _AUTH_VERDICT_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3}
 
 
 _AUTH_AGG_WINDOW_HOURS = 24
+
+# Aggregating ~300k raw rows into ~80k patterns (GROUP BY + COUNT + page)
+# costs several seconds and is rerun on every subsystem-tab click and on the
+# panel's 30s poll. Cache the full result briefly so tab switching is instant;
+# the TTL is below the panel's poll cadence, so this never shows staler data
+# than the dashboard already does. Mirrors the _tables_cache pattern above.
+_AUTH_AGG_TTL = 15.0
+_auth_agg_cache: dict[tuple, tuple[float, dict]] = {}
+_auth_agg_cache_lock = threading.Lock()
+_AUTH_AGG_CACHE_MAX = 64
+
+# Per-subsystem summary is identical for every tab, so cache it per-DB
+# (filter-independent) and reuse it across all subsystem tabs.
+_auth_summary_cache: dict[str, tuple[float, tuple[dict, int]]] = {}
+_auth_summary_cache_lock = threading.Lock()
+
+
+def _auth_summary(session: Session, cutoff: str) -> tuple[dict, int]:
+    """Recent per-subsystem event counts (short label -> count) plus the grand
+    total, cached for ``_AUTH_AGG_TTL`` seconds and shared across all tabs."""
+    key = _cache_key(session)
+    hit = _auth_summary_cache.get(key)
+    if hit is not None and time.monotonic() - hit[0] < _AUTH_AGG_TTL:
+        return hit[1]
+    summary_rows = session.execute(
+        select(AuthEventRow.subsystem, func.count().label("cnt"))
+        .where(AuthEventRow.event_timestamp >= cutoff)
+        .group_by(AuthEventRow.subsystem)
+        .order_by(func.count().desc())
+        .limit(12)
+    ).all()
+    summary = {
+        _AUTH_SUBSYSTEM_LABELS.get(s, (s or "(none)").split(".")[-1]): c
+        for s, c in summary_rows
+    }
+    value = (summary, sum(summary.values()))
+    with _auth_summary_cache_lock:
+        _auth_summary_cache[key] = (time.monotonic(), value)
+    return value
 
 
 def auth_events_aggregated(
@@ -1911,15 +1887,20 @@ def auth_events_aggregated(
     page: int = 1,
     per_page: int = DEFAULT_PER_PAGE,
 ):
-    """Auth events grouped by (content_hash, process, subsystem, event_message),
+    """Auth events grouped by content_hash (one pattern per unique log line),
     joined with LLM verdicts.  Collapses raw log lines into patterns; each
     pattern gets one judgment from the LLM judge.  Supports filtering by
     subsystem, verdict, and free-text search, and sorting by count or verdict
-    severity."""
+    severity.  Results are cached for ``_AUTH_AGG_TTL`` seconds (see above)."""
+    cache_key = (_cache_key(session), q, subsystem, verdict, sort, page, per_page)
+    cached = _auth_agg_cache.get(cache_key)
+    if cached is not None and time.monotonic() - cached[0] < _AUTH_AGG_TTL:
+        return cached[1]
+
     empty = {
         "rows": [],
         "summary": {},
-        "subsystem_options": AUTH_SUBSYSTEM_OPTIONS,
+        "subsystem_tabs": _auth_subsystem_tabs({}, 0),
         "total": 0,
         "total_events": 0,
         "page": 1,
@@ -1941,18 +1922,10 @@ def auth_events_aggregated(
     ).isoformat(timespec="seconds")
 
     # --- summary counts per subsystem (recent window) ---
-    summary_rows = session.execute(
-        select(AuthEventRow.subsystem, func.count().label("cnt"))
-        .where(AuthEventRow.event_timestamp >= cutoff)
-        .group_by(AuthEventRow.subsystem)
-        .order_by(func.count().desc())
-        .limit(12)
-    ).all()
-    summary = {
-        _AUTH_SUBSYSTEM_LABELS.get(s, (s or "(none)").split(".")[-1]): c
-        for s, c in summary_rows
-    }
-    total_events = sum(summary.values())
+    # Filter-independent (same for every tab), so cache it per-DB and share it
+    # across all subsystem tabs instead of recomputing the ~300k-row GROUP BY
+    # on each cold tab load.
+    summary, total_events = _auth_summary(session, cutoff)
 
     # --- aggregation: one row per unique (content_hash) pattern ---
     conds = [AuthEventRow.event_timestamp >= cutoff]
@@ -1967,27 +1940,24 @@ def auth_events_aggregated(
     if subsystem:
         conds.append(AuthEventRow.subsystem == subsystem)
 
-    group_cols = (
-        AuthEventRow.content_hash,
-        AuthEventRow.process,
-        AuthEventRow.subsystem,
-        AuthEventRow.event_message,
-    )
+    # Group by content_hash alone — it is 1:1 with (process, subsystem,
+    # event_message), so this yields identical patterns while grouping on the
+    # indexed column instead of sorting the long event_message text. The other
+    # display columns are functionally dependent, so min() returns their (sole)
+    # value.
     agg_sub = (
         select(
-            *group_cols,
+            AuthEventRow.content_hash,
+            func.min(AuthEventRow.process).label("process"),
+            func.min(AuthEventRow.subsystem).label("subsystem"),
+            func.min(AuthEventRow.event_message).label("event_message"),
             func.count().label("cnt"),
             func.max(AuthEventRow.event_timestamp).label("last_seen"),
         )
-        .group_by(*group_cols)
         .where(*conds)
-        if conds
-        else select(
-            *group_cols,
-            func.count().label("cnt"),
-            func.max(AuthEventRow.event_timestamp).label("last_seen"),
-        ).group_by(*group_cols)
-    ).subquery("agg")
+        .group_by(AuthEventRow.content_hash)
+        .subquery("agg")
+    )
 
     # Join with Judgement so each pattern carries its LLM verdict.
     outer = select(
@@ -2056,11 +2026,11 @@ def auth_events_aggregated(
             }
         )
 
-    return {
+    result = {
         "rows": rows,
         "summary": summary,
         "total_events": total_events,
-        "subsystem_options": AUTH_SUBSYSTEM_OPTIONS,
+        "subsystem_tabs": _auth_subsystem_tabs(summary, total_events),
         "total": total,
         "page": page,
         "per_page": per_page,
@@ -2070,6 +2040,12 @@ def auth_events_aggregated(
         "verdict": verdict,
         "sort": sort,
     }
+
+    with _auth_agg_cache_lock:
+        if len(_auth_agg_cache) >= _AUTH_AGG_CACHE_MAX:
+            _auth_agg_cache.clear()
+        _auth_agg_cache[cache_key] = (time.monotonic(), result)
+    return result
 
 
 def system_integrity(session: Session, run_id: str):

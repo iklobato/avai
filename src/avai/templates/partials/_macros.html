@@ -13,13 +13,15 @@
   </span>
 {% endmacro %}
 
+{# On/off integrity status as a filled pill — same visual language as
+   verdict_pill so "state" badges read consistently across the dashboard. #}
 {% macro status_badge(value) %}
   {% if value is none %}
-    <span class="text-slate-500 text-xs">unknown</span>
+    <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider bg-slate-700/40 text-slate-400 border-slate-600">unknown</span>
   {% elif value %}
-    <span class="text-emerald-400 text-xs font-semibold tracking-wider">ON</span>
+    <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider bg-emerald-900/40 text-emerald-300 border-emerald-900/60">on</span>
   {% else %}
-    <span class="text-red-400 text-xs font-semibold tracking-wider">OFF</span>
+    <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider bg-red-900/40 text-red-300 border-red-900/60">off</span>
   {% endif %}
 {% endmacro %}
 
@@ -27,11 +29,41 @@
   <h3 class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">{{ title }}</h3>
 {% endmacro %}
 
+{# Single source of truth for buttons. Variants map to colours ALREADY used
+   across the dashboard (sky/emerald/amber/red/slate) — no new colours. The
+   shared base gives every button one radius, padding, a 36px-min tap target,
+   and hover/active/disabled feedback; the global :focus-visible rule supplies
+   the keyboard ring. `extra` forwards hx-* / form attributes verbatim.
+
+   variant — purpose:
+     primary    sky      the one prominent action in a group
+     secondary  slate    quieter, non-committal actions (default)
+     success    emerald  positive/confirming (e.g. resume)
+     warning    amber    consequential but recoverable (e.g. reset baseline)
+     danger     red      destructive / irreversible (e.g. clear data)  #}
+{% macro btn(label, variant='secondary', type='button', extra='') %}
+  {# Press feedback uses active:opacity-80 (not a darker shade) so no new
+     colours enter the palette — the existing background shows through. Every
+     shade below is already used elsewhere in the app. #}
+  {% set variants = {
+    'primary':   'bg-sky-700 hover:bg-sky-600 text-white border border-transparent',
+    'secondary': 'bg-slate-800/70 hover:bg-slate-700 text-slate-200 border border-slate-700',
+    'success':   'bg-emerald-700 hover:bg-emerald-600 text-white border border-transparent',
+    'warning':   'bg-amber-800 hover:bg-amber-700 text-white border border-transparent',
+    'danger':    'bg-red-900 hover:bg-red-800 text-white border border-transparent',
+  } %}
+  <button type="{{ type }}" {{ extra | safe }}
+          class="inline-flex items-center justify-center gap-1.5 min-h-[36px] px-3 py-1.5
+                 rounded-md text-xs font-medium transition-colors active:opacity-80
+                 disabled:opacity-40 disabled:cursor-not-allowed
+                 {{ variants.get(variant, variants['secondary']) }}">{{ label }}</button>
+{% endmacro %}
+
 {% macro pagination_bar(section, page, total_pages, total, count, per_page, per_page_options) %}
 <div class="flex items-center justify-between gap-3 mt-3 pt-3 border-t border-slate-800 text-xs">
   <button type="button"
           aria-label="previous page"
-          class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          class="min-h-[36px] px-3 py-1.5 rounded-md border border-slate-700 text-slate-300 hover:bg-slate-800 active:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
           {% if page <= 1 %}disabled{% endif %}
           hx-get="/fragments/{{ section }}"
           hx-target="#{{ section }}"
@@ -46,7 +78,7 @@
   </div>
   <button type="button"
           aria-label="next page"
-          class="px-3 py-1 rounded border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          class="min-h-[36px] px-3 py-1.5 rounded-md border border-slate-700 text-slate-300 hover:bg-slate-800 active:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
           {% if page >= total_pages %}disabled{% endif %}
           hx-get="/fragments/{{ section }}"
           hx-target="#{{ section }}"

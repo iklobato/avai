@@ -44,12 +44,15 @@
 
     /* WCAG 2.4.7 — an always-visible keyboard focus ring on every
        interactive element. :focus-visible fires for keyboard nav only, so
-       mouse users don't see it. */
+       mouse users don't see it. `!important` is required: many inputs/selects
+       carry Tailwind's `focus:outline-none`, which has equal specificity and
+       (via the CDN sheet's later source order) would otherwise suppress this
+       ring on keyboard focus. Same colour as before — no palette change. */
     a:focus-visible, button:focus-visible, input:focus-visible,
     select:focus-visible, textarea:focus-visible,
     [tabindex]:focus-visible, [role="tab"]:focus-visible {
-      outline: 2px solid #38bdf8;
-      outline-offset: 2px;
+      outline: 2px solid #38bdf8 !important;
+      outline-offset: 2px !important;
       border-radius: 2px;
     }
 
@@ -83,6 +86,16 @@
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
+    /* The page scrolls vertically only. Wide content (every data table, the
+       network tab strip, the section jump-nav) carries its own
+       overflow-x-auto, so any horizontal overflow that reaches the document
+       is stray — clip it at the root rather than let it scroll the whole
+       page. overflow-x lives on <html> (not <body>) so the sticky header
+       keeps working, and we pin width to the visible viewport so a vertical
+       scrollbar can't push content sideways. */
+    html { overflow-x: hidden; }
+    html, body { width: 100%; max-width: 100%; }
+
     /* responsive tables — scroll horizontally on narrow screens */
     @media (max-width: 767px) {
       table {
@@ -160,7 +173,9 @@
 </head>
 <body class="bg-slate-950 text-slate-200 font-sans antialiased min-h-screen">
 
-  <header class="border-b border-slate-800/80 bg-slate-900/40 backdrop-blur sticky top-0 z-10">
+  {# Opaque sticky header (was bg-slate-900/40 — semi-transparent let content
+     bleed through on scroll). z-30 keeps it above swapped fragments. #}
+  <header class="border-b border-slate-800/80 bg-slate-950/95 backdrop-blur sticky top-0 z-30">
     <div class="max-w-screen-2xl mx-auto px-6 py-4 flex items-baseline justify-between gap-6">
       <div class="flex items-baseline gap-3">
         <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true"></span>
@@ -182,6 +197,27 @@
         </span>
       </div>
     </div>
+
+    {# In-page jump nav — turns the 6,000px scroll into a navigable tool.
+       Lives inside <header> so the whole bar sticks as one unit; sections
+       carry scroll-mt-28 so anchored jumps clear this combined height. #}
+    <nav aria-label="dashboard sections"
+         class="border-t border-slate-800/60 bg-slate-950/80">
+      <div class="max-w-screen-2xl mx-auto px-6 flex items-center gap-1 overflow-x-auto
+                  text-[11px] uppercase tracking-wider text-slate-400">
+        {% set jump_links = [
+          ('control', 'control'), ('resources', 'resources'),
+          ('findings', 'findings'), ('network', 'network'),
+          ('collection', 'collection'), ('persistence', 'persistence'),
+          ('file-scan-panel', 'yara'), ('auth-events', 'auth'),
+        ] %}
+        {% for anchor, label in jump_links %}
+          <a href="#{{ anchor }}"
+             class="whitespace-nowrap px-3 py-2 border-b-2 border-transparent
+                    hover:text-slate-100 hover:border-sky-500/70 transition-colors">{{ label }}</a>
+        {% endfor %}
+      </div>
+    </nav>
   </header>
 
   {# ----- toast notification stack ----- #}
@@ -206,12 +242,19 @@
 
   <main class="max-w-screen-2xl mx-auto px-6 py-6 space-y-8">
 
+    {# ---------- triage strip (above-the-fold "what needs attention now") ---------- #}
+    <section id="triage"
+             hx-get="/fragments/triage"
+             hx-trigger="load, every 30s"
+             hx-swap="innerHTML"></section>
+
     {# ---------- monitor control (pause / scan-now / scanners / settings) ---------- #}
     <section id="control"
+             class="scroll-mt-28"
              hx-get="/fragments/control"
              hx-trigger="load, every 15s"
              hx-swap="innerHTML">
-      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic max-w-3xl">
         loading control…
       </div>
     </section>
@@ -227,6 +270,7 @@
 
     {# ---------- system resources (memory / swap / cpu / load / disk + trends) ---------- #}
     <section id="resources"
+             class="scroll-mt-28"
              hx-get="/fragments/resources"
              hx-trigger="load, every 30s"
              hx-swap="innerHTML">
@@ -274,9 +318,12 @@
     {# ---------- findings (smart table — filters + sort + pagination in partial) ---------- #}
     <section>
       <div class="flex items-center justify-between mb-3">
-        <h2 class="text-[10px] uppercase tracking-widest text-slate-500">findings</h2>
+        <h2 class="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-slate-300">
+          <span class="h-4 w-1 rounded bg-sky-500/70" aria-hidden="true"></span>findings
+        </h2>
       </div>
       <div id="findings"
+           class="scroll-mt-28"
            hx-get="/fragments/findings"
            hx-trigger="load"
            hx-swap="innerHTML">
@@ -288,8 +335,11 @@
 
     {# ---------- network (tabbed: listening / outbound / dns) ---------- #}
     <section>
-      <h2 class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">network</h2>
+      <h2 class="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-slate-300 mb-3">
+        <span class="h-4 w-1 rounded bg-sky-500/70" aria-hidden="true"></span>network
+      </h2>
       <div id="network"
+           class="scroll-mt-28"
            hx-get="/fragments/network"
            hx-trigger="load"
            hx-swap="innerHTML"></div>
@@ -297,8 +347,11 @@
 
     {# ---------- collection health: row counts + recent runs + errors ---------- #}
     <section>
-      <h2 class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">collection health</h2>
+      <h2 class="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-slate-300 mb-3">
+        <span class="h-4 w-1 rounded bg-sky-500/70" aria-hidden="true"></span>collection health
+      </h2>
       <div id="collection"
+           class="scroll-mt-28"
            hx-get="/fragments/collection"
            hx-trigger="load, every 30s"
            hx-swap="innerHTML"></div>
@@ -306,24 +359,21 @@
 
     {# ---------- persistence & tampering (ssh keys / hosts / privileges) ---------- #}
     <section id="persistence"
+             class="scroll-mt-28"
              hx-get="/fragments/persistence"
              hx-trigger="load, every 60s"
              hx-swap="innerHTML"></section>
 
     {# ---------- file scan (YARA ruleset + matches) ---------- #}
     <section id="file-scan-panel"
+             class="scroll-mt-28"
              hx-get="/fragments/file-scan"
              hx-trigger="load, every 60s"
              hx-swap="innerHTML"></section>
 
-    {# ---------- YARA rules browser (the loaded ruleset) ---------- #}
-    <section id="yara-rules-panel"
-             hx-get="/fragments/yara-rules"
-             hx-trigger="load"
-             hx-swap="innerHTML"></section>
-
     {# ---------- auth events (unified log stream) ---------- #}
     <section id="auth-events"
+             class="scroll-mt-28"
              hx-get="/fragments/auth-events"
              hx-trigger="load, every 30s"
              hx-swap="innerHTML"></section>
@@ -418,7 +468,7 @@
     }
 
     // ---- Verdict totals donut chart ----
-    // The donut lives inside the /fragments/verdicts partial (swapped on
+    // The donut lives inside the /fragments/overview partial (swapped on
     // every poll). We re-create the Chart after each swap, destroying the
     // prior instance first.
     const VERDICT_COLOR = VERDICT_HEX;
@@ -472,13 +522,13 @@
         },
       });
     }
-    // Both verdict charts live in the /fragments/verdicts partial; rebuild
-    // them whenever that fragment swaps in (initial load + every poll).
+    // The cumulative-totals donut lives in /fragments/overview; the last-12h
+    // activity bar chart lives in /fragments/verdicts. Each is rebuilt when
+    // its own fragment swaps in (initial load + every poll).
     document.body.addEventListener('htmx:afterSwap', (e) => {
-      if (e.target && e.target.id === 'verdicts') {
-        renderVerdictDonut();
-        refreshChart();
-      }
+      if (!e.target) return;
+      if (e.target.id === 'overview') renderVerdictDonut();
+      if (e.target.id === 'verdicts') refreshChart();
     });
 
     // ---- System-resource trend charts (memory/swap %, cpu %) ----
@@ -634,6 +684,28 @@
         e.preventDefault();
         next.focus();
         next.click();  // load the panel + set active state
+      }
+    });
+
+    // ---- Auth-events subsystem tabs: roving-tabindex keyboard nav ----
+    // These tabs reload the whole auth panel on activation (server re-renders
+    // with the active tab set), so we use *manual* activation: arrows move
+    // focus only; Enter/Space (native button click) applies the filter.
+    document.body.addEventListener('keydown', (e) => {
+      const tab = e.target.closest && e.target.closest('.js-auth-tab');
+      if (!tab) return;
+      const tabs = Array.from(document.querySelectorAll('.js-auth-tab'));
+      const i = tabs.indexOf(tab);
+      let next = null;
+      if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+      else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+      else if (e.key === 'Home') next = tabs[0];
+      else if (e.key === 'End') next = tabs[tabs.length - 1];
+      if (next) {
+        e.preventDefault();
+        tabs.forEach((t) => t.setAttribute('tabindex', '-1'));
+        next.setAttribute('tabindex', '0');
+        next.focus();
       }
     });
 
