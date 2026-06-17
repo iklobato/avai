@@ -13,6 +13,7 @@ from avai.enrichers.base import (
     Evidence,
     Indicator,
     IndicatorType,
+    RateLimitedError,
     VerdictHint,
 )
 from avai.enrichers.http import HttpClient
@@ -36,6 +37,10 @@ class PhishTankEnricher(Enricher):
             _URL,
             data={"url": indicator.value, "format": "json", "app_key": self._key},
         )
+        # PhishTank signals throttling with HTTP 509 (not 429), so the
+        # shared client won't catch it — surface it as a rate-limit.
+        if resp.status_code == 509:
+            raise RateLimitedError("phishtank returned 509 (rate limited)")
         if resp.status_code != 200:
             return None
         body = resp.json()

@@ -77,6 +77,14 @@ services:
       - /home:/host/home:ro
       - /root:/host/root:ro
 
+      # Host root, read-only + recursive, so the disk_usage collector
+      # measures the real host filesystems (capacity/used per mount) rather
+      # than the container's own overlay + bind mounts. DiskMetrics reads
+      # the host mount table and statvfs's each filesystem through this
+      # prefix; without it, disk_usage emits nothing in container mode
+      # rather than report misleading container-internal rows.
+      - /:/host/rootfs:ro
+
       # ----- native-path mounts (CLI tools without prefix flags) -----
       - /run/systemd:/run/systemd:ro
       - /run/dbus:/run/dbus:ro
@@ -88,6 +96,15 @@ services:
       - NET_ADMIN
       - NET_RAW
       - DAC_READ_SEARCH
+
+    # The image bakes a dashboard healthcheck (probes :8765). The monitor
+    # role listens on no port, so that probe is meaningless here — it would
+    # either peg the container as permanently "unhealthy" or, under
+    # network_mode: host, falsely report healthy by hitting the dashboard's
+    # published port. Disable it so `docker ps` reflects the monitor's real
+    # state (process up/down via restart policy).
+    healthcheck:
+      disable: true
 
     restart: unless-stopped
 

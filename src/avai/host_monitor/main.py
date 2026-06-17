@@ -12,7 +12,6 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 
-from .collectors import build_snapshot_collectors, build_streaming_collectors
 from .constants import (
     DEFAULT_BASELINE_MIN_RUNS,
     DEFAULT_DB_PATH,
@@ -25,6 +24,7 @@ from .constants import (
     DEFAULT_PROMPTS_PATH,
     LOG,
 )
+from .hosts import HostFactory
 from .judge import build_judge
 from .models import Base
 from .narrator import build_narrator
@@ -182,9 +182,10 @@ def main() -> int:
     )
     try:
         sink = Sink(engine)
-        snapshot_collectors = build_snapshot_collectors(prompts)
+        host = HostFactory.create()
+        snapshot_collectors = host.snapshot_collectors(prompts)
         streaming_collectors = (
-            [] if args.no_streaming else build_streaming_collectors(prompts)
+            [] if args.no_streaming else host.streaming_collectors(prompts)
         )
         enrichment_chain = None
         if args.no_enrich:
@@ -211,6 +212,13 @@ def main() -> int:
             narrator=narrator,
         )
         runner.setup()
+        # Seed the cooperative control row with this run's settings so the
+        # dashboard reflects reality (no-op if it already exists).
+        sink.ensure_control_row(
+            interval=args.interval,
+            judge_enabled=not args.no_judge,
+            enrich_enabled=not args.no_enrich,
+        )
 
         if args.once:
             run_id, ok, failed = runner.run_once()

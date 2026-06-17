@@ -1,0 +1,139 @@
+{% from "partials/_macros.html" import card_header, verdict_pill %}
+
+{# Network exposure & MITM surface — configured proxies, mounted network
+   shares, active login sessions, and promiscuous-mode interfaces. The
+   silent-proxy / lateral-movement / live-operator / packet-sniffer surfaces.
+   Tables are small and bounded, so all rows show behind one shared verdict +
+   search filter (no pagination). #}
+
+{# ----- reusable section renderer: header + counts + table (defined before
+   use — Jinja2 does not hoist macros) ----- #}
+{% macro _expo_section(title, subtitle, rows, counts, columns) %}
+  <div class="mb-6 last:mb-0">
+    <div class="flex items-baseline justify-between mb-2">
+      <div>
+        <span class="text-slate-200 text-sm font-medium">{{ title }}</span>
+        <span class="text-slate-500 text-xs ml-2">{{ subtitle }}</span>
+      </div>
+      <div class="flex items-center gap-2 text-[10px] uppercase tracking-wider">
+        <span class="text-slate-500">{{ counts.total }} rows</span>
+        {% if counts.malicious %}
+          <span class="text-red-300">{{ counts.malicious }} malicious</span>
+        {% endif %}
+        {% if counts.suspicious %}
+          <span class="text-amber-300">{{ counts.suspicious }} suspicious</span>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if rows %}
+      <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead>
+          <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+            <th class="text-left font-semibold pb-2">verdict</th>
+            {% for label, _ in columns %}
+              <th class="text-left font-semibold pb-2">{{ label }}</th>
+            {% endfor %}
+            <th class="text-left font-semibold pb-2 w-1/4">why</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/80">
+          {% for r in rows %}
+            <tr class="hover:bg-slate-800/40 transition-colors">
+              <td class="py-2">
+                {% if r.verdict %}{{ verdict_pill(r.verdict, r.confidence) }}
+                {% else %}<span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>{% endif %}
+              </td>
+              {% for _, key in columns %}
+                <td class="py-2 font-mono break-all {{ 'text-slate-200' if r[key] not in (none, '') else 'text-slate-600' }}">{{ r[key] if r[key] not in (none, '') else "—" }}</td>
+              {% endfor %}
+              <td class="py-2 text-slate-400 line-clamp-2">{{ r.reasoning }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% else %}
+      <div class="text-slate-600 text-xs italic">none</div>
+    {% endif %}
+  </div>
+{% endmacro %}
+
+<div id="network-exposure" class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("Network exposure — proxies, shares, sessions & sniffers") }}
+
+  {% if expo %}
+  {# ----- shared filter bar ----- #}
+  <form id="network-exposure-filters"
+        class="mb-4 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="search"
+           name="q"
+           value="{{ expo.q }}"
+           placeholder="search host / share / user / interface"
+           aria-label="search exposure by host, share, user or interface"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-56 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/network-exposure"
+           hx-target="#network-exposure"
+           hx-include="#network-exposure-filters"
+           hx-trigger="keyup changed delay:300ms, search">
+
+    <select name="verdict"
+            aria-label="filter exposure by verdict"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/network-exposure"
+            hx-target="#network-exposure"
+            hx-include="#network-exposure-filters"
+            hx-trigger="change">
+      <option value=""           {% if expo.verdict == "" %}selected{% endif %}>all non-benign</option>
+      <option value="malicious"  {% if expo.verdict == "malicious" %}selected{% endif %}>malicious</option>
+      <option value="suspicious" {% if expo.verdict == "suspicious" %}selected{% endif %}>suspicious</option>
+      <option value="unknown"    {% if expo.verdict == "unknown" %}selected{% endif %}>unknown</option>
+      <option value="benign"     {% if expo.verdict == "benign" %}selected{% endif %}>benign (all)</option>
+    </select>
+  </form>
+  {% endif %}
+
+  {% if expo and expo.any %}
+    {% set c = expo.counts %}
+
+    {# ===== Proxies ===== #}
+    {{ _expo_section(
+      "Proxies", "configured proxies / PAC — a silent one is MITM or exfil",
+      expo.proxies, c.proxies,
+      [("scope", "scope"), ("host", "host"), ("port", "port"), ("PAC url", "pac_url")]
+    ) }}
+
+    {# ===== Network shares ===== #}
+    {{ _expo_section(
+      "Network shares", "mounted SMB/NFS — lateral movement & staging",
+      expo.shares, c.shares,
+      [("remote", "remote"), ("mountpoint", "mountpoint"), ("fstype", "fstype"), ("options", "options")]
+    ) }}
+
+    {# ===== Login sessions ===== #}
+    {{ _expo_section(
+      "Login sessions", "active logins — a remote source is a live operator",
+      expo.sessions, c.sessions,
+      [("user", "user"), ("tty", "tty"), ("source", "source"), ("login at", "login_at")]
+    ) }}
+
+    {# ===== Promiscuous interfaces ===== #}
+    {{ _expo_section(
+      "Promiscuous interfaces", "promisc=1 means a packet sniffer is attached",
+      expo.promisc, c.promisc,
+      [("interface", "interface"), ("promiscuous", "promiscuous"), ("flags", "flags")]
+    ) }}
+
+  {% elif expo %}
+    <div class="text-slate-500 italic">
+      no exposure rows match the current filters.
+    </div>
+  {% else %}
+    <div class="text-slate-500 italic">
+      no exposure data captured yet — wait for a collection cycle to complete.
+    </div>
+  {% endif %}
+</div>

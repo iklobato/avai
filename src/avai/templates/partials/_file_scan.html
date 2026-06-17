@@ -1,0 +1,138 @@
+{% from "partials/_macros.html" import card_header, verdict_pill %}
+
+{# File scan — the compiled YARA ruleset summary (what's loaded, from which
+   sources, how many skipped) plus this run's matches. The ruleset lives only
+   in the monitor process, so the monitor persists this summary for the
+   read-only dashboard to render. #}
+
+<div id="file-scan" class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("File scan — YARA ruleset & matches") }}
+
+  {# ===== Ruleset summary ===== #}
+  {% set st = data.status if data else none %}
+  {% if st and st.rules_loaded %}
+    <div class="mb-5">
+      <div class="flex flex-wrap items-baseline gap-x-5 gap-y-1">
+        <div>
+          <span class="text-2xl font-semibold text-slate-100">{{ "{:,}".format(st.rules_loaded) }}</span>
+          <span class="text-slate-500 text-xs ml-1">rules loaded</span>
+        </div>
+        <div class="text-xs text-slate-400">
+          {{ st.files_loaded }} files
+          {% if st.files_skipped %}
+            · <span class="text-amber-300">{{ st.files_skipped }} skipped</span>
+            {% for reason, n in st.skip_reasons.items() %}
+              <span class="text-slate-500">({{ n }} {{ reason }})</span>
+            {% endfor %}
+          {% endif %}
+        </div>
+        {% if st.compiled_at %}
+          <div class="text-[10px] uppercase tracking-wider text-slate-600">compiled {{ st.compiled_at }}</div>
+        {% endif %}
+      </div>
+
+      {% if st.sources %}
+        <div class="mt-2 flex flex-wrap gap-1.5">
+          {% for name, n in st.sources.items() %}
+            <span class="bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-[11px] text-slate-300">
+              {{ name }} <span class="text-slate-500">{{ "{:,}".format(n) }}</span>
+            </span>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      {% if st.top_categories %}
+        <div class="mt-2">
+          <div class="text-[10px] uppercase tracking-wider text-slate-600 mb-1">
+            top categories{% if st.category_count > st.top_categories|length %} (of {{ st.category_count }}){% endif %}
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            {% for name, n in st.top_categories %}
+              <span class="text-[11px] text-slate-400 font-mono">{{ name }}<span class="text-slate-600">·{{ n }}</span></span>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  {% elif st %}
+    <div class="mb-5 text-slate-500 text-xs italic">
+      no YARA rules loaded — drop rules under the rules dir, or fetch a pack
+      with <span class="font-mono">scripts/update_rules.py</span>.
+    </div>
+  {% else %}
+    <div class="mb-5 text-slate-500 text-xs italic">
+      the file scanner hasn't compiled a ruleset yet — wait for a collection
+      cycle to complete.
+    </div>
+  {% endif %}
+
+  {# ===== Matches ===== #}
+  {% if data %}
+  <form id="file-scan-filters"
+        class="mb-3 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="search"
+           name="q"
+           value="{{ data.q }}"
+           placeholder="search rule / path / author"
+           aria-label="search YARA matches by rule, path or author"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-56 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/file-scan"
+           hx-target="#file-scan"
+           hx-include="#file-scan-filters"
+           hx-trigger="keyup changed delay:300ms, search">
+
+    <select name="verdict"
+            aria-label="filter YARA matches by verdict"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/file-scan"
+            hx-target="#file-scan"
+            hx-include="#file-scan-filters"
+            hx-trigger="change">
+      <option value=""           {% if data.verdict == "" %}selected{% endif %}>all non-benign</option>
+      <option value="malicious"  {% if data.verdict == "malicious" %}selected{% endif %}>malicious</option>
+      <option value="suspicious" {% if data.verdict == "suspicious" %}selected{% endif %}>suspicious</option>
+      <option value="unknown"    {% if data.verdict == "unknown" %}selected{% endif %}>unknown</option>
+      <option value="benign"     {% if data.verdict == "benign" %}selected{% endif %}>benign (all)</option>
+    </select>
+  </form>
+  {% endif %}
+
+  {% if data and data.matches %}
+    <div class="overflow-x-auto">
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+          <th class="text-left font-semibold pb-2">verdict</th>
+          <th class="text-left font-semibold pb-2">rule</th>
+          <th class="text-left font-semibold pb-2">path</th>
+          <th class="text-left font-semibold pb-2">author</th>
+          <th class="text-left font-semibold pb-2">source</th>
+          <th class="text-left font-semibold pb-2 w-1/4">why</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-800/80">
+        {% for m in data.matches %}
+          <tr class="hover:bg-slate-800/40 transition-colors">
+            <td class="py-2">
+              {% if m.verdict %}{{ verdict_pill(m.verdict, m.confidence) }}
+              {% else %}<span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>{% endif %}
+            </td>
+            <td class="py-2 font-mono text-slate-200 break-all">{{ m.rule or "—" }}</td>
+            <td class="py-2 font-mono text-slate-300 break-all">{{ m.path or "—" }}</td>
+            <td class="py-2 text-slate-400 break-all">{{ m.author or "—" }}</td>
+            <td class="py-2 text-slate-500">{{ m.scan_source or "—" }}</td>
+            <td class="py-2 text-slate-400 line-clamp-2">{{ m.reasoning }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% elif data %}
+    <div class="text-slate-500 text-xs italic">
+      no YARA matches{% if data.q or data.verdict %} for the current filters{% endif %} —
+      a clean host with no rule hits looks exactly like this.
+    </div>
+  {% endif %}
+</div>

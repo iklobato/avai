@@ -53,6 +53,7 @@
            name="q"
            value="{{ q }}"
            placeholder="search reasoning / fix / collector…"
+           aria-label="search findings by reasoning, remediation or collector"
            autocomplete="off"
            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-64 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
            hx-get="/fragments/findings"
@@ -62,6 +63,7 @@
            hx-vals='{"page": 1}'>
 
     <select name="status"
+            aria-label="filter findings by status"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/findings"
             hx-target="#findings"
@@ -74,6 +76,7 @@
     </select>
 
     <select name="verdict"
+            aria-label="filter findings by verdict"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/findings"
             hx-target="#findings"
@@ -88,6 +91,7 @@
     </select>
 
     <select name="collector"
+            aria-label="filter findings by collector"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/findings"
             hx-target="#findings"
@@ -101,6 +105,7 @@
     </select>
 
     <select name="category"
+            aria-label="filter findings by category"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/findings"
             hx-target="#findings"
@@ -114,6 +119,7 @@
     </select>
 
     <select name="per_page"
+            aria-label="rows per page"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/findings"
             hx-target="#findings"

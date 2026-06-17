@@ -1,4 +1,5 @@
 """Read-only DB query layer — no Flask app, uses current_app for config."""
+
 from __future__ import annotations
 
 import ipaddress
@@ -8,11 +9,68 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from flask import current_app, request
-from sqlalchemy import and_, asc, case, create_engine, desc, func, literal, or_, select, text
-from sqlalchemy.orm import Session
-from avai.host_monitor import AuthEventRow, Base, BluetoothDeviceRow, BrowserExtensionRow, CollectionRun, CollectorErrorRow, DnsQueryRow, FileIntegrityRow, HostsFileRow, IncidentNarrativeRow, InstalledAppRow, Judgement, KernelExtensionRow, LaunchItemRow, ListeningPortRow, MdmProfileRow, MountRow, NetworkConnectionRow, NetworkFlowRow, NetworkInterfaceRow, PrivilegeConfigRow, ProcessExecRow, ProcessRow, QuarantineEventRow, RiskScoreRow, SetuidFileRow, SshAuthorizedKeyRow, SystemExtensionRow, SystemIntegrityRow, UsbDeviceRow, WifiStateRow
 
+from flask import current_app, request
+from sqlalchemy import (
+    and_,
+    asc,
+    case,
+    create_engine,
+    desc,
+    func,
+    literal,
+    or_,
+    select,
+    text,
+)
+from sqlalchemy.orm import Session
+
+from avai.host_monitor import (
+    ArpEntryRow,
+    AuthEventRow,
+    Base,
+    BluetoothDeviceRow,
+    BrowserExtensionRow,
+    CollectionRun,
+    CollectorErrorRow,
+    DiskUsageRow,
+    DnsQueryRow,
+    DnsResolverRow,
+    FileIntegrityRow,
+    FileScanRow,
+    HostResourceRow,
+    HostsFileRow,
+    IncidentNarrativeRow,
+    InstalledAppRow,
+    Judgement,
+    KernelExtensionRow,
+    LaunchItemRow,
+    ListeningPortRow,
+    LoginSessionRow,
+    MdmProfileRow,
+    MountRow,
+    NdpNeighborRow,
+    NetworkConnectionRow,
+    NetworkFlowRow,
+    NetworkInterfaceRow,
+    NetworkShareRow,
+    PrivilegeConfigRow,
+    ProcessExecRow,
+    ProcessRow,
+    PromiscuousInterfaceRow,
+    ProxyConfigRow,
+    QuarantineEventRow,
+    RiskScoreRow,
+    RouteRow,
+    SetuidFileRow,
+    SshAuthorizedKeyRow,
+    SystemExtensionRow,
+    SystemIntegrityRow,
+    UsbDeviceRow,
+    WifiStateRow,
+    YaraRuleRow,
+    YaraStatusRow,
+)
 
 COLLECTOR_MODELS = {
     "processes": ProcessRow,
@@ -33,6 +91,7 @@ COLLECTOR_MODELS = {
     "system_integrity": SystemIntegrityRow,
     "auth_events": AuthEventRow,
     "file_integrity": FileIntegrityRow,
+    "file_scan": FileScanRow,
     "installed_apps": InstalledAppRow,
     # Phase 4
     "process_exec_events": ProcessExecRow,
@@ -41,6 +100,18 @@ COLLECTOR_MODELS = {
     "mdm_profiles": MdmProfileRow,
     "kernel_extensions": KernelExtensionRow,
     "system_extensions": SystemExtensionRow,
+    "host_resources": HostResourceRow,
+    "disk_usage": DiskUsageRow,
+    # Network neighborhood & topology
+    "dns_resolvers": DnsResolverRow,
+    "arp_table": ArpEntryRow,
+    "ndp_neighbors": NdpNeighborRow,
+    "routes": RouteRow,
+    # Network exposure & MITM surface
+    "proxy_config": ProxyConfigRow,
+    "network_shares": NetworkShareRow,
+    "login_sessions": LoginSessionRow,
+    "promiscuous_ifaces": PromiscuousInterfaceRow,
 }
 
 
@@ -60,6 +131,7 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "browser_extensions": ("name", "browser"),
     "system_integrity": (),
     "file_integrity": ("path",),
+    "file_scan": ("rule", "path"),
     "installed_apps": ("name", "bundle_id"),
     # Phase 4
     "process_exec_events": ("exe_path", "parent_path"),
@@ -68,6 +140,8 @@ DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
     "mdm_profiles": ("display_name", "organization"),
     "kernel_extensions": ("bundle_id", "name"),
     "system_extensions": ("bundle_id", "team_id"),
+    "host_resources": (),
+    "disk_usage": ("mountpoint", "device", "fstype"),
 }
 
 
@@ -563,7 +637,11 @@ def findings(
         stmt = stmt.order_by(direction(sort_col), Judgement.created_at.desc())
 
     per_page = max(1, min(per_page, 200))
-    page = max(1, page)
+    # Clamp to the last page, mirroring _paginate. Without the upper bound a
+    # huge ?page= produces an OFFSET past SQLite's 64-bit INTEGER range and
+    # raises OverflowError → HTTP 500.
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
     stmt = stmt.offset((page - 1) * per_page).limit(per_page)
 
     raw = session.execute(stmt).scalars().all()
@@ -1389,6 +1467,319 @@ def dns_queries(
     }
 
 
+def network_topology(
+    session: Session,
+    run_id: str,
+    limit: int = 500,
+    verdict: str = "",
+    q: str = "",
+):
+    """Network neighborhood & topology for ``run_id``: configured DNS
+    resolvers, the ARP (IPv4) and NDP (IPv6) neighbor caches, and the
+    routing table — each row annotated with its LLM verdict. These are the
+    DNS-hijack / ARP-spoof / route-redirection surfaces. Each table is
+    small and bounded, so the section shows all rows (capped at ``limit``)
+    behind a shared verdict + search filter rather than paginating."""
+    resolvers = _collector_rows_with_verdict(
+        session,
+        run_id,
+        DnsResolverRow,
+        "dns_resolvers",
+        ("server", "scope", "search", "interface"),
+        limit,
+    )
+    arp = _collector_rows_with_verdict(
+        session,
+        run_id,
+        ArpEntryRow,
+        "arp_table",
+        ("ip", "mac", "interface", "flags"),
+        limit,
+    )
+    ndp = _collector_rows_with_verdict(
+        session,
+        run_id,
+        NdpNeighborRow,
+        "ndp_neighbors",
+        ("ip", "mac", "interface", "state"),
+        limit,
+    )
+    routes = _collector_rows_with_verdict(
+        session,
+        run_id,
+        RouteRow,
+        "routes",
+        ("destination", "gateway", "interface", "flags"),
+        limit,
+    )
+
+    def _filter(rs, fields):
+        if verdict:
+            rs = [r for r in rs if r.get("verdict") == verdict]
+        if q:
+            ql = q.lower()
+            rs = [
+                r for r in rs if any(ql in str(r.get(f) or "").lower() for f in fields)
+            ]
+        return rs
+
+    resolvers = _filter(resolvers, ("server", "scope", "search", "interface"))
+    arp = _filter(arp, ("ip", "mac", "interface"))
+    ndp = _filter(ndp, ("ip", "mac", "interface", "state"))
+    routes = _filter(routes, ("destination", "gateway", "interface"))
+
+    def _counts(rs: list[dict]) -> dict:
+        return {
+            "total": len(rs),
+            "malicious": sum(1 for r in rs if r["verdict"] == "malicious"),
+            "suspicious": sum(1 for r in rs if r["verdict"] == "suspicious"),
+        }
+
+    return {
+        "resolvers": resolvers,
+        "arp": arp,
+        "ndp": ndp,
+        "routes": routes,
+        "counts": {
+            "resolvers": _counts(resolvers),
+            "arp": _counts(arp),
+            "ndp": _counts(ndp),
+            "routes": _counts(routes),
+        },
+        "verdict": verdict,
+        "q": q,
+        "any": bool(resolvers or arp or ndp or routes),
+    }
+
+
+def network_exposure(
+    session: Session,
+    run_id: str,
+    limit: int = 500,
+    verdict: str = "",
+    q: str = "",
+):
+    """Network exposure & MITM surface for ``run_id``: configured proxies,
+    mounted network shares, active login sessions, and promiscuous-mode
+    interfaces — each row annotated with its LLM verdict. These are the
+    silent-proxy / lateral-movement / live-operator / packet-sniffer
+    surfaces. Small bounded tables, so all rows show behind a shared
+    verdict + search filter (no pagination), mirroring network_topology."""
+    proxies = _collector_rows_with_verdict(
+        session,
+        run_id,
+        ProxyConfigRow,
+        "proxy_config",
+        ("scope", "host", "port", "pac_url"),
+        limit,
+    )
+    shares = _collector_rows_with_verdict(
+        session,
+        run_id,
+        NetworkShareRow,
+        "network_shares",
+        ("remote", "mountpoint", "fstype", "options"),
+        limit,
+    )
+    sessions = _collector_rows_with_verdict(
+        session,
+        run_id,
+        LoginSessionRow,
+        "login_sessions",
+        ("user", "tty", "source", "login_at"),
+        limit,
+    )
+    promisc = _collector_rows_with_verdict(
+        session,
+        run_id,
+        PromiscuousInterfaceRow,
+        "promiscuous_ifaces",
+        ("interface", "promiscuous", "flags"),
+        limit,
+    )
+
+    def _filter(rs, fields):
+        if verdict:
+            rs = [r for r in rs if r.get("verdict") == verdict]
+        if q:
+            ql = q.lower()
+            rs = [
+                r for r in rs if any(ql in str(r.get(f) or "").lower() for f in fields)
+            ]
+        return rs
+
+    proxies = _filter(proxies, ("scope", "host", "pac_url"))
+    shares = _filter(shares, ("remote", "mountpoint", "fstype"))
+    sessions = _filter(sessions, ("user", "tty", "source"))
+    promisc = _filter(promisc, ("interface", "flags"))
+
+    def _counts(rs: list[dict]) -> dict:
+        return {
+            "total": len(rs),
+            "malicious": sum(1 for r in rs if r["verdict"] == "malicious"),
+            "suspicious": sum(1 for r in rs if r["verdict"] == "suspicious"),
+        }
+
+    return {
+        "proxies": proxies,
+        "shares": shares,
+        "sessions": sessions,
+        "promisc": promisc,
+        "counts": {
+            "proxies": _counts(proxies),
+            "shares": _counts(shares),
+            "sessions": _counts(sessions),
+            "promisc": _counts(promisc),
+        },
+        "verdict": verdict,
+        "q": q,
+        "any": bool(proxies or shares or sessions or promisc),
+    }
+
+
+def yara_status(session: Session) -> "dict | None":
+    """The file scanner's compiled-ruleset summary (single row, written by
+    the monitor). ``None`` when the scanner has never compiled — e.g. a DB
+    from before the monitor ran the file_scan collector."""
+    if YaraStatusRow.__tablename__ not in _existing_tables(session):
+        return None
+    row = session.get(YaraStatusRow, 1)
+    if row is None:
+        return None
+    by_category = json.loads(row.by_category_json or "{}")
+    return {
+        "compiled_at": row.compiled_at,
+        "rules_loaded": row.rules_loaded,
+        "files_loaded": row.files_loaded,
+        "files_skipped": row.files_skipped,
+        "rules_dir": row.rules_dir,
+        "sources": json.loads(row.sources_json or "{}"),
+        "skip_reasons": json.loads(row.skip_reasons_json or "{}"),
+        # Top categories descending — the long tail isn't worth the pixels.
+        "top_categories": sorted(
+            by_category.items(), key=lambda kv: kv[1], reverse=True
+        )[:12],
+        "category_count": len(by_category),
+    }
+
+
+def file_scan(
+    session: Session,
+    run_id: str,
+    verdict: str = "",
+    q: str = "",
+    limit: int = 500,
+) -> dict:
+    """The File Scan panel: the compiled-ruleset summary plus this run's
+    YARA matches (file_scan rows annotated with their LLM verdict), each
+    carrying the matched rule's author parsed from its meta for attribution.
+    """
+    matches = _collector_rows_with_verdict(
+        session,
+        run_id,
+        FileScanRow,
+        "file_scan",
+        ("rule", "path", "sha256", "scan_source", "tags_json", "meta_json"),
+        limit,
+    )
+    for m in matches:
+        meta = json.loads(m.get("meta_json") or "{}")
+        m["author"] = meta.get("author") or ""
+    if verdict:
+        matches = [m for m in matches if m.get("verdict") == verdict]
+    if q:
+        ql = q.lower()
+        matches = [
+            m
+            for m in matches
+            if any(
+                ql in str(m.get(f) or "").lower() for f in ("rule", "path", "author")
+            )
+        ]
+    return {
+        "status": yara_status(session),
+        "matches": matches,
+        "verdict": verdict,
+        "q": q,
+    }
+
+
+def yara_rules(
+    session: Session,
+    q: str = "",
+    source: str = "",
+    page: int = 1,
+    per_page: int = 50,
+) -> dict:
+    """Paginated, searchable inventory of the loaded YARA rules so the
+    dashboard can browse every rule (identifier / tags / author / source).
+    Empty when the monitor hasn't persisted the inventory yet."""
+    empty = {
+        "items": [],
+        "total": 0,
+        "page": 1,
+        "per_page": per_page,
+        "total_pages": 1,
+        "q": q,
+        "source": source,
+        "source_options": [],
+    }
+    if YaraRuleRow.__tablename__ not in _existing_tables(session):
+        return empty
+
+    stmt = select(YaraRuleRow)
+    if source:
+        stmt = stmt.where(YaraRuleRow.source == source)
+    if q:
+        like = f"%{q.lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(YaraRuleRow.identifier).like(like),
+                func.lower(func.coalesce(YaraRuleRow.tags, "")).like(like),
+                func.lower(func.coalesce(YaraRuleRow.author, "")).like(like),
+            )
+        )
+    total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    per_page = max(1, min(per_page, 200))
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = max(1, min(page, total_pages))
+    rows = (
+        session.execute(
+            stmt.order_by(YaraRuleRow.identifier)
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+        .scalars()
+        .all()
+    )
+    source_options = [
+        s
+        for (s,) in session.execute(
+            select(YaraRuleRow.source).distinct().order_by(YaraRuleRow.source)
+        )
+        if s
+    ]
+    return {
+        "items": [
+            {
+                "identifier": r.identifier,
+                "tags": r.tags,
+                "author": r.author,
+                "source": r.source,
+                "category": r.category,
+            }
+            for r in rows
+        ],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "q": q,
+        "source": source,
+        "source_options": source_options,
+    }
+
+
 def persistence_tampering(
     session: Session,
     run_id: str,
@@ -1741,6 +2132,59 @@ def system_integrity(session: Session, run_id: str):
             ("Screen Sharing", row.screen_sharing_enabled),
             ("Remote Mgmt (ARD)", row.remote_management_enabled),
         ],
+    }
+
+
+def host_resources(session: Session, run_id: str) -> dict | None:
+    """Latest aggregate resource meters (memory/swap/CPU/load/uptime/tasks)
+    for ``run_id`` as ``{"row": HostResourceRow, "per_core": [float, …]}``,
+    or None. Guarded for DBs written before the table existed."""
+    if "host_resources" not in _existing_tables(session):
+        return None
+    row = session.execute(
+        select(HostResourceRow).where(HostResourceRow.run_id == run_id).limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return {"row": row, "per_core": _parse_json_list(row.cpu_per_core_json)}
+
+
+def disk_usage(session: Session, run_id: str) -> list[DiskUsageRow]:
+    """Per-filesystem usage rows for ``run_id``, fullest first. [] when the
+    table is absent (older DB) or the run collected none."""
+    if "disk_usage" not in _existing_tables(session):
+        return []
+    rows = list(
+        session.execute(
+            select(DiskUsageRow).where(DiskUsageRow.run_id == run_id)
+        ).scalars()
+    )
+    rows.sort(key=lambda r: r.percent if r.percent is not None else -1.0, reverse=True)
+    return rows
+
+
+def resource_trend(session: Session, limit: int = 60) -> dict:
+    """Recent memory/CPU/swap percentages oldest→newest for the trend
+    charts. Empty series when the table is absent."""
+    empty = {"labels": [], "mem": [], "cpu": [], "swap": []}
+    if "host_resources" not in _existing_tables(session):
+        return empty
+    rows = session.execute(
+        select(
+            HostResourceRow.collected_at,
+            HostResourceRow.mem_percent,
+            HostResourceRow.cpu_percent,
+            HostResourceRow.swap_percent,
+        )
+        .order_by(desc(HostResourceRow.collected_at))
+        .limit(limit)
+    ).all()
+    rows = list(reversed(rows))
+    return {
+        "labels": [r[0] for r in rows],
+        "mem": [r[1] for r in rows],
+        "cpu": [r[2] for r in rows],
+        "swap": [r[3] for r in rows],
     }
 
 

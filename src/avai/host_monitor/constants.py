@@ -1,21 +1,14 @@
 """Defaults, tunables, pricing tables, and static data tables."""
+
 from __future__ import annotations
 
 import logging
 import os
-import platform as _platform
 from pathlib import Path
 
 from .enums import Browser, LaunchScope
 
-
 LOG = logging.getLogger("host_monitor")
-
-
-IS_MACOS = _platform.system() == "Darwin"
-
-
-IS_LINUX = _platform.system() == "Linux"
 
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
@@ -201,3 +194,37 @@ APP_INFO_KEYS = (
 
 
 HOST_PREFIX = os.environ.get("HOST_PREFIX", "").rstrip("/")
+
+
+# --- File scanning (YARA) ---
+# Bundled + user YARA rules live here; the FileScanCollector compiles
+# every *.yar / *.yara found, once per process. Override via the env var.
+YARA_RULES_DIR = Path(os.environ.get("AVAI_YARA_RULES_DIR", str(_PKG_DIR / "rules")))
+
+# Skip files larger than this — YARA reads the whole file. On the measured
+# target set (bin dirs + recent Downloads) p99 ≈ 9 MB, so 64 MB covers
+# virtually every real binary while skipping multi-hundred-MB media / DMG
+# outliers (observed max ≈ 372 MB). Large app executables are further
+# bounded by the per-file match timeout below.
+YARA_MAX_FILE_BYTES = 64 * 1024 * 1024
+
+# Per-file match timeout (seconds): caps worst-case cost on a large binary
+# so a single file can't stall the collection cycle.
+YARA_MATCH_TIMEOUT_S = 30
+
+# Hard cap on files scanned per cycle. The bounded target set measures
+# ~1.3k files on a typical host; 5k is generous headroom and a runaway
+# backstop (a home full of recent files can't blow out the cycle).
+YARA_MAX_FILES_PER_CYCLE = 5000
+
+# Only (re)scan Downloads modified within this window — freshly delivered
+# payloads are the signal; re-hashing tens of thousands of old downloads
+# every cycle is not (measured: 12 recent vs 72k total).
+YARA_DOWNLOADS_RECENT_DAYS = 7
+
+# Offline known-bad hash deny-list consumed by LocalHashDenylistEnricher:
+# one hex digest (md5 / sha1 / sha256) per line, '#' comments allowed. An
+# absent file ⇒ the enricher loads empty and simply gives no opinion.
+HASH_DENYLIST_PATH = Path(
+    os.environ.get("AVAI_HASH_DENYLIST", str(_PKG_DIR / "rules" / "hash_denylist.txt"))
+)

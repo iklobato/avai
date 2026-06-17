@@ -20,6 +20,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from .constants import LOG
@@ -30,6 +31,7 @@ from .models import (
     Base,
     CollectionRun,
     CollectorErrorRow,
+    ControlState,
     DnsQueryRow,
     IncidentNarrativeRow,
     Judgement,
@@ -41,12 +43,20 @@ from .models import (
     RiskScoreRow,
     StreamingSession,
     SystemIntegrityRow,
+    YaraRuleRow,
+    YaraStatusRow,
     _RowBase,
 )
-from .shell import utcnow
+from .runtime import Clock
 
 if TYPE_CHECKING:
     from .collectors import Collector
+
+# How long a writer waits for the SQLite write lock before raising
+# "database is locked". Generous (vs. the 5s pysqlite default) so the
+# snapshot loop and streaming-worker threads can serialise their writes
+# through WAL checkpoints on a large DB without losing a batch.
+_BUSY_TIMEOUT_MS = 30_000
 
 
 class Sink:
@@ -67,7 +77,20 @@ class Sink:
             register_schema(Base)
         except Exception:
             LOG.exception("enrichment schema registration failed")
-        Base.metadata.create_all(self.engine)
+        # create_all / ALTER are not atomic with respect to a second
+        # process running the same bootstrap on the shared SQLite file
+        # (monitor + dashboard both call setup() at startup against the
+        # bind-mounted DB). Two processes can each pass create_all's
+        # checkfirst and then both issue CREATE/ALTER, so the loser sees
+        # "table already exists" / "duplicate column name". Those are
+        # benign here — the schema is the same — so tolerate them rather
+        # than crash a container's startup.
+        try:
+            Base.metadata.create_all(self.engine)
+        except OperationalError as e:
+            if not _is_benign_concurrent_ddl(e):
+                raise
+            LOG.info("create_all raced with another bootstrap (continuing): %s", e)
         _migrate_add_columns(self.engine)
         # Apply Alembic migrations (indexes / future schema changes). The DB
         # was just built by create_all, so this stamps the baseline and runs
@@ -82,7 +105,7 @@ class Sink:
 
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
         run_id = str(uuid.uuid4())
-        started = utcnow()
+        started = Clock().now_iso()
         with Session(self.engine) as session:
             session.add(
                 CollectionRun(
@@ -102,7 +125,9 @@ class Sink:
                 update(CollectionRun)
                 .where(CollectionRun.run_id == self.run_id)
                 .values(
-                    finished_at=utcnow(), collectors_ok=ok, collectors_failed=failed
+                    finished_at=Clock().now_iso(),
+                    collectors_ok=ok,
+                    collectors_failed=failed,
                 )
             )
             session.commit()
@@ -122,7 +147,7 @@ class Sink:
                     collector=collector,
                     error_class=type(exc).__name__,
                     message=str(exc)[:1000],
-                    occurred_at=utcnow(),
+                    occurred_at=Clock().now_iso(),
                 )
             )
             session.commit()
@@ -512,6 +537,39 @@ class Sink:
             session.add(RiskScoreRow(**row))
             session.commit()
 
+    def write_yara_status(self, stats: dict) -> None:
+        """Upsert the single-row file-scanner ruleset summary (id=1) so the
+        read-only dashboard can show what's loaded."""
+        with Session(self.engine) as session:
+            session.merge(
+                YaraStatusRow(
+                    id=1,
+                    compiled_at=Clock().now_iso(),
+                    rules_loaded=stats.get("rules_loaded"),
+                    files_loaded=stats.get("files_loaded"),
+                    files_skipped=stats.get("files_skipped"),
+                    rules_dir=stats.get("rules_dir"),
+                    sources_json=json.dumps(stats.get("sources") or {}),
+                    skip_reasons_json=json.dumps(stats.get("skip_reasons") or {}),
+                    by_category_json=json.dumps(stats.get("by_category") or {}),
+                )
+            )
+            session.commit()
+
+    def write_yara_rules(self, inventory: list[dict]) -> None:
+        """Replace the browsable rule inventory. Skipped when the row count
+        already matches — the ruleset is static within a monitor process, so
+        this rewrites once (on first cycle / after a restart with changes)
+        rather than every cycle."""
+        with Session(self.engine) as session:
+            current = session.scalar(select(func.count()).select_from(YaraRuleRow))
+            if current == len(inventory):
+                return
+            session.execute(delete(YaraRuleRow))
+            if inventory:
+                session.execute(sqlite_insert(YaraRuleRow), inventory)
+            session.commit()
+
     def database_size_bytes(self) -> int:
         """Total on-disk bytes including the SQLite WAL/SHM sidecars."""
         url = str(self.engine.url)
@@ -694,7 +752,7 @@ class Sink:
                     run_id=run_id,
                     collector=collector,
                     hostname=hostname,
-                    started_at=utcnow(),
+                    started_at=Clock().now_iso(),
                 )
             )
             session.commit()
@@ -705,9 +763,136 @@ class Sink:
             session.execute(
                 update(StreamingSession)
                 .where(StreamingSession.run_id == run_id)
-                .values(finished_at=utcnow(), row_count=row_count)
+                .values(finished_at=Clock().now_iso(), row_count=row_count)
             )
             session.commit()
+
+    # ----- cooperative control plane (see models.ControlState) -----
+
+    def ensure_control_row(
+        self, *, interval: int, judge_enabled: bool, enrich_enabled: bool
+    ) -> None:
+        """Seed the single control row (id=1) with the monitor's startup
+        settings so the dashboard reflects reality. No-op if it already
+        exists — control state persists across restarts by design."""
+        with Session(self.engine) as session:
+            session.execute(
+                sqlite_insert(ControlState)
+                .values(
+                    id=1,
+                    paused=0,
+                    interval_override=interval,
+                    judge_enabled=int(judge_enabled),
+                    enrich_enabled=int(enrich_enabled),
+                )
+                .on_conflict_do_nothing()
+            )
+            session.commit()
+
+    def read_control(self) -> Optional[dict]:
+        """Return the control row as a plain dict, or None. Best-effort: a
+        control read must never crash the monitor loop."""
+        try:
+            with Session(self.engine) as session:
+                row = session.get(ControlState, 1)
+                if row is None:
+                    return None
+                return {
+                    c.name: getattr(row, c.name) for c in ControlState.__table__.columns
+                }
+        except Exception:
+            LOG.exception("read_control failed")
+            return None
+
+    def write_heartbeat(self, *, pid: int, status: str, current_interval: int) -> None:
+        now = Clock().now_iso()
+        with Session(self.engine) as session:
+            session.execute(
+                update(ControlState)
+                .where(ControlState.id == 1)
+                .values(
+                    pid=pid,
+                    status=status,
+                    current_interval=current_interval,
+                    last_seen_at=now,
+                    applied_at=now,
+                )
+            )
+            session.commit()
+
+    def ack_scan_now(self, nonce: int) -> None:
+        with Session(self.engine) as session:
+            session.execute(
+                update(ControlState)
+                .where(ControlState.id == 1)
+                .values(scan_now_applied=nonce)
+            )
+            session.commit()
+
+    def ack_command(self, nonce: int, result: str) -> None:
+        with Session(self.engine) as session:
+            session.execute(
+                update(ControlState)
+                .where(ControlState.id == 1)
+                .values(command_applied=nonce, command_result=result)
+            )
+            session.commit()
+
+    # ----- maintenance helpers (invoked by Runner on a one-shot command) -----
+
+    def clear_data(self) -> int:
+        """Wipe all collected telemetry, runs, judgements, narratives, and
+        risk scores — a clean slate. Keeps control_state and the enrichment
+        cache. Returns the number of rows deleted."""
+        models = [
+            *_RowBase.__subclasses__(),
+            CollectionRun,
+            CollectorErrorRow,
+            StreamingSession,
+            Judgement,
+            IncidentNarrativeRow,
+            RiskScoreRow,
+        ]
+        deleted = 0
+        with Session(self.engine) as session:
+            for model in models:
+                deleted += session.execute(delete(model)).rowcount or 0
+            session.commit()
+        return deleted
+
+    def clear_judgements(self) -> int:
+        """Delete all verdicts so the next cycles re-judge from scratch
+        (the unjudged-selection logic keys off the absence of a row)."""
+        with Session(self.engine) as session:
+            n = session.execute(delete(Judgement)).rowcount or 0
+            session.commit()
+        return n
+
+    def clear_narratives(self) -> int:
+        """Delete incident digests so the narrator regenerates next cycle."""
+        with Session(self.engine) as session:
+            n = session.execute(delete(IncidentNarrativeRow)).rowcount or 0
+            session.commit()
+        return n
+
+    def reset_baseline(self) -> int:
+        """Forget the host's learned-normal: drop run history so
+        completed_run_count falls below baseline_min_runs and novelty
+        re-learns over the next runs."""
+        with Session(self.engine) as session:
+            n = session.execute(delete(CollectionRun)).rowcount or 0
+            session.commit()
+        return n
+
+
+def _is_benign_concurrent_ddl(exc: OperationalError) -> bool:
+    """True when a DDL statement failed only because another process ran
+    the same bootstrap first (monitor + dashboard both call Sink.setup on
+    the shared SQLite file). SQLite reports these as "table ... already
+    exists" or "duplicate column name ...". The resulting schema is
+    identical either way, so the loser can safely continue."""
+    msg = str(exc).lower()
+    return "already exists" in msg or "duplicate column name" in msg
 
 
 def _set_sqlite_pragmas(dbapi_conn, _connection_record):
@@ -715,6 +900,14 @@ def _set_sqlite_pragmas(dbapi_conn, _connection_record):
     cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("PRAGMA synchronous=NORMAL")
     cur.execute("PRAGMA foreign_keys=ON")
+    # SQLite serialises writes, so the snapshot loop and the streaming-worker
+    # threads (auth_events, process_exec) contend for the single write lock.
+    # The pysqlite default busy timeout is only 5s — on a large DB a write or
+    # WAL checkpoint can hold the lock longer than that, and the loser raises
+    # "database is locked" instead of waiting. A generous timeout makes the
+    # contending writer block-and-retry rather than fail, which is the
+    # documented SQLite remedy for multi-connection write contention.
+    cur.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
     cur.close()
 
 
@@ -735,11 +928,18 @@ def _migrate_add_columns(engine: Engine) -> None:
                 continue
             col_type = col.type.compile(engine.dialect)
             nullable = "" if col.nullable else " NOT NULL DEFAULT ''"
-            with engine.begin() as conn:
-                conn.execute(
-                    text(
-                        f"ALTER TABLE {table.name} "
-                        f"ADD COLUMN {col.name} {col_type}{nullable}"
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE {table.name} "
+                            f"ADD COLUMN {col.name} {col_type}{nullable}"
+                        )
                     )
-                )
+            except OperationalError as e:
+                # Another process added the column between our inspect and
+                # our ALTER. Benign — keep going with the rest.
+                if not _is_benign_concurrent_ddl(e):
+                    raise
+                continue
             LOG.info("schema migration: added %s.%s", table.name, col.name)
