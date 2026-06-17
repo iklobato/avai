@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import sys
 import threading
 import webbrowser
@@ -10,9 +11,20 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 
-
 from .app import app
 from .queries import DEFAULT_DB_PATH
+
+# Below this, binding a TCP port needs root/Administrator. Reaching the
+# dashboard at http://avai.local (no port) means serving on 80, which is
+# privileged — so a clean-bind failure here gets an actionable message.
+_PRIVILEGED_PORT_CEILING = 1024
+_DEFAULT_HTTP_PORT = 80
+
+
+def _http_url(host: str, port: int) -> str:
+    """A browser URL, omitting the port when it's the implicit HTTP 80 — so
+    ``--port 80`` advertises ``http://avai.local`` rather than ``...:80``."""
+    return f"http://{host}" if port == _DEFAULT_HTTP_PORT else f"http://{host}:{port}"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -47,7 +59,32 @@ def _open_browser(host: str, port: int) -> None:
     server has time to bind the socket. 0.0.0.0/:: aren't routable from a
     browser, so point at loopback instead."""
     url_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
-    threading.Timer(1.0, lambda: webbrowser.open(f"http://{url_host}:{port}")).start()
+    url = _http_url(url_host, port)
+    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+
+
+def _hosts_notice(port: int) -> list[str]:
+    """Best-effort hostname mapping for the launch banner: map avai.local when
+    the dashboard already runs elevated, otherwise tell the user how. A
+    hosts-file problem (unsupported OS, missing privilege) must never stop the
+    dashboard from serving on loopback, so all of it degrades to a quiet line."""
+    from avai.hostsfile import DASHBOARD_HOSTNAME, HostsError, HostsRegistrar, Outcome
+
+    try:
+        registrar = HostsRegistrar.for_current_platform()
+        outcome = registrar.ensure_reachable()
+    except HostsError:
+        return []
+    url = _http_url(DASHBOARD_HOSTNAME, port)
+    if outcome is Outcome.CREATED:
+        return [
+            f" * mapped {DASHBOARD_HOSTNAME} -> 127.0.0.1 — also reachable at {url}"
+        ]
+    if outcome is Outcome.NEEDS_PRIVILEGE:
+        return [
+            f" * tip: `sudo avai install-hosts` makes the dashboard reachable at {url}"
+        ]
+    return [f" * also reachable at {url}"]
 
 
 def _serve(host: str, port: int, debug: bool, open_browser: bool = False) -> None:
@@ -58,12 +95,21 @@ def _serve(host: str, port: int, debug: bool, open_browser: bool = False) -> Non
     we degrade to the dev server rather than failing to start."""
     if open_browser:
         _open_browser(host, port)
+    for line in _hosts_notice(port):
+        print(line, flush=True)
+    try:
+        _run_server(host, port, debug)
+    except OSError as e:
+        raise SystemExit(_bind_error_message(host, port, e)) from e
+
+
+def _run_server(host: str, port: int, debug: bool) -> None:
     if not debug:
         try:
             from waitress import serve
 
             print(
-                f" * avai dashboard on http://{host}:{port}  (Ctrl-C to quit)",
+                f" * avai dashboard on {_http_url(host, port)}  (Ctrl-C to quit)",
                 flush=True,
             )
             # ~10 HTMX fragments fire in parallel on every page load/poll
@@ -77,6 +123,20 @@ def _serve(host: str, port: int, debug: bool, open_browser: bool = False) -> Non
                 file=sys.stderr,
             )
     app.run(host=host, port=port, debug=debug)
+
+
+def _bind_error_message(host: str, port: int, err: OSError) -> str:
+    """Turn a socket-bind failure into one actionable line. The common case is
+    forgetting that http://avai.local (port 80) needs privilege to bind."""
+    if err.errno in (errno.EACCES, errno.EPERM) and port < _PRIVILEGED_PORT_CEILING:
+        return (
+            f"avai: binding port {port} needs elevated privileges — "
+            f"re-run with `sudo avai dashboard --port {port}`, or use the "
+            "default unprivileged port (`avai dashboard`)."
+        )
+    if err.errno == errno.EADDRINUSE:
+        return f"avai: port {port} on {host} is already in use by another process."
+    return f"avai: could not bind {host}:{port}: {err}"
 
 
 def _ensure_db_exists(db_path: str) -> None:
