@@ -83,6 +83,15 @@
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
+    /* responsive tables — scroll horizontally on narrow screens */
+    @media (max-width: 767px) {
+      table {
+        display: block;
+        overflow-x: auto;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+      }
+    }
     /* Rendered-markdown styling for the incident digest. Tailwind's
        preflight resets list/heading styles, so restore them here. */
     .md-content > :first-child { margin-top: 0; }
