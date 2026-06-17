@@ -374,16 +374,16 @@ export function AiExpert() {
 export function GetStarted() {
   const options = [
     {
-      title: "pip (macOS or Linux)",
-      tag: "recommended",
-      body: "pip install 'avai-monitor[judge]'",
-    },
-    {
       title: "Docker",
-      tag: "",
+      tag: "recommended",
       body: 'docker run -p 8765:8765 -v "$PWD":/data iklob1/avai',
     },
     { title: "docker compose", tag: "", body: "docker compose up -d" },
+    {
+      title: "pip (macOS or Linux)",
+      tag: "",
+      body: "pip install 'avai-monitor[judge]'",
+    },
   ];
   const recipes = [
     {
@@ -411,7 +411,7 @@ export function GetStarted() {
     <Section
       id="install"
       title="One command to run it."
-      subtitle="Install with pip or Docker, then open the dashboard."
+      subtitle="One `docker run` — or install natively with pip — then open the dashboard."
     >
       <div className="grid gap-4 md:grid-cols-3">
         {options.map((o) => (
