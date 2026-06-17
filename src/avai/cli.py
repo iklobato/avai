@@ -9,8 +9,8 @@ argv through unchanged.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Optional
-
 
 _USAGE = """avai — host security telemetry collector + dashboard
 
@@ -24,6 +24,9 @@ usage:
                               start the read-only Flask + HTMX
                               dashboard. See `avai dashboard --help`.
 
+  avai rules [--list]         show the YARA ruleset the file scanner
+                              loads (counts; --list prints every rule).
+
   avai --version              print the installed package version
   avai --help                 this message
 """
@@ -31,6 +34,26 @@ usage:
 
 def _print_usage(stream=None) -> None:
     print(_USAGE, file=stream or sys.stdout)
+
+
+def _cmd_rules(rules_dir: Path, do_list: bool) -> int:
+    """Compile the file-scanner ruleset and report what loaded — the
+    user-facing answer to 'which rules are available?'. Read-only; no DB."""
+    from .host_monitor.collectors import _compile_yara_rules
+
+    rules = _compile_yara_rules(rules_dir)
+    if rules is None:
+        print(f"avai: no compilable YARA rules under {rules_dir}", file=sys.stderr)
+        return 1
+    loaded = list(rules)
+    print(f"avai: {len(loaded)} YARA rule(s) loaded from {rules_dir}")
+    if do_list:
+        for r in sorted(loaded, key=lambda x: x.identifier):
+            tags = " ".join(r.tags)
+            print(f"  {r.identifier}" + (f"  [{tags}]" if tags else ""))
+    else:
+        print("  (run with --list to print every rule identifier)")
+    return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -43,6 +66,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if argv[0] in ("-v", "--version"):
         from . import __version__
+
         print(__version__)
         return 0
 
@@ -50,13 +74,48 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if cmd in ("monitor", "start", "scan"):
         from .host_monitor import main as monitor_main
+
         sys.argv = ["avai monitor", *rest]
         return monitor_main()
 
     if cmd in ("dashboard", "ui", "serve"):
         from .dashboard import main as dashboard_main
+
         sys.argv = ["avai dashboard", *rest]
         return dashboard_main()
+
+    if cmd == "rules":
+        import argparse
+
+        from .host_monitor import constants
+
+        p = argparse.ArgumentParser(
+            prog="avai rules",
+            description="Inspect the YARA ruleset the file scanner loads.",
+        )
+        p.add_argument(
+            "--rules-dir",
+            default=str(constants.YARA_RULES_DIR),
+            help="rules directory to compile (default: bundled + vendor packs)",
+        )
+        p.add_argument(
+            "--list", action="store_true", help="print every loaded rule identifier"
+        )
+        a = p.parse_args(rest)
+        return _cmd_rules(Path(a.rules_dir), a.list)
+
+    if cmd == "migrate":
+        import argparse
+
+        from .db_migrate import upgrade_to_head
+        from .host_monitor import DEFAULT_DB_PATH
+
+        p = argparse.ArgumentParser(prog="avai migrate")
+        p.add_argument("--db", default=str(DEFAULT_DB_PATH))
+        a = p.parse_args(rest)
+        upgrade_to_head(f"sqlite:///{a.db}")
+        print(f"avai: migrations applied to {a.db}")
+        return 0
 
     print(f"avai: unknown command '{cmd}'\n", file=sys.stderr)
     _print_usage(sys.stderr)

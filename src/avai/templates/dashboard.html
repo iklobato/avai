@@ -24,6 +24,52 @@
     };
   </script>
   <style>
+    /* ===== Design tokens: single source of truth for verdict colors =====
+       Pills reference these via Tailwind classes in _macros.html; the
+       Chart.js configs below reference the same hexes through one JS map
+       (VERDICT_HEX). Keep all three in sync. */
+    :root {
+      --verdict-malicious:  #ef4444;
+      --verdict-suspicious: #f59e0b;
+      --verdict-unknown:    #94a3b8;
+      --verdict-benign:     #10b981;
+    }
+
+    /* Screen-reader-only text: announced by assistive tech, hidden visually.
+       Used to label search/select controls that show only a placeholder. */
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+    }
+
+    /* WCAG 2.4.7 — an always-visible keyboard focus ring on every
+       interactive element. :focus-visible fires for keyboard nav only, so
+       mouse users don't see it. */
+    a:focus-visible, button:focus-visible, input:focus-visible,
+    select:focus-visible, textarea:focus-visible,
+    [tabindex]:focus-visible, [role="tab"]:focus-visible {
+      outline: 2px solid #38bdf8;
+      outline-offset: 2px;
+      border-radius: 2px;
+    }
+
+    /* WCAG 1.4.3 — slate-500/600 as body text fall below the 4.5:1 contrast
+       floor on the slate-900/950 surfaces. Lift both to an AA-passing grey
+       in one place (5.5:1) instead of touching ~200 utility sites. The
+       `body` prefix outranks the bare Tailwind utility, so this wins
+       regardless of the Play-CDN stylesheet's source order. */
+    body .text-slate-500, body .text-slate-600 { color: #8b99ad; }
+
+    /* WCAG 2.3.3 — honour users who request reduced motion (the pulsing
+       status dot, toast fade-in, htmx swap transitions). */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+      }
+    }
+
     /* a tiny bit of color-scheme glue Tailwind doesn't cover */
     select { color-scheme: dark; }
     .htmx-swapping, .htmx-settling { opacity: 0.85; transition: opacity 200ms; }
@@ -46,6 +92,70 @@
         -webkit-overflow-scrolling: touch;
       }
     }
+    /* Rendered-markdown styling for the incident digest. Tailwind's
+       preflight resets list/heading styles, so restore them here. */
+    .md-content > :first-child { margin-top: 0; }
+    .md-content p { margin: 0.5rem 0; }
+    .md-content strong { font-weight: 600; color: #e2e8f0; }
+    .md-content em { font-style: italic; }
+    .md-content h1, .md-content h2, .md-content h3,
+    .md-content h4, .md-content h5, .md-content h6 {
+      font-weight: 600; color: #e2e8f0; margin: 0.9rem 0 0.35rem;
+      font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .md-content ul { list-style: disc; padding-left: 1.25rem; margin: 0.4rem 0; }
+    .md-content ol { list-style: decimal; padding-left: 1.4rem; margin: 0.4rem 0; }
+    .md-content li { margin: 0.15rem 0; }
+    .md-content code {
+      font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.8em;
+      background: #1e293b; color: #cbd5e1; padding: 0.1rem 0.3rem; border-radius: 0.25rem;
+    }
+    .md-content pre {
+      background: #0f172a; border: 1px solid #1e293b; border-radius: 0.375rem;
+      padding: 0.75rem; margin: 0.5rem 0; overflow-x: auto;
+    }
+    .md-content pre code { background: none; padding: 0; font-size: 0.8rem; }
+    .md-content blockquote {
+      border-left: 2px solid #334155; padding-left: 0.75rem; color: #94a3b8; margin: 0.5rem 0;
+    }
+    .md-content table { border-collapse: collapse; margin: 0.5rem 0; width: 100%; }
+    .md-content th, .md-content td {
+      border: 1px solid #1e293b; padding: 0.35rem 0.5rem; text-align: left; font-size: 0.8rem;
+    }
+    .md-content th { background: #1e293b; color: #cbd5e1; font-weight: 600; }
+
+    /* Incident digest — vertical attack timeline */
+    .timeline { position: relative; margin: 0; padding: 0 0 0 1.25rem; list-style: none; }
+    .timeline::before {
+      content: ""; position: absolute; left: 5px; top: 4px; bottom: 4px;
+      width: 2px; background: #1e293b;
+    }
+    .tl-item { position: relative; padding: 0 0 1rem 1rem; }
+    .tl-item:last-child { padding-bottom: 0; }
+    .tl-dot {
+      position: absolute; left: -1.25rem; top: 3px; width: 11px; height: 11px;
+      border-radius: 9999px;
+    }
+    .tl-head { display: flex; align-items: center; gap: 0.5rem; }
+    .tl-time { font-family: ui-monospace, Menlo, Monaco, monospace;
+               font-size: 0.7rem; color: #94a3b8; }
+    .tl-cat {
+      font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.06em;
+      font-weight: 600; border: 1px solid; border-radius: 9999px; padding: 0.05rem 0.4rem;
+    }
+    .tl-title { font-size: 0.85rem; color: #e2e8f0; margin-top: 0.1rem; }
+    .tl-detail { font-size: 0.75rem; color: #94a3b8; margin-top: 0.1rem; }
+
+    /* Incident digest — recommended action cards */
+    .action-card {
+      background: #0f172a; border: 1px solid #1e293b; border-radius: 0.5rem; padding: 0.6rem 0.75rem;
+    }
+    .action-cmd {
+      margin: 0.5rem 0 0; background: #020617; border: 1px solid #1e293b;
+      border-radius: 0.375rem; padding: 0.5rem 0.6rem; overflow-x: auto;
+      font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.75rem; color: #cbd5e1;
+    }
+    .action-cmd code { background: none; }
   </style>
 </head>
 <body class="bg-slate-950 text-slate-200 font-sans antialiased min-h-screen">
@@ -53,7 +163,7 @@
   <header class="border-b border-slate-800/80 bg-slate-900/40 backdrop-blur sticky top-0 z-10">
     <div class="max-w-screen-2xl mx-auto px-6 py-4 flex items-baseline justify-between gap-6">
       <div class="flex items-baseline gap-3">
-        <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true"></span>
         <h1 class="text-base font-semibold tracking-tight">avai host monitor</h1>
         <span id="header-meta"
               class="text-xs text-slate-500"
@@ -88,41 +198,77 @@
     </button>
   </div>
   <div id="toast-container"
+       role="region"
+       aria-label="security alerts"
+       aria-live="assertive"
        class="fixed top-28 right-4 z-50 w-96 max-w-[calc(100vw-2rem)] space-y-2 pointer-events-none">
   </div>
 
   <main class="max-w-screen-2xl mx-auto px-6 py-6 space-y-8">
+
+    {# ---------- monitor control (pause / scan-now / scanners / settings) ---------- #}
+    <section id="control"
+             hx-get="/fragments/control"
+             hx-trigger="load, every 15s"
+             hx-swap="innerHTML">
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
+        loading control…
+      </div>
+    </section>
 
     {# ---------- overview ---------- #}
     <section id="overview"
              hx-get="/fragments/overview"
              hx-trigger="load, every 30s"
              hx-swap="innerHTML"
-             class="grid grid-cols-2 xl:grid-cols-4 gap-4">
+             class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
       <div class="col-span-full text-slate-500 italic">loading overview…</div>
     </section>
 
-    {# ---------- posture row: sysint + errors + verdict chart, all side-by-side ---------- #}
-    <section class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+    {# ---------- system resources (memory / swap / cpu / load / disk + trends) ---------- #}
+    <section id="resources"
+             hx-get="/fragments/resources"
+             hx-trigger="load, every 30s"
+             hx-swap="innerHTML">
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
+        loading system resources…
+      </div>
+    </section>
+
+    {# ---------- incident digest (LLM-written attack-story from active findings) ---------- #}
+    <section id="incident"
+             hx-get="/fragments/incident"
+             hx-trigger="load, every 60s"
+             hx-swap="innerHTML">
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
+        loading incident digest…
+      </div>
+    </section>
+
+    {# ---------- vulnerabilities (CVE / EOL — patch me) ---------- #}
+    <section id="vulnerabilities"
+             hx-get="/fragments/vulnerabilities"
+             hx-trigger="load, every 60s"
+             hx-swap="innerHTML">
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
+        loading vulnerabilities…
+      </div>
+    </section>
+
+    {# ---------- posture score + verdicts + system integrity (one row, equal height) ---------- #}
+    <section class="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+      <div id="risk"
+           hx-get="/fragments/risk"
+           hx-trigger="load, every 60s"
+           hx-swap="innerHTML"></div>
+      <div id="verdicts"
+           hx-get="/fragments/verdicts"
+           hx-trigger="load, every 30s"
+           hx-swap="innerHTML"></div>
       <div id="sysint"
            hx-get="/fragments/sysint"
            hx-trigger="load, every 60s"
            hx-swap="innerHTML"></div>
-      <div id="errors"
-           hx-get="/fragments/errors"
-           hx-trigger="load, every 60s"
-           hx-swap="innerHTML"></div>
-      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 flex flex-col">
-        <div class="flex items-baseline justify-between mb-3">
-          <h3 class="text-[10px] uppercase tracking-widest text-slate-500">
-            verdicts produced — last 12h
-          </h3>
-          <span class="text-[10px] text-slate-600">auto 30s</span>
-        </div>
-        <div class="flex-1 min-h-[12rem]">
-          <canvas id="verdict-chart"></canvas>
-        </div>
-      </div>
     </section>
 
     {# ---------- findings (smart table — filters + sort + pagination in partial) ---------- #}
@@ -140,45 +286,27 @@
       </div>
     </section>
 
-    {# ---------- activity: row counts + recent runs ---------- #}
-    <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <div id="row-counts"
-           hx-get="/fragments/row-counts"
-           hx-trigger="load, every 30s"
+    {# ---------- network (tabbed: listening / outbound / dns) ---------- #}
+    <section>
+      <h2 class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">network</h2>
+      <div id="network"
+           hx-get="/fragments/network"
+           hx-trigger="load"
            hx-swap="innerHTML"></div>
-      <div id="runs"
-           hx-get="/fragments/runs"
+    </section>
+
+    {# ---------- collection health: row counts + recent runs + errors ---------- #}
+    <section>
+      <h2 class="text-[10px] uppercase tracking-widest text-slate-500 mb-3">collection health</h2>
+      <div id="collection"
+           hx-get="/fragments/collection"
            hx-trigger="load, every 30s"
            hx-swap="innerHTML"></div>
     </section>
 
-    {# ---------- listening ports (open sockets by process) — full-width ---------- #}
-    <section id="listening-ports"
-             hx-get="/fragments/listening-ports"
-             hx-trigger="load, every 30s"
-             hx-swap="innerHTML"></section>
-
-    {# ---------- network flows (tcpdump aggregator) — full-width, end of page ---------- #}
-    <section id="network-flows"
-             hx-get="/fragments/network-flows"
-             hx-trigger="load, every 30s"
-             hx-swap="innerHTML"></section>
-
-    {# ---------- DNS queries (tcpdump port 53 + DoH) ---------- #}
-    <section id="dns-queries"
-             hx-get="/fragments/dns-queries"
-             hx-trigger="load, every 30s"
-             hx-swap="innerHTML"></section>
-
     {# ---------- persistence & tampering (ssh keys / hosts / privileges) ---------- #}
     <section id="persistence"
              hx-get="/fragments/persistence"
-             hx-trigger="load, every 60s"
-             hx-swap="innerHTML"></section>
-
-    {# ---------- TCC privacy permissions ---------- #}
-    <section id="tcc"
-             hx-get="/fragments/tcc"
              hx-trigger="load, every 60s"
              hx-swap="innerHTML"></section>
 
@@ -191,16 +319,18 @@
   </main>
 
   <script>
-    // ---- Chart.js: stacked-bar verdict timeline ----
-    const COLOR = {
+    // ---- Verdict palette: the single JS source of truth, mirroring the
+    // --verdict-* CSS tokens in <style> and the pill classes in
+    // _macros.html. Both Chart.js configs below read from this. ----
+    const VERDICT_HEX = {
       malicious:  '#ef4444',
       suspicious: '#f59e0b',
       unknown:    '#94a3b8',
       benign:     '#10b981',
     };
 
-    const canvas = document.getElementById('verdict-chart');
-    let chart = null;
+    // ---- Chart.js: stacked-bar verdict timeline ----
+    const COLOR = VERDICT_HEX;
 
     function formatLabel(iso13) {
       // 'YYYY-MM-DDTHH' → 'MM-DD HH:00'
@@ -208,7 +338,13 @@
       return iso13.slice(5, 10) + ' ' + iso13.slice(11, 13) + ':00';
     }
 
+    // The canvas lives inside the /fragments/verdicts partial, which is
+    // swapped on every poll — so query it fresh and rebuild each time.
     async function refreshChart() {
+      const canvas = document.getElementById('verdict-chart');
+      if (!canvas) return;
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', 'verdict activity over time, stacked by severity');
       try {
         const r = await fetch('/api/chart/verdicts', { cache: 'no-store' });
         if (!r.ok) return;
@@ -221,12 +357,10 @@
           stack: 'verdicts',
           borderWidth: 0,
         }));
-        if (chart) {
-          chart.data.labels = labels;
-          chart.data.datasets = datasets;
-          chart.update('none');
-        } else {
-          chart = new Chart(canvas.getContext('2d'), {
+        {
+          const existing = Chart.getChart(canvas);
+          if (existing) existing.destroy();
+          new Chart(canvas.getContext('2d'), {
             type: 'bar',
             data: { labels, datasets },
             options: {
@@ -270,26 +404,23 @@
         }
       } catch (e) { /* ignore — next tick will retry */ }
     }
-    refreshChart();
-    setInterval(refreshChart, 30000);
 
     // ---- Verdict totals donut chart ----
-    // The canvas lives inside the /fragments/overview partial, which is
-    // re-rendered on every poll. We re-create the Chart instance after
-    // each swap; Chart.js destroys the previous one on the new canvas
-    // automatically because the canvas DOM node is replaced.
-    const VERDICT_COLOR = {
-      malicious:  '#ef4444',
-      suspicious: '#f59e0b',
-      unknown:    '#94a3b8',
-      benign:     '#10b981',
-    };
+    // The donut lives inside the /fragments/verdicts partial (swapped on
+    // every poll). We re-create the Chart after each swap, destroying the
+    // prior instance first.
+    const VERDICT_COLOR = VERDICT_HEX;
     function renderVerdictDonut() {
       const canvas = document.querySelector('.js-verdict-donut');
       if (!canvas) return;
       const verdicts = ['malicious', 'suspicious', 'unknown', 'benign'];
       const values = verdicts.map(v => parseInt(canvas.dataset[v] || '0', 10));
       const total  = values.reduce((a, b) => a + b, 0);
+      // Canvas is opaque to assistive tech — expose the distribution as text.
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', total > 0
+        ? 'verdict totals — ' + verdicts.map((v, i) => `${v} ${values[i]}`).join(', ')
+        : 'verdict totals — none yet');
       // If everything is zero, Chart.js still draws — but show a thin
       // ghost ring instead of a solid one.
       const data = total > 0
@@ -329,8 +460,215 @@
         },
       });
     }
+    // Both verdict charts live in the /fragments/verdicts partial; rebuild
+    // them whenever that fragment swaps in (initial load + every poll).
     document.body.addEventListener('htmx:afterSwap', (e) => {
-      if (e.target && e.target.id === 'overview') renderVerdictDonut();
+      if (e.target && e.target.id === 'verdicts') {
+        renderVerdictDonut();
+        refreshChart();
+      }
+    });
+
+    // ---- System-resource trend charts (memory/swap %, cpu %) ----
+    // The two canvases live inside the /fragments/resources partial, swapped
+    // on every poll — rebuild from /api/chart/resources after each swap.
+    function lineChart(canvas, labels, series) {
+      const existing = Chart.getChart(canvas);
+      if (existing) existing.destroy();
+      new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: series.map(s => ({
+            label: s.label,
+            data: s.data,
+            borderColor: s.color,
+            backgroundColor: s.color + '22',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.25,
+            fill: true,
+          })),
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            x: { display: false },
+            y: {
+              beginAtZero: true, suggestedMax: 100,
+              ticks: { color: '#64748b', font: { size: 10 }, precision: 0 },
+              grid: { color: '#1e293b' },
+            },
+          },
+          plugins: {
+            legend: {
+              display: series.length > 1, position: 'bottom',
+              labels: { color: '#cbd5e1', font: { size: 10 }, boxWidth: 10, boxHeight: 10, padding: 10 },
+            },
+            tooltip: {
+              backgroundColor: '#0f172a', borderColor: '#334155', borderWidth: 1,
+              titleColor: '#e2e8f0', bodyColor: '#cbd5e1',
+            },
+          },
+        },
+      });
+    }
+
+    async function renderResourceCharts() {
+      const memCanvas = document.getElementById('resource-mem-chart');
+      const cpuCanvas = document.getElementById('resource-cpu-chart');
+      if (!memCanvas && !cpuCanvas) return;
+      let data;
+      try {
+        const r = await fetch('/api/chart/resources', { cache: 'no-store' });
+        if (!r.ok) return;
+        data = await r.json();
+      } catch (e) { return; }
+      const labels = data.labels || [];
+      if (memCanvas) lineChart(memCanvas, labels, [
+        { label: 'memory', data: data.mem || [], color: '#38bdf8' },
+        { label: 'swap',   data: data.swap || [], color: '#a78bfa' },
+      ]);
+      if (cpuCanvas) lineChart(cpuCanvas, labels, [
+        { label: 'cpu', data: data.cpu || [], color: '#34d399' },
+      ]);
+    }
+
+    document.body.addEventListener('htmx:afterSwap', (e) => {
+      if (e.target && e.target.id === 'resources') renderResourceCharts();
+    });
+
+    // ---- Control plane: attach the secret token to every /control* request.
+    // The token lives only in localStorage (pasted once into the panel), so a
+    // viewer who loads the page sees no secret and any control POST without it
+    // 403s. A custom header also can't be forged by a cross-site form (CSRF).
+    document.body.addEventListener('htmx:configRequest', (e) => {
+      if (e.detail.path && e.detail.path.indexOf('/control') === 0) {
+        e.detail.headers['X-Avai-Token'] = localStorage.getItem('avai_control_token') || '';
+      }
+    });
+    // Repopulate the token input from localStorage after the panel swaps.
+    document.body.addEventListener('htmx:afterSwap', (e) => {
+      const inp = document.getElementById('control-token');
+      if (inp && !inp.value) inp.value = localStorage.getItem('avai_control_token') || '';
+    });
+
+    // ---- Global HTMX error surface ----
+    // Without this, a fragment that 5xx's or fails to reach the server just
+    // leaves its "loading…" placeholder forever. Show a transient error toast
+    // (deduped per message) so the user knows the panel is stale.
+    const _shownErrors = new Set();
+    function showErrorToast(msg) {
+      const container = document.getElementById('toast-container');
+      if (!container || _shownErrors.has(msg)) return;
+      _shownErrors.add(msg);
+      const t = document.createElement('div');
+      t.setAttribute('role', 'alert');
+      t.className =
+        'js-toast pointer-events-auto bg-slate-900 border border-slate-800 ' +
+        'rounded-lg shadow-lg overflow-hidden border-l-4 border-l-red-500 ' +
+        'animate-[fadein_200ms_ease-out] p-3 text-xs text-slate-200';
+      t.textContent = '⚠ ' + msg;
+      container.appendChild(t);
+      refreshDismissAll();
+      setTimeout(() => {
+        if (t.isConnected) { t.remove(); refreshDismissAll(); }
+        _shownErrors.delete(msg);
+      }, 8000);
+    }
+    document.body.addEventListener('htmx:responseError', (e) => {
+      const status = (e.detail && e.detail.xhr && e.detail.xhr.status) || '?';
+      showErrorToast(`a panel failed to load (HTTP ${status}) — it will retry on the next refresh`);
+    });
+    document.body.addEventListener('htmx:sendError', () => {
+      showErrorToast('network error reaching the monitor — retrying on the next refresh');
+    });
+
+    // ---- Network tabs: manage active state (visual + ARIA) ----
+    // A roving tabindex + aria-selected keeps the tablist accessible: the
+    // active tab is the only one in the tab order, and arrow keys move
+    // between them (WAI-ARIA tabs pattern).
+    function activateNetTab(tab) {
+      document.querySelectorAll('.js-net-tab').forEach((t) => {
+        t.classList.remove('border-sky-500', 'text-slate-100');
+        t.classList.add('border-transparent', 'text-slate-500');
+        t.setAttribute('aria-selected', 'false');
+        t.setAttribute('tabindex', '-1');
+      });
+      tab.classList.add('border-sky-500', 'text-slate-100');
+      tab.classList.remove('border-transparent', 'text-slate-500');
+      tab.setAttribute('aria-selected', 'true');
+      tab.setAttribute('tabindex', '0');
+      const panel = document.getElementById('network-content');
+      if (panel && tab.id) panel.setAttribute('aria-labelledby', tab.id);
+    }
+    document.body.addEventListener('click', (e) => {
+      const tab = e.target.closest && e.target.closest('.js-net-tab');
+      if (tab) activateNetTab(tab);
+    });
+    document.body.addEventListener('keydown', (e) => {
+      const tab = e.target.closest && e.target.closest('.js-net-tab');
+      if (!tab) return;
+      const tabs = Array.from(document.querySelectorAll('.js-net-tab'));
+      const i = tabs.indexOf(tab);
+      let next = null;
+      if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+      else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+      else if (e.key === 'Home') next = tabs[0];
+      else if (e.key === 'End') next = tabs[tabs.length - 1];
+      if (next) {
+        e.preventDefault();
+        next.focus();
+        next.click();  // load the panel + set active state
+      }
+    });
+
+    // ---- Client-side pagination (collection-health tables) ----
+    // Keeps the three cards the same height by capping visible rows. Page
+    // state is keyed by data-pg so it survives the panel's 30s auto-refresh.
+    const pageState = {};
+    function paginate(root) {
+      const size = parseInt(root.dataset.pageSize || '8', 10);
+      const items = Array.from(root.querySelectorAll('.js-pg-item'));
+      const pager = root.querySelector('.js-pager');
+      const key = root.dataset.pg || '';
+      const pages = Math.max(1, Math.ceil(items.length / size));
+      const page = Math.min(Math.max(pageState[key] || 0, 0), pages - 1);
+      pageState[key] = page;
+      items.forEach((el, i) => {
+        const on = i >= page * size && i < (page + 1) * size;
+        el.style.display = on ? '' : 'none';
+        const next = el.nextElementSibling;
+        if (next && next.classList.contains('js-pg-detail')) {
+          next.style.display = on ? '' : 'none';
+        }
+      });
+      if (!pager) return;
+      if (items.length <= size) { pager.innerHTML = ''; return; }
+      pager.innerHTML =
+        '<div class="flex items-center justify-between mt-2 pt-2 border-t border-slate-800 text-[11px] text-slate-400">' +
+        '<button type="button" data-pg-prev class="px-2 py-0.5 rounded border border-slate-700 hover:bg-slate-800 disabled:opacity-30"' + (page <= 0 ? ' disabled' : '') + '>← prev</button>' +
+        '<span class="font-mono tabular-nums">' + (page + 1) + ' / ' + pages + '</span>' +
+        '<button type="button" data-pg-next class="px-2 py-0.5 rounded border border-slate-700 hover:bg-slate-800 disabled:opacity-30"' + (page >= pages - 1 ? ' disabled' : '') + '>next →</button>' +
+        '</div>';
+    }
+    function paginateAll() { document.querySelectorAll('.js-paged').forEach(paginate); }
+
+    document.body.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('[data-pg-prev], [data-pg-next]');
+      if (!btn) return;
+      const root = btn.closest('.js-paged');
+      if (!root) return;
+      const key = root.dataset.pg || '';
+      pageState[key] = (pageState[key] || 0) + (btn.hasAttribute('data-pg-next') ? 1 : -1);
+      if (pageState[key] < 0) pageState[key] = 0;
+      paginate(root);
+    });
+
+    document.body.addEventListener('htmx:afterSwap', (e) => {
+      if (e.target && e.target.id === 'collection') paginateAll();
     });
 
     // ---- New-finding alerts: beep + toast ----

@@ -9,36 +9,48 @@ real OS binaries — so they run anywhere and would have caught the bug.
 Why the bug slipped through before: the enrichment/dashboard/judge
 layers were tested hard, but the collectors were waved off as
 "needs OS binaries". The crash was NOT in OS-binary territory — it
-was in `host_paths_for_home()` returning [] and the caller doing
+was in `HostPaths.for_home()` returning [] and the caller doing
 `[...][0]`. Pure logic, fully unit-testable. This file closes that gap.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 import avai.host_monitor as hm
-from avai.host_monitor import LinuxLaunchItemsCollector, host_path, host_paths_for_home
+from avai.host_monitor import LinuxLaunchItemsCollector
+from avai.host_monitor.runtime import HostPaths
+
+# HOST_PREFIX path translation, the Linux launch_items collector, and the
+# journald-dir probe all assume POSIX path semantics and a Linux filesystem
+# layout (forward-slash joins, /etc, systemd unit dirs). On Windows
+# pathlib produces backslash WindowsPaths and the assertions don't hold —
+# the behaviour under test never runs there, so these classes are skipped.
+_linux_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX path / Linux collector behaviour"
+)
 
 # ---------------------------------------------------------------------------
 # host_path — absolute-path translation under HOST_PREFIX
 # ---------------------------------------------------------------------------
 
 
+@_linux_only
 class TestHostPath:
     def test_passthrough_without_prefix(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "")
-        assert host_path("/etc/passwd") == Path("/etc/passwd")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
+        assert HostPaths.translate("/etc/passwd") == Path("/etc/passwd")
 
     def test_prepends_prefix_when_set(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "/host")
-        assert host_path("/etc/passwd") == Path("/host/etc/passwd")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
+        assert HostPaths.translate("/etc/passwd") == Path("/host/etc/passwd")
 
     def test_relative_path_is_passthrough_even_with_prefix(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "/host")
-        assert host_path("relative/dir") == Path("relative/dir")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
+        assert HostPaths.translate("relative/dir") == Path("relative/dir")
 
 
 # ---------------------------------------------------------------------------
@@ -47,15 +59,16 @@ class TestHostPath:
 # ---------------------------------------------------------------------------
 
 
+@_linux_only
 class TestHostPathsForHome:
     def test_absolute_template_returns_single_translated_path(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "/host")
-        out = host_paths_for_home("/etc/systemd/system")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
+        out = HostPaths.for_home("/etc/systemd/system")
         assert out == [Path("/host/etc/systemd/system")]
 
     def test_home_template_without_prefix_expands_user_home(self, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", "")
-        out = host_paths_for_home("~/.config/systemd/user")
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
+        out = HostPaths.for_home("~/.config/systemd/user")
         assert len(out) == 1
         assert str(out[0]).endswith("/.config/systemd/user")
         assert "~" not in str(out[0])  # expanduser ran
@@ -64,11 +77,11 @@ class TestHostPathsForHome:
         self, tmp_path, monkeypatch
     ):
         # Simulate /host/home/alice and /host/home/bob + /host/root.
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         (tmp_path / "home" / "alice").mkdir(parents=True)
         (tmp_path / "home" / "bob").mkdir(parents=True)
         (tmp_path / "root").mkdir()
-        out = host_paths_for_home("~/.config/systemd/user")
+        out = HostPaths.for_home("~/.config/systemd/user")
         names = sorted(str(p) for p in out)
         assert any("home/alice/.config/systemd/user" in p for p in names)
         assert any("home/bob/.config/systemd/user" in p for p in names)
@@ -82,13 +95,13 @@ class TestHostPathsForHome:
         # HOST_PREFIX is set, but neither <prefix>/home nor <prefix>/root
         # exist (e.g. only /proc and /sys were bind-mounted). The
         # function must return [] — and callers must tolerate it.
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
-        assert host_paths_for_home("~/.config/systemd/user") == []
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+        assert HostPaths.for_home("~/.config/systemd/user") == []
 
     def test_only_root_home_present(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         (tmp_path / "root").mkdir()
-        out = host_paths_for_home("~/.config/systemd/user")
+        out = HostPaths.for_home("~/.config/systemd/user")
         assert len(out) == 1
         assert "root/.config/systemd/user" in str(out[0])
 
@@ -104,13 +117,14 @@ def _write_unit(prefix: Path, rel_dir: str, name: str, body: str) -> None:
     (d / name).write_text(body, encoding="utf-8")
 
 
+@_linux_only
 class TestLinuxLaunchItemsCollect:
     def test_does_not_crash_when_no_home_or_root_mounted(self, tmp_path, monkeypatch):
         """THE regression test. Container mode with HOST_PREFIX set but
         no /host/home and no /host/root present. Pre-fix this raised
         IndexError and killed the collector; post-fix it must complete
         and still return the system units it can see."""
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         _write_unit(
             tmp_path,
             "/etc/systemd/system",
@@ -130,7 +144,7 @@ class TestLinuxLaunchItemsCollect:
         assert row["run_at_load"] == 1  # has [Install] WantedBy
 
     def test_collects_user_units_when_homes_present(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         _write_unit(
             tmp_path,
             "home/alice/.config/systemd/user",
@@ -143,11 +157,11 @@ class TestLinuxLaunchItemsCollect:
     def test_empty_prefix_tree_yields_nothing_no_crash(self, tmp_path, monkeypatch):
         # HOST_PREFIX points at an empty dir → no unit dirs exist → the
         # collector yields nothing and does not raise.
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         assert list(LinuxLaunchItemsCollector().collect()) == []
 
     def test_systemd_first_wins_dedup_across_dirs(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm, "HOST_PREFIX", str(tmp_path))
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         # Same unit name in /etc (higher precedence) and /lib.
         _write_unit(
             tmp_path,
@@ -270,3 +284,46 @@ class TestCronRows:
             )
         )
         assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# LinuxAuthEventsCollector._cmd — journalctl --directory selection in
+# container mode. Without the runtime-journal fallback, hosts with
+# volatile-only journald (Storage=volatile/auto, no /var/log/journal)
+# silently collected zero auth events from inside the container.
+# ---------------------------------------------------------------------------
+
+
+@_linux_only
+class TestLinuxAuthEventsJournalDir:
+    def _directory_arg(self, cmd):
+        return cmd[cmd.index("--directory") + 1] if "--directory" in cmd else None
+
+    def test_no_directory_flag_without_prefix(self, monkeypatch):
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
+        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        assert "--directory" not in cmd
+
+    def test_prefers_persistent_journal(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+        persistent = tmp_path / "var" / "log" / "journal"
+        runtime = tmp_path / "run" / "log" / "journal"
+        persistent.mkdir(parents=True)
+        runtime.mkdir(parents=True)
+        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        assert self._directory_arg(cmd) == str(persistent)
+
+    def test_falls_back_to_runtime_journal(self, monkeypatch, tmp_path):
+        # The regression: only the volatile runtime journal exists.
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+        runtime = tmp_path / "run" / "log" / "journal"
+        runtime.mkdir(parents=True)
+        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        assert self._directory_arg(cmd) == str(runtime)
+
+    def test_no_directory_flag_when_no_host_journal_present(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        assert "--directory" not in cmd

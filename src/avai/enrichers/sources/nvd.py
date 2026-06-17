@@ -14,6 +14,7 @@ from avai.enrichers.base import (
     Evidence,
     Indicator,
     IndicatorType,
+    RateLimitedError,
     VerdictHint,
 )
 from avai.enrichers.http import HttpClient
@@ -45,6 +46,11 @@ class NvdEnricher(Enricher):
             headers=headers,
             timeout=10.0,
         )
+        # NVD returns 403 when the (keyless) rate window is exceeded; treat
+        # it as a rate-limit so the chain backs off rather than recording a
+        # silent "no opinion" on every CVE under load.
+        if resp.status_code == 403:
+            raise RateLimitedError("nvd returned 403 (rate limited / over quota)")
         if resp.status_code != 200:
             return None
         vulns = (resp.json().get("vulnerabilities") or [])

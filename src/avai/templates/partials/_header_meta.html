@@ -1,8 +1,8 @@
 {% if latest_run %}
   host <span class="font-mono text-slate-400">{{ latest_run.hostname }}</span>
-  · last cycle <span class="font-mono text-slate-400">{{ latest_run.started_at }}</span>
+  · last cycle <span class="font-mono text-slate-400">{{ latest_run.started_at | datetime_fmt }}</span>
   {% if latest_run.finished_at %}
-    → <span class="font-mono text-slate-400">{{ latest_run.finished_at }}</span>
+    → <span class="font-mono text-slate-400">{{ latest_run.finished_at | datetime_fmt }}</span>
   {% endif %}
 {% else %}
   no runs yet — start <code class="text-slate-300">host_monitor.py</code>

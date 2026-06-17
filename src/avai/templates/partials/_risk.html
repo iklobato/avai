@@ -1,0 +1,65 @@
+{% from "partials/_macros.html" import card_header %}
+
+{% set grade_styles = {
+  'A': 'text-emerald-300 border-emerald-800 bg-emerald-900/30',
+  'B': 'text-lime-300 border-lime-800 bg-lime-900/30',
+  'C': 'text-amber-300 border-amber-800 bg-amber-900/30',
+  'D': 'text-orange-300 border-orange-800 bg-orange-900/30',
+  'F': 'text-red-300 border-red-800 bg-red-900/30',
+} %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5 h-full">
+  {{ card_header("posture score") }}
+
+  {% if risk %}
+    {% set gstyle = grade_styles.get(risk.grade, grade_styles['F']) %}
+    {% set delta = (risk.score - risk.prev_score) if risk.prev_score is not none else none %}
+    <div class="flex items-center gap-4">
+      <div class="flex items-center justify-center w-16 h-16 rounded-xl border text-3xl font-bold {{ gstyle }}">
+        {{ risk.grade }}
+      </div>
+      <div class="flex-1">
+        <div class="flex items-baseline gap-2">
+          <span class="text-2xl font-semibold text-slate-100 tabular-nums">{{ risk.score }}</span>
+          <span class="text-xs text-slate-500">/ 100</span>
+          {% if delta is not none and delta != 0 %}
+            <span class="text-xs font-mono {% if delta > 0 %}text-emerald-400{% else %}text-red-400{% endif %}">
+              {% if delta > 0 %}▲ +{{ delta }}{% else %}▼ {{ delta }}{% endif %}
+            </span>
+          {% elif delta == 0 %}
+            <span class="text-xs text-slate-600 font-mono">— no change</span>
+          {% endif %}
+        </div>
+        {% if spark_points %}
+          <svg viewBox="0 0 140 30" class="w-full max-w-[160px] h-8 mt-1" preserveAspectRatio="none">
+            <polyline points="{{ spark_points }}" fill="none" stroke="#38bdf8" stroke-width="1.5"
+                      stroke-linejoin="round" stroke-linecap="round" />
+          </svg>
+          <div class="text-[10px] text-slate-600">last {{ trend_len }} run(s)</div>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if risk.explanation %}
+      <p class="mt-3 text-xs text-slate-400 leading-relaxed">{{ risk.explanation }}</p>
+    {% endif %}
+
+    {% if drivers %}
+      <div class="mt-3 border-t border-slate-800 pt-3">
+        <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">what's costing points</div>
+        <ul class="space-y-1">
+          {% for d in drivers %}
+            <li class="flex items-center justify-between text-xs">
+              <span class="text-slate-300">{{ d.label }}</span>
+              <span class="font-mono text-red-400 tabular-nums">−{{ d.points }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% else %}
+      <p class="mt-3 text-xs text-emerald-400">No posture weaknesses detected.</p>
+    {% endif %}
+  {% else %}
+    <div class="text-slate-500 italic text-sm">no posture score yet — computed at the end of the next run.</div>
+  {% endif %}
+</div>

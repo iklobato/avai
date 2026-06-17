@@ -1,0 +1,54 @@
+{% from "partials/_macros.html" import card_header %}
+
+{% set vc = {
+  'malicious':  verdict_counts.get('malicious',  0),
+  'suspicious': verdict_counts.get('suspicious', 0),
+  'unknown':    verdict_counts.get('unknown',    0),
+  'benign':     verdict_counts.get('benign',     0),
+} %}
+{% set vc_total = vc.values() | sum %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5 h-full">
+  {{ card_header("verdicts") }}
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+    {# ----- all-time totals: donut + legend ----- #}
+    <div class="flex items-center gap-4">
+      <div class="relative w-20 h-20 flex-shrink-0">
+        <canvas id="verdict-donut"
+                class="js-verdict-donut"
+                data-malicious="{{ vc.malicious }}"
+                data-suspicious="{{ vc.suspicious }}"
+                data-unknown="{{ vc.unknown }}"
+                data-benign="{{ vc.benign }}"></canvas>
+        <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <span class="text-sm font-mono text-slate-200 tabular-nums">{{ vc_total }}</span>
+        </div>
+      </div>
+      <div class="flex-1 space-y-1 text-xs">
+        {% set rows = [
+          ('malicious',  'bg-red-500',     'text-red-300'),
+          ('suspicious', 'bg-amber-500',   'text-amber-300'),
+          ('unknown',    'bg-slate-500',   'text-slate-300'),
+          ('benign',     'bg-emerald-500', 'text-emerald-300'),
+        ] %}
+        {% for name, dot_cls, label_cls in rows %}
+          <div class="flex items-center justify-between">
+            <span class="flex items-center gap-2 {{ label_cls }}">
+              <span class="w-1.5 h-1.5 rounded-full {{ dot_cls }}"></span>{{ name }}
+            </span>
+            <span class="font-mono tabular-nums text-slate-300">{{ vc[name] }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    {# ----- last-12h trend (filled by JS from /api/chart/verdicts) ----- #}
+    <div class="flex flex-col">
+      <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">produced — last 12h</div>
+      <div class="flex-1 min-h-[10rem]">
+        <canvas id="verdict-chart"></canvas>
+      </div>
+    </div>
+  </div>
+</div>

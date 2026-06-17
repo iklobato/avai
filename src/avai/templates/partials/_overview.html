@@ -1,27 +1,16 @@
-{% from "partials/_macros.html" import verdict_pill %}
-
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
   <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">runs in db</div>
   <div class="text-3xl font-semibold text-slate-100">{{ runs_total }}</div>
 </div>
 
 <div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
-  <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">collectors (latest)</div>
-  <div class="flex items-baseline gap-2">
-    <span class="text-3xl font-semibold text-emerald-400">
-      {% if latest_run %}{{ latest_run.collectors_ok }}{% else %}–{% endif %}
-    </span>
-    <span class="text-sm text-slate-500">ok</span>
-    {% if latest_run and latest_run.collectors_failed %}
-      <span class="text-sm text-red-400 ml-3">{{ latest_run.collectors_failed }}</span>
-      <span class="text-sm text-slate-500">failed</span>
-    {% endif %}
-  </div>
-</div>
-
-<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
   <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">judgments since latest run</div>
   <div class="text-3xl font-semibold text-slate-100">{{ judged_this_run }}</div>
+  <div class="mt-1 text-[11px] text-slate-500"
+       title="Estimated equivalent public-API cost for the tokens spent judging (subscription/OAuth usage is not billed per-token)">
+    est. LLM cost
+    <span class="font-mono text-emerald-400">${{ "%.4f"|format(cost_this_run or 0.0) }}</span>
+  </div>
 </div>
 
 {% set vc = {

@@ -19,6 +19,23 @@ venv/
 /build/
 *.egg-info/
 
-# Landing-page screenshots/logo must ship with the site (global gitignore excludes assets/)
-!landing-page/assets/
-!landing-page/assets/**
+# Next.js app (web/) ships the screenshots/logo from public/assets
+# (global gitignore excludes assets/)
+!web/public/assets/
+!web/public/assets/**
+
+# web/lib is application source, not a build artifact (global gitignore has lib/)
+!web/lib/
+!web/lib/**
+
+# local secrets — never commit
+.env
+
+# Playwright MCP verification artifacts
+.playwright-mcp/
+*-resources.png
+
+# Opt-in YARA-Forge pack fetched by scripts/update_rules.py — never ship
+# in the wheel/sdist (mixed-license, needs a crypto-enabled yara). Users
+# fetch it post-install for their own environment.
+src/avai/rules/vendor/

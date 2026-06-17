@@ -125,13 +125,14 @@ class TestCirclHashlookup:
 
         return CirclHashlookupEnricher(http=http)
 
-    def test_hit_returns_benign(self):
+    def test_high_trust_hit_returns_benign(self):
+        # Real CIRCL response: trust signal is "hashlookup:trust" (0-100).
         http = _FakeHttp(
             _FakeResp(
                 json_body={
-                    "ProductName": "Windows 10 Notepad",
                     "FileName": "notepad.exe",
                     "FileSize": "12345",
+                    "hashlookup:trust": 100,
                 }
             )
         )
@@ -139,12 +140,34 @@ class TestCirclHashlookup:
         ev = e._fetch(Indicator(IndicatorType.SHA1, "a" * 40))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.BENIGN
-        assert "Notepad" in ev.summary
+        assert "notepad.exe" in ev.summary
 
     def test_not_found_returns_none(self):
         http = _FakeHttp(_FakeResp(status=404))
         e = self._enricher(http)
         assert e._fetch(Indicator(IndicatorType.SHA1, "a" * 40)) is None
+
+    def test_low_trust_hit_is_not_whitelisted(self):
+        # Regression: the source used to emit BENIGN (conf 0.9) for ANY 200
+        # response. A low hashlookup:trust score means the hash is known but
+        # untrusted — whitelisting it could suppress the judge on a bad
+        # binary. Below the threshold we must give no opinion.
+        http = _FakeHttp(
+            _FakeResp(
+                json_body={
+                    "FileName": "sketchy.exe",
+                    "hashlookup:trust": 10,
+                }
+            )
+        )
+        e = self._enricher(http)
+        assert e._fetch(Indicator(IndicatorType.SHA1, "b" * 40)) is None
+
+    def test_missing_trust_field_is_not_whitelisted(self):
+        # No trust field at all -> trust 0 -> no benign whitelist.
+        http = _FakeHttp(_FakeResp(json_body={"FileName": "x.exe"}))
+        e = self._enricher(http)
+        assert e._fetch(Indicator(IndicatorType.SHA1, "c" * 40)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -369,13 +392,42 @@ class TestOSV:
         e = self._enricher(http)
         assert e._fetch(Indicator(IndicatorType.PACKAGE, "ok@1.0")) is None
 
-    def test_cve_indicator_uses_id_query(self):
-        http = _FakeHttp(
-            _FakeResp(json_body={"vulns": [{"id": "CVE-2024-1", "summary": "x"}]})
-        )
+    def test_cve_indicator_uses_get_vulns_endpoint(self):
+        # CVE lookups must GET /v1/vulns/{id}; POST /v1/query {"id":...}
+        # returns HTTP 400 against the real API. The GET returns a single
+        # vuln object (not a {"vulns": [...]} envelope).
+        http = _FakeHttp(_FakeResp(json_body={"id": "CVE-2024-1", "summary": "x"}))
         e = self._enricher(http)
         ev = e._fetch(Indicator(IndicatorType.CVE, "CVE-2024-1"))
         assert ev is not None
+        method, url, _ = http.calls[0]
+        assert method == "GET"
+        assert url.endswith("/v1/vulns/CVE-2024-1")
+
+    def test_cve_alias_is_surfaced_for_forward_chain(self):
+        # Regression: OSV's primary id is often GHSA-/PYSEC-, with the CVE
+        # only in aliases. details["vuln_ids"] used to carry the primary id
+        # only, so the chain's CVE forward-enrichment (NVD CVSS, CISA KEV)
+        # never fired. Aliases must be surfaced too.
+        http = _FakeHttp(
+            _FakeResp(
+                json_body={
+                    "vulns": [
+                        {
+                            "id": "GHSA-1234-aaaa-bbbb",
+                            "aliases": ["CVE-2024-9999"],
+                            "summary": "rce",
+                        },
+                    ],
+                }
+            )
+        )
+        e = self._enricher(http)
+        ev = e._fetch(Indicator(IndicatorType.PACKAGE, "pkg@1.0"))
+        assert ev is not None
+        vuln_ids = ev.details["vuln_ids"]
+        assert "CVE-2024-9999" in vuln_ids  # alias surfaced
+        assert "GHSA-1234-aaaa-bbbb" in vuln_ids  # primary id kept
 
 
 # ---------------------------------------------------------------------------

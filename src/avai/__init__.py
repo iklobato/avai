@@ -9,8 +9,8 @@ Public entry points:
 
 Or programmatically:
 
-    from avai.host_monitor import build_snapshot_collectors, Sink, Runner
+    from avai.host_monitor import HostFactory, Sink, Runner
     from avai.dashboard import app as dashboard_app
 """
 
-__version__ = "0.3.2"
+__version__ = "0.5.0"

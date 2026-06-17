@@ -35,14 +35,44 @@ class TestEnsureDbExists:
         _ensure_db_exists(str(db))
         assert db.exists()
 
-    def test_is_no_op_when_file_already_populated(self, tmp_path):
-        db = tmp_path / "preexisting.db"
-        # Touch a non-trivial file so _ensure thinks it's real.
-        db.write_bytes(b"x" * 100)
-        mtime_before = db.stat().st_mtime_ns
-        _ensure_db_exists(str(db))
-        # No rewrite.
-        assert db.stat().st_mtime_ns == mtime_before
+    def test_adds_missing_tables_to_existing_db_preserving_data(self, tmp_path):
+        """Regression: a DB written by an OLDER monitor lacks a newly-added
+        table (e.g. control_state). _ensure_db_exists must add it on startup
+        WITHOUT touching existing data, so the read-only dashboard doesn't
+        500 on the new panel. This is the general 'every new table' fix."""
+        import sqlite3
+
+        from avai.host_monitor import CollectionRun, Sink
+
+        db = tmp_path / "old.db"
+        Sink(create_engine(f"sqlite:///{db}")).setup()  # full current schema
+        with Session(_engine_rw(str(db))) as s:  # seed real data
+            s.add(
+                CollectionRun(
+                    run_id="r1",
+                    started_at="2026-01-01T00:00:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.commit()
+        # Emulate an old DB: drop the table a later version introduced.
+        con = sqlite3.connect(str(db))
+        con.execute("DROP TABLE control_state")
+        con.commit()
+        con.close()
+
+        _ensure_db_exists(str(db))  # must re-add it, idempotently
+
+        con = sqlite3.connect(str(db))
+        tables = {
+            r[0]
+            for r in con.execute("select name from sqlite_master where type='table'")
+        }
+        runs = con.execute("select count(*) from collection_runs").fetchone()[0]
+        con.close()
+        assert "control_state" in tables  # missing table added
+        assert runs == 1  # existing data preserved, not wiped
 
     def test_schema_is_queryable_after_create(self, tmp_path):
         """The bug it regresses against: dashboard opens the file with
@@ -98,6 +128,21 @@ class TestDashboardEndpoints:
         assert r.status_code == 200
         assert b"<html" in r.data or b"<!doctype html" in r.data.lower()
 
+    def test_findings_huge_page_does_not_500(self, client):
+        # Regression: an out-of-range ?page= used to build an OFFSET past
+        # SQLite's 64-bit INTEGER range, raising OverflowError -> HTTP 500.
+        # findings() now clamps page to the last page (like _paginate).
+        for page in ("10000000000000000000", "99999999", "-5"):
+            r = client.get(f"/fragments/findings?page={page}&per_page=200")
+            assert r.status_code == 200, f"page={page} returned {r.status_code}"
+
+    def test_security_headers_present(self, client):
+        r = client.get("/")
+        assert r.headers.get("X-Frame-Options") == "DENY"
+        assert r.headers.get("X-Content-Type-Options") == "nosniff"
+        assert "frame-ancestors 'none'" in r.headers.get("Content-Security-Policy", "")
+        assert r.headers.get("Server") == "avai"
+
     def test_notifications_endpoint_returns_empty_items(self, client):
         # This is what the Docker HEALTHCHECK hits.
         r = client.get("/api/notifications/new?since=2099-01-01")
@@ -131,15 +176,745 @@ class TestDashboardEndpoints:
         [
             "/fragments/header-meta",
             "/fragments/overview",
+            "/fragments/incident",
+            "/fragments/risk",
             "/fragments/sysint",
             "/fragments/errors",
             "/fragments/row-counts",
             "/fragments/runs",
+            # merged panels
+            "/fragments/posture",
+            "/fragments/verdicts",
+            "/fragments/collection",
+            "/fragments/network",
+            "/fragments/network-topology",
+            "/fragments/network-exposure",
+            "/fragments/vulnerabilities",
         ],
     )
     def test_each_htmx_fragment_returns_200_on_empty_db(self, client, path):
         r = client.get(path)
         assert r.status_code == 200, f"{path} → {r.status_code}"
+
+    def test_posture_merges_risk_and_integrity(self, client):
+        body = client.get("/fragments/posture").data.decode()
+        # both sub-panels present in one panel
+        assert "posture score" in body
+        assert "system integrity" in body
+
+    def test_verdicts_merges_donut_and_trend(self, client):
+        body = client.get("/fragments/verdicts").data.decode()
+        assert 'id="verdict-donut"' in body  # all-time totals donut
+        assert 'id="verdict-chart"' in body  # 12h trend canvas
+
+    def test_collection_merges_runs_errors_rowcounts(self, client):
+        body = client.get("/fragments/collection").data.decode()
+        assert "rows per collector" in body
+        assert "recent runs" in body
+        assert "collector errors" in body
+
+    def test_network_tabs_present(self, client):
+        body = client.get("/fragments/network").data.decode()
+        assert "listening ports" in body
+        assert "outbound flows" in body
+        assert "dns queries" in body
+        assert "topology" in body
+        assert "exposure" in body
+        assert "js-net-tab" in body
+
+    def test_network_exposure_renders_rows_with_verdicts(self, client):
+        # A configured proxy and an active remote login session (with a
+        # verdict joined on content_hash/collector) must surface in the
+        # exposure panel.
+        from avai.host_monitor import (
+            CollectionRun,
+            Judgement,
+            LoginSessionRow,
+            ProxyConfigRow,
+        )
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                ProxyConfigRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="p1",
+                    scope="https",
+                    host="10.0.0.9",
+                    port="8080",
+                )
+            )
+            s.add(
+                LoginSessionRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="l1",
+                    user="root",
+                    tty="pts/0",
+                    source="203.0.113.7",
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="l1",
+                    collector="login_sessions",
+                    verdict="malicious",
+                    category="access",
+                    confidence=0.8,
+                    reasoning="remote root login from unknown IP",
+                    remediation="kill session",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/network-exposure").data.decode()
+        assert "10.0.0.9" in body  # proxy host
+        assert "203.0.113.7" in body  # login source
+        assert "malicious" in body  # joined verdict
+        assert "remote root login from unknown IP" in body  # reasoning
+
+        # search filter narrows to matching rows only
+        filtered = client.get("/fragments/network-exposure?q=10.0.0.9").data.decode()
+        assert "10.0.0.9" in filtered
+        assert "203.0.113.7" not in filtered
+
+    def test_file_scan_finding_renders_rule_and_path(self, client):
+        # A YARA match (file_scan collector) must render its rule + path in
+        # the findings table — regression for file_scan missing from the
+        # dashboard's COLLECTOR_MODELS / DISPLAY_FIELDS maps.
+        from avai.host_monitor import CollectionRun, FileScanRow, Judgement
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                FileScanRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="fs1",
+                    path="/usr/local/bin/dropper",
+                    sha256="a" * 64,
+                    rule="SUSP_Dropper_Gen",
+                    namespace="gen_dropper",
+                    tags_json='["FILE"]',
+                    meta_json='{"author": "Florian Roth"}',
+                    scan_source="bin_dirs",
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="fs1",
+                    collector="file_scan",
+                    verdict="malicious",
+                    category="execution",
+                    confidence=0.9,
+                    reasoning="YARA rule matched a known dropper pattern",
+                    remediation="quarantine the binary",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/findings").data.decode()
+        assert "SUSP_Dropper_Gen" in body  # the matched rule name
+        assert "/usr/local/bin/dropper" in body  # the scanned path
+        assert "malicious" in body
+
+    def test_network_panel_is_an_accessible_tablist(self, client):
+        # WAI-ARIA tabs pattern: the tab strip must be a tablist of tabs that
+        # control the shared panel, with exactly one tab pre-selected.
+        body = client.get("/fragments/network").data.decode()
+        assert 'role="tablist"' in body
+        assert 'role="tab"' in body
+        assert 'role="tabpanel"' in body
+        assert 'aria-controls="network-content"' in body
+        # exactly one selected tab (the first), the rest are not
+        assert body.count('aria-selected="true"') == 1
+        assert 'aria-selected="false"' in body
+
+    def test_filter_controls_have_accessible_labels(self, client):
+        # WCAG 1.3.1/3.3.2 — placeholder is not a label. Every search box and
+        # select in the data panels must carry an aria-label. The panels only
+        # render their filter bar once a run exists, so seed one first.
+        from avai.host_monitor import CollectionRun
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.commit()
+
+        for path in (
+            "/fragments/dns-queries",
+            "/fragments/listening-ports",
+            "/fragments/findings",
+            "/fragments/network-topology",
+            "/fragments/network-exposure",
+        ):
+            body = client.get(path).data.decode()
+            assert "aria-label=" in body, f"{path} has an unlabelled control"
+
+    def test_dns_pill_routes_through_shared_macro_with_confidence(self, client):
+        # Regression for centralising the verdict palette: the per-partial
+        # colour maps were removed in favour of the shared verdict_pill macro,
+        # which must still render the verdict text AND the confidence suffix.
+        from avai.host_monitor import CollectionRun, DnsQueryRow, Judgement
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                DnsQueryRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="d1",
+                    qname="evil.example.com",
+                    qtype="A",
+                    server_ip="9.9.9.9",
+                    process="curl",
+                    count=3,
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="d1",
+                    collector="dns_queries",
+                    verdict="malicious",
+                    category="c2",
+                    confidence=0.91,
+                    reasoning="known bad domain",
+                    remediation="block",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/dns-queries").data.decode()
+        assert "evil.example.com" in body
+        assert "malicious" in body  # pill verdict text
+        assert "91%" in body  # confidence suffix from the shared macro
+
+    def test_network_topology_renders_rows_with_verdicts(self, client):
+        # A configured resolver and an ARP entry (with a verdict joined on
+        # content_hash/collector) must surface in the topology panel.
+        from avai.host_monitor import (
+            ArpEntryRow,
+            CollectionRun,
+            DnsResolverRow,
+            Judgement,
+        )
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                DnsResolverRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="r1",
+                    server="9.9.9.9",
+                    scope="scutil",
+                    search="lan",
+                    interface="en0",
+                )
+            )
+            s.add(
+                ArpEntryRow(
+                    run_id="run1",
+                    collected_at="2026-05-30T12:00:00Z",
+                    content_hash="a1",
+                    ip="192.168.1.1",
+                    mac="de:ad:be:ef:00:01",
+                    interface="en0",
+                    flags="",
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="a1",
+                    collector="arp_table",
+                    verdict="suspicious",
+                    category="mitm",
+                    confidence=0.6,
+                    reasoning="new mac for the gateway",
+                    remediation="verify",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/network-topology").data.decode()
+        assert "9.9.9.9" in body  # resolver
+        assert "de:ad:be:ef:00:01" in body  # arp mac
+        assert "suspicious" in body  # joined verdict
+        assert "new mac for the gateway" in body  # reasoning
+
+        # search filter narrows to matching rows only
+        filtered = client.get("/fragments/network-topology?q=9.9.9.9").data.decode()
+        assert "9.9.9.9" in filtered
+        assert "de:ad:be:ef:00:01" not in filtered
+
+    def test_vulnerabilities_panel_renders_cves_and_kev(self, client):
+        import json as _json
+
+        from avai.dashboard import Base
+        from avai.enrichers.cache import register_schema
+
+        model = register_schema(Base)
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                model(
+                    source="osv",
+                    indicator_type="package",
+                    indicator_value="openssl@3.0.2",
+                    verdict_hint="suspicious",
+                    confidence=0.75,
+                    summary="OSV: 1 advisory hit(s): CVE-2024-0001",
+                    details_json=_json.dumps({"vuln_ids": ["CVE-2024-0001"]}),
+                    fetched_at="2026-05-30T12:00:00Z",
+                )
+            )
+            # forward-chaining enriched that CVE: KEV (cisa_kev) + CVSS (nvd)
+            s.add(
+                model(
+                    source="cisa_kev",
+                    indicator_type="cve",
+                    indicator_value="CVE-2024-0001",
+                    verdict_hint="malicious",
+                    confidence=0.98,
+                    summary="actively exploited",
+                    details_json="{}",
+                    fetched_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.add(
+                model(
+                    source="nvd",
+                    indicator_type="cve",
+                    indicator_value="CVE-2024-0001",
+                    verdict_hint="malicious",
+                    confidence=0.7,
+                    summary="NVD: CVSS=9.8 CRITICAL",
+                    details_json=_json.dumps(
+                        {"cvss31": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}}
+                    ),
+                    fetched_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.add(
+                model(
+                    source="endoflife",
+                    indicator_type="os_version",
+                    indicator_value="macos@12",
+                    verdict_hint="suspicious",
+                    confidence=0.6,
+                    summary="EOL since 2024",
+                    details_json="{}",
+                    fetched_at="2026-05-30T12:00:00Z",
+                )
+            )
+            # a benign endoflife row must NOT appear (still-supported OS)
+            s.add(
+                model(
+                    source="endoflife",
+                    indicator_type="os_version",
+                    indicator_value="macos@15",
+                    verdict_hint="benign",
+                    confidence=0.1,
+                    summary="supported",
+                    details_json="{}",
+                    fetched_at="2026-05-30T12:00:00Z",
+                )
+            )
+            s.commit()
+        body = client.get("/fragments/vulnerabilities").data.decode()
+        assert "openssl@3.0.2" in body and "CVE-2024-0001" in body
+        assert "KEV" in body  # forward-chained actively-exploited flag
+        assert "9.8" in body  # forward-chained CVSS from NVD
+        assert "macos@12" in body  # EOL surfaced
+        assert "macos@15" not in body  # benign filtered out
+        # the KEV/critical package must rank before the EOL OS
+        assert body.index("openssl@3.0.2") < body.index("macos@12")
+
+    def test_incident_fragment_empty_shows_placeholder(self, client):
+        r = client.get("/fragments/incident")
+        assert r.status_code == 200
+        assert b"no incident digest yet" in r.data
+
+    def test_incident_fragment_renders_latest_narrative(self, client):
+        from avai.host_monitor import IncidentNarrativeRow
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                IncidentNarrativeRow(
+                    created_at="2026-05-30T12:00:00Z",
+                    run_id="r1",
+                    model="m",
+                    severity="critical",
+                    headline="C2 beacon from /tmp binary",
+                    summary="A novel binary beaconed to a flagged IP.",
+                    timeline_json=(
+                        '[{"time":"2026-05-30T18:54","title":"binary launched",'
+                        '"category":"command_and_control","detail":"hit 9.9.9.9"}]'
+                    ),
+                    actions_json=(
+                        '[{"priority":"immediate","title":"kill process",'
+                        '"command":"kill 123","detail":"stop it"}]'
+                    ),
+                    finding_count=2,
+                    finding_hashes='["a","b"]',
+                )
+            )
+            s.commit()
+        r = client.get("/fragments/incident")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "C2 beacon from /tmp binary" in body
+        assert "critical" in body
+        assert "2 active findings" in body
+        # structured timeline rendered as a vertical timeline, not raw JSON
+        assert 'class="timeline"' in body
+        assert "binary launched" in body
+        assert "command and control" in body  # underscore → space in chip
+        # structured actions rendered as cards
+        assert "kill process" in body
+        assert "kill 123" in body
+        assert '"title":' not in body  # raw JSON must not leak through
+
+    def test_incident_legacy_narrative_still_renders(self, client):
+        # A digest written before the structured format (only the old
+        # `narrative` field) must still render via the markdown fallback,
+        # with any injected <script> stripped.
+        from avai.host_monitor import IncidentNarrativeRow
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                IncidentNarrativeRow(
+                    created_at="2026-05-30T13:00:00Z",
+                    run_id="r2",
+                    model="m",
+                    severity="high",
+                    headline="legacy",
+                    narrative="ok <script>alert(1)</script> **done**",
+                    finding_count=1,
+                    finding_hashes="[]",
+                )
+            )
+            s.commit()
+        r = client.get("/fragments/incident")
+        assert r.status_code == 200
+        assert b"<script" not in r.data  # sanitised
+        assert b"<strong>done</strong>" in r.data  # markdown fallback rendered
+
+    def test_findings_surface_novel_badge_and_context(self, client):
+        # A finding carrying the baseline novelty + correlated process story
+        # must render the 'novel' badge and the behavioural-context block.
+        from avai.host_monitor import CollectionRun, Judgement
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="hh",
+                    collector="processes",
+                    verdict="malicious",
+                    category="persistence",
+                    confidence=0.9,
+                    reasoning="bad",
+                    remediation="kill",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",  # == run start → active
+                    novel=1,
+                    context_json=(
+                        '{"baseline":{"novel":true,"first_seen":"2026-05-30T11:59",'
+                        '"times_seen":2,"host_runs":20,"baseline_established":true},'
+                        '"related":{"listening_ports":["0.0.0.0:4444"],'
+                        '"outbound_flows":[{"dst":"9.9.9.9:443","service":"https","packets":120}]}}'
+                    ),
+                )
+            )
+            s.commit()
+        r = client.get("/fragments/findings")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "novel" in body  # badge
+        assert "behavioural context" in body  # detail section
+        assert "0.0.0.0:4444" in body  # correlated listening port
+        assert "9.9.9.9:443" in body  # correlated outbound flow
+
+    def test_risk_fragment_renders_score_and_drivers(self, client):
+        from avai.host_monitor import RiskScoreRow
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                RiskScoreRow(
+                    created_at="2026-05-30T12:00:00Z",
+                    run_id="r1",
+                    score=72,
+                    grade="C",
+                    prev_score=85,
+                    drivers_json='[{"label":"Firewall off","points":15}]',
+                    explanation="Score down 13. New: Firewall off.",
+                )
+            )
+            s.commit()
+        r = client.get("/fragments/risk")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert ">C<" in body or "C" in body  # grade
+        assert "72" in body  # score
+        assert "Firewall off" in body  # driver
+        assert "−15" in body or "-15" in body  # driver points
+        assert "<polyline" in body  # sparkline (1 point series)
+        assert "Score down 13" in body  # explanation
+
+    def test_risk_fragment_empty_shows_placeholder(self, client):
+        r = client.get("/fragments/risk")
+        assert r.status_code == 200
+        assert b"no posture score yet" in r.data
+
+    def test_overview_shows_total_llm_cost(self, client):
+        from avai.host_monitor import CollectionRun, Judgement
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            for h, c in (("a", 0.001), ("b", 0.0005)):
+                s.add(
+                    Judgement(
+                        content_hash=h,
+                        collector="processes",
+                        verdict="benign",
+                        category="none",
+                        confidence=0.9,
+                        reasoning="",
+                        remediation="",
+                        model="m",
+                        created_at="2026-05-30T12:00:30Z",
+                        last_seen_at="2026-05-30T12:00:00Z",
+                        cost_usd=c,
+                    )
+                )
+            s.commit()
+        r = client.get("/fragments/overview")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "est. LLM cost" in body
+        assert "$0.0015" in body  # 0.001 + 0.0005, summed since the run
+
+    def test_row_counts_shows_total_and_delta(self, client):
+        from avai.host_monitor import CollectionRun, ProcessRow
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            for rid, ts in (
+                ("r0", "2026-05-30T11:00:00Z"),
+                ("r1", "2026-05-30T12:00:00Z"),
+            ):
+                s.add(
+                    CollectionRun(
+                        run_id=rid,
+                        started_at=ts,
+                        finished_at=ts,
+                        hostname="h",
+                        lookback_min=5,
+                    )
+                )
+            for i in range(3):  # previous run: 3 processes
+                s.add(
+                    ProcessRow(
+                        pid=i,
+                        name=f"a{i}",
+                        run_id="r0",
+                        collected_at="2026-05-30T11:00:00Z",
+                    )
+                )
+            for i in range(5):  # latest run: 5 processes → delta +2
+                s.add(
+                    ProcessRow(
+                        pid=i,
+                        name=f"b{i}",
+                        run_id="r1",
+                        collected_at="2026-05-30T12:00:00Z",
+                    )
+                )
+            s.commit()
+        r = client.get("/fragments/row-counts")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "total" in body  # summary total
+        assert "▲ +2" in body  # processes grew 3 → 5
+        assert "empty" in body  # other collectors have 0 rows
+
+    def test_finding_detail_shows_per_judgement_cost(self, client):
+        from avai.host_monitor import CollectionRun, Judgement
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="run1",
+                    started_at="2026-05-30T12:00:00Z",
+                    finished_at="2026-05-30T12:01:00Z",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.add(
+                Judgement(
+                    content_hash="hh",
+                    collector="processes",
+                    verdict="malicious",
+                    category="persistence",
+                    confidence=0.9,
+                    reasoning="bad",
+                    remediation="kill",
+                    model="m",
+                    created_at="2026-05-30T12:00:30Z",
+                    last_seen_at="2026-05-30T12:00:00Z",
+                    cost_usd=0.000123,
+                )
+            )
+            s.commit()
+        r = client.get("/fragments/findings")
+        assert r.status_code == 200
+        body = r.data.decode()
+        assert "est. LLM cost" in body
+        assert "$0.000123" in body
+
+
+class TestRowCountsDelta:
+    def test_delta_and_is_new(self, tmp_path):
+        from avai.dashboard import row_counts
+        from avai.host_monitor import ListeningPortRow, ProcessRow, Sink
+
+        eng = create_engine(
+            f"sqlite:///{tmp_path / 'rc.db'}",
+            connect_args={"check_same_thread": False},
+        )
+        sink = Sink(eng)
+        sink.setup()
+        prev, cur = "2026-05-30T11:00:00Z", "2026-05-30T12:00:00Z"
+        sink.write(
+            ProcessRow,
+            [
+                {"pid": i, "name": f"p{i}", "run_id": "r0", "collected_at": prev}
+                for i in range(3)
+            ],
+        )
+        sink.write(
+            ProcessRow,
+            [
+                {"pid": i, "name": f"p{i}", "run_id": "r1", "collected_at": cur}
+                for i in range(5)
+            ],
+        )
+        sink.write(
+            ListeningPortRow,
+            [{"pid": 1, "laddr_port": 22, "run_id": "r1", "collected_at": cur}],
+        )
+        with Session(eng) as s:
+            # snapshot collectors are counted by run_id now
+            counts = {c["name"]: c for c in row_counts(s, "r1", cur, "r0", prev)}
+        assert counts["processes"]["rows"] == 5
+        assert counts["processes"]["delta"] == 2  # 5 − 3
+        assert counts["processes"]["is_new"] is False
+        assert counts["listening_ports"]["rows"] == 1
+        assert counts["listening_ports"]["is_new"] is True  # 0 → 1
+
+
+class TestDatetimeFmt:
+    def test_formats_iso_to_human_utc(self):
+        from avai.dashboard import _datetime_fmt
+
+        assert (
+            _datetime_fmt("2026-05-30T18:57:20+00:00") == "May 30, 2026 · 18:57:20 UTC"
+        )
+
+    def test_naive_timestamp_assumed_utc(self):
+        from avai.dashboard import _datetime_fmt
+
+        assert _datetime_fmt("2026-05-30T18:57:20") == "May 30, 2026 · 18:57:20 UTC"
+
+    def test_non_utc_offset_converted_to_utc(self):
+        from avai.dashboard import _datetime_fmt
+
+        # 20:57 +02:00 == 18:57 UTC
+        assert (
+            _datetime_fmt("2026-05-30T20:57:20+02:00") == "May 30, 2026 · 18:57:20 UTC"
+        )
+
+    def test_empty_and_garbage_pass_through(self):
+        from avai.dashboard import _datetime_fmt
+
+        assert _datetime_fmt("") == ""
+        assert _datetime_fmt("not-a-date") == "not-a-date"
+
+
+def _engine_rw(db_path):
+    # The dashboard opens read-only; tests need a writable engine to seed.
+    return create_engine(
+        f"sqlite:///{db_path}", connect_args={"check_same_thread": False}
+    )
 
     def test_findings_fragment_supports_pagination_param(self, client):
         # Empty DB but the param-parsing must not crash.
@@ -286,7 +1061,7 @@ class TestLatestRunFallback:
 
     def _sink(self, tmp_path):
         engine = create_engine(
-            f"sqlite:///{tmp_path/'r.db'}", connect_args={"check_same_thread": False}
+            f"sqlite:///{tmp_path / 'r.db'}", connect_args={"check_same_thread": False}
         )
         s = Sink(engine)
         s.setup()
@@ -316,3 +1091,104 @@ class TestLatestRunFallback:
         sink = self._sink(tmp_path)
         with Session(sink.engine) as s:
             assert latest_run(s) is None
+
+
+# ---------------------------------------------------------------------------
+# Cooperative control plane — token auth + control writes
+# ---------------------------------------------------------------------------
+
+
+class TestControlPlane:
+    def _state(self):
+        from avai.dashboard.control import read_control_state
+
+        with app.app_context():
+            return read_control_state()
+
+    def test_fragment_control_renders(self, client):
+        r = client.get("/fragments/control")
+        assert r.status_code == 200
+        assert b"monitor control" in r.data
+
+    def test_panel_survives_missing_control_table(self, client):
+        """Belt-and-suspenders: even if control_state is somehow absent, the
+        panel degrades to 'offline' (200) instead of 500ing."""
+        import sqlite3
+
+        con = sqlite3.connect(app.config["DB_PATH"])
+        con.execute("DROP TABLE IF EXISTS control_state")
+        con.commit()
+        con.close()
+        from avai.dashboard.control import read_control_state
+
+        with app.app_context():
+            assert read_control_state() is None  # degraded, did not raise
+        assert client.get("/fragments/control").status_code == 200
+
+    def test_post_without_token_is_forbidden(self, client, monkeypatch):
+        monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
+        # Even supplying a header: fail closed when the server has no token.
+        r = client.post("/control/pause", headers={"X-Avai-Token": "x"})
+        assert r.status_code == 403
+
+    def test_post_with_wrong_token_is_forbidden(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post("/control/pause", headers={"X-Avai-Token": "nope"})
+        assert r.status_code == 403
+
+    def test_pause_resume_writes_row(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        assert client.post("/control/pause", headers=h).status_code == 200
+        assert self._state()["paused"] == 1
+        assert client.post("/control/resume", headers=h).status_code == 200
+        assert self._state()["paused"] == 0
+
+    def test_scan_now_bumps_nonce(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        before = self._state()
+        before_nonce = before["scan_now_nonce"] if before else 0
+        client.post("/control/scan-now", headers=h)
+        assert self._state()["scan_now_nonce"] == before_nonce + 1
+
+    def test_collector_toggle(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        client.post("/control/collector/network_flows/off", headers=h)
+        assert "network_flows" in (self._state()["disabled_collectors"] or "")
+        client.post("/control/collector/network_flows/on", headers=h)
+        assert "network_flows" not in (self._state()["disabled_collectors"] or "")
+
+    def test_unknown_collector_is_rejected(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post(
+            "/control/collector/bogus/off", headers={"X-Avai-Token": "secret"}
+        )
+        assert r.status_code == 400
+
+    def test_settings_update(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        client.post(
+            "/control/settings",
+            headers=h,
+            data={"interval": "45", "judge": "0", "enrich": "1"},
+        )
+        st = self._state()
+        assert st["interval_override"] == 45
+        assert st["judge_enabled"] == 0 and st["enrich_enabled"] == 1
+
+    def test_maintenance_queues_command(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        h = {"X-Avai-Token": "secret"}
+        client.post("/control/maintenance/prune", headers=h)
+        st = self._state()
+        assert st["command"] == "prune" and st["command_nonce"] == 1
+
+    def test_unknown_maintenance_action_is_rejected(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post(
+            "/control/maintenance/bogus", headers={"X-Avai-Token": "secret"}
+        )
+        assert r.status_code == 400

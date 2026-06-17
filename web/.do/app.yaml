@@ -1,0 +1,67 @@
+# DigitalOcean App Platform spec for the avai-landing app (getavai.com).
+#
+# A SINGLE Next.js service (web/) serves everything: the marketing landing page
+# at /, the blog at /blog and /blog/[slug], and the AutoSEO webhook at
+# POST /webhooks/autoseo. It replaced the old static-site + Flask-service split
+# (which caused App Platform prefix-strip bugs). Articles persist in the shared
+# managed Postgres cluster db-postgresql-nyc3-86715 (isolated `avai` database);
+# images are hotlinked from AutoSEO's CDN.
+#
+# Apply (inject real secrets into a local copy first — never commit them):
+#   doctl apps update b7308f12-6cd4-4c0f-b248-e82f558b40f5 --spec <local-copy>
+#
+# Secrets to inject at deploy:
+#   AUTOSEO_WEBHOOK_TOKEN  the shared Bearer/HMAC secret
+#   DATABASE_URL           postgresql://avai_app:<pw>@<cluster-host>:25060/avai
+#                          (NO ?sslmode= — node-postgres v8.13+ treats sslmode
+#                          as verify-full and rejects DO's self-signed chain;
+#                          DATABASE_SSL=require below drives TLS instead.)
+# The avai-landing app is already a trusted source on the DB cluster.
+name: avai-landing
+region: nyc
+
+domains:
+  - domain: www.getavai.com
+    type: PRIMARY
+  - domain: getavai.com
+    type: ALIAS
+
+services:
+  - name: web
+    dockerfile_path: web/Dockerfile
+    source_dir: /web
+    github:
+      repo: iklobato/avai
+      branch: main
+      deploy_on_push: true
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /
+      initial_delay_seconds: 20
+      period_seconds: 30
+      timeout_seconds: 5
+      failure_threshold: 3
+    envs:
+      - key: AUTOSEO_WEBHOOK_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_AT_DEPLOY
+      - key: AUTOSEO_SITE_URL
+        scope: RUN_TIME
+        value: https://www.getavai.com
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        type: SECRET
+        value: REPLACE_AT_DEPLOY
+      # Force TLS without CA verification (DO managed PG uses a self-signed
+      # chain). lib/db.ts reads this; keep sslmode OUT of DATABASE_URL.
+      - key: DATABASE_SSL
+        scope: RUN_TIME
+        value: require
+
+ingress:
+  rules:
+    - component: { name: web }
+      match: { path: { prefix: / } }

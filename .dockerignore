@@ -36,3 +36,21 @@ Dockerfile
 
 # Logs
 *.log
+
+# Host secrets — never ship to the build daemon (not COPY'd into the
+# image either, but keep them out of the context entirely)
+.env
+.env.*
+!.env.example
+
+# Build/test/site artifacts that bloat the context but aren't needed to
+# build the image
+dist/
+build/
+tests/
+docs/
+web/
+*.png
+.coverage
+.pytest_cache/
+.ruff_cache/

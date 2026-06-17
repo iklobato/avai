@@ -1,0 +1,7 @@
+{# Merged posture panel: risk score (with drivers/trend) above the full
+   system-integrity checklist. Reuses the standalone partials so there's a
+   single source of truth for each. #}
+<div class="space-y-4">
+  {% include "partials/_risk.html" %}
+  {% include "partials/_sysint.html" %}
+</div>

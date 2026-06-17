@@ -1,0 +1,138 @@
+{% from "partials/_macros.html" import card_header, verdict_pill %}
+
+{# Network neighborhood & topology — DNS resolvers, ARP (IPv4) and NDP (IPv6)
+   neighbor caches, and the routing table. The DNS-hijack / ARP-spoof /
+   route-redirection surfaces. Tables are small and bounded, so all rows show
+   behind one shared verdict + search filter (no pagination). #}
+
+{# ----- reusable section renderer: header + counts + table (defined before
+   use — Jinja2 does not hoist macros) ----- #}
+{% macro _topo_section(title, subtitle, rows, counts, columns) %}
+  <div class="mb-6 last:mb-0">
+    <div class="flex items-baseline justify-between mb-2">
+      <div>
+        <span class="text-slate-200 text-sm font-medium">{{ title }}</span>
+        <span class="text-slate-500 text-xs ml-2">{{ subtitle }}</span>
+      </div>
+      <div class="flex items-center gap-2 text-[10px] uppercase tracking-wider">
+        <span class="text-slate-500">{{ counts.total }} rows</span>
+        {% if counts.malicious %}
+          <span class="text-red-300">{{ counts.malicious }} malicious</span>
+        {% endif %}
+        {% if counts.suspicious %}
+          <span class="text-amber-300">{{ counts.suspicious }} suspicious</span>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if rows %}
+      <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead>
+          <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+            <th class="text-left font-semibold pb-2">verdict</th>
+            {% for label, _ in columns %}
+              <th class="text-left font-semibold pb-2">{{ label }}</th>
+            {% endfor %}
+            <th class="text-left font-semibold pb-2 w-1/4">why</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/80">
+          {% for r in rows %}
+            <tr class="hover:bg-slate-800/40 transition-colors">
+              <td class="py-2">
+                {% if r.verdict %}{{ verdict_pill(r.verdict) }}
+                {% else %}<span class="text-slate-600 text-[10px] uppercase tracking-wider">—</span>{% endif %}
+              </td>
+              {% for _, key in columns %}
+                <td class="py-2 font-mono break-all {{ 'text-slate-200' if r[key] else 'text-slate-600' }}">{{ r[key] or "—" }}</td>
+              {% endfor %}
+              <td class="py-2 text-slate-400 line-clamp-2">{{ r.reasoning }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      </div>
+    {% else %}
+      <div class="text-slate-600 text-xs italic">none</div>
+    {% endif %}
+  </div>
+{% endmacro %}
+
+<div id="network-topology" class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  {{ card_header("Network topology — resolvers, neighbors & routes") }}
+
+  {% if topo %}
+  {# ----- shared filter bar ----- #}
+  <form id="network-topology-filters"
+        class="mb-4 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="search"
+           name="q"
+           value="{{ topo.q }}"
+           placeholder="search ip / mac / host / gateway"
+           aria-label="search topology by ip, mac, host or gateway"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-56 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/network-topology"
+           hx-target="#network-topology"
+           hx-include="#network-topology-filters"
+           hx-trigger="keyup changed delay:300ms, search">
+
+    <select name="verdict"
+            aria-label="filter topology by verdict"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/network-topology"
+            hx-target="#network-topology"
+            hx-include="#network-topology-filters"
+            hx-trigger="change">
+      <option value=""           {% if topo.verdict == "" %}selected{% endif %}>all non-benign</option>
+      <option value="malicious"  {% if topo.verdict == "malicious" %}selected{% endif %}>malicious</option>
+      <option value="suspicious" {% if topo.verdict == "suspicious" %}selected{% endif %}>suspicious</option>
+      <option value="unknown"    {% if topo.verdict == "unknown" %}selected{% endif %}>unknown</option>
+      <option value="benign"     {% if topo.verdict == "benign" %}selected{% endif %}>benign (all)</option>
+    </select>
+  </form>
+  {% endif %}
+
+  {% if topo and topo.any %}
+    {% set c = topo.counts %}
+
+    {# ===== DNS resolvers ===== #}
+    {{ _topo_section(
+      "DNS resolvers", "nameservers this host is configured to use",
+      topo.resolvers, c.resolvers,
+      [("resolver", "server"), ("scope", "scope"), ("search domains", "search"), ("interface", "interface")]
+    ) }}
+
+    {# ===== Routing table ===== #}
+    {{ _topo_section(
+      "Routes", "where traffic is sent — watch the default route",
+      topo.routes, c.routes,
+      [("destination", "destination"), ("gateway", "gateway"), ("interface", "interface"), ("flags", "flags")]
+    ) }}
+
+    {# ===== ARP (IPv4 neighbors) ===== #}
+    {{ _topo_section(
+      "ARP table (IPv4 neighbors)", "ip ↔ mac — a new mac for the gateway is ARP-spoof",
+      topo.arp, c.arp,
+      [("ip", "ip"), ("mac", "mac"), ("interface", "interface"), ("flags", "flags")]
+    ) }}
+
+    {# ===== NDP (IPv6 neighbors) ===== #}
+    {{ _topo_section(
+      "NDP neighbors (IPv6)", "the IPv6 analog of ARP",
+      topo.ndp, c.ndp,
+      [("ip", "ip"), ("mac", "mac"), ("interface", "interface"), ("state", "state")]
+    ) }}
+
+  {% elif topo %}
+    <div class="text-slate-500 italic">
+      no topology rows match the current filters.
+    </div>
+  {% else %}
+    <div class="text-slate-500 italic">
+      no topology data captured yet — wait for a collection cycle to complete.
+    </div>
+  {% endif %}
+</div>

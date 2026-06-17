@@ -1,11 +1,4 @@
-{% from "partials/_macros.html" import card_header, pagination_bar %}
-
-{% set verdict_cls = {
-  'malicious':  'bg-red-900/40 text-red-300 border border-red-900/60',
-  'suspicious': 'bg-amber-900/40 text-amber-300 border border-amber-900/60',
-  'unknown':    'bg-slate-700/40 text-slate-300 border border-slate-600',
-  'benign':     'bg-emerald-900/30 text-emerald-300 border border-emerald-900/50',
-} %}
+{% from "partials/_macros.html" import card_header, pagination_bar, verdict_pill %}
 
 {% set sub_cls = {
   'TCC':           'bg-sky-900/40 text-sky-300 border-sky-900/60',
@@ -51,6 +44,7 @@
            name="q"
            value="{{ events.q if events else '' }}"
            placeholder="search process / message"
+           aria-label="search auth events by process or message"
            autocomplete="off"
            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-56 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
            hx-get="/fragments/auth-events"
@@ -60,6 +54,7 @@
            hx-vals='{"page": 1}'>
 
     <select name="subsystem"
+            aria-label="filter auth events by subsystem"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/auth-events"
             hx-target="#auth-events"
@@ -74,6 +69,7 @@
     </select>
 
     <select name="verdict"
+            aria-label="filter auth events by verdict"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/auth-events"
             hx-target="#auth-events"
@@ -101,6 +97,7 @@
     </button>
 
     <select name="per_page"
+            aria-label="rows per page"
             class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
             hx-get="/fragments/auth-events"
             hx-target="#auth-events"
@@ -118,6 +115,7 @@
   </form>
 
   {% if events and events.rows %}
+    <div class="overflow-x-auto">
     <table class="w-full text-xs">
       <thead>
         <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
@@ -135,18 +133,8 @@
           <tr class="js-expandable-row cursor-pointer hover:bg-slate-800/40 transition-colors"
               data-detail-id="{{ detail_id }}">
             <td class="py-2">
-              {% if e.verdict %}
-                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px]
-                             font-semibold uppercase tracking-wider
-                             {{ verdict_cls.get(e.verdict, verdict_cls['unknown']) }}">
-                  {{ e.verdict }}
-                  {% if e.confidence is not none %}
-                    <span class="ml-1 opacity-70">{{ "%.0f"|format(e.confidence * 100) }}%</span>
-                  {% endif %}
-                </span>
-              {% else %}
-                <span class="text-slate-600 text-[10px] uppercase tracking-wider">pending</span>
-              {% endif %}
+              {% if e.verdict %}{{ verdict_pill(e.verdict, e.confidence) }}
+              {% else %}<span class="text-slate-600 text-[10px] uppercase tracking-wider">pending</span>{% endif %}
             </td>
             <td class="py-2 text-right font-mono font-semibold text-slate-200 tabular-nums">
               {{ "{:,}".format(e.count) }}
@@ -163,7 +151,7 @@
               {% endif %}
             </td>
             <td class="py-2 text-slate-300 font-mono break-all line-clamp-2" title="{{ e.message }}">{{ e.message }}</td>
-            <td class="py-2 text-slate-500 font-mono whitespace-nowrap">{{ e.last_seen }}</td>
+            <td class="py-2 text-slate-500 font-mono whitespace-nowrap">{{ e.last_seen | datetime_fmt }}</td>
           </tr>
           {# expandable reasoning row #}
           {% if e.reasoning %}
@@ -182,6 +170,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
 
     {{ pagination_bar("auth-events", events.page, events.total_pages, events.total, events.rows|length, events.per_page, per_page_options) }}
 

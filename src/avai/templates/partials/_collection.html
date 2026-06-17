@@ -1,0 +1,8 @@
+{# Merged collection-health panel: per-collector volume, recent runs, and
+   the latest run's collector errors — stacked. Reuses the standalone
+   partials (single source of truth each). #}
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+  {% include "partials/_row_counts.html" %}
+  {% include "partials/_runs.html" %}
+  {% include "partials/_errors.html" %}
+</div>
