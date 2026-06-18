@@ -3,6 +3,13 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.7.2] — 2026-06-18
+
+### Added
+- **Landing page: the built-in YARA file-scanning feature, documented.** A new feature card and an explainer callout describe the integration — avai compiles a YARA ruleset (a small bundled set plus optional public packs: signature-base, YARA-Forge), scans on-disk executables and recently-changed Downloads locally each cycle, and runs every match through the same LLM judge so a hit becomes a plain-English verdict (rule, file path, author) in the File Scan panel.
+
+_Docs/landing only — no functional change to the Python package or Docker image since 0.7.1._
+
 ## [0.7.1] — 2026-06-17
 
 ### Changed
