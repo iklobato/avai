@@ -10,10 +10,16 @@
   </div>
   {% if sysint %}
     <ul class="divide-y divide-slate-800/80 text-sm">
-      {% for name, value in sysint.rows %}
+      {% for name, value, active in sysint.rows %}
         <li class="flex items-center justify-between py-2">
           <span class="text-slate-300">{{ name }}</span>
-          {{ status_badge(value) }}
+          <span class="flex items-center gap-1.5">
+            {% if active %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider bg-amber-900/40 text-amber-300 border-amber-900/60"
+                    title="A live session is active right now">active</span>
+            {% endif %}
+            {{ status_badge(value) }}
+          </span>
         </li>
       {% endfor %}
     </ul>

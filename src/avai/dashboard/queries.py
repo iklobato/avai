@@ -2160,6 +2160,16 @@ def system_integrity(session: Session, run_id: str):
         "vnc_active",
         "luks_mappings",
     }
+    # Behaviour ("active now") signals, written by the network-service
+    # controls alongside the posture columns. Each row is
+    # ``(label, enabled, active)``; active is None for topics that have no
+    # live-session concept (FileVault, Gatekeeper, …).
+    svc = raw.get("services") or {}
+
+    def _active(topic: str):
+        entry = svc.get(topic)
+        return entry.get("active") if isinstance(entry, dict) else None
+
     if linux_keys & set(raw):
         apparmor = raw.get("apparmor")
         apparmor_on = (
@@ -2168,25 +2178,29 @@ def system_integrity(session: Session, run_id: str):
         return {
             "platform": "Linux",
             "rows": [
-                ("SELinux", raw.get("selinux")),
-                ("AppArmor", apparmor_on),
-                ("Firewall (ufw)", raw.get("ufw_active")),
-                ("Firewall (firewalld)", raw.get("firewalld_active")),
-                ("SSH (sshd)", raw.get("sshd_active")),
-                ("VNC", raw.get("vnc_active")),
-                ("Disk encryption (LUKS)", bool(raw.get("luks_mappings"))),
+                ("SELinux", raw.get("selinux"), None),
+                ("AppArmor", apparmor_on, None),
+                ("Firewall (ufw)", raw.get("ufw_active"), None),
+                ("Firewall (firewalld)", raw.get("firewalld_active"), None),
+                ("SSH (sshd)", raw.get("sshd_active"), _active("remote_login")),
+                ("VNC", raw.get("vnc_active"), _active("screen_sharing")),
+                ("Disk encryption (LUKS)", bool(raw.get("luks_mappings")), None),
             ],
         }
     return {
         "platform": "macOS",
         "rows": [
-            ("FileVault", row.filevault_active),
-            ("Firewall", row.firewall_global_state),
-            ("Firewall stealth", row.firewall_stealth),
-            ("Gatekeeper", row.gatekeeper_assessments_enabled),
-            ("SSH (sshd)", row.remote_login_enabled),
-            ("Screen Sharing", row.screen_sharing_enabled),
-            ("Remote Mgmt (ARD)", row.remote_management_enabled),
+            ("FileVault", row.filevault_active, None),
+            ("Firewall", row.firewall_global_state, None),
+            ("Firewall stealth", row.firewall_stealth, None),
+            ("Gatekeeper", row.gatekeeper_assessments_enabled, None),
+            ("SSH (sshd)", row.remote_login_enabled, _active("remote_login")),
+            ("Screen Sharing", row.screen_sharing_enabled, _active("screen_sharing")),
+            (
+                "Remote Mgmt (ARD)",
+                row.remote_management_enabled,
+                _active("remote_management"),
+            ),
         ],
     }
 

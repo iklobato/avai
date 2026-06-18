@@ -20,7 +20,21 @@ from .coerce import Coerce
 from .command_runner import CommandRunner
 from .digest import Digest
 from .host_paths import HostPaths
-from .probes import DiskMetrics, PsutilConnections, ServiceProbe, SystemMetrics
+from .probes import (
+    DiskMetrics,
+    LaunchdServiceManager,
+    PortInspector,
+    ProcessInspector,
+    PsutilConnections,
+    PsutilPortInspector,
+    PsutilProcessInspector,
+    ServiceManager,
+    ServiceProbe,
+    SystemdServiceManager,
+    SystemMetrics,
+    WindowsScmServiceManager,
+    tri_or,
+)
 from .row_source import CommandSnapshot, FileSnapshot, RowParser, RowSource
 from .sqlite_reader import ExternalSqliteReader
 from .stream_source import JsonLineStreamSource, LineParser
@@ -36,6 +50,15 @@ __all__ = [
     "SystemMetrics",
     "DiskMetrics",
     "ServiceProbe",
+    "ServiceManager",
+    "LaunchdServiceManager",
+    "SystemdServiceManager",
+    "WindowsScmServiceManager",
+    "PortInspector",
+    "PsutilPortInspector",
+    "ProcessInspector",
+    "PsutilProcessInspector",
+    "tri_or",
     "CommandSnapshot",
     "FileSnapshot",
     "RowParser",

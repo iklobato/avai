@@ -80,10 +80,18 @@ from .runtime import (
     ExternalSqliteReader,
     HostPaths,
     JsonLineStreamSource,
+    LaunchdServiceManager,
+    PortInspector,
+    ProcessInspector,
     PsutilConnections,
-    ServiceProbe,
+    PsutilPortInspector,
+    PsutilProcessInspector,
+    ServiceManager,
+    SystemdServiceManager,
     SystemMetrics,
+    tri_or,
 )
+from .security_controls import NetworkServiceControl, ServiceSpec
 
 
 class Collector(ABC):
@@ -1148,6 +1156,35 @@ class SystemIntegrityCollector(SnapshotCollector):
         "remote_management_enabled",
     )
 
+    # macOS network-service topics (label, port, process). enabled = launchd
+    # job enabled OR port listening — so an idle-but-enabled daemon (whose
+    # process hasn't been spawned yet by launchd) is never reported "off".
+    _SERVICES = (
+        ServiceSpec("remote_login", "com.openssh.sshd", 22, "sshd"),
+        ServiceSpec(
+            "screen_sharing", "com.apple.screensharing", 5900, "screensharingd"
+        ),
+        ServiceSpec(
+            "remote_management", "com.apple.RemoteDesktop.agent", 3283, "ARDAgent"
+        ),
+    )
+
+    def __init__(
+        self,
+        judge_hints: str = "",
+        services: Optional[ServiceManager] = None,
+        ports: Optional[PortInspector] = None,
+        processes: Optional[ProcessInspector] = None,
+    ) -> None:
+        super().__init__(judge_hints=judge_hints)
+        svc = services or LaunchdServiceManager()
+        ports = ports or PsutilPortInspector()
+        processes = processes or PsutilProcessInspector()
+        self._controls = {
+            s.topic: NetworkServiceControl(s, svc, ports, processes)
+            for s in self._SERVICES
+        }
+
     def collect(self):
         fv = CommandRunner().exit_code(["fdesetup", "isactive"])
         alf = (
@@ -1171,18 +1208,28 @@ class SystemIntegrityCollector(SnapshotCollector):
                 gk = None
         except (FileNotFoundError, subprocess.TimeoutExpired):
             gk = None
+        # Posture (enabled) + behaviour (active) for the network services,
+        # via the injected controls. Persisting enabled into the existing
+        # columns; the live-session signal is kept in raw_json for the judge.
+        svc = {t: c.inspect() for t, c in self._controls.items()}
         yield {
             "filevault_active": None if fv is None else int(fv == 0),
             "firewall_global_state": alf.get("globalstate"),
             "firewall_stealth": int(bool(alf.get("stealthenabled"))) if alf else None,
             "firewall_logging": int(bool(alf.get("loggingenabled"))) if alf else None,
             "gatekeeper_assessments_enabled": gk,
-            # launchctl list only covers the user domain; sshd/screensharingd/
-            # ARDAgent are system-domain services — use pgrep instead.
-            "remote_login_enabled": ServiceProbe().running("sshd"),
-            "screen_sharing_enabled": ServiceProbe().running("screensharingd"),
-            "remote_management_enabled": ServiceProbe().running("ARDAgent"),
-            "raw_json": json.dumps({"alf": Coerce.jsonable(alf)}),
+            "remote_login_enabled": svc["remote_login"].enabled,
+            "screen_sharing_enabled": svc["screen_sharing"].enabled,
+            "remote_management_enabled": svc["remote_management"].enabled,
+            "raw_json": json.dumps(
+                {
+                    "alf": Coerce.jsonable(alf),
+                    "services": {
+                        t: {"enabled": f.enabled, "active": f.active}
+                        for t, f in svc.items()
+                    },
+                }
+            ),
         }
 
 
@@ -2453,12 +2500,33 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
         "remote_management_enabled",
     )
 
+    # SSH goes through the shared control (systemd-enabled OR port 22
+    # listening); VNC stays multi-server (x11vnc/vncserver/xrdp) but gains
+    # the port-5900 robustness + an active signal.
+    _SSH = ServiceSpec("remote_login", "ssh.service", 22, "sshd")
+    _VNC_PORT = 5900
+
+    def __init__(
+        self,
+        judge_hints: str = "",
+        services: Optional[ServiceManager] = None,
+        ports: Optional[PortInspector] = None,
+        processes: Optional[ProcessInspector] = None,
+    ) -> None:
+        super().__init__(judge_hints=judge_hints)
+        self._ports = ports or PsutilPortInspector()
+        self._ssh = NetworkServiceControl(
+            self._SSH,
+            services or SystemdServiceManager(),
+            self._ports,
+            processes or PsutilProcessInspector(),
+        )
+
     def collect(self):
         selinux = self._selinux_state()
         apparmor = self._apparmor_state()
         ufw = self._ufw_active()
         fwd = self._service_active("firewalld")
-        sshd = self._service_active("ssh") or self._service_active("sshd")
         vnc = (
             self._service_active("x11vnc")
             or self._service_active("vncserver")
@@ -2466,14 +2534,25 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
         )
         luks_n = self._luks_count()
 
+        ssh = self._ssh.inspect()
+        vnc_enabled = tri_or(int(vnc), self._ports.listening(self._VNC_PORT))
+        vnc_active = tri_or(int(vnc), self._ports.established(self._VNC_PORT))
+
         raw = {
             "selinux": selinux,
             "apparmor": apparmor,
             "ufw_active": ufw,
             "firewalld_active": fwd,
-            "sshd_active": sshd,
-            "vnc_active": vnc,
+            # posture (enabled) drives the dashboard badge; behaviour lives
+            # under "services" for the "active" pill.
+            "sshd_active": ssh.enabled,
+            "vnc_active": vnc_enabled,
             "luks_mappings": luks_n,
+            "services": {
+                "remote_login": {"enabled": ssh.enabled, "active": ssh.active},
+                "screen_sharing": {"enabled": vnc_enabled, "active": vnc_active},
+                "remote_management": {"enabled": vnc_enabled, "active": vnc_active},
+            },
         }
 
         yield {
@@ -2484,9 +2563,9 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
             "gatekeeper_assessments_enabled": int(
                 selinux == "Enforcing" or apparmor.get("enabled") is True
             ),
-            "remote_login_enabled": int(sshd),
-            "screen_sharing_enabled": int(vnc),
-            "remote_management_enabled": int(vnc),
+            "remote_login_enabled": ssh.enabled,
+            "screen_sharing_enabled": vnc_enabled,
+            "remote_management_enabled": vnc_enabled,
             "raw_json": json.dumps(raw),
         }
 
