@@ -204,6 +204,10 @@ export function Features() {
       title: "🔌 Hardware & browser",
       body: "USB, Bluetooth, Wi-Fi, browser extensions.",
     },
+    {
+      title: "🧬 YARA file scanning",
+      body: "On-disk binaries matched against thousands of malware rules.",
+    },
   ];
   const capabilities = [
     "One `docker run`",
@@ -251,6 +255,33 @@ export function Features() {
             on.
           </p>
         </div>
+      </div>
+
+      <div className="mt-6 card p-6">
+        <h3 className="font-semibold text-slate-100">
+          🧬 YARA file scanning, built in
+        </h3>
+        <p className="mt-3 text-sm text-slate-400">
+          avai compiles a YARA ruleset from a small bundled set plus optional
+          public packs (signature-base, YARA-Forge) — thousands of rules across
+          APT, commodity malware, hacktools, webshells and exploits — and scans
+          on-disk executables and recently-changed Downloads against them every
+          cycle. It&apos;s targeted rather than a full-disk crawl, so it stays
+          fast, and the scan runs entirely on your machine — no files leave the
+          host.
+        </p>
+        <p className="mt-3 text-sm text-slate-400">
+          The integration&apos;s real payoff: every match flows through the same
+          LLM judge as every other finding, so a hit becomes a plain-English
+          verdict and remediation — with file path, matched rule, and author —
+          instead of a raw rule name you have to interpret. The dashboard&apos;s
+          File Scan panel shows the compiled ruleset (rules loaded, sources, top
+          categories) alongside the matches, and rule packs are refreshable with{" "}
+          <code className="rounded bg-white/5 px-1 py-0.5 text-xs text-slate-300">
+            scripts/update_rules.py
+          </code>
+          .
+        </p>
       </div>
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
