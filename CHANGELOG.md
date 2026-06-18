@@ -3,6 +3,17 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.7.3] — 2026-06-18
+
+### Fixed
+- **System-integrity no longer reports an enabled-but-idle service as "off".** SSH / Screen Sharing / Remote Management were inferred from `pgrep` (is the daemon's process running *right now*), which misses socket-activated macOS services that `launchd` keeps listening on while the daemon is idle — so an exposed-but-idle SSH read as disabled. Detection now goes through a `NetworkServiceControl` abstraction: a service is **enabled** if the service manager reports it enabled **or** something is listening on its port (authoritative on macOS/Linux when running as root). Linux SSH uses the same control; Windows already read the authoritative `fDenyTSConnections` flag and is unchanged.
+
+### Added
+- **"Active" indicator for live remote sessions.** Each network-service control also reports *behaviour* — whether a session is connected right now (daemon running or an established peer) — surfaced as an "active" pill in the System Integrity panel next to the enabled badge.
+
+### Internal
+- New `SecurityControl` / `NetworkServiceControl` abstraction with injected `ServiceManager` (launchd/systemd/SCM) and psutil-backed `PortInspector` / `ProcessInspector` capability seams — one control class covers SSH/Screen Sharing/ARD across platforms, fully unit-tested with fakes (including the false-negative regression).
+
 ## [0.7.2] — 2026-06-18
 
 ### Added

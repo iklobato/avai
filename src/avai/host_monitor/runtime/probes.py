@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections import namedtuple
-from typing import Optional
+from typing import Optional, Protocol
 
 try:
     import psutil
@@ -289,3 +289,125 @@ class ServiceProbe:
         misses from the user session."""
         code = self._runner.exit_code(["pgrep", "-x", name])
         return None if code is None else int(code == 0)
+
+
+def tri_or(*values: Optional[int]) -> Optional[int]:
+    """Tri-state OR over 1/0/None signals: 1 if any signal is on, else 0 if
+    any signal is known-off, else None (all unknown). Lets a control combine
+    an authoritative-but-maybe-unavailable signal with a fallback without a
+    known-off masking an unknown-on."""
+    if any(v == 1 for v in values):
+        return 1
+    if any(v == 0 for v in values):
+        return 0
+    return None
+
+
+# --- capability seams: posture/behaviour of a service, one mechanism each ---
+# These are the OS-specific strategies a SecurityControl composes (DIP). The
+# control depends on these tiny interfaces, never on the commands directly;
+# the composition root (host module) injects the right implementation.
+
+
+class ServiceManager(Protocol):
+    """Whether a managed service is *enabled* (configured to be reachable),
+    independent of whether its process happens to be running right now."""
+
+    def enabled(self, unit: str) -> Optional[int]: ...
+
+
+class PortInspector(Protocol):
+    """Socket-level posture/behaviour: is something listening on a port
+    (enabled/exposed), and is there a live peer (in use right now)."""
+
+    def listening(self, port: int) -> Optional[int]: ...
+    def established(self, port: int) -> Optional[int]: ...
+
+
+class ProcessInspector(Protocol):
+    """Whether a process with an exact name is running (behaviour signal)."""
+
+    def running(self, name: str) -> Optional[int]: ...
+
+
+class LaunchdServiceManager:
+    """macOS: a system-domain launchd job is enabled when it's bootstrapped
+    (``launchctl print system/<label>`` exits 0). Needs root, which the
+    monitor has."""
+
+    def __init__(self, runner: Optional[CommandRunner] = None) -> None:
+        self._runner = runner or CommandRunner()
+
+    def enabled(self, unit: str) -> Optional[int]:
+        code = self._runner.exit_code(["launchctl", "print", f"system/{unit}"])
+        return None if code is None else int(code == 0)
+
+
+class SystemdServiceManager:
+    """Linux: ``systemctl is-enabled <unit>`` exits 0 for enabled/static."""
+
+    def __init__(self, runner: Optional[CommandRunner] = None) -> None:
+        self._runner = runner or CommandRunner()
+
+    def enabled(self, unit: str) -> Optional[int]:
+        code = self._runner.exit_code(["systemctl", "is-enabled", unit])
+        return None if code is None else int(code == 0)
+
+
+class WindowsScmServiceManager:
+    """Windows: a service is enabled when its SCM start type isn't DISABLED
+    (``sc qc <name>``)."""
+
+    def __init__(self, runner: Optional[CommandRunner] = None) -> None:
+        self._runner = runner or CommandRunner()
+
+    def enabled(self, unit: str) -> Optional[int]:
+        out = self._runner.text(["sc", "qc", unit])
+        if not out:
+            return None
+        upper = out.upper()
+        if "DISABLED" in upper:
+            return 0
+        if "AUTO_START" in upper or "DEMAND_START" in upper:
+            return 1
+        return None
+
+
+class PsutilPortInspector:
+    """Cross-platform port posture/behaviour from the psutil connection table
+    (one implementation for every OS). Needs root for full visibility — the
+    monitor runs as root; without it both signals degrade to None."""
+
+    def __init__(self, connections: Optional[PsutilConnections] = None) -> None:
+        self._connections = connections or PsutilConnections()
+
+    def _count(self, port: int, status: str) -> Optional[int]:
+        try:
+            conns = self._connections.inet()
+        except PermissionError:
+            return None
+        for c in conns:
+            laddr = getattr(c, "laddr", None)
+            if laddr and getattr(laddr, "port", None) == port and c.status == status:
+                return 1
+        return 0
+
+    def listening(self, port: int) -> Optional[int]:
+        return self._count(port, psutil.CONN_LISTEN)
+
+    def established(self, port: int) -> Optional[int]:
+        return self._count(port, psutil.CONN_ESTABLISHED)
+
+
+class PsutilProcessInspector:
+    """Cross-platform exact-name process check (one implementation for every
+    OS); replaces the POSIX-only ``pgrep -x`` shell-out."""
+
+    def running(self, name: str) -> Optional[int]:
+        try:
+            for proc in psutil.process_iter(["name"]):
+                if proc.info.get("name") == name:
+                    return 1
+            return 0
+        except psutil.Error:
+            return None

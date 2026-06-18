@@ -1113,12 +1113,12 @@ class TestSystemIntegrityPlatform:
         with Session(sink.engine) as s:
             si = system_integrity(s, run_id)
         assert si["platform"] == "Linux"
-        labels = [name for name, _ in si["rows"]]
+        labels = [name for name, _enabled, _active in si["rows"]]
         # macOS-only labels must NOT appear for Linux data.
         assert "FileVault" not in labels
         assert "Gatekeeper" not in labels
         # Linux posture must be present and read from raw_json.
-        d = dict(si["rows"])
+        d = {name: enabled for name, enabled, _active in si["rows"]}
         assert d["AppArmor"] is True
         assert d["Firewall (ufw)"] is True
         assert d["Disk encryption (LUKS)"] is True
@@ -1146,11 +1146,43 @@ class TestSystemIntegrityPlatform:
         with Session(sink.engine) as s:
             si = system_integrity(s, run_id)
         assert si["platform"] == "macOS"
-        d = dict(si["rows"])
+        d = {name: enabled for name, enabled, _active in si["rows"]}
         assert "FileVault" in d
         assert d["FileVault"] == 1
         assert d["Gatekeeper"] == 1
         assert "Disk encryption (LUKS)" not in d  # not a macOS label
+
+    def test_active_session_signal_surfaced_from_raw_json(self, tmp_path):
+        import json as _json
+
+        sink = self._sink(tmp_path)
+        run_id, ts = self._run(sink)
+        sink.write(
+            SystemIntegrityRow,
+            [
+                {
+                    "run_id": run_id,
+                    "collected_at": ts,
+                    "content_hash": "c",
+                    "remote_login_enabled": 1,
+                    "screen_sharing_enabled": 0,
+                    "raw_json": _json.dumps(
+                        {
+                            "services": {
+                                "remote_login": {"enabled": 1, "active": 1},
+                                "screen_sharing": {"enabled": 0, "active": 0},
+                            }
+                        }
+                    ),
+                }
+            ],
+        )
+        with Session(sink.engine) as s:
+            si = system_integrity(s, run_id)
+        active = {name: act for name, _enabled, act in si["rows"]}
+        assert active["SSH (sshd)"] == 1  # live session surfaced as the pill
+        assert active["Screen Sharing"] == 0
+        assert active["FileVault"] is None  # no live-session concept
 
     def test_missing_row_returns_none(self, tmp_path):
         sink = self._sink(tmp_path)

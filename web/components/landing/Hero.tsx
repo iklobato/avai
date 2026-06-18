@@ -11,7 +11,7 @@ export function Hero() {
   return (
     <section className="mx-auto max-w-6xl px-6 pt-16 pb-12 text-center">
       <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-300">
-        <span className="pulse-dot" /> v0.7.2 — open source, MIT licensed
+        <span className="pulse-dot" /> v0.7.3 — open source, MIT licensed
       </span>
       <h1 className="mx-auto mt-6 max-w-3xl text-4xl font-bold leading-tight sm:text-5xl">
         <span className="grad-text">
