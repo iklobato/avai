@@ -89,6 +89,10 @@ def _cmd_install_hosts(hostname: str, remove: bool) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    from .observability import init_sentry
+
+    init_sentry()
+
     if argv is None:
         argv = sys.argv[1:]
 
