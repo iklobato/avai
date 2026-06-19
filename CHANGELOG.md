@@ -3,6 +3,11 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.8.0] - 2026-06-19
+
+### Added
+- **Error reporting via Sentry, on by default.** avai now sends unhandled exceptions (main thread and the monitor's worker threads) plus logged warnings and errors to Sentry, so failures users hit in the wild are visible centrally and can be fixed. A bundled DSN means it works with no setup, and every event is tagged with the avai release. PII is never sent (`send_default_pii=False`), so request headers and client IP stay on the host. Opt out with `AVAI_TELEMETRY=0` (matching avai's `AVAI_*` toggle convention) or an empty `SENTRY_DSN`; redirect reports to your own project with `SENTRY_DSN`. Adds the `sentry-sdk` dependency.
+
 ## [0.7.3] — 2026-06-18
 
 ### Fixed
