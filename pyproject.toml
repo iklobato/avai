@@ -73,6 +73,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Desktop app (`avai app`): native window via the OS webview. Kept out of the
+# base install so a headless monitor/dashboard stays GUI-free.
+app = [
+    "pywebview>=5.0",
+]
 dev = [
     "build>=1.0",
     "twine>=5.0",

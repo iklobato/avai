@@ -24,6 +24,10 @@ usage:
                               start the read-only Flask + HTMX
                               dashboard. See `avai dashboard --help`.
 
+  avai app                    open the desktop app: dashboard + monitor in
+                              one native window (needs the GUI extra:
+                              pip install 'avai-monitor[app]').
+
   avai rules [--list]         show the YARA ruleset the file scanner
                               loads (counts; --list prints every rule).
 
@@ -115,6 +119,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         sys.argv = ["avai dashboard", *rest]
         return dashboard_main()
+
+    if cmd in ("app", "gui", "desktop"):
+        from .desktop import main as desktop_main
+
+        return desktop_main()
 
     if cmd == "rules":
         import argparse

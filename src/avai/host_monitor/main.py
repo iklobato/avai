@@ -166,15 +166,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
-    args = _build_parser().parse_args()
+def build_runner(args) -> "tuple[Runner, object]":
+    """Wire a fully-configured Runner (collectors, judge, sink, seeded control
+    row) from parsed args, without signal handlers or running the loop.
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)sZ %(levelname)s %(message)s",
-    )
-    logging.Formatter.converter = time.gmtime
-
+    Shared by the CLI ``main()`` and the in-process desktop app (which runs the
+    monitor in a thread, no subprocess). Returns ``(runner, engine)``; the
+    caller drives ``start_streaming`` / ``run_forever`` and disposes the engine.
+    """
     # The monitor often runs as root while the dashboard runs unprivileged;
     # both write the same SQLite file. A group-friendly umask makes the DB dir
     # and the files SQLite creates (db, -wal, -shm) group-writable so a
@@ -259,7 +258,23 @@ def main() -> int:
             judge_enabled=not args.no_judge,
             enrich_enabled=not args.no_enrich,
         )
+        return runner, engine
+    except Exception:
+        engine.dispose()
+        raise
 
+
+def main() -> int:
+    args = _build_parser().parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)sZ %(levelname)s %(message)s",
+    )
+    logging.Formatter.converter = time.gmtime
+
+    runner, engine = build_runner(args)
+    try:
         if args.once:
             run_id, ok, failed = runner.run_once()
             LOG.info("run complete run_id=%s ok=%d failed=%d", run_id, ok, failed)
@@ -268,14 +283,14 @@ def main() -> int:
         # Install signal handlers so SIGINT/SIGTERM cleanly stop both
         # the snapshot loop and every streaming worker. First signal =
         # graceful (let the current collector finish, then stop). Second
-        # signal = force-quit immediately — a guaranteed escape hatch so
+        # signal = force-quit immediately, a guaranteed escape hatch so
         # Ctrl-C is never swallowed during a long LLM-judging cycle.
         _signal_count = {"n": 0}
 
         def _handle_signal(signum, _frame):
             _signal_count["n"] += 1
             if _signal_count["n"] >= 2:
-                LOG.warning("second signal — forcing immediate exit")
+                LOG.warning("second signal, forcing immediate exit")
                 os._exit(130)
             LOG.warning(
                 "received signal %d; stopping after the current step "
