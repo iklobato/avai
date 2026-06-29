@@ -1,7 +1,8 @@
-{# Above-the-fold triage strip: the four "act now" signals the operator
-   needs at a glance — posture grade, active malicious/suspicious findings,
-   and whether the monitor is even running. Each segment links to the
-   section that explains it. Mirrors the grade palette in _risk.html. #}
+{# Above-the-fold triage. In app mode this is the antivirus-style protection
+   home (big shield status + scan button + tiles + recommendations); the web
+   dashboard keeps the slim operator strip. Both render as the content of
+   <section id="triage"> (first in <main>, self-polls every 30s). #}
+{% from "partials/_macros.html" import btn %}
 {% set grade_styles = {
   'A': 'text-emerald-300 border-emerald-800 bg-emerald-900/30',
   'B': 'text-lime-300 border-lime-800 bg-lime-900/30',
@@ -10,6 +11,141 @@
   'F': 'text-red-300 border-red-800 bg-red-900/30',
 } %}
 
+{% if app_mode %}
+{# ===== antivirus protection home (app mode) ===== #}
+{% set bad_grade = risk and risk.grade in ['D','F'] %}
+{% if (not alive) or active_malicious %}
+  {% set state = 'at_risk' %}
+{% elif active_suspicious or bad_grade %}
+  {% set state = 'needs_attention' %}
+{% else %}
+  {% set state = 'protected' %}
+{% endif %}
+{% set theme = {
+  'protected':       {'ring':'border-emerald-800','glow':'shadow-[0_0_60px_-15px_rgba(16,185,129,0.45)]','txt':'text-emerald-300','dot':'bg-emerald-400','label':'Protected','line':'avai has your back. No active threats and protection is live.'},
+  'needs_attention': {'ring':'border-amber-800','glow':'shadow-[0_0_60px_-15px_rgba(245,158,11,0.45)]','txt':'text-amber-300','dot':'bg-amber-400','label':'Needs attention','line':'avai found things worth a look. Review the items below.'},
+  'at_risk':         {'ring':'border-red-800','glow':'shadow-[0_0_60px_-15px_rgba(239,68,68,0.5)]','txt':'text-red-300','dot':'bg-red-500','label':'At risk','line':'avai needs you to act now. See the items below.'} } %}
+{% set t = theme[state] %}
+{% set paused = ctrl and ctrl.paused %}
+{% set scanning = ctrl and ctrl.status == 'scanning' %}
+
+<section aria-label="protection status"
+         class="bg-slate-900 border {{ t.ring }} {{ t.glow }} rounded-lg p-6 md:p-8">
+
+  {# ===== top: shield + status + actions ===== #}
+  <div class="flex flex-col md:flex-row md:items-center gap-6">
+
+    {# shield — colour is the whole-app verdict from status_logic #}
+    <div class="relative shrink-0 self-center md:self-auto" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" class="w-20 h-20 {{ t.txt }}">
+        <path d="M12 2l8 3v6c0 5-3.4 8.3-8 11-4.6-2.7-8-6-8-11V5l8-3z"
+              fill="currentColor" fill-opacity="0.12" stroke="currentColor" stroke-width="1.3"/>
+        {% if state == 'protected' %}
+          <path d="M8.5 12.2l2.4 2.4 4.6-4.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        {% elif state == 'needs_attention' %}
+          <path d="M12 8v4.5M12 15.4v.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        {% else %}
+          <path d="M9.4 9.4l5.2 5.2M14.6 9.4l-5.2 5.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        {% endif %}
+      </svg>
+      {% if alive and not paused %}
+        <span class="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full {{ t.dot }} ring-4 ring-slate-900 {{ 'animate-pulse' if scanning else '' }}"></span>
+      {% endif %}
+    </div>
+
+    {# status text #}
+    <div class="flex-1 min-w-0">
+      <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">protection status</div>
+      <div class="flex items-center gap-3 flex-wrap">
+        <h2 class="text-3xl font-semibold text-slate-100">{{ t.label }}</h2>
+        {% if risk %}
+          {% set gstyle = grade_styles.get(risk.grade, grade_styles['F']) %}
+          <span class="inline-flex items-center gap-1.5 rounded-xl border px-2.5 py-1 text-sm font-bold {{ gstyle }}">
+            {{ risk.grade }}<span class="font-mono text-xs font-normal opacity-70 tabular-nums">{{ risk.score }}/100</span>
+          </span>
+        {% endif %}
+        {% if not alive %}
+          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider bg-red-900/40 text-red-300 border-red-800">
+            <span class="w-1.5 h-1.5 rounded-full bg-red-500"></span>monitor offline · data stale</span>
+        {% elif scanning %}
+          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider {{ grade_styles['C'] }}">
+            <span class="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>scanning now</span>
+        {% elif paused %}
+          <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wider bg-amber-900/40 text-amber-300 border-amber-800">protection paused</span>
+        {% endif %}
+      </div>
+      <p class="mt-1.5 text-sm text-slate-400 leading-relaxed">
+        {{ risk.explanation if (risk and risk.explanation) else t.line }}
+      </p>
+    </div>
+
+    {# actions — real control routes; responses re-render #control, the hero
+       updates on its next poll. hx-disabled-elt blocks a double scan. #}
+    <div class="flex flex-col gap-2 shrink-0">
+      {{ btn(('⟳ scanning…' if scanning else '⟳ scan now'), 'primary',
+             extra='hx-post="/control/scan-now" hx-target="#control" hx-swap="innerHTML" hx-disabled-elt="this"' ~ (' disabled' if scanning else '')) }}
+      {% if paused %}
+        {{ btn('▶ resume protection', 'success', extra='hx-post="/control/resume" hx-target="#control" hx-swap="innerHTML"') }}
+      {% else %}
+        {{ btn('⏸ pause protection', 'secondary', extra='hx-post="/control/pause" hx-target="#control" hx-swap="innerHTML"') }}
+      {% endif %}
+    </div>
+  </div>
+
+  {# ===== four understated stat tiles ===== #}
+  <div class="mt-6 grid grid-cols-2 lg:grid-cols-4 gap-3">
+    <a href="#findings" class="bg-slate-950/60 border border-slate-800 rounded-lg p-4 hover:border-slate-700 transition-colors">
+      <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">active malicious</div>
+      <div class="text-3xl font-semibold tabular-nums font-mono {{ 'text-red-400' if active_malicious else 'text-slate-500' }}">{{ active_malicious }}</div>
+    </a>
+    <a href="#findings" class="bg-slate-950/60 border border-slate-800 rounded-lg p-4 hover:border-slate-700 transition-colors">
+      <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">active suspicious</div>
+      <div class="text-3xl font-semibold tabular-nums font-mono {{ 'text-amber-400' if active_suspicious else 'text-slate-500' }}">{{ active_suspicious }}</div>
+    </a>
+    <a href="#control" class="bg-slate-950/60 border border-slate-800 rounded-lg p-4 hover:border-slate-700 transition-colors">
+      <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">real-time protection</div>
+      {% if not alive %}
+        <div class="text-lg font-semibold text-red-400">Off</div>
+      {% elif paused %}
+        <div class="text-lg font-semibold text-amber-400">Paused</div>
+      {% else %}
+        <div class="text-lg font-semibold text-emerald-400 flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>On</div>
+      {% endif %}
+    </a>
+    <a href="#control" class="bg-slate-950/60 border border-slate-800 rounded-lg p-4 hover:border-slate-700 transition-colors">
+      <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-1">last scan</div>
+      {% if latest_run and latest_run.started_at %}
+        <div class="text-lg font-semibold text-slate-200">{{ latest_run.started_at | relative_time }}</div>
+        <div class="text-[10px] text-slate-600 font-mono">{{ latest_run.started_at | datetime_fmt }}</div>
+      {% else %}
+        <div class="text-lg font-semibold text-slate-500">never</div>
+      {% endif %}
+    </a>
+  </div>
+
+  {# ===== avai recommends — drivers = what's costing posture points ===== #}
+  <div class="mt-6 border-t border-slate-800 pt-4">
+    <div class="text-[10px] uppercase tracking-widest text-slate-500 mb-2">avai recommends</div>
+    {% if drivers %}
+      <ul class="space-y-1.5">
+        {% for d in drivers %}
+          <li class="flex items-center justify-between gap-3 text-sm bg-slate-950/40 border border-slate-800 rounded-md px-3 py-2">
+            <span class="flex items-center gap-2 text-slate-300 min-w-0">
+              <span class="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"></span>
+              <span class="truncate">{{ d.label }}</span>
+            </span>
+            <span class="font-mono text-red-400 tabular-nums shrink-0">&minus;{{ d.points }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="text-sm text-emerald-400 flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>Nothing to do. No posture weaknesses detected.</p>
+    {% endif %}
+  </div>
+</section>
+
+{% else %}
+{# ===== slim operator strip (web dashboard) ===== #}
 <div class="bg-slate-900 border border-slate-800 rounded-lg px-5 py-4
             flex flex-wrap items-center gap-x-10 gap-y-4">
 
@@ -69,3 +205,4 @@
     </div>
   </a>
 </div>
+{% endif %}

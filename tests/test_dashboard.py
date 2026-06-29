@@ -1318,6 +1318,15 @@ class TestControlPlane:
         r = client.post("/control/pause", headers={"X-Avai-Token": "nope"})
         assert r.status_code == 403
 
+    def test_open_mode_allows_control_without_token(self, client, monkeypatch):
+        # Desktop app: loopback webview, no token needed.
+        monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
+        monkeypatch.setenv("AVAI_CONTROL_OPEN", "1")
+        assert client.post("/control/pause").status_code == 200  # no header
+        assert self._state()["paused"] == 1
+        body = client.get("/fragments/control").get_data(as_text=True)
+        assert "control token" not in body  # token prompt hidden in open mode
+
     def test_pause_resume_writes_row(self, client, monkeypatch):
         monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
         h = {"X-Avai-Token": "secret"}
@@ -1771,14 +1780,32 @@ class TestLogAggregates:
         # ssh: 3 lines / 0 err; cron: 5 lines / 2 err; kernel: 2 lines / 1 err
         rows = []
         for i in range(3):
-            rows.append(("journald", "ssh.service", "info",
-                         f"Accepted password for ik from 10.0.0.{i} port 22"))
+            rows.append(
+                (
+                    "journald",
+                    "ssh.service",
+                    "info",
+                    f"Accepted password for ik from 10.0.0.{i} port 22",
+                )
+            )
         for i in range(5):
-            rows.append(("journald", "cron.service", "err" if i < 2 else "info",
-                         "job 1234 failed"))
+            rows.append(
+                (
+                    "journald",
+                    "cron.service",
+                    "err" if i < 2 else "info",
+                    "job 1234 failed",
+                )
+            )
         for i in range(2):
-            rows.append(("journald", "kernel", "err" if i == 0 else "warning",
-                         "EXT4-fs warning"))
+            rows.append(
+                (
+                    "journald",
+                    "kernel",
+                    "err" if i == 0 else "warning",
+                    "EXT4-fs warning",
+                )
+            )
         with Session(_engine_rw(db_path)) as s:
             for src, unit, lvl, msg in rows:
                 s.execute(
@@ -1787,8 +1814,15 @@ class TestLogAggregates:
                         "source, unit, level, event_timestamp, pid, message) VALUES "
                         "(:r,:c,NULL,:s,:u,:l,:t,NULL,:m)"
                     ),
-                    {"r": "r1", "c": "t", "s": src, "u": unit, "l": lvl,
-                     "t": "2026-06-24T00:00:00+00:00", "m": msg},
+                    {
+                        "r": "r1",
+                        "c": "t",
+                        "s": src,
+                        "u": unit,
+                        "l": lvl,
+                        "t": "2026-06-24T00:00:00+00:00",
+                        "m": msg,
+                    },
                 )
             s.commit()
 
@@ -1798,8 +1832,14 @@ class TestLogAggregates:
         db = tmp_path / "agg.db"
         _ensure_db_exists(str(db))
         with Session(_engine_rw(str(db))) as s:
-            s.add(CollectionRun(run_id="r1", started_at="2026-06-24T00:00:00+00:00",
-                                hostname="h", lookback_min=5))
+            s.add(
+                CollectionRun(
+                    run_id="r1",
+                    started_at="2026-06-24T00:00:00+00:00",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
             s.commit()
         self._seed(str(db))
         return db
@@ -1850,3 +1890,23 @@ class TestLogAggregates:
             Session(_engine_rw(str(db))), "r1", source="/var/log/nope.log"
         )
         assert none["groups"] == []
+
+
+class TestAppModeHero:
+    """In app mode (AVAI_APP_MODE) the triage section renders the antivirus
+    protection home; the web dashboard keeps the slim operator strip."""
+
+    def test_app_mode_shows_protection_hero(self, client, monkeypatch):
+        monkeypatch.setenv("AVAI_APP_MODE", "1")
+        b = client.get("/fragments/triage").data.decode()
+        assert "protection status" in b
+        assert "/control/scan-now" in b  # scan button wired to the real route
+        assert "avai recommends" in b
+        # empty DB -> monitor not alive -> At risk state
+        assert "At risk" in b
+
+    def test_web_mode_keeps_operator_strip(self, client, monkeypatch):
+        monkeypatch.delenv("AVAI_APP_MODE", raising=False)
+        b = client.get("/fragments/triage").data.decode()
+        assert "protection status" not in b  # no hero
+        assert "posture" in b

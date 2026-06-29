@@ -285,7 +285,9 @@ app.add_template_filter(_pretty_json, "pretty_json")
 
 @app.route("/")
 def index():
-    return render_template("dashboard.html")
+    return render_template(
+        "dashboard.html", app_mode=bool(os.environ.get("AVAI_APP_MODE"))
+    )
 
 
 @app.route("/fragments/triage")
@@ -299,12 +301,18 @@ def fragment_triage():
         active_suspicious = findings(
             s, verdict="suspicious", status="active", page=1, per_page=1
         )["total"]
+        risk = latest_risk(s)
+        state = read_control_state()  # reused for both alive and the ctrl chips
         return render_template(
             "partials/_triage.html",
-            risk=latest_risk(s),
+            risk=risk,
             active_malicious=active_malicious,
             active_suspicious=active_suspicious,
-            alive=monitor_alive(read_control_state()),
+            alive=monitor_alive(state),
+            ctrl=state,
+            latest_run=latest_run(s),
+            drivers=_parse_json_list(getattr(risk, "drivers_json", None)),
+            app_mode=bool(os.environ.get("AVAI_APP_MODE")),
         )
 
 
@@ -843,14 +851,25 @@ def api_notifications_new():
 _MAINTENANCE_ACTIONS = {"prune", "clear", "rejudge", "renarrate", "reset_baseline"}
 
 
+def _control_open() -> bool:
+    """Open mode: the desktop app sets ``AVAI_CONTROL_OPEN`` because the
+    dashboard is bound to loopback inside a single-user webview the user owns,
+    so the token (a CSRF defence for the network ``avai dashboard``) is just
+    friction. The CLI dashboard never sets it, so it stays gated."""
+    return bool(os.environ.get("AVAI_CONTROL_OPEN"))
+
+
 def require_control_token(fn):
     """Gate a control action behind ``AVAI_CONTROL_TOKEN``. Fails closed: if
     the env var is unset, control is disabled entirely (403). The token is
     read from the ``X-Avai-Token`` header — a custom header can't be set by a
-    cross-site form, so it doubles as the CSRF defence."""
+    cross-site form, so it doubles as the CSRF defence. Bypassed in open mode
+    (see :func:`_control_open`)."""
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        if _control_open():
+            return fn(*args, **kwargs)
         token = os.environ.get("AVAI_CONTROL_TOKEN")
         supplied = request.headers.get("X-Avai-Token", "")
         if not token or not hmac.compare_digest(token, supplied):
@@ -867,7 +886,8 @@ def _control_panel():
         ctrl=state,
         alive=monitor_alive(state),
         collectors=sorted(COLLECTOR_MODELS),
-        control_enabled=bool(os.environ.get("AVAI_CONTROL_TOKEN")),
+        control_enabled=bool(os.environ.get("AVAI_CONTROL_TOKEN")) or _control_open(),
+        control_open=_control_open(),
     )
 
 
