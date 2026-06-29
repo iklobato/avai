@@ -395,6 +395,24 @@ class AuthEventRow(_RowBase):
     raw_json: Mapped[Optional[str]]
 
 
+class LogEntryRow(_RowBase):
+    """One log line from a host log source (journald or a tailed plain-text
+    file). High-volume telemetry, not LLM-judged: a per-run snapshot of the
+    most recent lines the dashboard paginates, filters, and searches.
+
+    ``source`` is ``"journald"`` or the file path; ``unit`` is the systemd
+    unit / syslog identifier (journald) or the file's basename; ``level`` is
+    the normalised syslog severity (``emerg`` … ``debug``) when known."""
+
+    __tablename__ = "log_entries"
+    source: Mapped[Optional[str]] = mapped_column(index=True)
+    unit: Mapped[Optional[str]] = mapped_column(index=True)
+    level: Mapped[Optional[str]] = mapped_column(index=True)
+    event_timestamp: Mapped[Optional[str]] = mapped_column(index=True)
+    pid: Mapped[Optional[int]]
+    message: Mapped[Optional[str]]
+
+
 class FileIntegrityRow(_RowBase):
     __tablename__ = "file_integrity"
     path: Mapped[str] = mapped_column(index=True)

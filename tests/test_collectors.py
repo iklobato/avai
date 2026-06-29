@@ -327,3 +327,84 @@ class TestLinuxAuthEventsJournalDir:
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         cmd = hm.LinuxAuthEventsCollector()._cmd()
         assert "--directory" not in cmd
+
+
+class TestLogTailCollector:
+    """Generic journald + file log capture. Parsing is pure logic, unit-
+    testable without journalctl or a real /var/log."""
+
+    def test_parse_journal_maps_fields(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        row = LogTailCollector._parse_journal(
+            '{"MESSAGE":"Accepted password","PRIORITY":"6",'
+            '"_SYSTEMD_UNIT":"ssh.service","_PID":"42",'
+            '"__REALTIME_TIMESTAMP":"1700000000000000"}'
+        )
+        assert row["source"] == "journald"
+        assert row["unit"] == "ssh.service"
+        assert row["level"] == "info"
+        assert row["pid"] == 42
+        assert row["message"] == "Accepted password"
+        assert row["event_timestamp"].startswith("2023-11-14T")
+
+    def test_parse_journal_decodes_binary_message_array(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        # journald encodes a non-UTF-8 MESSAGE as an array of byte values.
+        row = LogTailCollector._parse_journal('{"MESSAGE":[104,105],"PRIORITY":"3"}')
+        assert row["message"] == "hi"
+        assert row["level"] == "err"
+
+    def test_parse_journal_bad_line_is_none(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        assert LogTailCollector._parse_journal("not json") is None
+
+    def test_parse_journal_unknown_priority_has_no_level(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        assert LogTailCollector._parse_journal('{"MESSAGE":"x"}')["level"] is None
+
+    def test_sniff_text_level(self):
+        from avai.host_monitor.collectors import _sniff_text_level
+
+        assert _sniff_text_level("dpkg: ERROR failed to configure") == "err"
+        assert _sniff_text_level("a warning was issued") == "warning"
+        assert _sniff_text_level("FATAL: disk full") == "crit"
+        assert _sniff_text_level("status installed openssl") is None
+        # Regression: "error" inside an identifier is NOT an error — a dpkg
+        # line about the libgpg-error-dev package used to be mis-tagged err,
+        # which then dominated the log-summary "most errors" ranking.
+        assert _sniff_text_level("status unpacked libgpg-error-dev:amd64") is None
+
+    def test_tail_file_yields_last_lines_in_order(self, tmp_path):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        f = tmp_path / "agent.log"
+        f.write_text("\n".join(f"line {i}" for i in range(10)) + "\n")
+        rows = list(LogTailCollector(files=[str(f)])._tail_file(str(f)))
+        assert [r["unit"] for r in rows] == ["agent.log"] * 10
+        assert rows[0]["source"] == str(f)
+        assert rows[0]["message"] == "line 0"
+        assert rows[-1]["message"] == "line 9"
+
+    def test_missing_file_is_skipped_silently(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        assert list(LogTailCollector()._tail_file("/no/such/path.log")) == []
+
+    def test_collect_without_journalctl_reads_configured_files(
+        self, tmp_path, monkeypatch
+    ):
+        import avai.host_monitor.collectors as col
+
+        f = tmp_path / "x.log"
+        f.write_text("boom ERROR happened\n")
+        monkeypatch.setattr(col.shutil, "which", lambda _b: None)  # no journalctl
+        c = col.LogTailCollector(files=[str(f)])
+        rows = list(c.collect())
+        assert len(rows) == 1
+        assert rows[0]["level"] == "err"
+        assert rows[0]["message"] == "boom ERROR happened"
+        assert c.judge_enabled is False  # bulk logs aren't LLM-judged

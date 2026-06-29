@@ -18,6 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from avai.host_monitor import ControlState, FeedbackRow
+from avai.host_monitor.constants import MONITOR_LIVENESS_WINDOW_S
 
 _write_engine_cache: dict[str, object] = {}
 _write_engine_lock = threading.Lock()
@@ -178,13 +179,15 @@ def read_control_state() -> dict | None:
 
 def monitor_alive(state: dict | None) -> bool:
     """Heartbeat freshness check. The monitor writes last_seen_at every poll
-    tick (~3s) even while idle/paused, so a generous 120s window only ever
-    reads 'dead' if the process is actually gone (or stuck in a very long
-    first-cycle scan, which shows status='scanning' for context)."""
+    tick (~3s) even while idle/paused, and refreshes it periodically mid-scan
+    (see runner._progress_heartbeat), so this window only ever reads 'dead' if
+    the process is actually gone."""
     if not state or not state.get("last_seen_at"):
         return False
     try:
         seen = datetime.fromisoformat(state["last_seen_at"])
     except (TypeError, ValueError):
         return False
-    return (datetime.now(timezone.utc) - seen).total_seconds() < 120
+    return (
+        datetime.now(timezone.utc) - seen
+    ).total_seconds() < MONITOR_LIVENESS_WINDOW_S

@@ -190,6 +190,9 @@ class TestDashboardEndpoints:
             "/fragments/network-topology",
             "/fragments/network-exposure",
             "/fragments/vulnerabilities",
+            "/fragments/resources",
+            "/fragments/logs",
+            "/fragments/log-summary",
         ],
     )
     def test_each_htmx_fragment_returns_200_on_empty_db(self, client, path):
@@ -663,7 +666,7 @@ class TestDashboardEndpoints:
         # the KEV/critical package must rank before the EOL OS
         assert body.index("openssl@3.0.2") < body.index("macos@12")
 
-    def test_vulnerabilities_flags_and_prioritises_reachable_software(self, client):
+    def test_vulnerabilities_sorted_by_severity_then_flags_reachable(self, client):
         import json as _json
 
         from avai.dashboard import Base
@@ -691,7 +694,8 @@ class TestDashboardEndpoints:
                     laddr_port=443,
                 )
             )
-            # Exposed nginx (CVSS 5.0) vs higher-CVSS openssl that isn't present.
+            # Exposed nginx (CVSS 5.0 → medium) vs higher-CVSS openssl
+            # (9.0 → critical) that isn't present on the host.
             for pkg, cve, score in [
                 ("nginx@1.20", "CVE-2024-2000", 5.0),
                 ("openssl@3.0.2", "CVE-2024-3000", 9.0),
@@ -723,8 +727,9 @@ class TestDashboardEndpoints:
             s.commit()
         body = client.get("/fragments/vulnerabilities").data.decode()
         assert "exposed" in body  # the reachable-software badge rendered
-        # exposed nginx outranks the higher-CVSS but not-present openssl
-        assert body.index("nginx@1.20") < body.index("openssl@3.0.2")
+        # Always severity-first: critical openssl outranks the medium-but-
+        # exposed nginx. (Exposure is only a tiebreaker within a severity band.)
+        assert body.index("openssl@3.0.2") < body.index("nginx@1.20")
 
     def test_incident_fragment_empty_shows_placeholder(self, client):
         r = client.get("/fragments/incident")
@@ -1413,3 +1418,435 @@ class TestFeedbackEndpoint:
             headers={"X-Avai-Token": "secret"},
         )
         assert r.status_code == 400
+
+
+class TestMountTree:
+    """mount_tree arranges flat filesystem rows into a mount-point hierarchy
+    so the disk-usage panel can render children indented under their parent."""
+
+    def _rows(self, *mountpoints):
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(mountpoint=m) for m in mountpoints]
+
+    def test_children_nest_under_parents_in_preorder(self):
+        from avai.dashboard.queries import mount_tree
+
+        tree = mount_tree(self._rows("/home", "/", "/boot/efi", "/boot"))
+        assert [(n["row"].mountpoint, n["depth"]) for n in tree] == [
+            ("/", 0),
+            ("/boot", 1),
+            ("/boot/efi", 2),
+            ("/home", 1),
+        ]
+
+    def test_last_child_flagged_for_branch_glyph(self):
+        from avai.dashboard.queries import mount_tree
+
+        flags = {
+            n["row"].mountpoint: n["is_last"]
+            for n in mount_tree(self._rows("/", "/home", "/var"))
+        }
+        assert flags["/var"] is True  # last child of root → '└'
+        assert flags["/home"] is False  # has a sibling below → '├'
+        assert flags["/"] is True  # only node at its level
+
+    def test_orphan_mount_without_present_parent_is_depth_zero(self):
+        from avai.dashboard.queries import mount_tree
+
+        # Root not collected: neither mount has an ancestor in the set.
+        depths = {
+            n["row"].mountpoint: n["depth"]
+            for n in mount_tree(self._rows("/home", "/var/log"))
+        }
+        assert depths == {"/home": 0, "/var/log": 0}
+
+    def test_rows_without_mountpoint_are_dropped(self):
+        from avai.dashboard.queries import mount_tree
+
+        tree = mount_tree(self._rows(None, "/"))
+        assert [n["row"].mountpoint for n in tree] == ["/"]
+
+
+class TestSeverityHelpers:
+    """Pure CVSS-band → severity mapping that drives the panel's sort/filter."""
+
+    def test_cvss_bands(self):
+        from avai.dashboard.queries import _severity_from_cvss
+
+        assert _severity_from_cvss(9.8) == "critical"
+        assert _severity_from_cvss(7.0) == "high"
+        assert _severity_from_cvss(4.0) == "medium"
+        assert _severity_from_cvss(0.1) == "low"
+        assert _severity_from_cvss(0.0) == "none"
+        assert _severity_from_cvss(None) is None
+
+    def test_item_severity_falls_back_to_cve_label_then_kev(self):
+        from avai.dashboard.queries import _item_severity
+
+        # No score on the item, but a labelled CVE → use the worst label.
+        cves = [{"severity": "high"}, {"severity": "low"}]
+        assert _item_severity(None, cves, kev=False) == "high"
+        # No score, no labels, but actively exploited → critical.
+        assert _item_severity(None, [{}], kev=True) == "critical"
+        # Nothing at all → none.
+        assert _item_severity(None, [{}], kev=False) == "none"
+
+
+class TestVulnerabilitiesPanel:
+    """vulnerabilities() always sorts by severity and supports filters +
+    pagination (regression: it previously returned an unpaginated, unfiltered
+    flat list)."""
+
+    def _seed(self, db_path):
+        import json
+
+        from sqlalchemy import text
+
+        pkg = {"itype": "package", "hint": "suspicious", "conf": 0.5, "summary": ""}
+        cve = {"itype": "cve", "hint": "suspicious", "conf": 0.5, "summary": ""}
+        rows = [
+            # critical package (CVSS 9.8)
+            {
+                **pkg,
+                "source": "osv",
+                "ival": "openssl@3.0.0",
+                "dj": json.dumps({"vuln_ids": ["CVE-2022-AAAA"]}),
+            },
+            {
+                **cve,
+                "source": "nvd",
+                "ival": "CVE-2022-AAAA",
+                "dj": json.dumps(
+                    {"cvss31": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}}
+                ),
+            },
+            # medium package (CVSS 5.0)
+            {
+                **pkg,
+                "source": "osv",
+                "ival": "leftpad@1.0.0",
+                "dj": json.dumps({"vuln_ids": ["CVE-2021-BBBB"]}),
+            },
+            {
+                **cve,
+                "source": "nvd",
+                "ival": "CVE-2021-BBBB",
+                "dj": json.dumps(
+                    {"cvss31": {"baseScore": 5.0, "baseSeverity": "MEDIUM"}}
+                ),
+            },
+        ]
+        with Session(_engine_rw(db_path)) as s:
+            for r in rows:
+                s.execute(
+                    text(
+                        "INSERT INTO enrichment_evidence "
+                        "(source, indicator_type, indicator_value, verdict_hint, "
+                        " confidence, summary, details_json, fetched_at) VALUES "
+                        "(:source,:itype,:ival,:hint,:conf,:summary,:dj,:fa)"
+                    ),
+                    {**r, "fa": "2026-01-01T00:00:00+00:00"},
+                )
+            s.commit()
+
+    def test_sorted_by_severity_with_metadata(self, tmp_path):
+        from avai.dashboard.queries import vulnerabilities
+
+        db = tmp_path / "v.db"
+        _ensure_db_exists(str(db))
+        self._seed(str(db))
+        with Session(_engine_rw(str(db))) as s:
+            res = vulnerabilities(s)
+        assert [r["software"] for r in res["rows"]] == [
+            "openssl@3.0.0",  # critical first
+            "leftpad@1.0.0",  # then medium
+        ]
+        assert res["rows"][0]["severity"] == "critical"
+        assert res["total"] == 2
+        assert res["summary"]["critical"] == 1
+
+    def test_severity_filter(self, tmp_path):
+        from avai.dashboard.queries import vulnerabilities
+
+        db = tmp_path / "v.db"
+        _ensure_db_exists(str(db))
+        self._seed(str(db))
+        with Session(_engine_rw(str(db))) as s:
+            res = vulnerabilities(s, severity="medium")
+        assert [r["software"] for r in res["rows"]] == ["leftpad@1.0.0"]
+        assert res["total"] == 1
+
+    def test_search_filter(self, tmp_path):
+        from avai.dashboard.queries import vulnerabilities
+
+        db = tmp_path / "v.db"
+        _ensure_db_exists(str(db))
+        self._seed(str(db))
+        with Session(_engine_rw(str(db))) as s:
+            by_name = vulnerabilities(s, q="openssl")
+            by_cve = vulnerabilities(s, q="cve-2021-bbbb")
+        assert [r["software"] for r in by_name["rows"]] == ["openssl@3.0.0"]
+        assert [r["software"] for r in by_cve["rows"]] == ["leftpad@1.0.0"]
+
+    def test_pagination_slices_and_reports_pages(self, tmp_path):
+        from avai.dashboard.queries import vulnerabilities
+
+        db = tmp_path / "v.db"
+        _ensure_db_exists(str(db))
+        self._seed(str(db))
+        with Session(_engine_rw(str(db))) as s:
+            p1 = vulnerabilities(s, per_page=1, page=1)
+            p2 = vulnerabilities(s, per_page=1, page=2)
+        assert p1["total"] == 2 and p1["total_pages"] == 2
+        assert len(p1["rows"]) == 1 and p1["rows"][0]["software"] == "openssl@3.0.0"
+        assert len(p2["rows"]) == 1 and p2["rows"][0]["software"] == "leftpad@1.0.0"
+
+
+class TestLogsPanel:
+    """log_entries() is newest-first, filterable (source/level/q) and
+    paginated — the generic journald + file log panel."""
+
+    def _seed(self, db_path):
+        from sqlalchemy import text
+
+        rows = [
+            (
+                "journald",
+                "ssh.service",
+                "info",
+                "2026-06-24T00:01:00+00:00",
+                111,
+                "Accepted password for ik",
+            ),
+            (
+                "journald",
+                "kernel",
+                "err",
+                "2026-06-24T00:02:00+00:00",
+                None,
+                "EXT4-fs error on sda1",
+            ),
+            (
+                "/var/log/dpkg.log",
+                "dpkg.log",
+                None,
+                None,
+                None,
+                "status installed openssl",
+            ),
+            (
+                "journald",
+                "sudo",
+                "warning",
+                "2026-06-24T00:03:00+00:00",
+                222,
+                "pam_unix sudo auth failure",
+            ),
+        ]
+        with Session(_engine_rw(db_path)) as s:
+            for src, unit, lvl, ts, pid, msg in rows:
+                s.execute(
+                    text(
+                        "INSERT INTO log_entries (run_id, collected_at, content_hash, "
+                        "source, unit, level, event_timestamp, pid, message) VALUES "
+                        "(:r,:c,NULL,:s,:u,:l,:t,:p,:m)"
+                    ),
+                    {
+                        "r": "r1",
+                        "c": "2026-06-24T00:00:00+00:00",
+                        "s": src,
+                        "u": unit,
+                        "l": lvl,
+                        "t": ts,
+                        "p": pid,
+                        "m": msg,
+                    },
+                )
+            s.commit()
+
+    def _run(self, tmp_path):
+        from avai.host_monitor import CollectionRun
+
+        db = tmp_path / "logs.db"
+        _ensure_db_exists(str(db))
+        with Session(_engine_rw(str(db))) as s:
+            s.add(
+                CollectionRun(
+                    run_id="r1",
+                    started_at="2026-06-24T00:00:00+00:00",
+                    hostname="h",
+                    lookback_min=5,
+                )
+            )
+            s.commit()
+        self._seed(str(db))
+        return db
+
+    def test_newest_first_with_summary_and_sources(self, tmp_path):
+        from avai.dashboard.queries import log_entries
+
+        db = self._run(tmp_path)
+        with Session(_engine_rw(str(db))) as s:
+            res = log_entries(s, "r1")
+        assert [r["message"][:7] for r in res["rows"]] == [
+            "pam_uni",
+            "EXT4-fs",
+            "Accepte",
+            "status ",  # 00:03, 00:02, 00:01, null-ts last
+        ]
+        assert res["summary"] == {"total": 4, "err": 1, "warning": 1, "sources": 2}
+        assert res["sources"] == ["/var/log/dpkg.log", "journald"]
+
+    def test_level_and_source_and_search_filters(self, tmp_path):
+        from avai.dashboard.queries import log_entries
+
+        db = self._run(tmp_path)
+        with Session(_engine_rw(str(db))) as s:
+            assert [
+                r["message"][:7] for r in log_entries(s, "r1", level="err")["rows"]
+            ] == ["EXT4-fs"]
+            assert [
+                r["unit"]
+                for r in log_entries(s, "r1", source="/var/log/dpkg.log")["rows"]
+            ] == ["dpkg.log"]
+            assert [
+                r["message"][:7] for r in log_entries(s, "r1", q="openssl")["rows"]
+            ] == ["status "]
+
+    def test_pagination(self, tmp_path):
+        from avai.dashboard.queries import log_entries
+
+        db = self._run(tmp_path)
+        with Session(_engine_rw(str(db))) as s:
+            p1 = log_entries(s, "r1", per_page=2, page=1)
+            p2 = log_entries(s, "r1", per_page=2, page=2)
+        assert p1["total"] == 4 and p1["total_pages"] == 2
+        assert len(p1["rows"]) == 2 and len(p2["rows"]) == 2
+
+
+class TestPrimaryFilesystems:
+    """The disk panel shows only real on-disk filesystems by default; snap
+    squashfs / tmpfs / virtual mounts are hidden (regression: a Linux desktop's
+    ~20 snap loop-mounts made the panel scroll for screens)."""
+
+    def _row(self, mountpoint, fstype, total, percent):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            mountpoint=mountpoint,
+            device="/dev/x",
+            fstype=fstype,
+            total=total,
+            percent=percent,
+        )
+
+    def test_drops_pseudo_and_snap_and_sorts_fullest_first(self):
+        from avai.dashboard.queries import primary_filesystems
+
+        rows = [
+            self._row("/snap/core/1", "squashfs", 100, 100.0),
+            self._row("/", "ext4", 1000, 40.0),
+            self._row("/boot", "ext4", 500, 80.0),
+            self._row("/run", "tmpfs", 100, 5.0),
+            self._row("/dev", "devtmpfs", 0, 0.0),
+        ]
+        out = primary_filesystems(rows)
+        # ext4 only, fullest-first; squashfs/tmpfs/devtmpfs dropped.
+        assert [r.mountpoint for r in out] == ["/boot", "/"]
+
+    def test_zero_capacity_real_fs_is_dropped(self):
+        from avai.dashboard.queries import primary_filesystems
+
+        assert primary_filesystems([self._row("/x", "ext4", 0, 0.0)]) == []
+
+
+class TestLogAggregates:
+    """log_aggregates() groups journald + file log lines and ranks them
+    most-errors-first then most-occurrences (the 'top sources & errors' view)."""
+
+    def _seed(self, db_path):
+        from sqlalchemy import text
+
+        # ssh: 3 lines / 0 err; cron: 5 lines / 2 err; kernel: 2 lines / 1 err
+        rows = []
+        for i in range(3):
+            rows.append(("journald", "ssh.service", "info",
+                         f"Accepted password for ik from 10.0.0.{i} port 22"))
+        for i in range(5):
+            rows.append(("journald", "cron.service", "err" if i < 2 else "info",
+                         "job 1234 failed"))
+        for i in range(2):
+            rows.append(("journald", "kernel", "err" if i == 0 else "warning",
+                         "EXT4-fs warning"))
+        with Session(_engine_rw(db_path)) as s:
+            for src, unit, lvl, msg in rows:
+                s.execute(
+                    text(
+                        "INSERT INTO log_entries (run_id, collected_at, content_hash, "
+                        "source, unit, level, event_timestamp, pid, message) VALUES "
+                        "(:r,:c,NULL,:s,:u,:l,:t,NULL,:m)"
+                    ),
+                    {"r": "r1", "c": "t", "s": src, "u": unit, "l": lvl,
+                     "t": "2026-06-24T00:00:00+00:00", "m": msg},
+                )
+            s.commit()
+
+    def _run(self, tmp_path):
+        from avai.host_monitor import CollectionRun
+
+        db = tmp_path / "agg.db"
+        _ensure_db_exists(str(db))
+        with Session(_engine_rw(str(db))) as s:
+            s.add(CollectionRun(run_id="r1", started_at="2026-06-24T00:00:00+00:00",
+                                hostname="h", lookback_min=5))
+            s.commit()
+        self._seed(str(db))
+        return db
+
+    def test_group_by_unit_ranks_errors_then_occurrences(self, tmp_path):
+        from avai.dashboard.queries import log_aggregates
+
+        db = self._run(tmp_path)
+        with Session(_engine_rw(str(db))) as s:
+            res = log_aggregates(s, "r1", group_by="unit")
+        keys = [(g["key"], g["count"], g["errors"]) for g in res["groups"]]
+        # cron (2 err) first, then kernel (1 err), then ssh (0 err) last
+        assert keys == [
+            ("cron.service", 5, 2),
+            ("kernel", 2, 1),
+            ("ssh.service", 3, 0),
+        ]
+        assert res["summary"] == {"groups": 3, "errors": 3, "warnings": 1, "lines": 10}
+
+    def test_group_by_message_collapses_variable_ids(self, tmp_path):
+        from avai.dashboard.queries import log_aggregates
+
+        db = self._run(tmp_path)
+        with Session(_engine_rw(str(db))) as s:
+            res = log_aggregates(s, "r1", group_by="message")
+        # The 3 ssh logins (varying IP) collapse to one templated group.
+        ssh = [g for g in res["groups"] if "Accepted password" in g["key"]]
+        assert len(ssh) == 1
+        assert ssh[0]["count"] == 3
+        assert "#.#.#.#" in ssh[0]["key"]  # ip + port digits normalised
+
+    def test_invalid_group_by_falls_back_to_unit(self, tmp_path):
+        from avai.dashboard.queries import log_aggregates
+
+        db = self._run(tmp_path)
+        with Session(_engine_rw(str(db))) as s:
+            res = log_aggregates(s, "r1", group_by="bogus")
+        assert res["group_by"] == "unit"
+
+    def test_source_filter_then_aggregate(self, tmp_path):
+        from avai.dashboard.queries import log_aggregates
+
+        db = self._run(tmp_path)
+        with Session(_engine_rw(str(db))) as s:
+            res = log_aggregates(s, "r1", source="journald")
+        assert res["summary"]["lines"] == 10
+        none = log_aggregates(  # a source with no rows aggregates to empty
+            Session(_engine_rw(str(db))), "r1", source="/var/log/nope.log"
+        )
+        assert none["groups"] == []

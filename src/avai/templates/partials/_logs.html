@@ -1,0 +1,147 @@
+{% from "partials/_macros.html" import card_header, pagination_bar %}
+
+{# syslog severity → row/level colour #}
+{% set lvl_cls = {
+  'emerg':   'text-red-300',
+  'alert':   'text-red-300',
+  'crit':    'text-red-400',
+  'err':     'text-red-400',
+  'warning': 'text-amber-400',
+  'notice':  'text-sky-300',
+  'info':    'text-slate-300',
+  'debug':   'text-slate-500',
+} %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  <div class="flex items-baseline justify-between mb-3">
+    {{ card_header("logs — journald + host log files") }}
+    {% if logs %}<span class="text-[10px] font-mono text-slate-400">{{ logs.total }} line(s)</span>{% endif %}
+  </div>
+
+  {% if logs %}
+  {# ----- filter bar ----- #}
+  <form id="logs-filters"
+        class="mb-4 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="hidden" name="page" value="{{ logs.page }}">
+
+    <input type="search"
+           name="q"
+           value="{{ logs.q }}"
+           placeholder="search message / unit"
+           aria-label="search logs by message or unit"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-56 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/logs"
+           hx-target="#logs"
+           hx-include="#logs-filters"
+           hx-trigger="keyup changed delay:300ms, search"
+           hx-vals='{"page": 1}'>
+
+    <select name="level"
+            aria-label="filter logs by severity"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/logs"
+            hx-target="#logs"
+            hx-include="#logs-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value="" {% if logs.level == "" %}selected{% endif %}>all levels</option>
+      {% for lv in logs.levels %}
+        <option value="{{ lv }}" {% if logs.level == lv %}selected{% endif %}>{{ lv }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="source"
+            aria-label="filter logs by source"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 max-w-[16rem] focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/logs"
+            hx-target="#logs"
+            hx-include="#logs-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value="" {% if logs.source == "" %}selected{% endif %}>all sources</option>
+      {% for src in logs.sources %}
+        <option value="{{ src }}" {% if logs.source == src %}selected{% endif %}>{{ src }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="per_page"
+            aria-label="rows per page"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/logs"
+            hx-target="#logs"
+            hx-include="#logs-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      {% for n in per_page_options %}
+        <option value="{{ n }}" {% if n == logs.per_page %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+  </form>
+  {% endif %}
+
+  {% if logs and logs.rows %}
+    {# ----- summary strip ----- #}
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+      {% set sm = logs.summary %}
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ sm.total }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">lines</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
+        <div class="mono text-red-300 text-lg">{{ sm.err }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">errors</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-amber-900/40 px-3 py-2">
+        <div class="mono text-amber-300 text-lg">{{ sm.warning }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">warnings</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-white/5 px-3 py-2">
+        <div class="mono text-slate-200 text-lg">{{ sm.sources }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">sources</div>
+      </div>
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead>
+          <tr class="text-slate-500 uppercase tracking-wider text-[10px]">
+            <th class="text-left font-semibold pb-2 w-20">time</th>
+            <th class="text-left font-semibold pb-2 w-16">level</th>
+            <th class="text-left font-semibold pb-2 w-40">unit / source</th>
+            <th class="text-left font-semibold pb-2">message</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800/80 [&>tr:nth-child(even)]:bg-slate-950/40">
+          {% for r in logs.rows %}
+            <tr class="hover:bg-slate-800/40 transition-colors [&>td]:align-top">
+              <td class="py-1.5 font-mono tabular-nums text-slate-500 whitespace-nowrap">
+                {{ r.event_timestamp[11:19] if r.event_timestamp else '—' }}
+              </td>
+              <td class="py-1.5 font-mono uppercase {{ lvl_cls.get(r.level, 'text-slate-600') }}">
+                {{ r.level or '—' }}
+              </td>
+              <td class="py-1.5 font-mono text-slate-400 truncate max-w-[10rem]" title="{{ r.source }}">
+                {{ r.unit or '—' }}
+                {% if r.pid is not none %}<span class="text-slate-600">[{{ r.pid }}]</span>{% endif %}
+              </td>
+              <td class="py-1.5 font-mono text-slate-300 break-all">{{ r.message }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {{ pagination_bar("logs", logs.page, logs.total_pages, logs.total, logs.rows|length, logs.per_page, per_page_options) }}
+  {% elif logs and (logs.q or logs.level or logs.source) %}
+    <div class="text-slate-500 italic text-sm">no log lines match the current filters.</div>
+  {% elif logs %}
+    <div class="flex items-center gap-2 text-xs text-slate-500">
+      <span class="w-1.5 h-1.5 rounded-full bg-slate-600 flex-shrink-0" aria-hidden="true"></span>
+      no logs captured in the latest run — needs <span class="mono">journalctl</span> (systemd) or readable files under <span class="mono">/var/log</span>; some sources need the monitor run with <span class="mono">sudo</span>.
+    </div>
+  {% else %}
+    <div class="text-slate-500 italic">no run yet.</div>
+  {% endif %}
+</div>

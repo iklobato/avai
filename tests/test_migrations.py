@@ -55,7 +55,7 @@ def test_sink_setup_applies_migrations(tmp_path):
     Sink(create_engine(f"sqlite:///{db}")).setup()
     assert set(_IDX) <= _indexes(db)
     assert "control_state" in _tables(db)
-    assert _version(db) == "0011_feedback"
+    assert _version(db) == "0012_log_entries"
 
 
 def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path, monkeypatch):
@@ -93,7 +93,7 @@ def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
 
     upgrade_to_head(f"sqlite:///{db}")  # stamps baseline then adds indexes
     assert set(_IDX) <= _indexes(db)
-    assert _version(db) == "0011_feedback"
+    assert _version(db) == "0012_log_entries"
 
 
 def test_downgrade_then_upgrade_roundtrip(tmp_path):
@@ -126,7 +126,7 @@ def test_control_state_migration_roundtrip(tmp_path):
 
     command.upgrade(_config(f"sqlite:///{db}"), "head")
     assert "control_state" in _tables(db)
-    assert _version(db) == "0011_feedback"
+    assert _version(db) == "0012_log_entries"
 
     command.downgrade(_config(f"sqlite:///{db}"), "0002_perf_indexes")
     assert "control_state" not in _tables(db)

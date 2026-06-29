@@ -93,16 +93,20 @@ Issues = "https://github.com/iklobato/avai/issues"
 # templates/, static/) in both wheel and sdist.
 # -----------------------------------------------------------------------------
 
+# The full YARA pack (rules/vendor/) is fetched onto the build host by
+# scripts/update_rules.py and is VCS-ignored, so hatchling skips it by default.
+# `artifacts` force-includes it so the published wheel/sdist ships the whole
+# ruleset (signature-base), not just the bundled EICAR rule. The pack is
+# mixed-license (see rules/vendor/.../LICENSE + the NOTICE file) and some rules
+# need a crypto-enabled yara to compile; both are tolerated at load time.
+[tool.hatch.build]
+artifacts = ["src/avai/rules/vendor/**"]
+
 [tool.hatch.build.targets.wheel]
 # packages = ["src/avai"] is enough — hatchling walks the directory
 # and includes every file (Python and otherwise), so prompts.toml,
-# templates/, static/, and the bundled rules/ (EICAR + deny-list) end up
-# under avai/ in the wheel automatically.
+# templates/, static/, and the rules/ tree end up under avai/ in the wheel.
 packages = ["src/avai"]
-# The opt-in YARA-Forge pack is fetched into rules/vendor/ post-install;
-# it is mixed-license and needs a crypto-enabled yara, so it must never
-# ride along in a published artifact.
-exclude = ["src/avai/rules/vendor/**"]
 
 [tool.hatch.build.targets.sdist]
 include = [

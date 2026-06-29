@@ -19,6 +19,7 @@ from .constants import (
     _LAUNCH_ITEM_COLLECTOR,
     DEFAULT_BASELINE_MIN_RUNS,
     LOG,
+    MONITOR_PROGRESS_HEARTBEAT_S,
 )
 from .enums import FeedbackLabel, Verdict
 from .judge import Judge, NullJudge
@@ -98,6 +99,10 @@ class Runner:
         self._control: dict = {}
         self._default_judge_on = not isinstance(judge, NullJudge)
         self._default_enrich_on = enrichment_chain is not None
+        # Monotonic timestamp of the last liveness touch written mid-scan.
+        # See _progress_heartbeat: run_once can run far longer than the
+        # dashboard's liveness window, so it refreshes last_seen_at as it goes.
+        self._last_progress_beat = 0.0
 
     def request_shutdown(self) -> None:
         """Idempotent — safe to call from a signal handler."""
@@ -128,6 +133,21 @@ class Runner:
             )
         except Exception:
             LOG.exception("heartbeat write failed")
+
+    def _progress_heartbeat(self) -> None:
+        """Refresh last_seen_at mid-scan so a long run_once doesn't read as
+        offline on the dashboard. Throttled to one write per
+        MONITOR_PROGRESS_HEARTBEAT_S; run_forever owns status/interval, so this
+        touches only the timestamp. Cheap to call in tight collector/enrichment
+        loops — the throttle drops the redundant calls."""
+        now = time.monotonic()
+        if now - self._last_progress_beat < MONITOR_PROGRESS_HEARTBEAT_S:
+            return
+        self._last_progress_beat = now
+        try:
+            self.sink.touch_heartbeat()
+        except Exception:
+            LOG.exception("progress heartbeat write failed")
 
     def _run_pending_command(self, ctrl: dict) -> None:
         """Execute a one-shot maintenance command if a new nonce is present,
@@ -187,6 +207,10 @@ class Runner:
         # narrative / risk reflect the fixed verdicts.
         self._apply_feedback()
         run_id, started = self.sink.start_run(socket.gethostname(), self.lookback_min)
+        # run_forever wrote a full heartbeat just before this; start the
+        # mid-scan throttle from now so the first progress touch lands one
+        # interval into the scan, not immediately.
+        self._last_progress_beat = time.monotonic()
         # Snapshot the host's baseline state once: it can't change mid-cycle
         # (the current run isn't completed yet), and every collector shares
         # the same cutoff.
@@ -203,6 +227,7 @@ class Runner:
                 break
             if c.name in disabled:
                 continue
+            self._progress_heartbeat()
             try:
                 self._run_collector(c, run_id, started, host_baseline)
                 ok += 1
@@ -739,6 +764,10 @@ class Runner:
 
         total = 0
         for entry in unjudged:
+            # Each indicator below is a serial, rate-limited threat-intel HTTP
+            # call; a host with many entries keeps this loop running well past
+            # the dashboard's liveness window. Keep proving liveness as we go.
+            self._progress_heartbeat()
             h = entry.get("content_hash")
             row = rows_by_hash.get(h) if isinstance(h, str) else None
             if row is None:

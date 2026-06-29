@@ -293,9 +293,32 @@
     <section id="vulnerabilities"
              hx-get="/fragments/vulnerabilities"
              hx-trigger="load, every 60s"
+             hx-include="#vulnerabilities-filters"
              hx-swap="innerHTML">
       <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
         loading vulnerabilities…
+      </div>
+    </section>
+
+    {# ---------- log summary (aggregated: top sources & errors) ---------- #}
+    <section id="log-summary"
+             hx-get="/fragments/log-summary"
+             hx-trigger="load, every 60s"
+             hx-include="#log-summary-filters"
+             hx-swap="innerHTML">
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
+        loading log summary…
+      </div>
+    </section>
+
+    {# ---------- logs (journald + host log files) ---------- #}
+    <section id="logs"
+             hx-get="/fragments/logs"
+             hx-trigger="load, every 60s"
+             hx-include="#logs-filters"
+             hx-swap="innerHTML">
+      <div class="bg-slate-900 border border-slate-800 rounded-lg p-5 text-slate-500 italic">
+        loading logs…
       </div>
     </section>
 

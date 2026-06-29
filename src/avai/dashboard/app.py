@@ -47,11 +47,15 @@ from .queries import (
     latest_risk,
     latest_run,
     listening_ports,
+    log_aggregates,
+    log_entries,
+    mount_tree,
     network_exposure,
     network_flows,
     network_topology,
     new_alerts,
     persistence_tampering,
+    primary_filesystems,
     recent_runs,
     resource_trend,
     risk_trend,
@@ -423,9 +427,23 @@ def fragment_network():
 @app.route("/fragments/vulnerabilities")
 def fragment_vulnerabilities():
     """CVE / EOL 'protect yourself' panel from collected enrichment evidence."""
+    q = request.args.get("q", "")
+    severity = request.args.get("severity", "")
+    source = request.args.get("source", "")
+    page = _int_arg("page", 1)
+    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
     with _session() as s:
         return render_template(
-            "partials/_vulnerabilities.html", vulns=vulnerabilities(s)
+            "partials/_vulnerabilities.html",
+            vulns=vulnerabilities(
+                s,
+                q=q,
+                severity=severity,
+                source=source,
+                page=page,
+                per_page=per_page,
+            ),
+            per_page_options=PER_PAGE_OPTIONS,
         )
 
 
@@ -442,13 +460,15 @@ def fragment_sysint():
 @app.route("/fragments/resources")
 def fragment_resources():
     """System-resources panel: current memory/swap/CPU/load/uptime/tasks +
-    per-filesystem disk table + trend-chart canvases."""
+    per-filesystem disk tree + trend-chart canvases."""
     with _session() as s:
         latest = latest_run(s)
+        disks = disk_usage(s, latest.run_id) if latest else []
         return render_template(
             "partials/_resources.html",
             resources=(host_resources(s, latest.run_id) if latest else None),
-            disks=(disk_usage(s, latest.run_id) if latest else []),
+            disks_primary=primary_filesystems(disks),
+            mounts=mount_tree(disks),
         )
 
 
@@ -517,6 +537,62 @@ def fragment_dns_queries():
                     s,
                     latest.run_id,
                     verdict=verdict,
+                    level=level,
+                    q=q,
+                    page=page,
+                    per_page=per_page,
+                )
+                if latest
+                else None
+            ),
+            per_page_options=PER_PAGE_OPTIONS,
+        )
+
+
+@app.route("/fragments/log-summary")
+def fragment_log_summary():
+    group_by = request.args.get("group_by", "unit")
+    source = request.args.get("source", "")
+    q = request.args.get("q", "")
+    page = _int_arg("page", 1)
+    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_log_summary.html",
+            summary=(
+                log_aggregates(
+                    s,
+                    latest.run_id,
+                    group_by=group_by,
+                    source=source,
+                    q=q,
+                    page=page,
+                    per_page=per_page,
+                )
+                if latest
+                else None
+            ),
+            per_page_options=PER_PAGE_OPTIONS,
+        )
+
+
+@app.route("/fragments/logs")
+def fragment_logs():
+    source = request.args.get("source", "")
+    level = request.args.get("level", "")
+    q = request.args.get("q", "")
+    page = _int_arg("page", 1)
+    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    with _session() as s:
+        latest = latest_run(s)
+        return render_template(
+            "partials/_logs.html",
+            logs=(
+                log_entries(
+                    s,
+                    latest.run_id,
+                    source=source,
                     level=level,
                     q=q,
                     page=page,

@@ -34,7 +34,7 @@ from avai.host_monitor import (
     Runner,
     Sink,
 )
-from avai.host_monitor.runtime import Clock, Digest
+from avai.host_monitor.runtime import Clock, Digest, FrozenClock
 
 
 class _StubCollector:
@@ -271,6 +271,63 @@ class TestShutdownResponsiveness:
         runner.run_once()
         # c1 runs fully; the pre-loop check then breaks before c2/c3.
         assert _CountingCollector.calls == ["a"]
+
+
+class TestProgressHeartbeat:
+    """run_once must keep the control row's last_seen_at fresh *during* a
+    scan, not only between scans. Regression: a first cycle that ran longer
+    than the dashboard's liveness window (minutes-to-hours of serial
+    enrichment over many indicators) left last_seen_at frozen, so the
+    dashboard reported the live, busy monitor as 'monitor offline'."""
+
+    def test_touch_heartbeat_refreshes_only_last_seen_at(self, sink, monkeypatch):
+        import avai.host_monitor.sink as sink_mod
+
+        sink.ensure_control_row(interval=300, judge_enabled=False, enrich_enabled=False)
+        start = "2026-06-23T23:07:51+00:00"
+        monkeypatch.setattr(sink_mod, "Clock", lambda: FrozenClock(start))
+        sink.write_heartbeat(pid=42, status="scanning", current_interval=300)
+        before = sink.read_control()
+
+        later = "2026-06-23T23:20:00+00:00"
+        monkeypatch.setattr(sink_mod, "Clock", lambda: FrozenClock(later))
+        sink.touch_heartbeat()
+        after = sink.read_control()
+
+        assert after["last_seen_at"] == later  # liveness refreshed
+        # Status/interval/applied_at belong to write_heartbeat — a mid-scan
+        # touch must not claim a status change or a control-application.
+        assert after["status"] == before["status"]
+        assert after["applied_at"] == start
+        assert after["current_interval"] == before["current_interval"]
+        assert after["pid"] == before["pid"]
+
+    def test_run_once_refreshes_liveness_at_each_collector(self, sink, monkeypatch):
+        import avai.host_monitor.runner as runner_mod
+
+        # Zero the throttle so each collector boundary writes; the test scan
+        # is far shorter than the real interval.
+        monkeypatch.setattr(runner_mod, "MONITOR_PROGRESS_HEARTBEAT_S", 0)
+        sink.ensure_control_row(interval=300, judge_enabled=False, enrich_enabled=False)
+
+        beats = {"n": 0}
+        real_touch = sink.touch_heartbeat
+
+        def counting_touch():
+            beats["n"] += 1
+            real_touch()
+
+        monkeypatch.setattr(sink, "touch_heartbeat", counting_touch)
+
+        _CountingCollector.calls = []
+        c1 = _CountingCollector("a")
+        c2 = _CountingCollector("b")
+        runner = Runner(sink, [c1, c2], [], NullJudge(), 5)
+        runner.run_once()
+
+        # One liveness touch per collector boundary: the monitor proves it's
+        # alive as the scan advances, not only when it finishes.
+        assert beats["n"] >= 2
 
 
 # ---------------------------------------------------------------------------

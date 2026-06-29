@@ -1,18 +1,112 @@
-{% from "partials/_macros.html" import card_header %}
+{% from "partials/_macros.html" import card_header, pagination_bar %}
 
-<div class="bg-slate-900 border border-slate-800 rounded-lg {{ 'p-5' if vulns else 'px-5 py-3' }}">
-  <div class="flex items-baseline justify-between {{ 'mb-3' if vulns else '' }}">
+{# severity → pill colour (CVSS band). Drives the leading column the panel is
+   always sorted by. #}
+{% set sev_cls = {
+  'critical': 'border-red-800 bg-red-900/40 text-red-300',
+  'high':     'border-orange-800 bg-orange-900/30 text-orange-300',
+  'medium':   'border-amber-800 bg-amber-900/30 text-amber-300',
+  'low':      'border-sky-900/60 bg-sky-900/30 text-sky-300',
+  'none':     'border-slate-700 bg-slate-800/60 text-slate-400',
+} %}
+{% set has_filters = vulns.q or vulns.severity or vulns.source %}
+
+<div class="bg-slate-900 border border-slate-800 rounded-lg p-5">
+  <div class="flex items-baseline justify-between mb-3">
     {{ card_header("vulnerabilities — patch me (CVE / EOL)") }}
-    {% if vulns %}
-      <span class="text-[10px] font-mono text-slate-400">{{ vulns | length }} item(s)</span>
-    {% endif %}
+    <span class="text-[10px] font-mono text-slate-400">{{ vulns.total }} item(s)</span>
   </div>
 
-  {% if vulns %}
+  {% if vulns.rows or has_filters %}
+  {# ----- filter bar ----- #}
+  <form id="vulnerabilities-filters"
+        class="mb-4 flex flex-wrap items-center gap-2 text-xs"
+        onsubmit="return false;">
+    <input type="hidden" name="page" value="{{ vulns.page }}">
+
+    <input type="search"
+           name="q"
+           value="{{ vulns.q }}"
+           placeholder="search software / CVE / summary"
+           aria-label="search vulnerabilities by software, CVE id, or summary"
+           autocomplete="off"
+           class="bg-slate-800 border border-slate-700 rounded px-2 py-1 w-56 focus:outline-none focus:border-slate-500 placeholder:text-slate-600"
+           hx-get="/fragments/vulnerabilities"
+           hx-target="#vulnerabilities"
+           hx-include="#vulnerabilities-filters"
+           hx-trigger="keyup changed delay:300ms, search"
+           hx-vals='{"page": 1}'>
+
+    <select name="severity"
+            aria-label="filter vulnerabilities by severity"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/vulnerabilities"
+            hx-target="#vulnerabilities"
+            hx-include="#vulnerabilities-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value="" {% if vulns.severity == "" %}selected{% endif %}>all severities</option>
+      {% for s in ["critical", "high", "medium", "low"] %}
+        <option value="{{ s }}" {% if vulns.severity == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="source"
+            aria-label="filter vulnerabilities by source"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/vulnerabilities"
+            hx-target="#vulnerabilities"
+            hx-include="#vulnerabilities-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      <option value="" {% if vulns.source == "" %}selected{% endif %}>all sources</option>
+      {% for s in vulns.sources %}
+        <option value="{{ s }}" {% if vulns.source == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+
+    <select name="per_page"
+            aria-label="rows per page"
+            class="bg-slate-800 border border-slate-700 rounded px-2 py-1 focus:outline-none focus:border-slate-500"
+            hx-get="/fragments/vulnerabilities"
+            hx-target="#vulnerabilities"
+            hx-include="#vulnerabilities-filters"
+            hx-trigger="change"
+            hx-vals='{"page": 1}'>
+      {% for n in per_page_options %}
+        <option value="{{ n }}" {% if n == vulns.per_page %}selected{% endif %}>{{ n }} / page</option>
+      {% endfor %}
+    </select>
+  </form>
+  {% endif %}
+
+  {% if vulns.rows %}
+    {# ----- summary strip ----- #}
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+      {% set sm = vulns.summary %}
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
+        <div class="mono text-red-300 text-lg">{{ sm.critical }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">critical</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-orange-900/40 px-3 py-2">
+        <div class="mono text-orange-300 text-lg">{{ sm.high }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">high</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
+        <div class="mono text-red-300 text-lg">{{ sm.kev }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">exploited (KEV)</div>
+      </div>
+      <div class="rounded-lg bg-slate-950/60 ring-1 ring-red-900/40 px-3 py-2">
+        <div class="mono text-red-300 text-lg">{{ sm.exposed }}</div>
+        <div class="text-[10px] uppercase tracking-wider text-slate-500">exposed</div>
+      </div>
+    </div>
+
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="bg-slate-800/40 text-slate-500 uppercase tracking-wider text-[10px]">
           <tr>
+            <th class="px-3 py-2 text-left font-semibold w-24">severity</th>
             <th class="px-3 py-2 text-left font-semibold">software</th>
             <th class="px-3 py-2 text-left font-semibold">vulnerabilities</th>
             <th class="px-3 py-2 text-right font-semibold w-20">cvss</th>
@@ -21,8 +115,11 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-800/80 [&>tr:nth-child(even)]:bg-slate-950/40">
-          {% for v in vulns %}
+          {% for v in vulns.rows %}
             <tr class="hover:bg-slate-800/40 transition-colors">
+              <td class="px-3 py-2 align-top">
+                <span class="inline-flex items-center px-1.5 py-0.5 rounded-full border text-[9px] font-semibold uppercase tracking-wider {{ sev_cls.get(v.severity, sev_cls['none']) }}">{{ v.severity }}</span>
+              </td>
               <td class="px-3 py-2 align-top font-mono text-xs text-slate-200 break-all">
                 {{ v.software }}
                 {% if v.exposed or v.running %}
@@ -66,6 +163,10 @@
         </tbody>
       </table>
     </div>
+
+    {{ pagination_bar("vulnerabilities", vulns.page, vulns.total_pages, vulns.total, vulns.rows|length, vulns.per_page, per_page_options) }}
+  {% elif has_filters %}
+    <div class="text-slate-500 italic text-sm">no vulnerabilities match the current filters.</div>
   {% else %}
     <div class="flex items-center gap-2 text-xs text-slate-500">
       <span class="w-1.5 h-1.5 rounded-full bg-slate-600 flex-shrink-0" aria-hidden="true"></span>

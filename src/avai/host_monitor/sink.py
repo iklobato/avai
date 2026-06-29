@@ -1034,6 +1034,20 @@ class Sink:
             )
             session.commit()
 
+    def touch_heartbeat(self) -> None:
+        """Refresh only ``last_seen_at`` on the control row, leaving status,
+        interval, and ``applied_at`` as the last full ``write_heartbeat`` set
+        them. Lets a long scan keep proving liveness to the dashboard without
+        claiming a status change or a control-application it didn't make."""
+        now = Clock().now_iso()
+        with Session(self.engine) as session:
+            session.execute(
+                update(ControlState)
+                .where(ControlState.id == 1)
+                .values(last_seen_at=now)
+            )
+            session.commit()
+
     def ack_scan_now(self, nonce: int) -> None:
         with Session(self.engine) as session:
             session.execute(

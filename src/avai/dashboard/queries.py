@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,7 @@ from avai.host_monitor import (
     KernelExtensionRow,
     LaunchItemRow,
     ListeningPortRow,
+    LogEntryRow,
     LoginSessionRow,
     MdmProfileRow,
     MountRow,
@@ -102,6 +104,7 @@ COLLECTOR_MODELS = {
     "system_extensions": SystemExtensionRow,
     "host_resources": HostResourceRow,
     "disk_usage": DiskUsageRow,
+    "log_entries": LogEntryRow,
     # Network neighborhood & topology
     "dns_resolvers": DnsResolverRow,
     "arp_table": ArpEntryRow,
@@ -356,6 +359,38 @@ def risk_trend(session: Session, limit: int = 30) -> list[int]:
 
 _VULN_SOURCES = ("osv", "nvd", "cisa_kev", "github_advisory", "endoflife")
 
+# Severity buckets, most-severe first. The rank doubles as the primary sort key
+# for the vulnerabilities panel ("always sort by severity") and as the set of
+# values the severity filter accepts.
+SEVERITY_ORDER = ("critical", "high", "medium", "low", "none")
+_SEVERITY_RANK = {label: i for i, label in enumerate(SEVERITY_ORDER)}
+# CVSS base-score → qualitative severity (CVSS v3.1 rating bands).
+_SEVERITY_BANDS = ((9.0, "critical"), (7.0, "high"), (4.0, "medium"), (0.1, "low"))
+
+
+def _severity_from_cvss(score: float | None) -> str | None:
+    """Map a CVSS base score to its qualitative band, or None when unscored."""
+    if score is None:
+        return None
+    for threshold, label in _SEVERITY_BANDS:
+        if score >= threshold:
+            return label
+    return "none"
+
+
+def _item_severity(cvss: float | None, cves: list[dict], kev: bool) -> str:
+    """Worst severity for a vulnerable-software item: the CVSS band if scored,
+    else the most-severe per-CVE label, else 'critical' for an unscored but
+    actively-exploited (KEV) item, else 'none'."""
+    label = _severity_from_cvss(cvss)
+    if label is None:
+        labelled = [c["severity"] for c in cves if c.get("severity")]
+        if labelled:
+            label = min(labelled, key=lambda s: _SEVERITY_RANK.get(s, 99))
+    if label is None:
+        return "critical" if kev else "none"
+    return label
+
 
 def _normalize_software(name: str) -> str:
     """Reduce a software/package/exe string to a comparable base token:
@@ -400,15 +435,40 @@ def _software_presence(session: Session, run_id) -> tuple[set, set]:
     return running, exposed
 
 
-def vulnerabilities(session: Session) -> list[dict]:
-    """Aggregate the CVE / EOL evidence the enrichment chain already
-    collected into a prioritised 'patch me' list. Each item is flagged with
-    whether the vulnerable software is actually ``running`` and/or ``exposed``
-    (listening) on the host, and the list is prioritised
-    KEV → exposed → running → CVSS → has-CVE → EOL — actively-exploited and
-    reachable first. Reads the enrichment_evidence cache; [] if absent."""
+def vulnerabilities(
+    session: Session,
+    *,
+    q: str = "",
+    severity: str = "",
+    source: str = "",
+    page: int = 1,
+    per_page: int = DEFAULT_PER_PAGE,
+) -> dict:
+    """Aggregate the CVE / EOL evidence the enrichment chain already collected
+    into a prioritised 'patch me' list. Each item carries its worst
+    ``severity`` (CVSS band) and whether the vulnerable software is actually
+    ``running`` and/or ``exposed`` (listening) on the host.
+
+    Always ordered by severity first (critical → none), then
+    KEV → exposed → running → CVSS → name within a band. Supports a text
+    search (``q`` over software / CVE id / summary) and ``severity`` / ``source``
+    filters, and paginates the result. Returns a dict with ``rows`` plus the
+    pagination + echoed-filter fields the panel template expects; an empty
+    result (same shape) if the evidence table is absent."""
+    empty = {
+        "rows": [],
+        "total": 0,
+        "page": 1,
+        "per_page": per_page,
+        "total_pages": 1,
+        "q": q,
+        "severity": severity,
+        "source": source,
+        "sources": list(_VULN_SOURCES),
+        "summary": {"critical": 0, "high": 0, "kev": 0, "exposed": 0},
+    }
     if "enrichment_evidence" not in _existing_tables(session):
-        return []
+        return empty
     from avai.enrichers.cache import register_schema
 
     latest = latest_run(session)
@@ -483,6 +543,7 @@ def vulnerabilities(session: Session) -> list[dict]:
                 "cves": cves,
                 "kev": kev,
                 "cvss": cvss,
+                "severity": _item_severity(cvss, cves, kev),
                 "eol": eol,
                 "summary": summary or "",
                 # Is this vulnerable software actually present on the host?
@@ -490,20 +551,53 @@ def vulnerabilities(session: Session) -> list[dict]:
                 "exposed": base in exposed,
             }
         )
-    # prioritise: actively-exploited (KEV) → reachable (exposed) → present
-    # (running) → highest CVSS → has-CVE → EOL.
+
+    if q:
+        ql = q.lower()
+        items = [
+            i
+            for i in items
+            if ql in i["software"].lower()
+            or ql in i["summary"].lower()
+            or any(ql in str(c["id"]).lower() for c in i["cves"])
+        ]
+    if severity:
+        items = [i for i in items if i["severity"] == severity]
+    if source:
+        items = [i for i in items if i["source"] == source]
+
+    # Always severity-first (critical → none), then actively-exploited (KEV) →
+    # reachable (exposed) → present (running) → highest CVSS → name.
     items.sort(
         key=lambda i: (
+            _SEVERITY_RANK.get(i["severity"], 99),
             not i["kev"],
             not i["exposed"],
             not i["running"],
             -(i["cvss"] or 0.0),
-            not i["cves"],
-            not i["eol"],
             i["software"],
         )
     )
-    return items
+
+    summary = {
+        "critical": sum(1 for i in items if i["severity"] == "critical"),
+        "high": sum(1 for i in items if i["severity"] == "high"),
+        "kev": sum(1 for i in items if i["kev"]),
+        "exposed": sum(1 for i in items if i["exposed"]),
+    }
+    page_rows, total, total_pages = _paginate(items, page, per_page)
+    return {
+        "rows": page_rows,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "q": q,
+        "severity": severity,
+        "source": source,
+        "sources": list(_VULN_SOURCES),
+        "summary": summary,
+    }
 
 
 def recent_runs(session: Session, limit: int = 10) -> list[CollectionRun]:
@@ -2231,6 +2325,344 @@ def disk_usage(session: Session, run_id: str) -> list[DiskUsageRow]:
     )
     rows.sort(key=lambda r: r.percent if r.percent is not None else -1.0, reverse=True)
     return rows
+
+
+# Pseudo / virtual / read-only loop filesystems that bloat a `df` view: snap
+# squashfs images (one mount per installed snap), tmpfs, and kernel virtual
+# filesystems. Hidden from the primary disk view — a typical Linux desktop has
+# ~20 snap mounts drowning the 2-3 filesystems a person actually cares about.
+_PSEUDO_FSTYPES = frozenset(
+    {
+        "squashfs",
+        "tmpfs",
+        "devtmpfs",
+        "overlay",
+        "ramfs",
+        "efivarfs",
+        "proc",
+        "sysfs",
+        "cgroup",
+        "cgroup2",
+        "debugfs",
+        "mqueue",
+        "hugetlbfs",
+        "pstore",
+        "autofs",
+        "binfmt_misc",
+        "tracefs",
+        "securityfs",
+        "configfs",
+        "fusectl",
+        "nsfs",
+        "fuse.gvfsd-fuse",
+        "fuse.portal",
+    }
+)
+
+
+def primary_filesystems(rows: list[DiskUsageRow]) -> list[DiskUsageRow]:
+    """The 'real' on-disk filesystems worth showing first: drop pseudo /
+    virtual / snap-loop mounts and zero-capacity entries, fullest first.
+    The full set stays available via :func:`mount_tree` (the 'all mounts'
+    drawer)."""
+    real = [
+        r
+        for r in rows
+        if (r.fstype or "").lower() not in _PSEUDO_FSTYPES and (r.total or 0) > 0
+    ]
+    real.sort(key=lambda r: r.percent if r.percent is not None else -1.0, reverse=True)
+    return real
+
+
+def _path_components(mountpoint: str) -> tuple[str, ...]:
+    """Path segments of a mountpoint, root ('/') being the empty tuple. Sorting
+    by this key yields pre-order tree order: a parent always precedes its
+    children, and siblings come out alphabetically."""
+    return tuple(part for part in mountpoint.split("/") if part)
+
+
+def _is_ancestor(parent: str, child: str) -> bool:
+    """True if ``parent`` is a mountpoint strictly above ``child`` in the
+    filesystem tree. Root is an ancestor of everything but itself."""
+    if parent == child:
+        return False
+    if parent == "/":
+        return True
+    return child.startswith(parent + "/")
+
+
+def mount_tree(rows: list[DiskUsageRow]) -> list[dict]:
+    """Arrange filesystem rows as a mount-point tree for display.
+
+    Each entry is ``{"row", "depth", "is_last"}``: ``depth`` is how many of the
+    other mountpoints in this set sit above it (so a child filesystem indents
+    under its parent), and ``is_last`` marks the last child of a given parent
+    so the template can draw the correct branch glyph. Ordered as a pre-order
+    walk (parent before children) rather than fullest-first; the usage bar and
+    colour still surface a full filesystem at a glance.
+    """
+    rows = [r for r in rows if r.mountpoint]
+    points = {r.mountpoint for r in rows}
+    ordered = sorted(rows, key=lambda r: _path_components(r.mountpoint))
+
+    nodes: list[dict] = []
+    for row in ordered:
+        ancestors = [m for m in points if _is_ancestor(m, row.mountpoint)]
+        parent = max(ancestors, key=lambda m: len(_path_components(m)), default=None)
+        nodes.append({"row": row, "depth": len(ancestors), "parent": parent})
+
+    siblings: dict = {}
+    for node in nodes:
+        siblings.setdefault(node["parent"], []).append(node)
+    for group in siblings.values():
+        for node in group:
+            node["is_last"] = node is group[-1]
+    return nodes
+
+
+# Syslog severities, most severe first — the order the level filter offers.
+LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
+_LOG_ERROR_LEVELS = frozenset({"emerg", "alert", "crit", "err"})
+
+
+def log_entries(
+    session: Session,
+    run_id: str,
+    *,
+    source: str = "",
+    level: str = "",
+    q: str = "",
+    page: int = 1,
+    per_page: int = DEFAULT_PER_PAGE,
+) -> dict:
+    """Recent host log lines (journald + tailed files) for ``run_id`` as a
+    filtered, paginated, newest-first table. Supports a ``source`` filter
+    (journald / file path), a ``level`` filter (syslog severity), and a text
+    search ``q`` over message + unit. Returns the rows plus pagination +
+    echoed-filter fields the panel expects; an empty result (same shape) if
+    the table is absent (older DB) or the run captured nothing."""
+    empty = {
+        "rows": [],
+        "total": 0,
+        "page": 1,
+        "per_page": per_page,
+        "total_pages": 1,
+        "source": source,
+        "level": level,
+        "q": q,
+        "sources": [],
+        "levels": list(LOG_LEVELS),
+        "summary": {"total": 0, "err": 0, "warning": 0, "sources": 0},
+    }
+    if "log_entries" not in _existing_tables(session):
+        return empty
+
+    rows = list(
+        session.execute(
+            select(LogEntryRow).where(LogEntryRow.run_id == run_id)
+        ).scalars()
+    )
+    # Newest first: event time when known, else insertion order (id).
+    rows.sort(key=lambda r: (r.event_timestamp or "", r.id), reverse=True)
+    # Distinct sources for the dropdown — from the whole run, before filtering.
+    sources = sorted({r.source for r in rows if r.source})
+
+    if source:
+        rows = [r for r in rows if r.source == source]
+    if level:
+        rows = [r for r in rows if r.level == level]
+    if q:
+        ql = q.lower()
+        rows = [
+            r
+            for r in rows
+            if ql in (r.message or "").lower() or ql in (r.unit or "").lower()
+        ]
+
+    summary = {
+        "total": len(rows),
+        "err": sum(1 for r in rows if r.level in _LOG_ERROR_LEVELS),
+        "warning": sum(1 for r in rows if r.level == "warning"),
+        "sources": len(sources),
+    }
+    page_rows, total, total_pages = _paginate(rows, page, per_page)
+    items = [
+        {
+            "source": r.source,
+            "unit": r.unit,
+            "level": r.level,
+            "event_timestamp": r.event_timestamp,
+            "pid": r.pid,
+            "message": r.message,
+        }
+        for r in page_rows
+    ]
+    return {
+        "rows": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "source": source,
+        "level": level,
+        "q": q,
+        "sources": sources,
+        "levels": list(LOG_LEVELS),
+        "summary": summary,
+    }
+
+
+_LOG_HEX_RE = re.compile(r"\b[0-9a-fA-F]{8,}\b")
+_LOG_NUM_RE = re.compile(r"\d+")
+_LOG_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_log_message(message: str | None) -> str:
+    """Collapse a log line to a template so repeated events with varying ids
+    aggregate together: hex tokens (hashes / uuids) and digit runs (pids,
+    ports, timestamps) become ``#``. ``"Accepted password for ik from 10.0.0.5
+    port 22"`` and the next login collapse to the same key."""
+    if not message:
+        return "(empty)"
+    collapsed = _LOG_HEX_RE.sub("#", message.strip())
+    collapsed = _LOG_NUM_RE.sub("#", collapsed)
+    return _LOG_WS_RE.sub(" ", collapsed)[:160]
+
+
+def _log_group_by_unit(row: LogEntryRow) -> str:
+    return row.unit or "(none)"
+
+
+def _log_group_by_source(row: LogEntryRow) -> str:
+    return row.source or "(none)"
+
+
+def _log_group_by_message(row: LogEntryRow) -> str:
+    return _normalize_log_message(row.message)
+
+
+# group_by value → key function. Doubles as the allow-list of valid dimensions.
+_LOG_GROUPERS = {
+    "unit": _log_group_by_unit,
+    "source": _log_group_by_source,
+    "message": _log_group_by_message,
+}
+
+
+def log_aggregates(
+    session: Session,
+    run_id: str,
+    *,
+    group_by: str = "unit",
+    source: str = "",
+    q: str = "",
+    page: int = 1,
+    per_page: int = DEFAULT_PER_PAGE,
+) -> dict:
+    """Aggregate the run's log lines into ranked groups for the log-summary
+    panel. Groups by ``unit`` (systemd unit / file), ``source`` (journald vs a
+    file), or ``message`` (a normalised template, so repeated events count
+    together). Each group carries its occurrence count + error / warning
+    counts; **ranked most-errors-first, then most-occurrences**. Supports the
+    same ``source`` / ``q`` filters as the raw view, and paginates. Empty shape
+    if the table is absent."""
+    group_by = group_by if group_by in _LOG_GROUPERS else "unit"
+    empty = {
+        "groups": [],
+        "total": 0,
+        "page": 1,
+        "per_page": per_page,
+        "total_pages": 1,
+        "group_by": group_by,
+        "group_options": list(_LOG_GROUPERS),
+        "source": source,
+        "q": q,
+        "sources": [],
+        "summary": {"groups": 0, "errors": 0, "warnings": 0, "lines": 0},
+    }
+    if "log_entries" not in _existing_tables(session):
+        return empty
+
+    rows = list(
+        session.execute(
+            select(LogEntryRow).where(LogEntryRow.run_id == run_id)
+        ).scalars()
+    )
+    sources = sorted({r.source for r in rows if r.source})
+    if source:
+        rows = [r for r in rows if r.source == source]
+    if q:
+        ql = q.lower()
+        rows = [
+            r
+            for r in rows
+            if ql in (r.message or "").lower() or ql in (r.unit or "").lower()
+        ]
+
+    key_of = _LOG_GROUPERS[group_by]
+    groups: dict[str, dict] = {}
+    for r in rows:
+        key = key_of(r)
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {
+                "key": key,
+                "count": 0,
+                "errors": 0,
+                "warnings": 0,
+                "last": "",
+                "sample": None,
+                "_units": set(),
+                "_sources": set(),
+            }
+        g["count"] += 1
+        if r.level in _LOG_ERROR_LEVELS:
+            g["errors"] += 1
+        elif r.level == "warning":
+            g["warnings"] += 1
+        ts = r.event_timestamp or ""
+        if ts > g["last"]:
+            g["last"] = ts
+        if g["sample"] is None and r.message:
+            g["sample"] = r.message
+        if r.unit:
+            g["_units"].add(r.unit)
+        if r.source:
+            g["_sources"].add(r.source)
+
+    items = list(groups.values())
+    # Most errors first, then most occurrences, then key for a stable order.
+    items.sort(key=lambda g: (-g["errors"], -g["count"], g["key"]))
+    for g in items:
+        units = g.pop("_units")
+        srcs = g.pop("_sources")
+        g["unit_label"] = (
+            next(iter(units)) if len(units) == 1 else f"{len(units)} units"
+        )
+        g["source_label"] = (
+            next(iter(srcs)) if len(srcs) == 1 else f"{len(srcs)} sources"
+        )
+
+    summary = {
+        "groups": len(items),
+        "errors": sum(g["errors"] for g in items),
+        "warnings": sum(g["warnings"] for g in items),
+        "lines": sum(g["count"] for g in items),
+    }
+    page_rows, total, total_pages = _paginate(items, page, per_page)
+    return {
+        "groups": page_rows,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+        "group_by": group_by,
+        "group_options": list(_LOG_GROUPERS),
+        "source": source,
+        "q": q,
+        "sources": sources,
+        "summary": summary,
+    }
 
 
 def resource_trend(session: Session, limit: int = 60) -> dict:
