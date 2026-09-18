@@ -145,4 +145,3 @@ max-args = 5
 "tools/**" = ["C901", "PLR0913", "PLR2004"]
 "scripts/**" = ["C901", "PLR0913", "PLR2004"]
 "packaging/**" = ["C901", "PLR0913", "PLR2004"]
-"src/avai/host_monitor/runtime/stream_source.py" = ["C901"]
