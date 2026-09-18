@@ -12,6 +12,8 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 
+from avai.enrichers import build_default_chain
+
 from .constants import (
     DEFAULT_BASELINE_MIN_RUNS,
     DEFAULT_DB_PATH,
@@ -227,10 +229,6 @@ def build_runner(args) -> "tuple[Runner, object]":
         if args.no_enrich:
             LOG.info("enrichment disabled (--no-enrich)")
         else:
-            # Importing here keeps the `requests` dep out of the startup
-            # path for `--no-enrich` smoke tests.
-            from avai.enrichers import build_default_chain
-
             enrichment_chain = build_default_chain(
                 engine,
                 Base,

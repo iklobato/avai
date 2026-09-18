@@ -12,6 +12,8 @@ import time
 from dataclasses import replace
 from typing import Optional
 
+from avai.enrichers import extract_indicators
+
 from .collectors import Collector, SnapshotCollector, StreamingCollector
 from .constants import (
     _CORRELATED_COLLECTOR,
@@ -754,7 +756,6 @@ class Runner:
         chain = self._enrichment_chain
         if chain is None or not self._enrich_on():
             return 0
-        from avai.enrichers import extract_indicators
 
         rows_by_hash: dict[str, dict] = {}
         for r in rows:
