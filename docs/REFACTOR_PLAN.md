@@ -330,6 +330,60 @@ Acceptance: the before/after HTML diff is empty, no function in
 `dashboard/` is over mccabe 10 or 60 lines, and query classes are tested
 without a Flask app.
 
+Done on `refactor/p6-dashboard` in six commits: the app factory and
+blueprints, the `queries` split, two bug fixes, the filter objects, and the
+last long function. `app.py` went from 976 lines to 63 and `queries.py`
+(2719 lines) became 14 modules; the largest is `common.py` at 342. No
+function in `dashboard/` is over mccabe 10 or 60 lines, and both ruff
+ignores for the dashboard are gone from `pyproject.toml`. Every GET route
+(times 56 query strings) and every POST was rendered against a fixed
+`tools/seed_demo_db.py` DB in three setups (plain, desktop open mode, token):
+4542 captured responses, byte-identical to the commit before each refactor.
+Changes from the design above:
+
+- Functions per panel module, not query classes. Each function already takes
+  a `Session` and nothing else, so a class per panel would only have held
+  the session. The layering test now fails if `dashboard.queries*` or
+  `dashboard.control` imports Flask, `dashboard.app` or `dashboard.routes`.
+- `FindingFilter` holds verdict, collector, category, search and status;
+  `sort` and `order` stay separate arguments since they are not filters.
+  `RowFilter(verdict, q)` and `LogFilter(source, level, q)` were added for
+  the other panels, `PersistencePages` for the three persistence tables, and
+  `VerdictTable` replaces `_collector_rows_with_verdict` (its `limit`
+  argument, never passed by a caller, is now a per-table constant).
+- Control writes go through `ControlStore(engine)`, built once in
+  `create_app` next to the read-only engine (`db.py`). `DashboardServices`
+  holds both in `app.extensions`.
+- `desktop.py` still sets `AVAI_CONTROL_OPEN` and `AVAI_APP_MODE` in the
+  environment and calls `DashboardConfig.from_env`; moving that is Phase 9.
+- The package facade lost `_paginate`, `_collector_rows_with_verdict` and
+  `_prior_run` (no caller outside the package). `prior_run` now lives in
+  `queries.collection`, so no route module runs SQL itself.
+
+Two bugs found by the HTML diff, each fixed in its own commit with a test
+that failed first:
+
+- A page past the end (`?page=99`) showed the last page's rows but echoed
+  page 99, so the row numbers and the prev/next links were wrong. Panels now
+  return the page they actually served (`Page.within`).
+- In `network_flows` and `listening_ports` the loop variable `verdict`
+  shadowed the verdict filter, so picking a verdict filtered on whatever the
+  last row had. The flows and ports tabs now filter on the picked verdict.
+
+Behaviour changes besides those: a `raw_json` or evidence value that parses
+to something other than a JSON object now reads as empty in
+`system_integrity` and `vulnerabilities` instead of raising.
+
+Coverage of `avai.dashboard` on the full suite is 93% (`db.py` 62%, the
+query log hook). New tests: `tests/test_dashboard_paging.py` (`Page`),
+`tests/test_dashboard_filters.py` (the three filters) and
+`TestDashboardConfigFromEnv`. Deliberate breaks of the verdict filter, the
+case-insensitive search, the finding status, the Linux posture branch and
+`prior_run` each turned a test red. One mutant survives by design: making the
+findings search case-sensitive changes nothing, because SQLite `LIKE`
+already ignores ASCII case. Em dashes already in moved user-facing strings
+(`routes/control.py`, `serve.py`) were left as they are. 987 tests pass.
+
 ## Phase 7: collectors (SRP, DIP, magic values)
 
 Characterization tests come first. `collectors.py` is at 65% coverage and is

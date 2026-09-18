@@ -142,16 +142,20 @@ src/avai/
 │   └── sources/                19 concrete Enricher subclasses, one file per external API
 └── dashboard/                  read-only Flask + HTMX UI
     ├── __init__.py             facade
-    ├── app.py                  Flask app, CSP, Jinja filters, 38 routes
-    ├── queries.py              read-only query layer (uses current_app for config)
-    ├── control.py              writable control plane (control_state + feedback rows)
+    ├── app.py                  create_app(DashboardConfig): CSP headers, filters, services, blueprints
+    ├── config.py               DashboardConfig (db path, control token / open mode, app mode, query log)
+    ├── db.py                   the two SQLite engines (read-only mode=ro, writable WAL) + query log hook
+    ├── filters.py              Jinja filters (markdown, times, json, bytes, flags)
+    ├── routes/                 DashboardServices + 3 blueprints: fragments (27), api (3), control (8)
+    ├── queries/                read-only query layer, one module per panel, no Flask
+    ├── control.py              ControlStore: writable control plane (control_state + feedback rows)
     └── serve.py                `avai dashboard` CLI + waitress launcher
 
 packaging/    PyInstaller spec, Inno Setup (Windows), .deb builder (Linux), cask + entitlements (macOS)
 docker/       supervisord.conf (monitor + dashboard in one container)
 tools/        seed_demo_db.py (synthetic DB for demos)
 scripts/      update_rules.py (fetch pinned YARA packs into rules/vendor)
-tests/        39 pytest modules
+tests/        44 pytest modules
 ```
 
 ### Module dependency graph
@@ -167,8 +171,10 @@ graph TD
     desktop --> dapp["dashboard.app"]
     serve --> dapp
     serve -.-> hostsfile
-    dapp --> queries["dashboard.queries"]
+    dapp --> droutes["dashboard.routes/*"]
     dapp --> control["dashboard.control"]
+    droutes --> queries["dashboard.queries/*"]
+    droutes --> control
     queries --> models["host_monitor.models"]
     control --> models
 
@@ -217,6 +223,8 @@ graph TD
 - `hosts/factory.py` is the **only** place that reads `platform.system()`.
 - `runtime/command_runner.py` is the **only** subprocess seam; collectors never call `subprocess` directly.
 - `sink.py` is the **only** telemetry writer. The dashboard's `control.py` writes two tables and nothing else.
+- `dashboard.queries` and `dashboard.control` never import Flask, `dashboard.app` or `dashboard.routes`
+  (`tests/test_layering.py`); they take a `Session` or an `Engine` and nothing else.
 - `enrichers/sources/*` depend only on `base` and `http`; `registry` and `chain` are the only modules that know every source.
 - `host_monitor` imports `enrichers` at module level. `requests` loads on every boot anyway, because
   `Sink.setup()` registers the `enrichers.cache` tables.
@@ -1188,23 +1196,39 @@ never renders data server-side on first paint.
 
 ```mermaid
 graph TD
-    serve["serve.py<br/>main → _ensure_db_exists → _serve (waitress, 16 threads)"] --> appmod
-    desktop["desktop._start_dashboard"] --> appmod
-    subgraph appmod["app.py"]
-        idx["/ → dashboard.html"]
-        frags["/fragments/* (27) → Jinja partials"]
-        api["/api/* (3) → JSON"]
-        ctl["/control/* + /feedback (7 POST)<br/>@require_control_token"]
-        filters["Jinja filters: render_markdown, relative_time,<br/>datetime_fmt, pretty_json, human_bytes, flag_emoji"]
-        hdrs["@after_request _security_headers (CSP, XFO, nosniff)"]
+    serve["serve.py<br/>main → _ensure_db_exists → _serve (waitress, 16 threads)"] --> factory
+    desktop["desktop._start_dashboard"] --> factory
+    cfg["DashboardConfig.from_env(db_path)<br/>token, open mode, app mode, query log"] --> factory
+    subgraph appmod["app.py: create_app(config)"]
+        factory["create_app"]
+        hdrs["after_request _security_headers (CSP, XFO, nosniff)"]
+        filters["filters.register_filters"]
+        svc["DashboardServices(config, read_engine, ControlStore)<br/>in app.extensions['avai']"]
     end
-    frags --> Q["queries.py<br/>read-only engine, mode=ro"]
+    factory --> hdrs
+    factory --> filters
+    factory --> svc
+    factory --> bps
+    subgraph bps["routes/ blueprints"]
+        frags["fragments: / + /fragments/* → Jinja partials"]
+        api["api: /api/* (3) → JSON"]
+        ctl["control: /fragments/control + 7 POST<br/>@require_control_token"]
+    end
+    frags --> Q["queries/*<br/>functions of a Session, no Flask"]
     api --> Q
-    ctl --> C["control.py<br/>writable engine, WAL + busy_timeout"]
-    Q --> DB[("avai.db")]
-    C --> DB
+    ctl --> C["ControlStore<br/>writable engine, WAL + busy_timeout"]
+    svc -. "read_session()" .-> Q
+    Q --> RO["db.read_only_engine (mode=ro)"]
+    C --> RW["db.writable_engine"]
+    RO --> DB[("avai.db")]
+    RW --> DB
     Q -. "ORM models" .-> HM["host_monitor.models"]
 ```
+
+The factory builds both engines once per app, from the config, and every
+route reaches them through `routes.services()` / `routes.read_session()`.
+Nothing under `dashboard/` reads `os.environ` except
+`DashboardConfig.from_env`, which `serve.main` and `desktop` call.
 
 ### 6.1 Routes
 
@@ -1232,7 +1256,7 @@ graph TD
 | `/fragments/network-topology` | `fragment_network_topology` | `_network_topology` | `network_topology` | tab |
 | `/fragments/network-exposure` | `fragment_network_exposure` | `_network_exposure` | `network_exposure` | tab |
 | `/fragments/collection` | `fragment_collection` | `_collection` | `recent_runs`, `row_counts`, `collector_errors` | 30 s |
-| `/fragments/row-counts` | `fragment_row_counts` | `_row_counts` | `row_counts`, `_prior_run` | nested |
+| `/fragments/row-counts` | `fragment_row_counts` | `_row_counts` | `row_counts`, `prior_run` | nested |
 | `/fragments/runs` | `fragment_runs` | `_runs` | `recent_runs` | nested |
 | `/fragments/errors` | `fragment_errors` | `_errors` | `collector_errors` | nested |
 | `/fragments/persistence` | `fragment_persistence` | `_persistence` | `persistence_tampering` | 60 s |
@@ -1248,51 +1272,71 @@ graph TD
 | `POST /control/maintenance/<action>` | `control_maintenance` | `_control` | `queue_command` (`prune`, `clear`, `rejudge`, `renarrate`, `reset_baseline`) | token |
 | `POST /feedback/<collector>/<hash>/<label>` | `feedback_record` | inline HTML | `record_feedback` | token |
 
-`require_control_token` reads `AVAI_CONTROL_TOKEN` and compares it with the
-`X-Avai-Token` header (constant-time); unset token → 403 (fails closed). The
-desktop app bypasses it with `AVAI_CONTROL_OPEN=1` (`_control_open`).
+The `/fragments/control` row and every `POST` row live in the `control`
+blueprint, the three `/api/*` rows in `api`, and the rest in `fragments`.
+`require_control_token` compares `DashboardConfig.control_token` with the
+`X-Avai-Token` header (constant-time); no token → 403 (fails closed). The
+desktop app skips it with `control_open` (`AVAI_CONTROL_OPEN=1`).
 
-### 6.2 Query layer (`queries.py`, 2774 lines)
+### 6.2 Query layer (`queries/`)
 
-| Group | Functions |
+One module per panel. Every public function takes a `Session` (plus the run
+id and the filters) and returns plain dicts for the template; none touches
+Flask, so tests call them with a session on a temp DB.
+
+| Module | Functions |
 |---|---|
-| Engine / session | `_engine` (process-wide read-only engine, cached per path, `mode=ro`), `_session`, `_log_query` (optional SQL log), `_cache_key`, `_existing_tables`, `_existing_columns` (defensive against DBs written by older monitors) |
-| Run and posture | `latest_run`, `latest_narrative`, `latest_risk`, `risk_trend`, `system_integrity`, `host_resources`, `disk_usage`, `primary_filesystems`, `mount_tree` (+ `_path_components`, `_is_ancestor`), `resource_trend` |
-| Findings | `findings` (paginated, filters: verdict, status, collector, category, q, sort), `collector_options`, `category_options`, `_row_and_artifact` (source row for a judgment), `new_alerts`, `verdict_counts`, `verdict_timeseries`, `judged_since`, `cost_since` |
-| Vulnerabilities | `vulnerabilities` (CVE / EOL evidence joined to running and exposed software), `_severity_from_cvss`, `_item_severity`, `_normalize_software`, `_software_presence` |
-| Collection health | `recent_runs`, `runs_total`, `row_counts` (per collector, delta vs previous run), `collector_errors` |
-| Network | `network_flows` (aggregated by destination, geo and host from cached evidence: `_attach_ip_enrichment`, `_geo_from_details`, `_geo_richness`, `_host_from_details`, `_port_sort_key`), `listening_ports` (`_addr_scope`, `_cmdline_str`), `dns_queries` (`_dns_resolution_level`), `network_topology`, `network_exposure`, `_collector_rows_with_verdict` (generic rows + verdict join) |
-| File scan | `yara_status`, `file_scan`, `yara_coverage` |
-| Persistence | `persistence_tampering` (SSH keys, hosts file, privilege config, each paginated) |
-| Auth events | `auth_events_aggregated` (grouped by content_hash, cached per window: `_auth_summary`, `_auth_subsystem_tabs`) |
-| Logs | `log_entries`, `log_aggregates` (`_normalize_log_message`, `_log_group_by_unit` / `_source` / `_message`) |
-| Utilities | `_paginate`, `_parse_json_list`, `_parse_json_obj` |
+| `common` | `COLLECTOR_MODELS`, `DISPLAY_FIELDS`, `VERDICTS`, paging constants; `_existing_tables` / `_existing_columns` (cached, defensive against DBs written by older monitors); `_row_and_artifact` (latest source row of a judgment); `VerdictTable`, `_verdict_tables`, `_take_worse_verdict`, `_tally`, `_parse_json_list` / `_parse_json_obj` |
+| `collection` | `latest_run`, `prior_run`, `latest_narrative`, `latest_risk`, `risk_trend`, `recent_runs`, `runs_total`, `row_counts` (per collector, delta vs previous run), `collector_errors`, `verdict_counts`, `verdict_timeseries`, `judged_since`, `cost_since`, `new_alerts` |
+| `findings` | `findings` (`FindingFilter`, sort, `Page`), `collector_options`, `category_options` |
+| `vulnerabilities` | `vulnerabilities` (CVE / EOL evidence joined to running and exposed software, patch priority) |
+| `flows`, `ip_enrichment` | `network_flows` (aggregated by destination; geo and host from cached evidence via `_attach_ip_enrichment`) |
+| `ports` | `listening_ports` (one row per port and pid, bind scope, owning process, live connections) |
+| `dns` | `dns_queries` (`_dns_resolution_level`) |
+| `exposure` | `network_topology`, `network_exposure`: small tables shown whole behind one `RowFilter` |
+| `posture` | `system_integrity` (Linux or macOS labels), `yara_status`, `yara_coverage`, `file_scan`, `persistence_tampering` (SSH keys, hosts file, privilege config, each with its own `Page`) |
+| `auth_events` | `auth_events_aggregated` (grouped by pattern, cached per window and page) |
+| `logs` | `log_entries`, `log_aggregates` (by unit, source or normalized message) |
+| `resources` | `host_resources`, `disk_usage`, `primary_filesystems`, `mount_tree`, `resource_trend` |
 
-Constants worth knowing: `COLLECTOR_MODELS` (collector `name` → model, built
-from `host_monitor.slices`; used by findings, row counts, the control panel and
-feedback validation),
-`SEVERITY_ORDER`, `VERDICTS`, `PER_PAGE_OPTIONS`, `DEFAULT_PER_PAGE`,
-`DEFAULT_DB_PATH`.
+Value objects the routes build from the query string:
+
+| Type | Holds | Behaviour |
+|---|---|---|
+| `Page(number, size)` | the requested page, clamped on construction (size 1 to `MAX_PER_PAGE` = 200) | `within(total)` pulls it back to the last real page, `slice(rows)`, `fields(total)` (the paging keys every panel echoes) |
+| `RowFilter(verdict, q)` | the verdict pick and search box of the network and posture panels | `keep(rows, search_fields)`, `fields()` |
+| `LogFilter(source, level, q)` | the two log panels' filters | `keep(lines)`, `fields()` |
+| `FindingFilter(verdict, collector, category, search, status)` | the findings panel filters (status `active` / `resolved` / `all`) | `apply(stmt, latest_started)` adds the WHERE clauses |
+| `PersistencePages(ssh, hosts, priv)` | one `Page` per persistence table | |
+| `VerdictTable(collector, columns, search, limit)` | one collector table as a panel reads it | `rows(session, run_id)`: LEFT JOIN `Judgement`, worst verdict first, missing columns as NULL |
 
 `DISPLAY_FIELDS` is still kept by hand. It has no entry for 15 slices: the 12
 source-injected network, exposure and persistence slices, plus `auth_events`,
 `log_entries` and `network_interfaces`. Findings from the judged ones show an
 empty artifact label.
 
-### 6.3 `control.py` and `serve.py`
+### 6.3 `control.py`, `db.py` and `serve.py`
 
-`control.py`: `_write_engine` (cached writable engine, `_on_connect` sets WAL
-and `busy_timeout=5000`), `_ensure_row`, `_update`, `set_paused`,
-`bump_scan_now`, `set_settings`, `set_collector`, `queue_command`,
-`record_feedback` (latest-wins per finding), `read_control_state`,
-`monitor_alive` (`last_seen_at` within `MONITOR_LIVENESS_WINDOW_S` = 120 s).
+`control.py`: `ControlStore(engine)` holds the dashboard's only writes:
+`set_paused`, `bump_scan_now`, `set_settings(interval, judge, enrich)`,
+`set_collector`, `queue_command` (each through `_ensure_row` on the single
+`control_state` row) and `record_feedback` (a `feedback` row, latest-wins
+per finding).
+`read_control_state(session)` and `monitor_alive` (`last_seen_at` within
+`MONITOR_LIVENESS_WINDOW_S` = 120 s) are plain reads on the read-only session.
+
+`db.py`: `read_only_engine(db_path, query_log_path)` (`mode=ro`, no
+`immutable=1` so the WAL is read; optional `_QueryLog` hook that appends each
+statement with its route) and `writable_engine(db_path)` (`_on_connect` sets
+WAL and `busy_timeout=5000`).
 
 `serve.py`: `_build_parser` (`--db`, `--host`, `--port` 8765, `--debug`,
-`--open`), `main`, `_ensure_db_exists` (runs `Sink.setup()` on a temporary
-write engine so every table exists before the read-only engine opens),
-`_serve` → `_run_server` (waitress, 16 threads; Werkzeug only with `--debug`),
-`_open_browser`, `_hosts_notice` (best-effort `avai.local` mapping banner),
-`_http_url`, `_bind_error_message`.
+`--open`), `main` (builds `DashboardConfig.from_env` and the app),
+`_ensure_db_exists` (runs `Sink.setup()` on a temporary write engine so every
+table exists before the read-only engine opens), `_serve` → `_run_server`
+(waitress, 16 threads; Werkzeug only with `--debug`), `_open_browser`,
+`_hosts_notice` (best-effort `avai.local` mapping banner), `_http_url`,
+`_bind_error_message`.
 
 ---
 
@@ -1464,7 +1508,7 @@ graph TD
 | `test_llm_judge.py`, `test_judge_auth.py` | `LlmJudge` parsing and batching, cost; the credential rule (one table-driven test) and `LlmStages.build` wiring |
 | `test_sink_rotation.py`, `test_sink_correlation.py`, `test_sink_setup_concurrency.py`, `test_migrations.py` | `prune_to_size`, `correlation_context`, concurrent `setup()`, Alembic upgrade path |
 | `test_enrichers.py`, `test_enricher_sources.py`, `test_more_sources.py`, `test_indicators_edge.py`, `test_http.py`, `test_registry.py` | chain, cache, every source, extractors, `HttpClient`, discovery |
-| `test_dashboard.py` | routes, query layer, control plane, feedback |
+| `test_dashboard.py`, `test_dashboard_paging.py`, `test_dashboard_filters.py` | routes, query layer, `DashboardConfig`, control plane, feedback; `Page`; `RowFilter`, `LogFilter`, `FindingFilter` |
 | `test_hostsfile.py` | `HostsTable`, `HostsRegistrar`, platforms |
 | `test_layering.py` | import rules between packages (a lower layer never imports a higher one) |
 | `test_slices.py` | the slice catalog matches the row models, collector classes, prompt hints and enrichment extractors |
@@ -1484,8 +1528,8 @@ plugin crash on this machine).
 | Change what the LLM is told | `prompts.toml`; the context bundle is built by the stages in `finding_stages.py` (`evidence`, `baseline`, `related`, `rule_meta`) |
 | Change verdict post-processing | `VerifyStage`, `InvestigateStage` in `finding_stages.py`; `CollectionCycle._apply_feedback`; add a stage in `runner._snapshot_stages` |
 | Change the posture score | `risk.compute_risk_score` + `RISK_WEIGHTS` / `RISK_GRADES` |
-| Add a dashboard panel | query fn in `dashboard/queries.py`, route in `dashboard/app.py`, partial in `templates/partials/`, `hx-get` in `dashboard.html` |
-| Add a control action | `dashboard/control.py` + route with `@require_control_token`, then add a `MaintenanceCommand` member and its entry in `_COMMAND_ACTIONS` (`control_loop.py`) |
+| Add a dashboard panel | query function in a `dashboard/queries/<panel>.py` module (export it from `queries/__init__.py`), route in `dashboard/routes/fragments.py`, partial in `templates/partials/`, `hx-get` in `dashboard.html` |
+| Add a control action | a `ControlStore` method in `dashboard/control.py` + a route in `dashboard/routes/control.py` with `@require_control_token`, then add a `MaintenanceCommand` member and its entry in `_COMMAND_ACTIONS` (`control_loop.py`) |
 | Tune DB size, intervals, LLM caps | `constants.py`, `--max-db-mb`, `Sink.prune_to_size` |
 | Debug a streaming collector that keeps dying | `supervision.py` constants and `LoggingSupervisionListener` output; `streaming_sessions` table |
 | Ship a release | `pyproject.toml` version, `CHANGELOG.md`, tag `vX.Y.Z` → `release.yml`; `scripts/update_rules.py` refreshes the YARA pack before building the wheel |
@@ -1503,7 +1547,7 @@ signatures omit `self` / `cls`.
 ### A.1 Entry points and utilities
 
 
-#### `avai` · `avai/__init__.py` · 16 lines
+#### `avai` · `avai/__init__.py` · 17 lines
 
 _avai: macOS / Linux host security telemetry collector with an LLM_
 
@@ -3129,176 +3173,377 @@ Constants: `_BASE`
 ### A.4 dashboard (Flask + HTMX)
 
 
-#### `avai.dashboard` · `avai/dashboard/__init__.py` · 212 lines
+#### `avai.dashboard` · `avai/dashboard/__init__.py` · 214 lines
 
 _avai.dashboard: package facade._
 
+#### `avai.dashboard.app` · `avai/dashboard/app.py` · 63 lines
 
-#### `avai.dashboard.app` · `avai/dashboard/app.py` · 976 lines
+_Flask application factory: security headers, template filters, routes._
 
-_Flask app, config, Jinja template filters, and all HTTP routes._
+Constants: `_PKG_DIR`, `_CSP`
 
-Constants: `_PKG_DIR`, `_CSP`, `_MD_TAGS`, `_LIST_ITEM_RE`, `_MAINTENANCE_ACTIONS`, `_FEEDBACK_LABELS`
+- `_security_headers(response)` (L34) : Add baseline security headers to every response and drop the server
+- `create_app(config) -> Flask` (L46)
 
-- `_security_headers(response)` `@app.after_request` (L106) : Add baseline security headers to every response and drop the server
-- `_ensure_list_blank_lines(text) -> str` (L157) : Insert a blank line before a list that directly follows a non-list
-- `render_markdown(text) -> str` (L179) : LLM-written markdown → sanitised HTML. Falls back to HTML-escaped
-- `_relative_time(iso_string) -> str` (L199) : Short relative-time string like '5m ago' for an ISO timestamp.
-- `_datetime_fmt(iso_string) -> str` (L224) : Human-readable absolute timestamp (UTC) like 'May 30, 2026 · 18:57:20
-- `_pretty_json(value) -> str` (L242) : Re-serialize a JSON string with indentation. Pass non-JSON through.
-- `_human_bytes(n) -> str` (L252) : Human-readable data volume (e.g. 927 -> '927 B', 12345 -> '12.1 KB',
-- `_flag_emoji(cc) -> str` (L271) : Render a 2-letter ISO country code as its flag emoji (regional
-- `index()` `@app.route('/')` (L287)
-- `fragment_triage()` `@app.route('/fragments/triage')` (L294) : Above-the-fold triage strip: posture grade, active malicious/
-- `fragment_header_meta()` `@app.route('/fragments/header-meta')` (L320)
-- `fragment_overview()` `@app.route('/fragments/overview')` (L329)
-- `_sparkline_points(scores, w, h, pad) -> str` (L342) : SVG polyline points for a 0-100 score series (oldest→newest).
-- `fragment_risk()` `@app.route('/fragments/risk')` (L358)
-- `fragment_incident()` `@app.route('/fragments/incident')` (L373)
-- `fragment_verdicts()` `@app.route('/fragments/verdicts')` (L387) : Verdicts panel: last-12h activity trend. Cumulative totals live in
-- `fragment_posture()` `@app.route('/fragments/posture')` (L394) : Merged posture panel: risk score + system-integrity checklist.
-- `fragment_collection()` `@app.route('/fragments/collection')` (L412) : Merged collection-health panel: row counts + recent runs + errors.
-- `fragment_network()` `@app.route('/fragments/network')` (L430) : Tabbed network panel wrapper (tabs lazy-load the existing fragments).
-- `fragment_vulnerabilities()` `@app.route('/fragments/vulnerabilities')` (L436) : CVE / EOL 'protect yourself' panel from collected enrichment evidence.
-- `fragment_sysint()` `@app.route('/fragments/sysint')` (L459)
-- `fragment_resources()` `@app.route('/fragments/resources')` (L469) : System-resources panel: current memory/swap/CPU/load/uptime/tasks +
-- `fragment_network_flows()` `@app.route('/fragments/network-flows')` (L484)
-- `fragment_listening_ports()` `@app.route('/fragments/listening-ports')` (L505)
-- `fragment_dns_queries()` `@app.route('/fragments/dns-queries')` (L533)
-- `fragment_log_summary()` `@app.route('/fragments/log-summary')` (L561)
-- `fragment_logs()` `@app.route('/fragments/logs')` (L589)
-- `fragment_network_topology()` `@app.route('/fragments/network-topology')` (L617)
-- `fragment_network_exposure()` `@app.route('/fragments/network-exposure')` (L633)
-- `fragment_persistence()` `@app.route('/fragments/persistence')` (L649)
-- `fragment_auth_events()` `@app.route('/fragments/auth-events')` (L679)
-- `fragment_errors()` `@app.route('/fragments/errors')` (L703)
-- `_int_arg(name, default) -> int` (L712)
-- `fragment_findings()` `@app.route('/fragments/findings')` (L721)
-- `fragment_file_scan()` `@app.route('/fragments/file-scan')` (L766)
-- `fragment_row_counts()` `@app.route('/fragments/row-counts')` (L780)
-- `_prior_run(session, before_started) -> tuple[str | None, str | None]` (L792) : ``(run_id, started_at)`` of the run immediately before
-- `fragment_runs()` `@app.route('/fragments/runs')` (L805)
-- `api_chart_verdicts()` `@app.route('/api/chart/verdicts')` (L814)
-- `api_chart_resources()` `@app.route('/api/chart/resources')` (L820) : Memory / CPU / swap percentage time-series for the resource trend
-- `api_notifications_new()` `@app.route('/api/notifications/new')` (L828) : Return malicious/suspicious judgements created after ``?since``.
-- `_control_open() -> bool` (L854) : Open mode: the desktop app sets ``AVAI_CONTROL_OPEN`` because the
-- `require_control_token(fn)` (L862) : Gate a control action behind ``AVAI_CONTROL_TOKEN``. Fails closed: if
-- `_control_panel()` (L882)
-- `fragment_control()` `@app.route('/fragments/control')` (L895)
-- `control_pause()` `@app.route('/control/pause', methods=['POST']), require_control_token` (L901)
-- `control_resume()` `@app.route('/control/resume', methods=['POST']), require_control_token` (L908)
-- `control_scan_now()` `@app.route('/control/scan-now', methods=['POST']), require_control_token` (L915)
-- `control_collector(name, state)` `@app.route('/control/collector/<name>/<state>', methods=['POST']), require_control_token` (L922)
-- `control_settings()` `@app.route('/control/settings', methods=['POST']), require_control_token` (L931)
-- `control_maintenance(action)` `@app.route('/control/maintenance/<action>', methods=['POST']), require_control_token` (L948)
-- `feedback_record(collector, content_hash, label)` `@app.route('/feedback/<collector>/<content_hash>/<label>', methods=['POST']), require_control_token` (L960) : Record an operator correction on a finding. The monitor applies it to
+#### `avai.dashboard.config` · `avai/dashboard/config.py` · 42 lines
 
-#### `avai.dashboard.control` · `avai/dashboard/control.py` · 193 lines
+_What one dashboard instance runs with, read once at startup._
+
+Constants: `DEFAULT_DB_PATH`
+
+- **class `DashboardConfig`** `@dataclass(frozen=True)` (L15)
+  - fields: `db_path: str`, `control_token: Optional[str]`, `control_open: bool`, `app_mode: bool`, `query_log_path: Optional[str]`
+  - `from_env(db_path, environ) -> DashboardConfig` `@classmethod`
+  - `control_enabled() -> bool` `@property`
+
+#### `avai.dashboard.control` · `avai/dashboard/control.py` · 162 lines
 
 _Writable control-plane access for the dashboard._
 
-- `_on_connect(dbapi_conn, _record)` (L27)
-- `_write_engine()` (L36)
-- `_ensure_row(session) -> None` (L52)
-- `_update() -> None` (L57)
-- `set_paused(paused) -> None` (L66)
-- `bump_scan_now() -> None` (L70) : Request an immediate scan (monitor runs one cycle within a poll tick).
-- `set_settings() -> None` (L82)
-- `set_collector(name, enabled) -> None` (L94)
-- `record_feedback() -> None` (L106) : Persist an operator correction on a finding (latest-wins per finding).
-- `queue_command(command) -> None` (L145) : Queue a one-shot maintenance command; the monitor runs + acks it.
-- `read_control_state() -> dict | None` (L157) : Read the control row (read-only engine is fine) for display.
-- `monitor_alive(state) -> bool` (L180) : Heartbeat freshness check. The monitor writes last_seen_at every poll
+- **class `ControlStore`** (L30) : The dashboard's writes, through one writable engine per app.
+  - `__init__(engine)`
+  - `_update() -> None`
+  - `set_paused(paused) -> None`
+  - `bump_scan_now() -> None`
+  - `set_settings() -> None`
+  - `set_collector(name, enabled) -> None`
+  - `record_feedback() -> None`
+  - `queue_command(command) -> None`
+- `_ensure_row(session) -> None` (L25)
+- `read_control_state(session) -> dict | None` (L133) : Read the control row for display.
+- `monitor_alive(state) -> bool` (L149) : Heartbeat freshness check. The monitor writes last_seen_at every poll
 
-#### `avai.dashboard.queries` · `avai/dashboard/queries.py` · 2719 lines
+#### `avai.dashboard.db` · `avai/dashboard/db.py` · 81 lines
 
-_Read-only DB query layer: no Flask app, uses current_app for config._
+_The dashboard's two SQLite engines, built once per app: a read-only one_
 
-Constants: `COLLECTOR_MODELS`, `SEVERITY_ORDER`, `VERDICTS`, `PER_PAGE_OPTIONS`, `DEFAULT_PER_PAGE`, `DEFAULT_DB_PATH`, `_HIDDEN_SOURCE_FIELDS`, `_QUERY_LOG_PATH`, `_SCHEMA_TTL`, `_VULN_SOURCES`, `SEVERITY_ORDER`, `_SEVERITY_RANK`, `_SEVERITY_BANDS`, `_SEVERITY_CASE`, `_SORT_FIELDS`, `_STREAMING_COLLECTORS`, `_FLOW_SEV`, `_PROTO_BY_SOCK`, `_FAMILY_LABEL`, `_SCOPE_SEV`, `_AUTH_SUBSYSTEM_LABELS`, `AUTH_SUBSYSTEM_OPTIONS`, `_AUTH_VERDICT_SEV`, `_AUTH_AGG_WINDOW_HOURS`, `_AUTH_AGG_TTL`, `_AUTH_AGG_CACHE_MAX`, `_PSEUDO_FSTYPES`, `LOG_LEVELS`, `_LOG_ERROR_LEVELS`, `_LOG_HEX_RE`, `_LOG_NUM_RE`, `_LOG_WS_RE`, `_LOG_GROUPERS`
+Constants: `_LOGGED_PARAMS_MAX`
 
-- `_engine()` (L121) : Return a process-wide, thread-safe read-only engine for the
-- `_log_query(conn, cursor, statement, parameters, context, executemany)` (L167) : SQLAlchemy before_cursor_execute hook → append one line per query.
-- `_session() -> Session` (L191)
-- `_cache_key(session) -> str` (L204)
-- `_existing_tables(session) -> set[str]` (L208) : Tables actually present in the DB. The dashboard may read a
-- `_existing_columns(session, table) -> set[str]` (L226) : Column names present on ``table``. The DB may have been written by
-- `latest_run(session)` (L241) : The run the dashboard should display.
-- `latest_narrative(session)` (L267) : The most recent incident digest, or None. Guarded for DBs written by
-- `latest_risk(session)` (L279) : Most recent host posture score, or None. Guarded for older DBs that
-- `risk_trend(session, limit) -> list[int]` (L289) : Recent scores oldest→newest for the sparkline. [] if unavailable.
-- `_severity_from_cvss(score) -> str | None` (L316) : Map a CVSS base score to its qualitative band, or None when unscored.
-- `_item_severity(cvss, cves, kev) -> str` (L326) : Worst severity for a vulnerable-software item: the CVSS band if scored,
-- `_normalize_software(name) -> str` (L340) : Reduce a software/package/exe string to a comparable base token:
-- `_software_presence(session, run_id) -> tuple[set, set]` (L352) : ``(running, exposed)`` normalized software names for ``run_id``:
-- `vulnerabilities(session) -> dict` (L383) : Aggregate the CVE / EOL evidence the enrichment chain already collected
-- `recent_runs(session, limit) -> list[CollectionRun]` (L548)
-- `runs_total(session) -> int` (L556)
-- `verdict_counts(session) -> dict[str, int]` (L562)
-- `judged_since(session, since) -> int` (L572)
-- `cost_since(session, since) -> float` (L583) : Total estimated LLM cost (USD) of judgments produced since ``since``.
-- `_row_and_artifact(session, j) -> tuple[dict, str]` (L595) : Return ``(source_row_dict, artifact_display_string)`` for a judgment.
-- `collector_options(session) -> list[str]` (L643)
-- `category_options(session) -> list[str]` (L650)
-- `findings(session) -> dict` (L660) : Paginated, filterable, sortable findings query.
-- `row_counts(session, latest_run_id, latest_started, prev_run_id, prev_started) -> list[dict]` (L815) : Per-collector row counts for the latest run, with a change signal vs
-- `collector_errors(session, run_id) -> list[CollectorErrorRow]` (L874)
-- `_paginate(rows, page, per_page) -> tuple[list, int, int]` (L885) : Slice *rows* for the requested page. Returns (page_rows, total, total_pages).
-- `network_flows(session, run_id, limit, verdict, q, page, per_page)` (L895) : Tcpdump flows for ``run_id``, **aggregated by destination IP** for
-- `_port_sort_key(p)` (L1081) : Sort '443/https' or '4444' numerically by the leading port.
-- `_geo_from_details(details) -> dict | None` (L1087) : Extract a normalised geolocation from one evidence row's details,
-- `_geo_richness(g) -> int` (L1111) : Count how many fields a geo candidate fills: used to keep the
-- `_host_from_details(details) -> str | None` (L1119) : Pull a hostname / domain for the IP out of one evidence row's
-- `_attach_ip_enrichment(session, rows) -> None` (L1135) : Populate each flow row from the cached enrichment evidence for its
-- `_collector_rows_with_verdict(session, run_id, model, collector, fields, limit) -> list[dict]` (L1192) : Generic: every ``collector`` row for ``run_id``, each annotated
-- `_addr_scope(ip) -> str` (L1247) : Classify a listening bind address: the dominant threat signal:
-- `_cmdline_str(raw) -> str | None` (L1267) : ProcessRow.cmdline_json is a JSON-encoded argv list; render it as a
-- `listening_ports(session, run_id, limit, verdict, scope_filter, q, page, per_page)` (L1281) : Listening sockets for ``run_id`` as a glanceable table: one row per
-- `_dns_resolution_level(server_ip, qtype) -> str` (L1476) : Classify *how/where* a name resolved, from the resolver it was
-- `dns_queries(session, run_id, limit, verdict, level, q, page, per_page)` (L1503) : DNS questions seen this run (+ detected DoH endpoints), each with
-- `network_topology(session, run_id, limit, verdict, q)` (L1565) : Network neighborhood & topology for ``run_id``: configured DNS
-- `network_exposure(session, run_id, limit, verdict, q)` (L1650) : Network exposure & MITM surface for ``run_id``: configured proxies,
-- `yara_status(session) -> 'dict | None'` (L1735) : The file scanner's compiled-ruleset summary (single row, written by
-- `file_scan(session, run_id, verdict, q, limit) -> dict` (L1761) : The File Scan panel: the compiled-ruleset summary plus this run's
-- `yara_coverage(session) -> 'dict | None'` (L1803) : The most recent LLM assessment of how well the loaded ruleset covers
-- `persistence_tampering(session, run_id, limit, verdict, q, ssh_page, hosts_page, priv_page, per_page)` (L1825) : The persistence & tampering posture for ``run_id``: SSH authorized
-- `_auth_subsystem_tabs(summary, total_events) -> list[dict]` (L1941) : Tab descriptors for the auth-events subsystem tablist: short label,
-- `_auth_summary(session, cutoff) -> tuple[dict, int]` (L1976) : Recent per-subsystem event counts (short label -> count) plus the grand
-- `auth_events_aggregated(session, q, subsystem, verdict, sort, page, per_page)` (L2000) : Auth events grouped by content_hash (one pattern per unique log line),
-- `system_integrity(session, run_id)` (L2170) : Return the latest system-integrity posture as a platform-tagged
-- `host_resources(session, run_id) -> dict | None` (L2247) : Latest aggregate resource meters (memory/swap/CPU/load/uptime/tasks)
-- `disk_usage(session, run_id) -> list[DiskUsageRow]` (L2261) : Per-filesystem usage rows for ``run_id``, fullest first. [] when the
-- `primary_filesystems(rows) -> list[DiskUsageRow]` (L2308) : The 'real' on-disk filesystems worth showing first: drop pseudo /
-- `_path_components(mountpoint) -> tuple[str, ...]` (L2322) : Path segments of a mountpoint, root ('/') being the empty tuple. Sorting
-- `_is_ancestor(parent, child) -> bool` (L2329) : True if ``parent`` is a mountpoint strictly above ``child`` in the
-- `mount_tree(rows) -> list[dict]` (L2339) : Arrange filesystem rows as a mount-point tree for display.
-- `log_entries(session, run_id) -> dict` (L2373) : Recent host log lines (journald + tailed files) for ``run_id`` as a
-- `_normalize_log_message(message) -> str` (L2465) : Collapse a log line to a template so repeated events with varying ids
-- `_log_group_by_unit(row) -> str` (L2477)
-- `_log_group_by_source(row) -> str` (L2481)
-- `_log_group_by_message(row) -> str` (L2485)
-- `log_aggregates(session, run_id) -> dict` (L2497) : Aggregate the run's log lines into ranked groups for the log-summary
-- `resource_trend(session, limit) -> dict` (L2613) : Recent memory/CPU/swap percentages oldest→newest for the trend
-- `new_alerts(session, since, limit) -> list[dict]` (L2638) : Return malicious / suspicious judgements created after ``since``,
-- `verdict_timeseries(session, hours) -> dict` (L2673) : Return verdict counts grouped per-hour bucket over the last N hours.
-- `_parse_json_list(raw) -> list` (L2700) : Defensively parse a stored JSON array column; [] on any problem.
-- `_parse_json_obj(raw) -> dict` (L2711) : Defensively parse a stored JSON object column; {} on any problem.
+- **class `_QueryLog`** (L59) : SQLAlchemy before_cursor_execute hook: append one line per query.
+  - `__init__(path)`
+  - `__call__(_conn, _cursor, statement, parameters)`
+- `read_only_engine(db_path, query_log_path) -> Engine` (L17) : One pooled engine per app, reused by every request. An engine per
+- `writable_engine(db_path) -> Engine` (L41)
+- `_on_connect(dbapi_conn, _record)` (L50)
 
+#### `avai.dashboard.filters` · `avai/dashboard/filters.py` · 172 lines
 
-#### `avai.dashboard.serve` · `avai/dashboard/serve.py` · 172 lines
+_Jinja template filters: markdown, times, sizes, JSON, flags._
+
+Constants: `_MINUTE_S`, `_HOUR_S`, `_DAY_S`, `_KIB`, `_COUNTRY_CODE_LEN`, `_MD_TAGS`, `_LIST_ITEM_RE`
+
+- `_ensure_list_blank_lines(text) -> str` (L55) : Insert a blank line before a list that directly follows a non-list
+- `render_markdown(text) -> str` (L77) : LLM-written markdown → sanitised HTML. Falls back to HTML-escaped
+- `_relative_time(iso_string) -> str` (L94) : Short relative-time string like '5m ago' for an ISO timestamp.
+- `_datetime_fmt(iso_string) -> str` (L116) : Human-readable absolute timestamp (UTC) like 'May 30, 2026 · 18:57:20
+- `_pretty_json(value) -> str` (L131) : Re-serialize a JSON string with indentation. Pass non-JSON through.
+- `_human_bytes(n) -> str` (L141) : Human-readable data volume (e.g. 927 -> '927 B', 12345 -> '12.1 KB',
+- `_flag_emoji(cc) -> str` (L157) : Render a 2-letter ISO country code as its flag emoji (regional
+- `register_filters(app) -> None` (L166)
+
+#### `avai.dashboard.queries` · `avai/dashboard/queries/__init__.py` · 103 lines
+
+_Read-only DB query layer, one module per dashboard panel. Every function_
+
+#### `avai.dashboard.queries.auth_events` · `avai/dashboard/queries/auth_events.py` · 269 lines
+
+_The authentication events panel, aggregated per subsystem._
+
+Constants: `_AUTH_SUBSYSTEM_LABELS`, `AUTH_SUBSYSTEM_OPTIONS`, `_AUTH_VERDICT_SEV`, `_AUTH_AGG_WINDOW_HOURS`, `_AUTH_AGG_TTL`, `_AUTH_AGG_CACHE_MAX`
+
+- `_auth_subsystem_tabs(summary, total_events) -> list[dict]` (L53) : Tab descriptors for the auth-events subsystem tablist: short label,
+- `_auth_summary(session, cutoff) -> tuple[dict, int]` (L98) : Recent per-subsystem event counts (short label -> count) plus the grand
+- `_auth_patterns(filters, subsystem, cutoff)` (L122) : One row per unique log line (content_hash) in the window, with its
+- `_auth_order(sort, count_col) -> tuple` (L179)
+- `_auth_row(pattern) -> dict` (L186)
+- `_remember_auth_page(cache_key, result) -> None` (L203)
+- `auth_events_aggregated(session, filters, subsystem, sort, page)` (L210) : Auth events grouped by content_hash (one pattern per unique log line),
+
+#### `avai.dashboard.queries.collection` · `avai/dashboard/queries/collection.py` · 278 lines
+
+_Run-level queries: latest run, risk, narrative, counts, errors, alerts._
+
+Constants: `_STREAMING_COLLECTORS`
+
+- `latest_run(session)` (L26) : The run the dashboard should display.
+- `latest_narrative(session)` (L52) : The most recent incident digest, or None. Guarded for DBs written by
+- `latest_risk(session)` (L64) : Most recent host posture score, or None. Guarded for older DBs that
+- `risk_trend(session, limit) -> list[int]` (L74) : Recent scores oldest→newest for the sparkline. [] if unavailable.
+- `prior_run(session, before_started) -> tuple[str | None, str | None]` (L90) : ``(run_id, started_at)`` of the run immediately before
+- `recent_runs(session, limit) -> list[CollectionRun]` (L102)
+- `runs_total(session) -> int` (L110)
+- `verdict_counts(session) -> dict[str, int]` (L116)
+- `judged_since(session, since) -> int` (L126)
+- `cost_since(session, since) -> float` (L137) : Total estimated LLM cost (USD) of judgments produced since ``since``.
+- `row_counts(session, latest_run_id, latest_started, prev_run_id, prev_started) -> list[dict]` (L152) : Per-collector row counts for the latest run, with a change signal vs
+- `collector_errors(session, run_id) -> list[CollectorErrorRow]` (L211)
+- `new_alerts(session, since, limit) -> list[dict]` (L219) : Return malicious / suspicious judgements created after ``since``,
+- `verdict_timeseries(session, hours) -> dict` (L254) : Return verdict counts grouped per-hour bucket over the last N hours.
+
+#### `avai.dashboard.queries.common` · `avai/dashboard/queries/common.py` · 342 lines
+
+_Shared pieces of the query layer: collector registry, display fields,_
+
+Constants: `COLLECTOR_MODELS`, `VERDICTS`, `PER_PAGE_OPTIONS`, `DEFAULT_PER_PAGE`, `_HIDDEN_SOURCE_FIELDS`, `_SCHEMA_TTL`, `_FLOW_SEV`, `MAX_PER_PAGE`
+
+- **class `Page`** `@dataclass(frozen=True)` (L163) : One page of a panel as the query string asked for it. Clamped on
+  - fields: `number: int`, `size: int`
+  - `__post_init__() -> None`
+  - `total_pages(total) -> int`
+  - `within(total) -> Page`
+  - `offset() -> int` `@property`
+  - `fields(total) -> dict`
+  - `slice(rows) -> tuple[list, dict]`
+- **class `VerdictTable(NamedTuple)`** (L216) : One collector table as a panel shows it: the columns it reads, the ones
+  - fields: `collector: str`, `columns: tuple[str, ...]`, `search: tuple[str, ...]`, `limit: int`
+  - `rows(session, run_id) -> list[dict]`
+- **class `RowFilter`** `@dataclass(frozen=True)` (L261) : The verdict pick and search box most panels share.
+  - fields: `verdict: str`, `q: str`
+  - `keep(rows, search) -> list[dict]`
+  - `fields() -> dict`
+- `_cache_key(session) -> str` (L79)
+- `_existing_tables(session) -> set[str]` (L83) : Tables actually present in the DB. The dashboard may read a
+- `_existing_columns(session, table) -> set[str]` (L101) : Column names present on ``table``. The DB may have been written by
+- `_source_row(row_obj) -> dict` (L116) : A collector row as a dict, minus the internal SQL plumbing columns.
+- `_artifact_label(collector, source_row) -> str` (L125) : The short "what is this" text for a finding, from its display fields.
+- `_row_and_artifact(session, j) -> tuple[dict, str]` (L133) : Return ``(source_row_dict, artifact_display_string)`` for a judgment.
+- `_port_sort_key(p)` (L204) : Sort '443/https' or '4444' numerically by the leading port.
+- `_column_or_null(model, name, present)` (L210) : ``model.name``, or a NULL labelled ``name`` when an older monitor wrote
+- `_tally(rows) -> dict` (L286) : Row count plus how many of them the judge flagged.
+- `_verdict_tables(session, run_id, tables, filters) -> dict` (L295) : A panel of small, bounded tables shown whole (no paging) behind one
+- `_take_worse_verdict(group, verdict, confidence, reasoning) -> None` (L315) : Keep the worst verdict a grouped row has seen, with its reasoning.
+- `_parse_json_list(raw) -> list` (L323) : Defensively parse a stored JSON array column; [] on any problem.
+- `_parse_json_obj(raw) -> dict` (L334) : Defensively parse a stored JSON object column; {} on any problem.
+
+#### `avai.dashboard.queries.dns` · `avai/dashboard/queries/dns.py` · 82 lines
+
+_The DNS queries panel._
+
+Constants: `_DNS_TABLE`
+
+- `_dns_resolution_level(server_ip, qtype) -> str` (L12) : Classify *how/where* a name resolved, from the resolver it was
+- `dns_queries(session, run_id, filters, level, page)` (L47) : DNS questions seen this run (+ detected DoH endpoints), each with
+
+#### `avai.dashboard.queries.exposure` · `avai/dashboard/queries/exposure.py` · 76 lines
+
+_The network topology and exposure panels._
+
+Constants: `_TOPOLOGY_TABLES`, `_EXPOSURE_TABLES`
+
+- `network_topology(session, run_id, filters)` (L35) : Network neighborhood & topology for ``run_id``: configured DNS
+- `network_exposure(session, run_id, filters)` (L70) : Network exposure & MITM surface for ``run_id``: configured proxies,
+
+#### `avai.dashboard.queries.findings` · `avai/dashboard/queries/findings.py` · 207 lines
+
+_The findings panel: judged rows, their filters and sort orders._
+
+Constants: `_SEVERITY_CASE`, `_SORT_FIELDS`
+
+- **class `FindingFilter`** `@dataclass(frozen=True)` (L66) : What the findings panel narrows to. ``status`` is ``active`` /
+  - fields: `verdict: str`, `collector: str`, `category: str`, `search: str`, `status: str`
+  - `apply(stmt, latest_started)`
+  - `_apply_status(stmt, latest_started)`
+- `collector_options(session) -> list[str]` (L48)
+- `category_options(session) -> list[str]` (L55)
+- `_ordered(stmt, sort, order)` (L116)
+- `_latest_source_rows(session, judgements) -> dict[tuple, tuple]` (L129) : ``(collector, content_hash) -> (source_row, artifact_label)`` for the
+- `_finding_item(j, artifacts, latest_started) -> dict` (L154)
+- `findings(session) -> dict` (L178) : Paginated, filterable, sortable findings query.
+
+#### `avai.dashboard.queries.flows` · `avai/dashboard/queries/flows.py` · 155 lines
+
+_The network flows panel._
+
+Constants: `_FLOW_LIMIT`, `_FLOW_SEARCH`
+
+- `_flows_with_verdict(session, run_id)` (L32) : This run's raw flows, each LEFT JOINed to its LLM verdict. Tolerates a
+- `_flows_by_destination(flows) -> list[dict]` (L62) : Roll raw flows up per destination IP: summed packets and bytes, the
+- `_destination_row(group) -> dict` (L96)
+- `network_flows(session, run_id, filters, page)` (L116) : Tcpdump flows for ``run_id``, **aggregated by destination IP** for
+
+#### `avai.dashboard.queries.ip_enrichment` · `avai/dashboard/queries/ip_enrichment.py` · 121 lines
+
+_Geo and host details from the IP enrichment table, merged into rows._
+
+- `_geo_from_details(details) -> dict | None` (L19) : Extract a normalised geolocation from one evidence row's details,
+- `_geo_richness(g) -> int` (L43) : Count how many fields a geo candidate fills: used to keep the
+- `_host_from_details(details) -> str | None` (L51) : Pull a hostname / domain for the IP out of one evidence row's
+- `_attach_ip_enrichment(session, rows) -> None` (L67) : Populate each flow row from the cached enrichment evidence for its
+
+#### `avai.dashboard.queries.logs` · `avai/dashboard/queries/logs.py` · 250 lines
+
+_The logs panel: raw entries and grouped aggregates._
+
+Constants: `LOG_LEVELS`, `_LOG_ERROR_LEVELS`, `_LOG_HEX_RE`, `_LOG_NUM_RE`, `_LOG_WS_RE`, `_LOG_GROUPERS`
+
+- **class `LogFilter`** `@dataclass(frozen=True)` (L27) : The logs panels' filters: a source (journald / file path), a syslog
+  - fields: `source: str`, `level: str`, `q: str`
+  - `keep(rows) -> list[LogEntryRow]`
+  - `fields() -> dict`
+- `_run_log_lines(session, run_id) -> list[LogEntryRow]` (L55)
+- `log_entries(session, run_id, filters, page) -> dict` (L63) : Recent host log lines (journald + tailed files) for ``run_id`` as a
+- `_normalize_log_message(message) -> str` (L129) : Collapse a log line to a template so repeated events with varying ids
+- `_log_group_by_unit(row) -> str` (L141)
+- `_log_group_by_source(row) -> str` (L145)
+- `_log_group_by_message(row) -> str` (L149)
+- `_log_groups(rows, key_of) -> list[dict]` (L161) : Count lines per group key, with error / warning counts, the latest
+- `_labelled_group(group) -> dict` (L189) : Swap the unit / source sets for a label: the one name, or a count.
+- `log_aggregates(session, run_id, filters, group_by, page) -> dict` (L202) : Aggregate the run's log lines into ranked groups for the log-summary
+
+#### `avai.dashboard.queries.ports` · `avai/dashboard/queries/ports.py` · 230 lines
+
+_The listening ports panel._
+
+Constants: `_PROTO_BY_SOCK`, `_FAMILY_LABEL`, `_SCOPE_SEV`, `_PORT_LIMIT`, `_PORT_SEARCH`, `_PROC_COLUMNS`
+
+- `_addr_scope(ip) -> str` (L30) : Classify a listening bind address: the dominant threat signal:
+- `_cmdline_str(raw) -> str | None` (L50) : ProcessRow.cmdline_json is a JSON-encoded argv list; render it as a
+- `_processes_by_pid(session, run_id) -> dict[int, dict]` (L80) : Owning-process detail, keyed by pid, from the same run's snapshot.
+- `_established_by_port(session, run_id) -> dict[int, int]` (L97) : Established connections terminating on each local port: "is anyone
+- `_sockets_by_port_and_pid(session, run_id) -> list[dict]` (L113) : One group per (port, pid): wildcard binds (0.0.0.0 + :: on the same
+- `_port_row(group, procs, conns) -> dict` (L162)
+- `listening_ports(session, run_id, filters, scope_filter, page)` (L183) : Listening sockets for ``run_id`` as a glanceable table: one row per
+
+#### `avai.dashboard.queries.posture` · `avai/dashboard/queries/posture.py` · 243 lines
+
+_Host posture panels: YARA, file scan, persistence, system integrity._
+
+Constants: `_FILE_SCAN_TABLE`, `_SSH_KEYS_TABLE`, `_HOSTS_TABLE`, `_PRIVILEGE_TABLE`, `_LINUX_KEYS`
+
+- **class `PersistencePages(NamedTuple)`** (L102) : The page each persistence table is on; they page independently.
+  - fields: `ssh: Page`, `hosts: Page`, `priv: Page`
+- `yara_status(session) -> 'dict | None'` (L30) : The file scanner's compiled-ruleset summary (single row, written by
+- `file_scan(session, run_id, filters) -> dict` (L63) : The File Scan panel: the compiled-ruleset summary plus this run's
+- `yara_coverage(session) -> 'dict | None'` (L80) : The most recent LLM assessment of how well the loaded ruleset covers
+- `persistence_tampering(session, run_id, filters, pages)` (L125) : The persistence & tampering posture for ``run_id``: SSH authorized
+- `_service_activity(raw)` (L173) : ``topic -> active now`` from the network-service controls, or None for
+- `_linux_posture(raw, active) -> dict` (L185)
+- `_macos_posture(row, active) -> dict` (L202)
+- `system_integrity(session, run_id)` (L221) : Return the latest system-integrity posture as a platform-tagged
+
+#### `avai.dashboard.queries.resources` · `avai/dashboard/queries/resources.py` · 162 lines
+
+_Host resources: CPU and memory trend, disks and the mount tree._
+
+Constants: `_PSEUDO_FSTYPES`
+
+- `host_resources(session, run_id) -> dict | None` (L19) : Latest aggregate resource meters (memory/swap/CPU/load/uptime/tasks)
+- `disk_usage(session, run_id) -> list[DiskUsageRow]` (L33) : Per-filesystem usage rows for ``run_id``, fullest first. [] when the
+- `primary_filesystems(rows) -> list[DiskUsageRow]` (L80) : The 'real' on-disk filesystems worth showing first: drop pseudo /
+- `_path_components(mountpoint) -> tuple[str, ...]` (L94) : Path segments of a mountpoint, root ('/') being the empty tuple. Sorting
+- `_is_ancestor(parent, child) -> bool` (L101) : True if ``parent`` is a mountpoint strictly above ``child`` in the
+- `mount_tree(rows) -> list[dict]` (L111) : Arrange filesystem rows as a mount-point tree for display.
+- `resource_trend(session, limit) -> dict` (L140) : Recent memory/CPU/swap percentages oldest→newest for the trend
+
+#### `avai.dashboard.queries.vulnerabilities` · `avai/dashboard/queries/vulnerabilities.py` · 273 lines
+
+_The vulnerabilities panel: advisories matched to installed software._
+
+Constants: `_VULN_SOURCES`, `SEVERITY_ORDER`, `_SEVERITY_RANK`, `_SEVERITY_BANDS`
+
+- **class `_Evidence(NamedTuple)`** (L104)
+  - fields: `source: str`, `indicator_type: str`, `indicator_value: str`, `verdict_hint: str | None`, `summary: str | None`, `details: dict`
+- `_severity_from_cvss(score) -> str | None` (L37) : Map a CVSS base score to its qualitative band, or None when unscored.
+- `_item_severity(cvss, cves, kev) -> str` (L47) : Worst severity for a vulnerable-software item: the CVSS band if scored,
+- `_normalize_software(name) -> str` (L61) : Reduce a software/package/exe string to a comparable base token:
+- `_software_presence(session, run_id) -> tuple[set, set]` (L73) : ``(running, exposed)`` normalized software names for ``run_id``:
+- `_vuln_evidence(session) -> list[_Evidence]` (L113)
+- `_cvss_score(details) -> float | None` (L133)
+- `_no_cve_detail() -> dict` (L143)
+- `_cve_details(evidence) -> dict[str, dict]` (L147) : CVE id -> {kev, cvss, severity}, merged across the forward-chained
+- `_vuln_item(ev, cve_detail, running, exposed)` (L168) : One patch-me row for a package or end-of-life product, or None for a
+- `_mentions(item, needle) -> bool` (L196)
+- `_patch_priority(item) -> tuple` (L204) : Severity first (critical -> none), then actively exploited (KEV) ->
+- `vulnerabilities(session) -> dict` (L217) : Aggregate the CVE / EOL evidence the enrichment chain already collected
+
+#### `avai.dashboard.routes` · `avai/dashboard/routes/__init__.py` · 34 lines
+
+_HTTP routes, one Blueprint per surface: HTML fragments, the JSON api and_
+
+Constants: `_EXTENSION_KEY`
+
+- **class `DashboardServices`** `@dataclass(frozen=True)` (L20)
+  - fields: `config: DashboardConfig`, `read_engine: Engine`, `control: ControlStore`
+  - `install(app) -> None`
+- `services() -> DashboardServices` (L29)
+- `read_session() -> Session` (L33)
+
+#### `avai.dashboard.routes.api` · `avai/dashboard/routes/api.py` · 49 lines
+
+_JSON endpoints for the charts and the browser notifications._
+
+- `api_chart_verdicts()` `@bp.route('/api/chart/verdicts')` (L20)
+- `api_chart_resources()` `@bp.route('/api/chart/resources')` (L26) : Memory / CPU / swap percentage time-series for the resource trend
+- `api_notifications_new()` `@bp.route('/api/notifications/new')` (L34) : Return malicious/suspicious judgements created after ``?since``.
+
+#### `avai.dashboard.routes.control` · `avai/dashboard/routes/control.py` · 141 lines
+
+_The cooperative control plane: POST routes write the control_state row_
+
+Constants: `_MAINTENANCE_ACTIONS`, `_FEEDBACK_LABELS`
+
+- `require_control_token(fn)` (L24) : Gate a control action behind the configured token. Fails closed: with
+- `_control_panel()` (L45)
+- `fragment_control()` `@bp.route('/fragments/control')` (L60)
+- `control_pause()` `@bp.route('/control/pause', methods=['POST']), require_control_token` (L66)
+- `control_resume()` `@bp.route('/control/resume', methods=['POST']), require_control_token` (L73)
+- `control_scan_now()` `@bp.route('/control/scan-now', methods=['POST']), require_control_token` (L80)
+- `control_collector(name, state)` `@bp.route('/control/collector/<name>/<state>', methods=['POST']), require_control_token` (L87)
+- `control_settings()` `@bp.route('/control/settings', methods=['POST']), require_control_token` (L96)
+- `control_maintenance(action)` `@bp.route('/control/maintenance/<action>', methods=['POST']), require_control_token` (L113)
+- `feedback_record(collector, content_hash, label)` `@bp.route('/feedback/<collector>/<content_hash>/<label>', methods=['POST']), require_control_token` (L125) : Record an operator correction on a finding. The monitor applies it to
+
+#### `avai.dashboard.routes.fragments` · `avai/dashboard/routes/fragments.py` · 544 lines
+
+_HTML fragments the page polls with HTMX, plus the page itself._
+
+- `index()` `@bp.route('/')` (L57)
+- `fragment_triage()` `@bp.route('/fragments/triage')` (L62) : Above-the-fold triage strip: posture grade, active malicious/
+- `fragment_header_meta()` `@bp.route('/fragments/header-meta')` (L88)
+- `fragment_overview()` `@bp.route('/fragments/overview')` (L97)
+- `_sparkline_points(scores, w, h, pad) -> str` (L110) : SVG polyline points for a 0-100 score series (oldest→newest).
+- `fragment_risk()` `@bp.route('/fragments/risk')` (L126)
+- `fragment_incident()` `@bp.route('/fragments/incident')` (L141)
+- `fragment_verdicts()` `@bp.route('/fragments/verdicts')` (L155) : Verdicts panel: last-12h activity trend. Cumulative totals live in
+- `fragment_posture()` `@bp.route('/fragments/posture')` (L162) : Merged posture panel: risk score + system-integrity checklist.
+- `fragment_collection()` `@bp.route('/fragments/collection')` (L180) : Merged collection-health panel: row counts + recent runs + errors.
+- `fragment_network()` `@bp.route('/fragments/network')` (L198) : Tabbed network panel wrapper (tabs lazy-load the existing fragments).
+- `fragment_vulnerabilities()` `@bp.route('/fragments/vulnerabilities')` (L204) : CVE / EOL 'protect yourself' panel from collected enrichment evidence.
+- `fragment_sysint()` `@bp.route('/fragments/sysint')` (L225)
+- `fragment_resources()` `@bp.route('/fragments/resources')` (L235) : System-resources panel: current memory/swap/CPU/load/uptime/tasks +
+- `fragment_network_flows()` `@bp.route('/fragments/network-flows')` (L250)
+- `fragment_listening_ports()` `@bp.route('/fragments/listening-ports')` (L270)
+- `fragment_dns_queries()` `@bp.route('/fragments/dns-queries')` (L295)
+- `fragment_log_summary()` `@bp.route('/fragments/log-summary')` (L320)
+- `fragment_logs()` `@bp.route('/fragments/logs')` (L345)
+- `fragment_network_topology()` `@bp.route('/fragments/network-topology')` (L369)
+- `fragment_network_exposure()` `@bp.route('/fragments/network-exposure')` (L385)
+- `fragment_persistence()` `@bp.route('/fragments/persistence')` (L401)
+- `fragment_auth_events()` `@bp.route('/fragments/auth-events')` (L428)
+- `fragment_errors()` `@bp.route('/fragments/errors')` (L449)
+- `_int_arg(name, default) -> int` (L458)
+- `_page_arg(name) -> Page` (L466)
+- `fragment_findings()` `@bp.route('/fragments/findings')` (L471)
+- `fragment_file_scan()` `@bp.route('/fragments/file-scan')` (L510)
+- `fragment_row_counts()` `@bp.route('/fragments/row-counts')` (L526)
+- `fragment_runs()` `@bp.route('/fragments/runs')` (L539)
+
+#### `avai.dashboard.serve` · `avai/dashboard/serve.py` · 175 lines
 
 _CLI entrypoint and WSGI launcher for `avai dashboard`._
 
 Constants: `_PRIVILEGED_PORT_CEILING`, `_DEFAULT_HTTP_PORT`
 
-- `_http_url(host, port) -> str` (L24) : A browser URL, omitting the port when it's the implicit HTTP 80: so
-- `_build_parser() -> argparse.ArgumentParser` (L30)
-- `main() -> int` (L48)
-- `_open_browser(host, port) -> None` (L57) : Open the dashboard in the default browser after a short delay so the
-- `_hosts_notice(port) -> list[str]` (L66) : Best-effort hostname mapping for the launch banner: map avai.local when
-- `_serve(host, port, debug, open_browser) -> None` (L90) : Serve the dashboard. In normal use we run on waitress, a real
-- `_run_server(host, port, debug) -> None` (L106)
-- `_bind_error_message(host, port, err) -> str` (L128) : Turn a socket-bind failure into one actionable line. The common case is
-- `_ensure_db_exists(db_path) -> None` (L142) : Bring the dashboard's DB up to the current schema, on every start.
+- `_http_url(host, port) -> str` (L25) : A browser URL, omitting the port when it's the implicit HTTP 80: so
+- `_build_parser() -> argparse.ArgumentParser` (L31)
+- `main() -> int` (L49)
+- `_open_browser(host, port) -> None` (L58) : Open the dashboard in the default browser after a short delay so the
+- `_hosts_notice(port) -> list[str]` (L67) : Best-effort hostname mapping for the launch banner: map avai.local when
+- `_serve(app, host, port, debug, open_browser) -> None` (L91) : Serve the dashboard. In normal use we run on waitress, a real
+- `_run_server(app, host, port, debug) -> None` (L109)
+- `_bind_error_message(host, port, err) -> str` (L131) : Turn a socket-bind failure into one actionable line. The common case is
+- `_ensure_db_exists(db_path) -> None` (L145) : Bring the dashboard's DB up to the current schema, on every start.
 
 ### A.5 migrations (Alembic)
 
