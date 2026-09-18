@@ -452,6 +452,57 @@ class TestForwardChain:
         srcs = {e.source for e in out}
         assert "osv_like" in srcs and "nvd_like" in srcs
 
+    def test_forward_chain_dedups_filters_and_caps_ids(self, cache):
+        from avai.enrichers import (
+            Enricher,
+            EnrichmentChain,
+            Evidence,
+            Indicator,
+            IndicatorType,
+            VerdictHint,
+        )
+
+        many = [f"CVE-2024-{n:04d}" for n in range(2, 14)]
+        vuln_ids = ["cve-2024-0001", "PYSEC-2024-1", "GHSA-aaaa", "ghsa-AAAA"]
+
+        def evidence(source, ind, details):
+            return Evidence(
+                source=source,
+                indicator=ind,
+                verdict_hint=VerdictHint.SUSPICIOUS,
+                confidence=0.5,
+                summary="x",
+                details=details,
+            )
+
+        class _Pkg(Enricher):
+            name = "pkg"
+            supports_types = frozenset({IndicatorType.PACKAGE})
+            requires_token = None
+
+            def _fetch(self, ind):
+                return evidence(self.name, ind, {"vuln_ids": vuln_ids + many})
+
+        class _Cve(Enricher):
+            name = "cve"
+            supports_types = frozenset({IndicatorType.CVE})
+            requires_token = None
+
+            def __init__(self):
+                self.calls = []
+
+            def _fetch(self, ind):
+                self.calls.append(ind.value.upper())
+                return evidence(self.name, ind, {})
+
+        cve = _Cve()
+        out = EnrichmentChain([_Pkg(), cve], cache).enrich(
+            Indicator(IndicatorType.PACKAGE, "openssl@3.0.2")
+        )
+        expected = ["CVE-2024-0001", "GHSA-AAAA", *many[:8]]
+        assert cve.calls == expected
+        assert [e.source for e in out] == ["pkg"] + ["cve"] * len(expected)
+
     def test_cve_indicator_does_not_recurse(self, cache):
         from avai.enrichers import (
             Enricher,

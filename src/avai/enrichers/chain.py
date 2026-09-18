@@ -14,6 +14,9 @@ need a single summary.
 from __future__ import annotations
 
 import logging
+from dataclasses import asdict, dataclass
+from itertools import islice
+from typing import Iterable, Optional
 
 from avai.enrichers.base import (
     Enricher,
@@ -28,6 +31,19 @@ from avai.enrichers.cache import EvidenceCache
 LOG = logging.getLogger("avai.enrichers.chain")
 
 
+@dataclass
+class SourceStats:
+    """How one source answered this chain's lookups. A fresh fetch counts
+    as both ``hit`` and ``miss`` (a cache miss that the source answered)."""
+
+    hit: int = 0
+    miss: int = 0
+    rate_limited: int = 0
+    error: int = 0
+    none: int = 0
+    cached: int = 0
+
+
 class EnrichmentChain:
     # Cap how many discovered CVE IDs a single indicator forward-chains
     # into CVE lookups — bounds API calls when a package has many advisories.
@@ -36,86 +52,99 @@ class EnrichmentChain:
     def __init__(self, enrichers: list[Enricher], cache: EvidenceCache):
         self._enrichers = enrichers
         self._cache = cache
-        # Tally per-source outcomes for the per-cycle summary log.
-        self._stats: dict[str, dict[str, int]] = {}
+        self._stats: dict[str, SourceStats] = {}
 
     @property
     def sources(self) -> list[str]:
         return [e.name for e in self._enrichers]
 
     def stats(self) -> dict[str, dict[str, int]]:
-        return dict(self._stats)
+        return {name: asdict(tally) for name, tally in self._stats.items()}
 
     def enrich(self, indicator: Indicator) -> list[Evidence]:
         out: list[Evidence] = []
         for enricher in self._enrichers:
             if not enricher.supports(indicator):
                 continue
-            tally = self._stats.setdefault(
-                enricher.name,
-                {
-                    "hit": 0,
-                    "miss": 0,
-                    "rate_limited": 0,
-                    "error": 0,
-                    "none": 0,
-                    "cached": 0,
-                },
-            )
-            cached = self._cache.get(enricher, indicator)
-            if cached is not None:
-                out.append(cached)
-                tally["cached"] += 1
-                continue
-            try:
-                evidence = enricher._fetch(indicator)
-            except RateLimitedError:
-                LOG.warning(
-                    "enricher=%s rate-limited for %s", enricher.name, indicator.value
-                )
-                tally["rate_limited"] += 1
-                continue
-            except EnricherError as exc:
-                LOG.warning(
-                    "enricher=%s error for %s: %s", enricher.name, indicator.value, exc
-                )
-                tally["error"] += 1
-                continue
-            except Exception as exc:  # noqa: BLE001
-                # Last-resort net: a broken source must not bring the
-                # cycle down. Log once per cycle would be nice but the
-                # surface area here is tiny.
-                LOG.warning(
-                    "enricher=%s unexpected error for %s: %s: %s",
-                    enricher.name,
-                    indicator.value,
-                    type(exc).__name__,
-                    exc,
-                )
-                tally["error"] += 1
-                continue
-            if evidence is None:
-                tally["none"] += 1
-                continue
-            self._cache.put(evidence)
-            out.append(evidence)
-            tally["miss"] += 1
-            tally["hit"] += 1
-
-        # Forward-chain: a package/OS lookup may report CVE IDs (OSV's
-        # ``vuln_ids``). Re-run each discovered CVE through the chain so the
-        # CVE-typed sources (NVD CVSS, CISA KEV exploited-status, GitHub
-        # Advisory) enrich it. Skip when the indicator is itself a CVE so we
-        # never recurse on the same id.
+            evidence = self._lookup(enricher, indicator)
+            if evidence is not None:
+                out.append(evidence)
+        # A CVE indicator never forward-chains, so a CVE source reporting
+        # its own id can't recurse.
         if indicator.type is not IndicatorType.CVE:
-            seen: set[str] = set()
-            for ev in list(out):
-                for raw in (ev.details or {}).get("vuln_ids", []) or []:
-                    cid = str(raw).upper()
-                    if not cid.startswith(("CVE-", "GHSA-")) or cid in seen:
-                        continue
-                    seen.add(cid)
-                    if len(seen) > self._MAX_FORWARD_CVES:
-                        break
-                    out.extend(self.enrich(Indicator(IndicatorType.CVE, cid)))
+            out.extend(self._forward_chain(out))
         return out
+
+    def _lookup(self, enricher: Enricher, indicator: Indicator) -> Optional[Evidence]:
+        tally = self._stats.setdefault(enricher.name, SourceStats())
+        cached = self._cache.get(enricher, indicator)
+        if cached is not None:
+            tally.cached += 1
+            return cached
+        evidence = self._fetch(enricher, indicator, tally)
+        if evidence is None:
+            return None
+        self._cache.put(evidence)
+        tally.miss += 1
+        tally.hit += 1
+        return evidence
+
+    @staticmethod
+    def _fetch(
+        enricher: Enricher, indicator: Indicator, tally: SourceStats
+    ) -> Optional[Evidence]:
+        """Ask the source, swallowing its failures so one broken source
+        doesn't break the cycle. None when it failed or had nothing."""
+        try:
+            evidence = enricher._fetch(indicator)
+        except RateLimitedError:
+            LOG.warning(
+                "enricher=%s rate-limited for %s", enricher.name, indicator.value
+            )
+            tally.rate_limited += 1
+            return None
+        except EnricherError as exc:
+            LOG.warning(
+                "enricher=%s error for %s: %s", enricher.name, indicator.value, exc
+            )
+            tally.error += 1
+            return None
+        except Exception as exc:  # noqa: BLE001
+            # Last-resort net: a broken source must not bring the
+            # cycle down. Log once per cycle would be nice but the
+            # surface area here is tiny.
+            LOG.warning(
+                "enricher=%s unexpected error for %s: %s: %s",
+                enricher.name,
+                indicator.value,
+                type(exc).__name__,
+                exc,
+            )
+            tally.error += 1
+            return None
+        if evidence is None:
+            tally.none += 1
+        return evidence
+
+    def _forward_chain(self, evidence: list[Evidence]) -> list[Evidence]:
+        """A package/OS lookup may report CVE IDs (OSV's ``vuln_ids``).
+        Re-run each discovered id through the chain so the CVE-typed sources
+        (NVD CVSS, CISA KEV exploited-status, GitHub Advisory) enrich it."""
+        ids = islice(_advisory_ids(evidence), self._MAX_FORWARD_CVES)
+        return [
+            found
+            for advisory in ids
+            for found in self.enrich(Indicator(IndicatorType.CVE, advisory))
+        ]
+
+
+def _advisory_ids(evidence: list[Evidence]) -> Iterable[str]:
+    """The distinct CVE/GHSA ids reported across ``evidence``, upper-cased,
+    in the order they appear."""
+    seen: set[str] = set()
+    for ev in evidence:
+        for raw in (ev.details or {}).get("vuln_ids", []) or []:
+            advisory = str(raw).upper()
+            if advisory.startswith(("CVE-", "GHSA-")) and advisory not in seen:
+                seen.add(advisory)
+                yield advisory
