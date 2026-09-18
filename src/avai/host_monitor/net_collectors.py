@@ -17,8 +17,8 @@ from __future__ import annotations
 import json
 import re
 
+from . import slices
 from .collectors import SnapshotCollector
-from .models import ArpEntryRow, DnsResolverRow, NdpNeighborRow, RouteRow
 from .runtime import RowSource
 
 _MAC_RE = re.compile(r"^([0-9a-fA-F]{1,2}:){5}[0-9a-fA-F]{1,2}$")
@@ -56,26 +56,22 @@ class _SourceSnapshotCollector(SnapshotCollector):
 
 
 class ArpTableCollector(_SourceSnapshotCollector):
-    name = "arp_table"
-    model = ArpEntryRow
+    slice = slices.ARP_TABLE
     judge_fields = ("ip", "mac", "interface", "flags")
 
 
 class NdpNeighborsCollector(_SourceSnapshotCollector):
-    name = "ndp_neighbors"
-    model = NdpNeighborRow
+    slice = slices.NDP_NEIGHBORS
     judge_fields = ("ip", "mac", "interface", "state")
 
 
 class RoutesCollector(_SourceSnapshotCollector):
-    name = "routes"
-    model = RouteRow
+    slice = slices.ROUTES
     judge_fields = ("destination", "gateway", "interface", "flags")
 
 
 class DnsResolversCollector(_SourceSnapshotCollector):
-    name = "dns_resolvers"
-    model = DnsResolverRow
+    slice = slices.DNS_RESOLVERS
     judge_fields = ("server", "scope", "search", "interface")
 
 

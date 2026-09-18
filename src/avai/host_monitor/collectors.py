@@ -31,7 +31,7 @@ try:
 except ImportError:  # pragma: no cover - Windows has no pwd module
     pwd = None
 
-from . import constants
+from . import constants, slices
 from .constants import (
     APP_INFO_KEYS,
     AUTH_LOG_PREDICATE,
@@ -40,38 +40,7 @@ from .constants import (
     WATCHED_FILES,
 )
 from .enums import Browser, LaunchScope
-from .models import (
-    AuthEventRow,
-    BluetoothDeviceRow,
-    BrowserExtensionRow,
-    DiskUsageRow,
-    DnsQueryRow,
-    FileIntegrityRow,
-    FileScanRow,
-    HostResourceRow,
-    HostsFileRow,
-    InstalledAppRow,
-    KernelExtensionRow,
-    LaunchItemRow,
-    ListeningPortRow,
-    LogEntryRow,
-    MdmProfileRow,
-    MountRow,
-    NetworkConnectionRow,
-    NetworkFlowRow,
-    NetworkInterfaceRow,
-    PrivilegeConfigRow,
-    ProcessExecRow,
-    ProcessRow,
-    QuarantineEventRow,
-    SetuidFileRow,
-    SshAuthorizedKeyRow,
-    SystemExtensionRow,
-    SystemIntegrityRow,
-    UsbDeviceRow,
-    WifiStateRow,
-    _RowBase,
-)
+from .models import _RowBase
 from .runtime import (
     Clock,
     Coerce,
@@ -104,13 +73,20 @@ class Collector(ABC):
     via ``judge_hints`` (sourced from the external prompts TOML file).
     """
 
-    name: ClassVar[str]
-    model: ClassVar[type[_RowBase]]
+    slice: ClassVar[slices.Slice]
     judge_enabled: ClassVar[bool] = True
     judge_fields: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, judge_hints: str = ""):
         self.judge_hints = judge_hints
+
+    @property
+    def name(self) -> str:
+        return self.slice.name
+
+    @property
+    def model(self) -> type[_RowBase]:
+        return self.slice.model
 
     @property
     def table(self) -> str:
@@ -226,8 +202,7 @@ class FirefoxExtensionReader(BrowserExtensionReader):
 
 
 class ProcessCollector(SnapshotCollector):
-    name = "processes"
-    model = ProcessRow
+    slice = slices.PROCESSES
     judge_fields = ("name", "exe", "cmdline_json", "username")
     _ATTRS = [
         "pid",
@@ -267,8 +242,7 @@ class ProcessCollector(SnapshotCollector):
 
 
 class NetworkConnectionsCollector(SnapshotCollector):
-    name = "network_connections"
-    model = NetworkConnectionRow
+    slice = slices.NETWORK_CONNECTIONS
     # Judged on the remote-endpoint identity. Dedup over (remote ip, port,
     # status) collapses the many sockets to one verdict per peer (judged once
     # ever via content_hash), and threat-intel for the remote IP is attached
@@ -292,8 +266,7 @@ class NetworkConnectionsCollector(SnapshotCollector):
 
 
 class ListeningPortsCollector(SnapshotCollector):
-    name = "listening_ports"
-    model = ListeningPortRow
+    slice = slices.LISTENING_PORTS
     judge_fields = ("process_name", "family", "type", "laddr_ip", "laddr_port")
 
     def collect(self):
@@ -391,8 +364,7 @@ class NetworkFlowsCollector(SnapshotCollector):
     Requires root to capture — the monitor already runs as root.
     """
 
-    name = "network_flows"
-    model = NetworkFlowRow
+    slice = slices.NETWORK_FLOWS
     judge_fields = ("iface", "proto", "dst_ip", "dst_port")
 
     CAPTURE_SECONDS = 8  # wall-clock cap per cycle
@@ -572,8 +544,7 @@ class DnsQueriesCollector(SnapshotCollector):
     Requires root to capture.
     """
 
-    name = "dns_queries"
-    model = DnsQueryRow
+    slice = slices.DNS_QUERIES
     judge_fields = ("qname", "qtype", "server_ip")
 
     CAPTURE_SECONDS = 8
@@ -729,8 +700,7 @@ class DnsQueriesCollector(SnapshotCollector):
 
 
 class NetworkInterfacesCollector(SnapshotCollector):
-    name = "network_interfaces"
-    model = NetworkInterfaceRow
+    slice = slices.NETWORK_INTERFACES
     judge_enabled = False  # counters need behavioural analysis
 
     def collect(self):
@@ -780,8 +750,7 @@ class HostResourcesCollector(SnapshotCollector):
     the dashboard trends it instead of asking the LLM to classify it.
     """
 
-    name = "host_resources"
-    model = HostResourceRow
+    slice = slices.HOST_RESOURCES
     judge_enabled = False
 
     # Blocking CPU sample window (seconds). The monitor cycles every few
@@ -882,8 +851,7 @@ class DiskUsageCollector(SnapshotCollector):
     :class:`DiskMetrics` seam. Continuous metric → ``judge_enabled=False``.
     """
 
-    name = "disk_usage"
-    model = DiskUsageRow
+    slice = slices.DISK_USAGE
     judge_enabled = False
 
     def __init__(self, metrics: Optional[DiskMetrics] = None, judge_hints: str = ""):
@@ -927,8 +895,7 @@ class DiskUsageCollector(SnapshotCollector):
 
 
 class UsbDevicesCollector(SnapshotCollector):
-    name = "usb_devices"
-    model = UsbDeviceRow
+    slice = slices.USB_DEVICES
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
     def collect(self):
@@ -957,8 +924,7 @@ class UsbDevicesCollector(SnapshotCollector):
 
 
 class BluetoothCollector(SnapshotCollector):
-    name = "bluetooth_devices"
-    model = BluetoothDeviceRow
+    slice = slices.BLUETOOTH_DEVICES
     judge_fields = ("name", "address", "minor_type")
     _GROUPS = (
         "device_connected",
@@ -996,8 +962,7 @@ class BluetoothCollector(SnapshotCollector):
 
 
 class WifiCollector(SnapshotCollector):
-    name = "wifi_state"
-    model = WifiStateRow
+    slice = slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
     def collect(self):
@@ -1024,8 +989,7 @@ class WifiCollector(SnapshotCollector):
 
 
 class LaunchItemsCollector(SnapshotCollector):
-    name = "launch_items"
-    model = LaunchItemRow
+    slice = slices.LAUNCH_ITEMS
     judge_fields = (
         "scope",
         "label",
@@ -1083,8 +1047,7 @@ class LaunchItemsCollector(SnapshotCollector):
 
 
 class QuarantineCollector(SnapshotCollector):
-    name = "quarantine_events"
-    model = QuarantineEventRow
+    slice = slices.QUARANTINE_EVENTS
     judge_fields = ("agent_bundle_id", "agent_name", "origin_url", "data_url")
     _COLUMN_MAP = {
         "LSQuarantineEventIdentifier": "event_id",
@@ -1110,8 +1073,7 @@ class QuarantineCollector(SnapshotCollector):
 
 
 class BrowserExtensionsCollector(SnapshotCollector):
-    name = "browser_extensions"
-    model = BrowserExtensionRow
+    slice = slices.BROWSER_EXTENSIONS
     judge_fields = (
         "browser",
         "extension_id",
@@ -1145,8 +1107,7 @@ class BrowserExtensionsCollector(SnapshotCollector):
 
 
 class SystemIntegrityCollector(SnapshotCollector):
-    name = "system_integrity"
-    model = SystemIntegrityRow
+    slice = slices.SYSTEM_INTEGRITY
     judge_fields = (
         "filevault_active",
         "firewall_global_state",
@@ -1254,8 +1215,7 @@ class AuthEventsCollector(StreamingCollector):
     """Tails the macOS unified log forever via ``log stream``. Each
     matching event is yielded as it arrives — no polling gaps."""
 
-    name = "auth_events"
-    model = AuthEventRow
+    slice = slices.AUTH_EVENTS
     judge_enabled = True
     judge_fields = ("process", "subsystem", "event_message")
 
@@ -1280,8 +1240,7 @@ class AuthEventsCollector(StreamingCollector):
 
 
 class FileIntegrityCollector(SnapshotCollector):
-    name = "file_integrity"
-    model = FileIntegrityRow
+    slice = slices.FILE_INTEGRITY
     judge_fields = ("path", "sha256", "exists_flag")
 
     def __init__(self, watched: Iterable[str] = WATCHED_FILES, judge_hints: str = ""):
@@ -1557,8 +1516,7 @@ class FileScanCollector(SnapshotCollector):
     delivered payloads land.
     """
 
-    name = "file_scan"
-    model = FileScanRow
+    slice = slices.FILE_SCAN
     judge_fields = ("path", "sha256", "rule", "namespace", "tags_json")
 
     _SECONDS_PER_DAY = 86400
@@ -1715,8 +1673,7 @@ class FileScanCollector(SnapshotCollector):
 
 
 class InstalledAppsCollector(SnapshotCollector):
-    name = "installed_apps"
-    model = InstalledAppRow
+    slice = slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
     def collect(self):
@@ -1759,8 +1716,7 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
     stable identifier in either case.
     """
 
-    name = "installed_apps"
-    model = InstalledAppRow
+    slice = slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
     _DPKG_FIELDS = ("Status", "Package", "Version", "Architecture", "Description")
@@ -1904,8 +1860,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
     ``user_crontab``.
     """
 
-    name = "launch_items"
-    model = LaunchItemRow
+    slice = slices.LAUNCH_ITEMS
     judge_fields = (
         "scope",
         "label",
@@ -2176,8 +2131,7 @@ class LinuxAuthEventsCollector(StreamingCollector):
     group OR by default.
     """
 
-    name = "auth_events"
-    model = AuthEventRow
+    slice = slices.AUTH_EVENTS
     judge_enabled = True
     judge_fields = ("process", "subsystem", "event_message")
 
@@ -2273,8 +2227,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
     only want device-level entries.
     """
 
-    name = "usb_devices"
-    model = UsbDeviceRow
+    slice = slices.USB_DEVICES
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
     _ATTRS = (
@@ -2339,8 +2292,7 @@ class LinuxBluetoothCollector(SnapshotCollector):
     root-only — the monitor container runs as root.
     """
 
-    name = "bluetooth_devices"
-    model = BluetoothDeviceRow
+    slice = slices.BLUETOOTH_DEVICES
     judge_fields = ("name", "address", "minor_type")
 
     def collect(self):
@@ -2403,8 +2355,7 @@ class LinuxWifiCollector(SnapshotCollector):
     exists.
     """
 
-    name = "wifi_state"
-    model = WifiStateRow
+    slice = slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
     def collect(self):
@@ -2490,8 +2441,7 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     vnc systemd status) live in ``raw_json`` for the LLM judge.
     """
 
-    name = "system_integrity"
-    model = SystemIntegrityRow
+    slice = slices.SYSTEM_INTEGRITY
     judge_fields = (
         "filevault_active",
         "firewall_global_state",
@@ -2645,8 +2595,7 @@ class MountsCollector(SnapshotCollector):
     those are exactly what we want to watch for surprises.
     """
 
-    name = "mounts"
-    model = MountRow
+    slice = slices.MOUNTS
     judge_fields = ("device", "mountpoint", "fstype", "opts")
 
     def collect(self):
@@ -2686,8 +2635,7 @@ class SetuidFilesCollector(SnapshotCollector):
     host's ``/usr/bin`` rather than its own.
     """
 
-    name = "setuid_files"
-    model = SetuidFileRow
+    slice = slices.SETUID_FILES
     judge_fields = ("path", "uid", "setuid", "setgid")
 
     def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
@@ -2742,8 +2690,7 @@ class SshAuthorizedKeysCollector(SnapshotCollector):
     classic, quiet persistence backdoor invisible to process/network
     collectors."""
 
-    name = "ssh_authorized_keys"
-    model = SshAuthorizedKeyRow
+    slice = slices.SSH_AUTHORIZED_KEYS
     judge_fields = ("path", "owner", "key_type", "fingerprint")
 
     _KEY_TYPES = frozenset(
@@ -2806,8 +2753,7 @@ class HostsFileCollector(SnapshotCollector):
     attacker IP (phishing / update hijack) or sinkholes a security domain
     to 0.0.0.0 is a cheap, high-impact tamper that nothing else catches."""
 
-    name = "hosts_file"
-    model = HostsFileRow
+    slice = slices.HOSTS_FILE
     judge_fields = ("ip", "hostnames")
 
     def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
@@ -2848,8 +2794,7 @@ class PrivilegeConfigCollector(SnapshotCollector):
     rules, members of the admin/wheel/sudo groups, and UID-0 accounts.
     New entries here are privilege-escalation persistence."""
 
-    name = "privilege_config"
-    model = PrivilegeConfigRow
+    slice = slices.PRIVILEGE_CONFIG
     judge_fields = ("kind", "subject", "detail")
 
     def __init__(
@@ -2912,8 +2857,7 @@ class MdmProfilesCollector(SnapshotCollector):
     SPConfigurationProfileDataType`` gives us a structured (JSON)
     view of every installed profile."""
 
-    name = "mdm_profiles"
-    model = MdmProfileRow
+    slice = slices.MDM_PROFILES
     judge_fields = ("identifier", "display_name", "organization", "profile_scope")
 
     def collect(self):
@@ -2968,8 +2912,7 @@ class KernelExtensionsCollector(SnapshotCollector):
     ones via the prompt hints.
     """
 
-    name = "kernel_extensions"
-    model = KernelExtensionRow
+    slice = slices.KERNEL_EXTENSIONS
     judge_fields = ("bundle_id", "name", "team_id")
 
     def collect(self):
@@ -3028,8 +2971,7 @@ class SystemExtensionsCollector(SnapshotCollector):
     ``systemextensionsctl list`` output.
     """
 
-    name = "system_extensions"
-    model = SystemExtensionRow
+    slice = slices.SYSTEM_EXTENSIONS
     judge_fields = ("bundle_id", "team_id")
 
     def collect(self):
@@ -3074,8 +3016,7 @@ class MacosProcessExecCollector(StreamingCollector):
     calls, not O(every-exec).
     """
 
-    name = "process_exec_events"
-    model = ProcessExecRow
+    slice = slices.PROCESS_EXEC_EVENTS
     judge_enabled = True
     judge_fields = ("exe_path", "exe_args_json", "uid", "parent_path")
 
@@ -3132,8 +3073,7 @@ class LinuxProcessExecCollector(StreamingCollector):
     PAM events; the execve rule is the additional configuration.)
     """
 
-    name = "process_exec_events"
-    model = ProcessExecRow
+    slice = slices.PROCESS_EXEC_EVENTS
     judge_enabled = True
     judge_fields = ("exe_path", "exe_args_json", "uid", "parent_path")
 
@@ -3255,8 +3195,7 @@ class LogTailCollector(SnapshotCollector):
     shown for the latest run only, like the other snapshot collectors.
     """
 
-    name = "log_entries"
-    model = LogEntryRow
+    slice = slices.LOG_ENTRIES
     judge_enabled = False
 
     MAX_JOURNAL_LINES = 500

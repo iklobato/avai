@@ -14,8 +14,8 @@ import io
 import json
 from typing import TYPE_CHECKING
 
+from . import slices
 from .collectors import SnapshotCollector
-from .models import InjectionEnvRow, KernelModuleRow, SshKnownHostRow
 from .net_collectors import _load_ps_json, _SourceSnapshotCollector
 from .runtime import Digest
 
@@ -42,14 +42,12 @@ _KNOWN_HOST_KEY_TYPES = frozenset(
 
 
 class InjectionEnvCollector(_SourceSnapshotCollector):
-    name = "injection_env"
-    model = InjectionEnvRow
+    slice = slices.INJECTION_ENV
     judge_fields = ("scope", "variable", "value")
 
 
 class KernelModulesCollector(_SourceSnapshotCollector):
-    name = "kernel_modules"
-    model = KernelModuleRow
+    slice = slices.KERNEL_MODULES
     judge_fields = ("name", "size", "used_by")
 
 
@@ -58,8 +56,7 @@ class SshKnownHostsCollector(SnapshotCollector):
     per-user homes the FilesystemLayout reports (same shape as
     ssh_authorized_keys)."""
 
-    name = "ssh_known_hosts"
-    model = SshKnownHostRow
+    slice = slices.SSH_KNOWN_HOSTS
     judge_fields = ("host", "key_type", "fingerprint")
 
     def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):

@@ -10,13 +10,7 @@ from __future__ import annotations
 
 import json
 
-from .models import (
-    LoginSessionRow,
-    NetworkShareRow,
-    PromiscuousInterfaceRow,
-    ProxyConfigRow,
-    TrustedRootRow,
-)
+from . import slices
 from .net_collectors import _load_ps_json, _SourceSnapshotCollector
 
 _NET_FS = {"smbfs", "nfs", "nfs4", "afpfs", "webdav", "cifs", "ftp"}
@@ -28,32 +22,27 @@ _NET_FS = {"smbfs", "nfs", "nfs4", "afpfs", "webdav", "cifs", "ftp"}
 
 
 class ProxyConfigCollector(_SourceSnapshotCollector):
-    name = "proxy_config"
-    model = ProxyConfigRow
+    slice = slices.PROXY_CONFIG
     judge_fields = ("scope", "host", "port", "pac_url")
 
 
 class LoginSessionsCollector(_SourceSnapshotCollector):
-    name = "login_sessions"
-    model = LoginSessionRow
+    slice = slices.LOGIN_SESSIONS
     judge_fields = ("user", "tty", "source")
 
 
 class NetworkSharesCollector(_SourceSnapshotCollector):
-    name = "network_shares"
-    model = NetworkShareRow
+    slice = slices.NETWORK_SHARES
     judge_fields = ("remote", "mountpoint", "fstype")
 
 
 class PromiscuousInterfacesCollector(_SourceSnapshotCollector):
-    name = "promiscuous_ifaces"
-    model = PromiscuousInterfaceRow
+    slice = slices.PROMISCUOUS_IFACES
     judge_fields = ("interface", "promiscuous", "flags")
 
 
 class TrustedRootsCollector(_SourceSnapshotCollector):
-    name = "trusted_roots"
-    model = TrustedRootRow
+    slice = slices.TRUSTED_ROOTS
     judge_fields = ("subject", "fingerprint")
 
 
