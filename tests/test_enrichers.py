@@ -24,7 +24,7 @@ from avai.enrichers import (
     VerdictHint,
     extract_indicators,
 )
-from avai.enrichers.base import RateLimitedError, worst_hint
+from avai.enrichers.base import EnricherError, RateLimitedError, worst_hint
 from avai.enrichers.cache import register_schema
 from avai.enrichers.registry import discover_enricher_classes
 
@@ -116,14 +116,6 @@ class TestIndicator:
         ind = Indicator(IndicatorType.URL, "https://e.test/x#hash")
         assert ind.value == "https://e.test/x"
 
-    def test_equality_drives_dedup(self):
-        a = Indicator(IndicatorType.IPV4, "1.2.3.4")
-        b = Indicator(IndicatorType.IPV4, "1.2.3.4", context={"x": "y"})
-        # Frozen dataclass equality ignores nothing — context is part of
-        # the hash. Use a set of (type, value) tuples for indicator
-        # dedup when context shouldn't matter.
-        assert a != b
-
 
 # ---------------------------------------------------------------------------
 # EvidenceCache
@@ -209,8 +201,14 @@ class TestEnrichmentChain:
         out = chain.enrich(ind)
         # One bad source must not block the good one.
         assert [ev.source for ev in out] == ["good"]
-        # And the bad source was tallied as rate_limited.
-        assert chain.stats()["bad"]["rate_limited"] == 1
+
+    def test_source_error_is_swallowed(self, cache):
+        ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
+        e_bad = _FakeEnricher(name="bad", raise_exc=EnricherError("http 500"))
+        e_good = _FakeEnricher(name="good", return_value=_make_evidence("good", ind))
+        chain = EnrichmentChain([e_bad, e_good], cache)
+        out = chain.enrich(ind)
+        assert [ev.source for ev in out] == ["good"]
 
     def test_unexpected_exception_does_not_propagate(self, cache):
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
@@ -219,7 +217,6 @@ class TestEnrichmentChain:
         chain = EnrichmentChain([e_bad, e_good], cache)
         out = chain.enrich(ind)
         assert [ev.source for ev in out] == ["good"]
-        assert chain.stats()["bad"]["error"] == 1
 
     def test_none_response_is_not_cached(self, cache):
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")

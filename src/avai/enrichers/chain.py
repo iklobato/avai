@@ -14,7 +14,6 @@ need a single summary.
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass
 from itertools import islice
 from typing import Iterable, Optional
 
@@ -31,19 +30,6 @@ from avai.enrichers.cache import EvidenceCache
 LOG = logging.getLogger("avai.enrichers.chain")
 
 
-@dataclass
-class SourceStats:
-    """How one source answered this chain's lookups. A fresh fetch counts
-    as both ``hit`` and ``miss`` (a cache miss that the source answered)."""
-
-    hit: int = 0
-    miss: int = 0
-    rate_limited: int = 0
-    error: int = 0
-    none: int = 0
-    cached: int = 0
-
-
 class EnrichmentChain:
     # Cap how many discovered CVE IDs a single indicator forward-chains
     # into CVE lookups — bounds API calls when a package has many advisories.
@@ -52,14 +38,10 @@ class EnrichmentChain:
     def __init__(self, enrichers: list[Enricher], cache: EvidenceCache):
         self._enrichers = enrichers
         self._cache = cache
-        self._stats: dict[str, SourceStats] = {}
 
     @property
     def sources(self) -> list[str]:
         return [e.name for e in self._enrichers]
-
-    def stats(self) -> dict[str, dict[str, int]]:
-        return {name: asdict(tally) for name, tally in self._stats.items()}
 
     def enrich(self, indicator: Indicator) -> list[Evidence]:
         out: list[Evidence] = []
@@ -76,23 +58,16 @@ class EnrichmentChain:
         return out
 
     def _lookup(self, enricher: Enricher, indicator: Indicator) -> Optional[Evidence]:
-        tally = self._stats.setdefault(enricher.name, SourceStats())
         cached = self._cache.get(enricher, indicator)
         if cached is not None:
-            tally.cached += 1
             return cached
-        evidence = self._fetch(enricher, indicator, tally)
-        if evidence is None:
-            return None
-        self._cache.put(evidence)
-        tally.miss += 1
-        tally.hit += 1
+        evidence = self._fetch(enricher, indicator)
+        if evidence is not None:
+            self._cache.put(evidence)
         return evidence
 
     @staticmethod
-    def _fetch(
-        enricher: Enricher, indicator: Indicator, tally: SourceStats
-    ) -> Optional[Evidence]:
+    def _fetch(enricher: Enricher, indicator: Indicator) -> Optional[Evidence]:
         """Ask the source, swallowing its failures so one broken source
         doesn't break the cycle. None when it failed or had nothing."""
         try:
@@ -101,13 +76,11 @@ class EnrichmentChain:
             LOG.warning(
                 "enricher=%s rate-limited for %s", enricher.name, indicator.value
             )
-            tally.rate_limited += 1
             return None
         except EnricherError as exc:
             LOG.warning(
                 "enricher=%s error for %s: %s", enricher.name, indicator.value, exc
             )
-            tally.error += 1
             return None
         except Exception as exc:  # noqa: BLE001
             # Last-resort net: a broken source must not bring the
@@ -120,10 +93,7 @@ class EnrichmentChain:
                 type(exc).__name__,
                 exc,
             )
-            tally.error += 1
             return None
-        if evidence is None:
-            tally.none += 1
         return evidence
 
     def _forward_chain(self, evidence: list[Evidence]) -> list[Evidence]:

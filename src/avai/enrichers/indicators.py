@@ -95,21 +95,19 @@ def _public_host_type(host: str) -> Optional[IndicatorType]:
     return None
 
 
-def _host_indicators(
-    host: object, *kinds: IndicatorType, context: Mapping[str, str] | None = None
-) -> Iterable[Indicator]:
+def _host_indicators(host: object, *kinds: IndicatorType) -> Iterable[Indicator]:
     """The host as an indicator when it's public and one of ``kinds``."""
     if not isinstance(host, str):
         return
     kind = _public_host_type(host)
     if kind in kinds:
-        yield Indicator(kind, host, context=context or {})
+        yield Indicator(kind, host)
 
 
-def _file_hash_indicators(path: str, context: Mapping[str, str]) -> Iterable[Indicator]:
+def _file_hash_indicators(path: str) -> Iterable[Indicator]:
     digest = _sha256_of_file(path)
     if digest:
-        yield Indicator(IndicatorType.SHA256, digest, context=context)
+        yield Indicator(IndicatorType.SHA256, digest)
 
 
 def _safe_loads(s: object) -> object:
@@ -152,7 +150,7 @@ class ProcessExtractor(IndicatorExtractor):
     def extract(self, row):
         exe = row.get("exe")
         if isinstance(exe, str) and exe:
-            yield from _file_hash_indicators(exe, {"binary_path": exe})
+            yield from _file_hash_indicators(exe)
 
 
 class NetworkConnectionExtractor(IndicatorExtractor):
@@ -166,9 +164,7 @@ class NetworkConnectionExtractor(IndicatorExtractor):
             raddr = row.get("raddr")
             if isinstance(raddr, str) and ":" in raddr:
                 host = raddr.rsplit(":", 1)[0]
-        yield from _host_indicators(
-            host, IndicatorType.IPV4, context={"raddr_ip": str(host)}
-        )
+        yield from _host_indicators(host, IndicatorType.IPV4)
 
 
 class NetworkFlowExtractor(IndicatorExtractor):
@@ -181,7 +177,6 @@ class NetworkFlowExtractor(IndicatorExtractor):
             row.get("dst_ip"),
             IndicatorType.IPV4,
             IndicatorType.IPV6,
-            context={"dst_port": str(row.get("dst_port") or "")},
         )
 
 
@@ -196,7 +191,6 @@ class DnsQueryExtractor(IndicatorExtractor):
             yield Indicator(
                 IndicatorType.DOMAIN,
                 qname,
-                context={"qtype": str(row.get("qtype") or "")},
             )
 
 
@@ -220,9 +214,7 @@ class ListeningPortExtractor(IndicatorExtractor):
         # listening_ports has laddr (bind ip) — only flag publicly bound.
         laddr = row.get("laddr")
         if isinstance(laddr, str) and ":" in laddr:
-            yield from _host_indicators(
-                laddr.rsplit(":", 1)[0], IndicatorType.IPV4, context={"laddr": laddr}
-            )
+            yield from _host_indicators(laddr.rsplit(":", 1)[0], IndicatorType.IPV4)
 
 
 class LaunchItemExtractor(IndicatorExtractor):
@@ -230,14 +222,14 @@ class LaunchItemExtractor(IndicatorExtractor):
         # Try the program first; fall back to the first argv element.
         target = row.get("program") or row.get("exec_start")
         if isinstance(target, str) and target.startswith("/"):
-            yield from _file_hash_indicators(target.split()[0], {"target": target})
+            yield from _file_hash_indicators(target.split()[0])
 
 
 class SetuidFileExtractor(IndicatorExtractor):
     def extract(self, row):
         path = row.get("path")
         if isinstance(path, str):
-            yield from _file_hash_indicators(path, {"path": path})
+            yield from _file_hash_indicators(path)
 
 
 class QuarantineExtractor(IndicatorExtractor):
@@ -282,7 +274,6 @@ class InstalledAppExtractor(IndicatorExtractor):
         yield Indicator(
             IndicatorType.PACKAGE,
             value,
-            context={"name": name, "version": str(version)},
         )
 
 
@@ -294,7 +285,6 @@ class SystemIntegrityExtractor(IndicatorExtractor):
             yield Indicator(
                 IndicatorType.OS_VERSION,
                 f"{product.lower()}@{cycle}",
-                context={"product": product, "cycle": cycle},
             )
 
 
@@ -302,7 +292,7 @@ class ProcessExecEventExtractor(IndicatorExtractor):
     def extract(self, row):
         exe = row.get("exe") or row.get("path")
         if isinstance(exe, str):
-            yield from _file_hash_indicators(exe.split()[0], {"exe": exe})
+            yield from _file_hash_indicators(exe.split()[0])
 
 
 class RecordedDigestExtractor(IndicatorExtractor):
@@ -317,7 +307,6 @@ class RecordedDigestExtractor(IndicatorExtractor):
             yield Indicator(
                 IndicatorType.SHA256,
                 digest,
-                context={"path": str(row.get("path") or "")},
             )
 
 

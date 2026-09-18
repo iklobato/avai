@@ -178,7 +178,9 @@ class TestEvidenceStage:
         assert any(e["src"] == "test_hit" for e in unjudged[0]["evidence"])
         assert unjudged[0]["evidence"][0]["hint"] == "malicious"
 
-    def test_enrichment_turned_off_means_no_evidence_no_lookups(self, sink, chain):
+    def test_enrichment_turned_off_means_no_evidence_no_lookups(self, sink):
+        source = _AlwaysHitEnricher()
+        chain = EnrichmentChain([source], EvidenceCache(sink.engine, Base))
         stage = _evidence_stage(sink, chain, enrich_on=False)
         from avai.host_monitor.models import NetworkConnectionRow
 
@@ -193,7 +195,7 @@ class TestEvidenceStage:
         stage.apply(batch)
         assert batch.indicators_looked_up == 0
         assert "evidence" not in unjudged[0]
-        assert chain.stats() == {}  # no source was asked
+        assert source.calls == []
 
     def test_no_indicators_means_no_evidence_field(self, sink, chain):
         # "Unknown" collector has no extractor → no indicators → no
@@ -242,14 +244,12 @@ class TestEvidenceStage:
         h = Digest.of_row({"raddr": "8.8.8.8:53"}, collector.judge_fields)
         rows = [{"raddr": "8.8.8.8:53", "content_hash": h}]
         unjudged = [{"content_hash": h, "raddr": "8.8.8.8:53"}]
-        # Should not raise; broken source counts as an error in stats.
+        # Should not raise.
         batch = _batch(collector, unjudged, rows)
         _evidence_stage(sink, chain).apply(batch)
         assert batch.indicators_looked_up == 1
         # No evidence attached (the only source errored).
         assert unjudged[0].get("evidence") in (None, [])
-        # The chain recorded the error.
-        assert chain.stats()["broken"]["error"] == 1
 
 
 class _CountingCollector:

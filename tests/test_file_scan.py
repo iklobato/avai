@@ -541,7 +541,6 @@ class TestFileScanExtractor:
         inds = extract_indicators("file_scan", {"sha256": "a" * 64, "path": "/bin/x"})
         assert len(inds) == 1
         assert inds[0].type is IndicatorType.SHA256
-        assert inds[0].context["path"] == "/bin/x"
 
     def test_no_sha_no_indicator(self):
         assert extract_indicators("file_scan", {"path": "/bin/x"}) == []

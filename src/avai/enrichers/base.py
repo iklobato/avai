@@ -60,13 +60,11 @@ class Indicator:
 
     ``value`` is canonicalised at construction (hashes lowercased, URLs
     stripped of fragments, etc.) so the cache key is stable across
-    callers. ``context`` is opaque side data — kept so an enricher can
-    cross-reference the originating row without having to re-derive it.
+    callers.
     """
 
     type: IndicatorType
     value: str
-    context: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         v = self.value
