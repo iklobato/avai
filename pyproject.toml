@@ -125,11 +125,10 @@ exclude = ["src/avai/rules/vendor/**"]
 
 
 # -----------------------------------------------------------------------------
-# Ruff: refactor ratchet (docs/REFACTOR_PLAN.md, Phase 0).
-# Complexity, argument count and magic values are enforced everywhere in src/.
-# The per-file list below freezes today's offenders; each refactor phase
-# deletes its entries and nothing new may be added. Tests and tools compare
-# against literal expected values by design, so these rules skip them.
+# Ruff: complexity, argument count and magic values are enforced everywhere
+# in src/, with no per-file exceptions (docs/REFACTOR_PLAN.md emptied the
+# list phase by phase). Tests and tools compare against literal expected
+# values by design, so these rules skip them.
 # -----------------------------------------------------------------------------
 [tool.ruff.lint]
 extend-select = ["C901", "PLR0913", "PLR2004"]
