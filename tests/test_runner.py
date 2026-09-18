@@ -1089,6 +1089,34 @@ class TestComputeRiskScore:
         r = compute_risk_score(_HARDENED, 0, 0, 1, 1)  # -10 nopasswd -15 uid0
         assert r["score"] == 75 and r["grade"] == "C"
 
+    def test_every_driver_with_its_points_in_order(self):
+        from avai.host_monitor import compute_risk_score
+
+        worst = {
+            "filevault_active": 0,
+            "firewall_global_state": 0,
+            "gatekeeper_assessments_enabled": 0,
+            "firewall_stealth": 0,
+            "remote_login_enabled": 1,
+            "screen_sharing_enabled": 1,
+            "remote_management_enabled": 1,
+        }
+        r = compute_risk_score(worst, 1, 2, 3, 1)
+        assert r["score"] == 0 and r["grade"] == "F"
+        assert [(d["label"], d["points"]) for d in r["drivers"]] == [
+            ("1 active malicious finding(s)", 20),
+            ("3 NOPASSWD sudoers rule(s)", 20),
+            ("2 active suspicious finding(s)", 16),
+            ("Disk encryption (FileVault) off", 15),
+            ("Firewall off", 15),
+            ("1 extra uid-0 account(s)", 15),
+            ("Gatekeeper off", 12),
+            ("Remote login (SSH) enabled", 10),
+            ("Remote management enabled", 10),
+            ("Screen sharing enabled", 8),
+            ("Firewall stealth mode off", 3),
+        ]
+
 
 class TestRiskExplanation:
     def test_initial_score(self):

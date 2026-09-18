@@ -13,6 +13,21 @@ def _risk_grade(score: int) -> str:
     return "F"
 
 
+# Integrity fields that cost points when explicitly off, and those that cost
+# points when on: (field, RISK_WEIGHTS key, driver label).
+_PROTECTIONS = (
+    ("filevault_active", "filevault_off", "Disk encryption (FileVault) off"),
+    ("firewall_global_state", "firewall_off", "Firewall off"),
+    ("gatekeeper_assessments_enabled", "gatekeeper_off", "Gatekeeper off"),
+    ("firewall_stealth", "stealth_off", "Firewall stealth mode off"),
+)
+_EXPOSURES = (
+    ("remote_login_enabled", "ssh_on", "Remote login (SSH) enabled"),
+    ("screen_sharing_enabled", "screen_sharing_on", "Screen sharing enabled"),
+    ("remote_management_enabled", "remote_mgmt_on", "Remote management enabled"),
+)
+
+
 def compute_risk_score(
     integrity: Optional[dict],
     malicious: int,
@@ -21,67 +36,38 @@ def compute_risk_score(
     extra_uid0: int,
 ) -> dict:
     """Deterministic host posture score in [0, 100] with a letter grade and
-    the list of point-costing ``drivers``. Pure function — all inputs are
+    the list of point-costing ``drivers``. Pure function: all inputs are
     plain values so it is trivially testable and reproducible.
 
-    Unknown integrity fields (NULL — e.g. a macOS-only field on Linux) are
+    Unknown integrity fields (NULL, e.g. a macOS-only field on Linux) are
     treated as "not a known weakness" and cost nothing, so a missing signal
     never silently tanks the score."""
     w = RISK_WEIGHTS
-    score = 100
+    integ = integrity or {}
     drivers: list[dict] = []
 
     def penalise(points: int, label: str) -> None:
-        nonlocal score
         if points > 0:
-            score -= points
             drivers.append({"label": label, "points": points})
 
-    integ = integrity or {}
+    for field, weight, label in _PROTECTIONS:
+        value = integ.get(field)
+        if value is not None and not value:  # None means unknown: free
+            penalise(w[weight], label)
+    for field, weight, label in _EXPOSURES:
+        if integ.get(field):
+            penalise(w[weight], label)
 
-    def is_off(key):  # explicitly false/0 — None means "unknown", skip
-        v = integ.get(key)
-        return v is not None and not v
+    # (count, RISK_WEIGHTS prefix for <prefix>_each / <prefix>_cap, label)
+    counted = (
+        (malicious, "malicious", f"{malicious} active malicious finding(s)"),
+        (suspicious, "suspicious", f"{suspicious} active suspicious finding(s)"),
+        (nopasswd_sudoers, "nopasswd", f"{nopasswd_sudoers} NOPASSWD sudoers rule(s)"),
+        (extra_uid0, "uid0", f"{extra_uid0} extra uid-0 account(s)"),
+    )
+    for count, prefix, label in counted:
+        penalise(min(count * w[f"{prefix}_each"], w[f"{prefix}_cap"]), label)
 
-    def is_on(key):
-        return bool(integ.get(key))
-
-    if is_off("filevault_active"):
-        penalise(w["filevault_off"], "Disk encryption (FileVault) off")
-    if is_off("firewall_global_state"):
-        penalise(w["firewall_off"], "Firewall off")
-    if is_off("gatekeeper_assessments_enabled"):
-        penalise(w["gatekeeper_off"], "Gatekeeper off")
-    if is_off("firewall_stealth"):
-        penalise(w["stealth_off"], "Firewall stealth mode off")
-    if is_on("remote_login_enabled"):
-        penalise(w["ssh_on"], "Remote login (SSH) enabled")
-    if is_on("screen_sharing_enabled"):
-        penalise(w["screen_sharing_on"], "Screen sharing enabled")
-    if is_on("remote_management_enabled"):
-        penalise(w["remote_mgmt_on"], "Remote management enabled")
-
-    if malicious > 0:
-        penalise(
-            min(malicious * w["malicious_each"], w["malicious_cap"]),
-            f"{malicious} active malicious finding(s)",
-        )
-    if suspicious > 0:
-        penalise(
-            min(suspicious * w["suspicious_each"], w["suspicious_cap"]),
-            f"{suspicious} active suspicious finding(s)",
-        )
-    if nopasswd_sudoers > 0:
-        penalise(
-            min(nopasswd_sudoers * w["nopasswd_each"], w["nopasswd_cap"]),
-            f"{nopasswd_sudoers} NOPASSWD sudoers rule(s)",
-        )
-    if extra_uid0 > 0:
-        penalise(
-            min(extra_uid0 * w["uid0_each"], w["uid0_cap"]),
-            f"{extra_uid0} extra uid-0 account(s)",
-        )
-
-    score = max(0, min(100, score))
+    score = max(0, min(100, 100 - sum(d["points"] for d in drivers)))
     drivers.sort(key=lambda d: d["points"], reverse=True)
     return {"score": score, "grade": _risk_grade(score), "drivers": drivers}
