@@ -16,6 +16,7 @@ from __future__ import annotations
 import base64
 from types import SimpleNamespace
 
+import psutil
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -65,13 +66,9 @@ class TestProcessAttribution:
             SimpleNamespace(raddr=None, pid=999),  # listening — no remote, skipped
             SimpleNamespace(raddr=SimpleNamespace(ip="1.2.3.4", port=53), pid=None),
         ]
+        monkeypatch.setattr(psutil, "net_connections", lambda kind="inet": conns)
         monkeypatch.setattr(
-            "avai.host_monitor.collectors.psutil.net_connections",
-            lambda kind="inet": conns,
-        )
-        monkeypatch.setattr(
-            "avai.host_monitor.collectors.psutil.Process",
-            lambda pid: SimpleNamespace(name=lambda: "curl"),
+            psutil, "Process", lambda pid: SimpleNamespace(name=lambda: "curl")
         )
         snap = ProcessConnectionResolver().snapshot()
         assert snap[("8.8.8.8", 443)] == ("curl", 4321)

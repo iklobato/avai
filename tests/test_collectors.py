@@ -397,11 +397,13 @@ class TestLogTailCollector:
     def test_collect_without_journalctl_reads_configured_files(
         self, tmp_path, monkeypatch
     ):
+        import shutil
+
         import avai.host_monitor.collectors as col
 
         f = tmp_path / "x.log"
         f.write_text("boom ERROR happened\n")
-        monkeypatch.setattr(col.shutil, "which", lambda _b: None)  # no journalctl
+        monkeypatch.setattr(shutil, "which", lambda _b: None)  # no journalctl
         c = col.LogTailCollector(files=[str(f)])
         rows = list(c.collect())
         assert len(rows) == 1
