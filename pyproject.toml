@@ -171,7 +171,6 @@ max-args = 5
 "src/avai/host_monitor/hosts/linux.py" = ["PLR2004"]
 "src/avai/host_monitor/hosts/macos.py" = ["PLR2004"]
 "src/avai/host_monitor/hosts/windows.py" = ["PLR2004"]
-"src/avai/host_monitor/judge.py" = ["PLR0913"]
 "src/avai/host_monitor/main.py" = ["PLR2004"]
 "src/avai/host_monitor/net_collectors.py" = ["PLR2004"]
 "src/avai/host_monitor/persistence_collectors.py" = ["PLR2004"]

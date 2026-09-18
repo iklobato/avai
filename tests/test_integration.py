@@ -34,8 +34,8 @@ class _CapturingClient:
     def __init__(self):
         self.user_prompts: list[str] = []
 
-    def complete_structured(self, *, user, **kw):
-        self.user_prompts.append(user)
+    def complete_structured(self, request):
+        self.user_prompts.append(request.user)
         return {"judgments": []}
 
 

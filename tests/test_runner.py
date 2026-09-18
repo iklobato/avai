@@ -913,8 +913,8 @@ class TestIncidentNarratorNormalization:
             def __init__(self):
                 self.calls = []
 
-            def complete_structured(self, **kw):
-                self.calls.append(kw)
+            def complete_structured(self, request):
+                self.calls.append(request)
                 return payload
 
         return IncidentNarrator(
@@ -964,8 +964,8 @@ class TestIncidentNarratorNormalization:
             def __init__(self):
                 self.calls = []
 
-            def complete_structured(self, **kw):
-                self.calls.append(kw)
+            def complete_structured(self, request):
+                self.calls.append(request)
                 return {
                     "headline": "h",
                     "severity": "high",
@@ -987,7 +987,7 @@ class TestIncidentNarratorNormalization:
             for i in range(cap + 20)
         ]
         nar.narrate(findings)
-        user = client.calls[0]["user"]
+        user = client.calls[0].user
         assert user.count('"content_hash"') == cap  # trimmed to the cap
         assert '"keep"' in user  # the malicious finding survived the trim
 
@@ -1536,8 +1536,8 @@ class TestYaraCoverageAssessor:
             def __init__(self):
                 self.calls = []
 
-            def complete_structured(self, **kw):
-                self.calls.append(kw)
+            def complete_structured(self, request):
+                self.calls.append(request)
                 return payload
 
         return YaraCoverageAssessor(
@@ -1681,8 +1681,8 @@ class TestMaliciousVerdictVerifier:
             def __init__(self):
                 self.calls = []
 
-            def complete_structured(self, **kw):
-                self.calls.append(kw)
+            def complete_structured(self, request):
+                self.calls.append(request)
                 return payload
 
         return MaliciousVerdictVerifier(
@@ -1801,7 +1801,7 @@ class TestUnknownFindingInvestigator:
         from avai.host_monitor.investigator import UnknownFindingInvestigator
 
         class _FakeClient:
-            def complete_structured(self, **kw):
+            def complete_structured(self, request):
                 return payload
 
         return UnknownFindingInvestigator(

@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from avai.host_monitor import LlmJudge, Prompts, ThreatCategory, Verdict
+from avai.host_monitor import (
+    CompletionRequest,
+    LlmJudge,
+    Prompts,
+    ThreatCategory,
+    Verdict,
+)
 
 
 class _FakeClient:
@@ -21,13 +27,13 @@ class _FakeClient:
     def __init__(
         self, parsed=None, parsed_per_call=None, raise_exc: Exception | None = None
     ):
-        self.calls: list[dict] = []
+        self.calls: list[CompletionRequest] = []
         self._parsed = parsed
         self._queue = list(parsed_per_call or [])
         self._raise = raise_exc
 
-    def complete_structured(self, **kw):
-        self.calls.append(kw)
+    def complete_structured(self, request):
+        self.calls.append(request)
         if self._raise is not None:
             raise self._raise
         if self._queue:
@@ -159,7 +165,7 @@ class TestHappyPath:
         client = _FakeClient()
         judge = _judge(prompts, client)
         judge.judge("processes", "be careful", [{"content_hash": "a", "name": "x"}])
-        user_text = client.calls[0]["user"]
+        user_text = client.calls[0].user
         assert "Source: processes" in user_text
         assert "Hints: be careful" in user_text
         # entries should be JSON-serialised.
@@ -448,8 +454,8 @@ class TestFailureIsolation:
         ]
         calls_made: list[dict] = []
 
-        def fake_complete(**kw):
-            calls_made.append(kw)
+        def fake_complete(request):
+            calls_made.append(request)
             r = results_per_call.pop(0)
             if isinstance(r, Exception):
                 raise r

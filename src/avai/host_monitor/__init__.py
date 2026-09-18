@@ -81,19 +81,15 @@ from .constants import (
 )
 from .enums import Browser, FeedbackLabel, LaunchScope, ThreatCategory, Verdict
 from .hosts import FilesystemLayout, Host, HostFactory, PrivilegedAccounts
-from .judge import (
+from .judge import Judge, Judgment, LlmJudge, NullJudge, estimate_cost
+from .llm import (
     AnthropicOAuthClient,
     CompletionClient,
-    Judge,
-    Judgment,
+    CompletionRequest,
     LitellmClient,
-    LlmJudge,
-    NullJudge,
-    build_completion_client,
-    build_judge,
-    estimate_cost,
+    LlmCredentials,
 )
-from .main import _build_parser, main
+from .main import LlmStages, _build_parser, main
 from .models import (
     ArpEntryRow,
     AuthEventRow,
@@ -146,7 +142,7 @@ from .models import (
     YaraStatusRow,
     _RowBase,
 )
-from .narrator import IncidentNarrator, build_narrator
+from .narrator import IncidentNarrator
 from .prompts import Prompts
 from .risk import _risk_grade, compute_risk_score
 from .runner import Runner
@@ -205,6 +201,7 @@ __all__ = [
     "CollectorErrorRow",
     "ControlState",
     "CompletionClient",
+    "CompletionRequest",
     "DEFAULT_BASELINE_MIN_RUNS",
     "DEFAULT_DB_PATH",
     "DEFAULT_INTERVAL",
@@ -259,7 +256,9 @@ __all__ = [
     "LogEntryRow",
     "LoginSessionRow",
     "LitellmClient",
+    "LlmCredentials",
     "LlmJudge",
+    "LlmStages",
     "MODEL_PRICING",
     "MacosProcessExecCollector",
     "MdmProfileRow",
@@ -323,9 +322,6 @@ __all__ = [
     "_payload_bytes",
     "_risk_grade",
     "_set_sqlite_pragmas",
-    "build_completion_client",
-    "build_judge",
-    "build_narrator",
     "compute_risk_score",
     "estimate_cost",
     "main",

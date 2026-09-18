@@ -24,7 +24,7 @@ _COLLECTOR_MODULES = tuple(
 )
 _LLM_STAGES = tuple(
     f"{_HM}.{name}"
-    for name in ("judge", "narrator", "verifier", "investigator", "coverage")
+    for name in ("llm", "judge", "narrator", "verifier", "investigator", "coverage")
 )
 _ORCHESTRATION = (f"{_HM}.runner", f"{_HM}.streaming", f"{_HM}.main")
 

@@ -8,7 +8,9 @@ import os
 import signal
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from sqlalchemy import create_engine
 
@@ -26,16 +28,92 @@ from .constants import (
     DEFAULT_PROMPTS_PATH,
     LOG,
 )
-from .coverage import build_coverage_assessor
+from .coverage import YaraCoverageAssessor
 from .hosts import HostFactory
-from .investigator import build_investigator
-from .judge import build_judge
+from .investigator import UnknownFindingInvestigator
+from .judge import Judge, LlmJudge, NullJudge
+from .llm import CompletionClient, LlmCredentials
 from .models import Base
-from .narrator import build_narrator
+from .narrator import IncidentNarrator
 from .prompts import Prompts
 from .runner import Runner
 from .sink import Sink
-from .verifier import build_verifier
+from .verifier import MaliciousVerdictVerifier
+
+
+def _has_prompt(system: str, stage: str) -> bool:
+    if not system:
+        LOG.warning("%s prompt missing from prompts file; %s disabled", stage, stage)
+    return bool(system)
+
+
+@dataclass(frozen=True)
+class LlmStages:
+    """Every LLM stage, sharing one completion client. A stage stays off (the
+    judge a NullJudge) when its flag, its prompt, or the credentials say so."""
+
+    judge: Judge
+    narrator: Optional[IncidentNarrator] = None
+    coverage: Optional[YaraCoverageAssessor] = None
+    verifier: Optional[MaliciousVerdictVerifier] = None
+    investigator: Optional[UnknownFindingInvestigator] = None
+
+    @classmethod
+    def build(cls, args, prompts: Prompts, credentials: LlmCredentials) -> LlmStages:
+        if not credentials.can_call():
+            LOG.warning(
+                "no usable LLM credentials (CLAUDE_CODE_OAUTH_TOKEN, or "
+                "ANTHROPIC_API_KEY / OPENAI_API_KEY with litellm installed); "
+                "LLM stages disabled"
+            )
+            return cls(judge=NullJudge())
+        try:
+            client = credentials.client()
+        except RuntimeError as exc:
+            LOG.warning("LLM client unavailable (%s); LLM stages disabled", exc)
+            return cls(judge=NullJudge())
+        LOG.info("llm client=%s", type(client).__name__)
+        return cls(
+            judge=cls._judge(args, prompts, client),
+            # A digest is only meaningful when judging runs.
+            narrator=(
+                IncidentNarrator(prompts, client, args.narrative_model)
+                if not (args.no_narrative or args.no_judge)
+                and _has_prompt(prompts.narrator_system, "narrator")
+                else None
+            ),
+            coverage=(
+                YaraCoverageAssessor(prompts, client, args.narrative_model)
+                if not args.no_coverage
+                and _has_prompt(prompts.coverage_system, "coverage")
+                else None
+            ),
+            verifier=(
+                MaliciousVerdictVerifier(prompts, client, args.judge_model)
+                if not args.no_verify
+                and _has_prompt(prompts.verifier_system, "verifier")
+                else None
+            ),
+            investigator=(
+                UnknownFindingInvestigator(prompts, client, args.judge_model)
+                if not args.no_investigate
+                and _has_prompt(prompts.investigator_system, "investigator")
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _judge(args, prompts: Prompts, client: CompletionClient) -> Judge:
+        if args.no_judge:
+            LOG.info("judge disabled (--no-judge)")
+            return NullJudge()
+        return LlmJudge(
+            prompts,
+            client,
+            args.judge_model,
+            args.judge_batch_size,
+            args.judge_max_per_collector,
+        )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -193,22 +271,18 @@ def build_runner(args) -> "tuple[Runner, object]":
         len(prompts.collector_hints),
     )
 
-    judge = build_judge(args, prompts)
-    narrator = build_narrator(args, prompts)
-    coverage = build_coverage_assessor(args, prompts)
-    verifier = build_verifier(args, prompts)
-    investigator = build_investigator(args, prompts)
+    llm = LlmStages.build(args, prompts, LlmCredentials.from_env(os.environ))
     LOG.info(
         "starting host_monitor db=%s interval=%ds lookback=%dm judge=%s "
         "narrator=%s coverage=%s verify=%s investigate=%s",
         db_path,
         args.interval,
         args.lookback_min,
-        type(judge).__name__,
-        type(narrator).__name__ if narrator else "off",
-        type(coverage).__name__ if coverage else "off",
-        type(verifier).__name__ if verifier else "off",
-        type(investigator).__name__ if investigator else "off",
+        type(llm.judge).__name__,
+        type(llm.narrator).__name__ if llm.narrator else "off",
+        type(llm.coverage).__name__ if llm.coverage else "off",
+        type(llm.verifier).__name__ if llm.verifier else "off",
+        type(llm.investigator).__name__ if llm.investigator else "off",
     )
 
     # check_same_thread=False allows the connection pool to hand
@@ -238,15 +312,15 @@ def build_runner(args) -> "tuple[Runner, object]":
             sink,
             snapshot_collectors,
             streaming_collectors,
-            judge,
+            llm.judge,
             args.lookback_min,
             max_db_bytes=max(0, args.max_db_mb) * 1024 * 1024,
             enrichment_chain=enrichment_chain,
             baseline_min_runs=max(1, args.baseline_runs),
-            narrator=narrator,
-            coverage=coverage,
-            verifier=verifier,
-            investigator=investigator,
+            narrator=llm.narrator,
+            coverage=llm.coverage,
+            verifier=llm.verifier,
+            investigator=llm.investigator,
         )
         runner.setup()
         # Seed the cooperative control row with this run's settings so the

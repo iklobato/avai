@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-import os
-from string import Template
 from typing import Optional
 
-from .constants import DEFAULT_NARRATIVE_MODEL, LOG
-from .judge import HAS_LITELLM, CompletionClient, build_completion_client
+from .constants import DEFAULT_NARRATIVE_MODEL
+from .llm import CompletionClient, CompletionRequest, StructuredCall
 from .prompts import Prompts
 
 
@@ -20,6 +18,8 @@ class IncidentNarrator:
     and structured-output path."""
 
     SCHEMA_NAME = "submit_incident"
+    TEMPERATURE = 0.3
+    MAX_TOKENS = 2048
     SEVERITIES = ("informational", "low", "medium", "high", "critical")
     PRIORITIES = ("immediate", "high", "medium", "low")
     # Bound the prompt: a host with hundreds of active findings would
@@ -72,22 +72,23 @@ class IncidentNarrator:
     def __init__(
         self,
         prompts: Prompts,
+        client: CompletionClient,
         model: str = DEFAULT_NARRATIVE_MODEL,
-        temperature: float = 0.3,
-        max_tokens: int = 2048,
-        client: Optional[CompletionClient] = None,
     ):
         self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self._system = prompts.narrator_system
-        self._user_template = Template(prompts.narrator_user_template)
-        self._client = client or build_completion_client()
-        self._schema = self._narrative_schema()
-
-    @property
-    def auth_mode(self) -> str:
-        return type(self._client).__name__
+        self._llm = StructuredCall(
+            "narrator",
+            client,
+            CompletionRequest(
+                model=model,
+                system=prompts.narrator_system,
+                user=prompts.narrator_user_template,
+                schema=self._narrative_schema(),
+                schema_name=self.SCHEMA_NAME,
+                max_tokens=self.MAX_TOKENS,
+                temperature=self.TEMPERATURE,
+            ),
+        )
 
     def _cap(self, findings: list[dict]) -> list[dict]:
         """Trim to MAX_FINDINGS, keeping the most severe/confident, then
@@ -113,26 +114,11 @@ class IncidentNarrator:
         if not findings:
             return None
         findings = self._cap(findings)
-        user = self._user_template.safe_substitute(
+        parsed = self._llm.ask_or_none(
             count=len(findings),
             findings=json.dumps(findings, ensure_ascii=False),
         )
-        try:
-            parsed = self._client.complete_structured(
-                model=self.model,
-                system=self._system,
-                user=user,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                schema=self._schema,
-                schema_name=self.SCHEMA_NAME,
-            )
-        except Exception as exc:
-            LOG.warning(
-                "narrator failed error=%s msg=%s",
-                type(exc).__name__,
-                str(exc)[:200],
-            )
+        if parsed is None:
             return None
         severity = str(parsed.get("severity") or "").lower()
         if severity not in self.SEVERITIES:
@@ -189,29 +175,3 @@ class IncidentNarrator:
                 }
             )
         return out[:15]
-
-
-def build_narrator(args, prompts: Prompts) -> "Optional[IncidentNarrator]":
-    """Build the incident narrator when enabled and credentials exist.
-    Returns None (digest disabled) otherwise — the same credential rule as
-    the judge, since a digest is only meaningful when judging runs."""
-    if args.no_narrative or args.no_judge:
-        return None
-    if not prompts.narrator_system:
-        LOG.warning("narrator prompt missing from prompts file; digest disabled")
-        return None
-    has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
-    has_api_key = bool(
-        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    )
-    if not has_oauth and not has_api_key:
-        return None
-    if not has_oauth and not HAS_LITELLM:
-        return None
-    try:
-        narrator = IncidentNarrator(prompts=prompts, model=args.narrative_model)
-    except RuntimeError as exc:
-        LOG.warning("IncidentNarrator unavailable (%s); digest disabled", exc)
-        return None
-    LOG.info("narrator auth_mode=%s model=%s", narrator.auth_mode, narrator.model)
-    return narrator
