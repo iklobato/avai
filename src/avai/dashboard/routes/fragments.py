@@ -12,6 +12,8 @@ from ..control import monitor_alive, read_control_state
 from ..queries import (
     DEFAULT_PER_PAGE,
     PER_PAGE_OPTIONS,
+    Page,
+    PersistencePages,
     auth_events_aggregated,
     category_options,
     collector_errors,
@@ -62,10 +64,10 @@ def fragment_triage():
     suspicious finding counts, and monitor liveness."""
     with read_session() as s:
         active_malicious = findings(
-            s, verdict="malicious", status="active", page=1, per_page=1
+            s, verdict="malicious", status="active", page=Page(1, 1)
         )["total"]
         active_suspicious = findings(
-            s, verdict="suspicious", status="active", page=1, per_page=1
+            s, verdict="suspicious", status="active", page=Page(1, 1)
         )["total"]
         risk = latest_risk(s)
         state = read_control_state(s)  # reused for both alive and the ctrl chips
@@ -204,8 +206,7 @@ def fragment_vulnerabilities():
     q = request.args.get("q", "")
     severity = request.args.get("severity", "")
     source = request.args.get("source", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    page = _page_arg()
     with read_session() as s:
         return render_template(
             "partials/_vulnerabilities.html",
@@ -215,7 +216,6 @@ def fragment_vulnerabilities():
                 severity=severity,
                 source=source,
                 page=page,
-                per_page=per_page,
             ),
             per_page_options=PER_PAGE_OPTIONS,
         )
@@ -250,16 +250,13 @@ def fragment_resources():
 def fragment_network_flows():
     verdict = request.args.get("verdict", "")
     q = request.args.get("q", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    page = _page_arg()
     with read_session() as s:
         latest = latest_run(s)
         return render_template(
             "partials/_network_flows.html",
             flows=(
-                network_flows(
-                    s, latest.run_id, verdict=verdict, q=q, page=page, per_page=per_page
-                )
+                network_flows(s, latest.run_id, verdict=verdict, q=q, page=page)
                 if latest
                 else None
             ),
@@ -272,8 +269,7 @@ def fragment_listening_ports():
     verdict = request.args.get("verdict", "")
     scope_filter = request.args.get("scope_filter", "")
     q = request.args.get("q", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    page = _page_arg()
     with read_session() as s:
         latest = latest_run(s)
         return render_template(
@@ -286,7 +282,6 @@ def fragment_listening_ports():
                     scope_filter=scope_filter,
                     q=q,
                     page=page,
-                    per_page=per_page,
                 )
                 if latest
                 else None
@@ -300,8 +295,7 @@ def fragment_dns_queries():
     verdict = request.args.get("verdict", "")
     level = request.args.get("level", "")
     q = request.args.get("q", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    page = _page_arg()
     with read_session() as s:
         latest = latest_run(s)
         return render_template(
@@ -314,7 +308,6 @@ def fragment_dns_queries():
                     level=level,
                     q=q,
                     page=page,
-                    per_page=per_page,
                 )
                 if latest
                 else None
@@ -328,8 +321,7 @@ def fragment_log_summary():
     group_by = request.args.get("group_by", "unit")
     source = request.args.get("source", "")
     q = request.args.get("q", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    page = _page_arg()
     with read_session() as s:
         latest = latest_run(s)
         return render_template(
@@ -342,7 +334,6 @@ def fragment_log_summary():
                     source=source,
                     q=q,
                     page=page,
-                    per_page=per_page,
                 )
                 if latest
                 else None
@@ -356,8 +347,7 @@ def fragment_logs():
     source = request.args.get("source", "")
     level = request.args.get("level", "")
     q = request.args.get("q", "")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    page = _page_arg()
     with read_session() as s:
         latest = latest_run(s)
         return render_template(
@@ -370,7 +360,6 @@ def fragment_logs():
                     level=level,
                     q=q,
                     page=page,
-                    per_page=per_page,
                 )
                 if latest
                 else None
@@ -415,10 +404,11 @@ def fragment_network_exposure():
 def fragment_persistence():
     verdict = request.args.get("verdict", "")
     q = request.args.get("q", "")
-    ssh_page = _int_arg("ssh_page", 1)
-    hosts_page = _int_arg("hosts_page", 1)
-    priv_page = _int_arg("priv_page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    pages = PersistencePages(
+        ssh=_page_arg("ssh_page"),
+        hosts=_page_arg("hosts_page"),
+        priv=_page_arg("priv_page"),
+    )
     with read_session() as s:
         latest = latest_run(s)
         return render_template(
@@ -429,10 +419,7 @@ def fragment_persistence():
                     latest.run_id,
                     verdict=verdict,
                     q=q,
-                    ssh_page=ssh_page,
-                    hosts_page=hosts_page,
-                    priv_page=priv_page,
-                    per_page=per_page,
+                    pages=pages,
                 )
                 if latest
                 else None
@@ -447,8 +434,7 @@ def fragment_auth_events():
     subsystem = request.args.get("subsystem", "")
     verdict = request.args.get("verdict", "")
     sort = request.args.get("sort", "count")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    page = _page_arg()
     with read_session() as s:
         return render_template(
             "partials/_auth_events.html",
@@ -459,7 +445,6 @@ def fragment_auth_events():
                 verdict=verdict,
                 sort=sort,
                 page=page,
-                per_page=per_page,
             ),
             per_page_options=PER_PAGE_OPTIONS,
         )
@@ -483,6 +468,10 @@ def _int_arg(name: str, default: int) -> int:
         return default
 
 
+def _page_arg(name: str = "page") -> Page:
+    return Page(_int_arg(name, 1), _int_arg("per_page", DEFAULT_PER_PAGE))
+
+
 @bp.route("/fragments/findings")
 def fragment_findings():
     verdict = request.args.get("verdict", "")
@@ -492,8 +481,7 @@ def fragment_findings():
     status = request.args.get("status", "active")
     sort = request.args.get("sort", "severity")
     order = request.args.get("order", "desc")
-    page = _int_arg("page", 1)
-    per_page = _int_arg("per_page", DEFAULT_PER_PAGE)
+    page = _page_arg()
 
     with read_session() as s:
         result = findings(
@@ -506,7 +494,6 @@ def fragment_findings():
             sort=sort,
             order=order,
             page=page,
-            per_page=per_page,
         )
         return render_template(
             "partials/_findings.html",

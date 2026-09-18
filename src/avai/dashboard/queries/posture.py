@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import NamedTuple
 
 from sqlalchemy import (
     desc,
@@ -21,10 +22,9 @@ from avai.host_monitor import (
 )
 
 from .common import (
-    DEFAULT_PER_PAGE,
+    Page,
     _collector_rows_with_verdict,
     _existing_tables,
-    _paginate,
 )
 
 
@@ -118,16 +118,21 @@ def yara_coverage(session: Session) -> "dict | None":
     }
 
 
+class PersistencePages(NamedTuple):
+    """The page each persistence table is on; they page independently."""
+
+    ssh: Page = Page()
+    hosts: Page = Page()
+    priv: Page = Page()
+
+
 def persistence_tampering(
     session: Session,
     run_id: str,
     limit: int = 500,
     verdict: str = "",
     q: str = "",
-    ssh_page: int = 1,
-    hosts_page: int = 1,
-    priv_page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
+    pages: PersistencePages = PersistencePages(),
 ):
     """The persistence & tampering posture for ``run_id``: SSH authorized
     keys, /etc/hosts mappings, and privilege config — each list annotated
@@ -178,9 +183,9 @@ def persistence_tampering(
     hosts = _filter_rows(hosts, ("ip", "hostnames"))
     priv = _filter_rows(priv, ("kind", "subject", "detail"))
 
-    ssh_rows, ssh_total, ssh_pages = _paginate(ssh, ssh_page, per_page)
-    hosts_rows, hosts_total, hosts_pages = _paginate(hosts, hosts_page, per_page)
-    priv_rows, priv_total, priv_pages = _paginate(priv, priv_page, per_page)
+    ssh_rows, ssh_paging = pages.ssh.slice(ssh)
+    hosts_rows, hosts_paging = pages.hosts.slice(hosts)
+    priv_rows, priv_paging = pages.priv.slice(priv)
 
     return {
         "ssh_keys": ssh_rows,
@@ -191,16 +196,9 @@ def persistence_tampering(
             "hosts": _counts(hosts),
             "privilege": _counts(priv),
         },
-        "pagination": {
-            "ssh": {"page": ssh_page, "total": ssh_total, "total_pages": ssh_pages},
-            "hosts": {
-                "page": hosts_page,
-                "total": hosts_total,
-                "total_pages": hosts_pages,
-            },
-            "priv": {"page": priv_page, "total": priv_total, "total_pages": priv_pages},
-        },
-        "per_page": per_page,
+        "pagination": {"ssh": ssh_paging, "hosts": hosts_paging, "priv": priv_paging},
+        # The route sizes all three tables alike.
+        "per_page": pages.ssh.size,
         "verdict": verdict,
         "q": q,
         "any": bool(ssh or hosts or priv),

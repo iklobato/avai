@@ -19,7 +19,7 @@ from avai.host_monitor import (
     ProcessRow,
 )
 
-from .common import _FLOW_SEV, DEFAULT_PER_PAGE, _existing_tables, _paginate
+from .common import _FLOW_SEV, Page, _existing_tables
 
 _PROTO_BY_SOCK = {"SOCK_STREAM": "TCP", "SOCK_DGRAM": "UDP"}
 
@@ -68,8 +68,7 @@ def listening_ports(
     verdict: str = "",
     scope_filter: str = "",
     q: str = "",
-    page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
+    page: Page = Page(),
 ):
     """Listening sockets for ``run_id`` as a glanceable table: one row per
     (port, pid) socket, annotated with its LLM verdict (LEFT JOIN
@@ -242,14 +241,11 @@ def listening_ports(
         "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
     }
 
-    page_rows, total, total_pages = _paginate(rows, page, per_page)
+    page_rows, paging = page.slice(rows)
     return {
         "summary": summary,
         "rows": page_rows,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
+        **paging,
         "q": q,
         "verdict": verdict,
         "scope_filter": scope_filter,

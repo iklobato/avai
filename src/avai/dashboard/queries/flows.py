@@ -16,10 +16,9 @@ from avai.host_monitor import (
 
 from .common import (
     _FLOW_SEV,
-    DEFAULT_PER_PAGE,
+    Page,
     _existing_columns,
     _existing_tables,
-    _paginate,
     _port_sort_key,
 )
 from .ip_enrichment import _attach_ip_enrichment
@@ -31,8 +30,7 @@ def network_flows(
     limit: int = 1000,
     verdict: str = "",
     q: str = "",
-    page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
+    page: Page = Page(),
 ):
     """Tcpdump flows for ``run_id``, **aggregated by destination IP** for
     a compact, glanceable table.
@@ -198,14 +196,11 @@ def network_flows(
         "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
     }
 
-    page_rows, total, total_pages = _paginate(rows, page, per_page)
+    page_rows, paging = page.slice(rows)
     return {
         "summary": summary,
         "rows": page_rows,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
+        **paging,
         "q": q,
         "verdict": verdict,
     }

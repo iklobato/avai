@@ -23,6 +23,7 @@ from .common import (
     DISPLAY_FIELDS,
     PER_PAGE_OPTIONS,
     VERDICTS,
+    Page,
 )
 from .dns import dns_queries
 from .exposure import network_exposure, network_topology
@@ -31,6 +32,7 @@ from .flows import network_flows
 from .logs import LOG_LEVELS, log_aggregates, log_entries
 from .ports import listening_ports
 from .posture import (
+    PersistencePages,
     file_scan,
     persistence_tampering,
     system_integrity,
@@ -55,6 +57,8 @@ __all__ = [
     "PER_PAGE_OPTIONS",
     "SEVERITY_ORDER",
     "VERDICTS",
+    "Page",
+    "PersistencePages",
     "auth_events_aggregated",
     "category_options",
     "collector_errors",

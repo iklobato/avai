@@ -16,7 +16,7 @@ from avai.host_monitor import (
 )
 
 from .collection import latest_run
-from .common import DEFAULT_PER_PAGE, _existing_tables, _paginate
+from .common import Page, _existing_tables
 
 _VULN_SOURCES = ("osv", "nvd", "cisa_kev", "github_advisory", "endoflife")
 
@@ -107,8 +107,7 @@ def vulnerabilities(
     q: str = "",
     severity: str = "",
     source: str = "",
-    page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
+    page: Page = Page(),
 ) -> dict:
     """Aggregate the CVE / EOL evidence the enrichment chain already collected
     into a prioritised 'patch me' list. Each item carries its worst
@@ -123,10 +122,7 @@ def vulnerabilities(
     result (same shape) if the evidence table is absent."""
     empty = {
         "rows": [],
-        "total": 0,
-        "page": 1,
-        "per_page": per_page,
-        "total_pages": 1,
+        **page.fields(0),
         "q": q,
         "severity": severity,
         "source": source,
@@ -251,13 +247,10 @@ def vulnerabilities(
         "kev": sum(1 for i in items if i["kev"]),
         "exposed": sum(1 for i in items if i["exposed"]),
     }
-    page_rows, total, total_pages = _paginate(items, page, per_page)
+    page_rows, paging = page.slice(items)
     return {
         "rows": page_rows,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
+        **paging,
         "q": q,
         "severity": severity,
         "source": source,

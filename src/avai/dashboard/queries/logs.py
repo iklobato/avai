@@ -13,7 +13,7 @@ from avai.host_monitor import (
     LogEntryRow,
 )
 
-from .common import DEFAULT_PER_PAGE, _existing_tables, _paginate
+from .common import Page, _existing_tables
 
 # Syslog severities, most severe first — the order the level filter offers.
 LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
@@ -29,8 +29,7 @@ def log_entries(
     source: str = "",
     level: str = "",
     q: str = "",
-    page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
+    page: Page = Page(),
 ) -> dict:
     """Recent host log lines (journald + tailed files) for ``run_id`` as a
     filtered, paginated, newest-first table. Supports a ``source`` filter
@@ -40,10 +39,7 @@ def log_entries(
     the table is absent (older DB) or the run captured nothing."""
     empty = {
         "rows": [],
-        "total": 0,
-        "page": 1,
-        "per_page": per_page,
-        "total_pages": 1,
+        **page.fields(0),
         "source": source,
         "level": level,
         "q": q,
@@ -82,7 +78,7 @@ def log_entries(
         "warning": sum(1 for r in rows if r.level == "warning"),
         "sources": len(sources),
     }
-    page_rows, total, total_pages = _paginate(rows, page, per_page)
+    page_rows, paging = page.slice(rows)
     items = [
         {
             "source": r.source,
@@ -96,10 +92,7 @@ def log_entries(
     ]
     return {
         "rows": items,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
+        **paging,
         "source": source,
         "level": level,
         "q": q,
@@ -157,8 +150,7 @@ def log_aggregates(
     group_by: str = "unit",
     source: str = "",
     q: str = "",
-    page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
+    page: Page = Page(),
 ) -> dict:
     """Aggregate the run's log lines into ranked groups for the log-summary
     panel. Groups by ``unit`` (systemd unit / file), ``source`` (journald vs a
@@ -170,10 +162,7 @@ def log_aggregates(
     group_by = group_by if group_by in _LOG_GROUPERS else "unit"
     empty = {
         "groups": [],
-        "total": 0,
-        "page": 1,
-        "per_page": per_page,
-        "total_pages": 1,
+        **page.fields(0),
         "group_by": group_by,
         "group_options": list(_LOG_GROUPERS),
         "source": source,
@@ -250,13 +239,10 @@ def log_aggregates(
         "warnings": sum(g["warnings"] for g in items),
         "lines": sum(g["count"] for g in items),
     }
-    page_rows, total, total_pages = _paginate(items, page, per_page)
+    page_rows, paging = page.slice(items)
     return {
         "groups": page_rows,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
+        **paging,
         "group_by": group_by,
         "group_options": list(_LOG_GROUPERS),
         "source": source,

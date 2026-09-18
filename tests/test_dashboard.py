@@ -24,6 +24,7 @@ from avai.dashboard import (
     system_integrity,
 )
 from avai.dashboard.db import read_only_engine
+from avai.dashboard.queries import Page
 from avai.host_monitor import Sink, SystemIntegrityRow
 
 # ---------------------------------------------------------------------------
@@ -1728,8 +1729,8 @@ class TestVulnerabilitiesPanel:
         _ensure_db_exists(str(db))
         self._seed(str(db))
         with Session(_engine_rw(str(db))) as s:
-            p1 = vulnerabilities(s, per_page=1, page=1)
-            p2 = vulnerabilities(s, per_page=1, page=2)
+            p1 = vulnerabilities(s, page=Page(1, 1))
+            p2 = vulnerabilities(s, page=Page(2, 1))
         assert p1["total"] == 2 and p1["total_pages"] == 2
         assert len(p1["rows"]) == 1 and p1["rows"][0]["software"] == "openssl@3.0.0"
         assert len(p2["rows"]) == 1 and p2["rows"][0]["software"] == "leftpad@1.0.0"
@@ -1851,10 +1852,21 @@ class TestLogsPanel:
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            p1 = log_entries(s, "r1", per_page=2, page=1)
-            p2 = log_entries(s, "r1", per_page=2, page=2)
+            p1 = log_entries(s, "r1", page=Page(1, 2))
+            p2 = log_entries(s, "r1", page=Page(2, 2))
         assert p1["total"] == 4 and p1["total_pages"] == 2
         assert len(p1["rows"]) == 2 and len(p2["rows"]) == 2
+
+    def test_page_past_the_end_echoes_the_last_page(self, tmp_path):
+        # Regression: the panel sliced the last page but echoed the page that
+        # was asked for, so the bar read "page 99 / 2".
+        from avai.dashboard.queries import log_entries
+
+        db = self._run(tmp_path)
+        with Session(_engine_rw(str(db))) as s:
+            res = log_entries(s, "r1", page=Page(99, 2))
+        assert (res["page"], res["total_pages"]) == (2, 2)
+        assert len(res["rows"]) == 2
 
 
 class TestPrimaryFilesystems:

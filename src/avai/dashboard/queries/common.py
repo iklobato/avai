@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import dataclass, replace
 
 from sqlalchemy import (
     and_,
@@ -145,14 +146,49 @@ def _row_and_artifact(session: Session, j: Judgement) -> tuple[dict, str]:
 _FLOW_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3, None: 4}
 
 
-def _paginate(rows: list, page: int, per_page: int) -> tuple[list, int, int]:
-    """Slice *rows* for the requested page. Returns (page_rows, total, total_pages)."""
-    total = len(rows)
-    per_page = max(1, min(per_page, 200))
-    page = max(1, page)
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = min(page, total_pages)
-    return rows[(page - 1) * per_page : page * per_page], total, total_pages
+MAX_PER_PAGE = 200
+
+
+@dataclass(frozen=True)
+class Page:
+    """One page of a panel as the query string asked for it. Clamped on
+    construction, so a hand-typed ``?page=0`` or ``?per_page=999`` still
+    names a real page."""
+
+    number: int = 1
+    size: int = DEFAULT_PER_PAGE
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "number", max(1, self.number))
+        object.__setattr__(self, "size", max(1, min(self.size, MAX_PER_PAGE)))
+
+    def total_pages(self, total: int) -> int:
+        return max(1, (total + self.size - 1) // self.size)
+
+    def within(self, total: int) -> Page:
+        """This page, pulled back to the last one when ``total`` rows don't
+        reach it. Without the upper bound a huge ``?page=`` builds an OFFSET
+        past SQLite's 64-bit INTEGER range and raises OverflowError."""
+        return replace(self, number=min(self.number, self.total_pages(total)))
+
+    @property
+    def offset(self) -> int:
+        return (self.number - 1) * self.size
+
+    def fields(self, total: int) -> dict:
+        """The pagination keys every panel returns, for ``total`` rows."""
+        page = self.within(total)
+        return {
+            "total": total,
+            "page": page.number,
+            "per_page": page.size,
+            "total_pages": page.total_pages(total),
+        }
+
+    def slice(self, rows: list) -> tuple[list, dict]:
+        """The rows on this page, plus :meth:`fields` for all of ``rows``."""
+        page = self.within(len(rows))
+        return rows[page.offset : page.offset + page.size], self.fields(len(rows))
 
 
 def _port_sort_key(p: str):

@@ -20,9 +20,9 @@ from .collection import latest_run
 from .common import (
     _HIDDEN_SOURCE_FIELDS,
     COLLECTOR_MODELS,
-    DEFAULT_PER_PAGE,
     DISPLAY_FIELDS,
     VERDICTS,
+    Page,
     _parse_json_obj,
 )
 
@@ -70,8 +70,7 @@ def findings(
     status: str = "active",
     sort: str = "severity",
     order: str = "desc",
-    page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
+    page: Page = Page(),
 ) -> dict:
     """Paginated, filterable, sortable findings query.
 
@@ -134,13 +133,8 @@ def findings(
         direction = asc if order == "asc" else desc
         stmt = stmt.order_by(direction(sort_col), Judgement.created_at.desc())
 
-    per_page = max(1, min(per_page, 200))
-    # Clamp to the last page, mirroring _paginate. Without the upper bound a
-    # huge ?page= produces an OFFSET past SQLite's 64-bit INTEGER range and
-    # raises OverflowError → HTTP 500.
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = max(1, min(page, total_pages))
-    stmt = stmt.offset((page - 1) * per_page).limit(per_page)
+    page = page.within(total)
+    stmt = stmt.offset(page.offset).limit(page.size)
 
     raw = session.execute(stmt).scalars().all()
 
@@ -204,9 +198,6 @@ def findings(
 
     return {
         "items": items,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": max(1, (total + per_page - 1) // per_page),
+        **page.fields(total),
         "latest_started_at": latest_started,
     }

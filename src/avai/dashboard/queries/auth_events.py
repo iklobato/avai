@@ -21,7 +21,7 @@ from avai.host_monitor import (
     Judgement,
 )
 
-from .common import DEFAULT_PER_PAGE, _cache_key, _existing_tables
+from .common import Page, _cache_key, _existing_tables
 
 _AUTH_SUBSYSTEM_LABELS = {
     "com.apple.securityd": "securityd",
@@ -125,15 +125,14 @@ def auth_events_aggregated(
     subsystem: str = "",
     verdict: str = "",
     sort: str = "count",
-    page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
+    page: Page = Page(),
 ):
     """Auth events grouped by content_hash (one pattern per unique log line),
     joined with LLM verdicts.  Collapses raw log lines into patterns; each
     pattern gets one judgment from the LLM judge.  Supports filtering by
     subsystem, verdict, and free-text search, and sorting by count or verdict
     severity.  Results are cached for ``_AUTH_AGG_TTL`` seconds (see above)."""
-    cache_key = (_cache_key(session), q, subsystem, verdict, sort, page, per_page)
+    cache_key = (_cache_key(session), q, subsystem, verdict, sort, page)
     cached = _auth_agg_cache.get(cache_key)
     if cached is not None and time.monotonic() - cached[0] < _AUTH_AGG_TTL:
         return cached[1]
@@ -142,11 +141,8 @@ def auth_events_aggregated(
         "rows": [],
         "summary": {},
         "subsystem_tabs": _auth_subsystem_tabs({}, 0),
-        "total": 0,
+        **page.fields(0),
         "total_events": 0,
-        "page": 1,
-        "per_page": per_page,
-        "total_pages": 1,
         "q": q,
         "subsystem": subsystem,
         "verdict": verdict,
@@ -230,10 +226,7 @@ def auth_events_aggregated(
         or 0
     )
 
-    per_page = max(1, min(per_page, 200))
-    page = max(1, page)
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page = min(page, total_pages)
+    page = page.within(total)
 
     if sort == "verdict":
         sev_case = case(
@@ -245,7 +238,7 @@ def auth_events_aggregated(
     else:
         order_by = (agg_sub.c.cnt.desc(),)
 
-    page_stmt = outer.order_by(*order_by).offset((page - 1) * per_page).limit(per_page)
+    page_stmt = outer.order_by(*order_by).offset(page.offset).limit(page.size)
 
     rows = []
     for ch, proc, sub, msg, cnt, last, verd, conf, reason in session.execute(
@@ -272,10 +265,7 @@ def auth_events_aggregated(
         "summary": summary,
         "total_events": total_events,
         "subsystem_tabs": _auth_subsystem_tabs(summary, total_events),
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
+        **page.fields(total),
         "q": q,
         "subsystem": subsystem,
         "verdict": verdict,

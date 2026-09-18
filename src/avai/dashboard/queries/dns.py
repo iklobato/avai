@@ -10,7 +10,7 @@ from avai.host_monitor import (
     DnsQueryRow,
 )
 
-from .common import _FLOW_SEV, DEFAULT_PER_PAGE, _collector_rows_with_verdict, _paginate
+from .common import _FLOW_SEV, Page, _collector_rows_with_verdict
 
 
 def _dns_resolution_level(server_ip, qtype) -> str:
@@ -47,8 +47,7 @@ def dns_queries(
     verdict: str = "",
     level: str = "",
     q: str = "",
-    page: int = 1,
-    per_page: int = DEFAULT_PER_PAGE,
+    page: Page = Page(),
 ):
     """DNS questions seen this run (+ detected DoH endpoints), each with
     its LLM verdict and the resolution level (where/how it resolved).
@@ -88,14 +87,11 @@ def dns_queries(
         "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
     }
 
-    page_rows, total, total_pages = _paginate(rows, page, per_page)
+    page_rows, paging = page.slice(rows)
     return {
         "summary": summary,
         "rows": page_rows,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "total_pages": total_pages,
+        **paging,
         "q": q,
         "verdict": verdict,
         "level": level,
