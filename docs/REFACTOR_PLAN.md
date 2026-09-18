@@ -408,6 +408,66 @@ Acceptance: coverage for the collector package is at least 80%, no function
 exceeds mccabe 10, and zero `CommandRunner()` or `psutil.` calls remain inside
 collector classes.
 
+Done on `refactor/p7-collectors` in six commits: characterization tests,
+the package split, the injection, `YaraRulesetCompiler` with the file-scan
+target split, the Linux launch-item readers, and the named magic values. The
+53 characterization tests (`tests/test_collectors_characterization.py`)
+patch `subprocess`, `shutil.which` and `psutil` on the global modules, so
+they run unchanged across every move; they took `collectors.py` from 64% to
+90% line coverage before anything moved. The split commit only moved code
+(the AST of every class and function is identical). `collectors.py` (3301
+lines) is now 11 modules; the largest is `persistence.py` at 538. No
+function in the package is over mccabe 10, nothing in it calls `psutil` or
+`subprocess` directly, and the C901/PLR2004 ignores for `collectors/*.py`,
+`net_collectors.py`, `exposure_collectors.py` and
+`persistence_collectors.py` are gone from `pyproject.toml`. Changes from the
+design above:
+
+- The collaborators are optional constructor arguments (`runner`,
+  `connections`, `metrics`, `disks`) that default to a fresh instance, the
+  pattern the security controls already used. So `CommandRunner()` still
+  appears once in the `__init__` of each of the 13 collectors that shell
+  out, as that default; none builds one per call any more, and the Linux
+  and macOS hosts pass their own runner. Tests build collectors with no
+  arguments.
+- Eight direct `subprocess.run` calls that the plan did not list (tcpdump
+  twice, spctl, dpkg-query, iw, systemctl, dmsetup, journalctl) also go
+  through the runner, since `runtime/command_runner.py` documents it as the
+  one subprocess seam. That took one new method, `CommandRunner.capture`,
+  which returns stdout, stderr and a `timed_out` flag and keeps partial
+  output on timeout (tcpdump stops at its time cap on a quiet link).
+- New seam methods: `PsutilConnections.listening` and `process_name`,
+  `SystemMetrics.process_table` and the three `net_if_*`/`net_io_counters`
+  readers, and `DiskMetrics.mount_table` (every mount, pseudo filesystems
+  included, unlike the container-aware `partitions`).
+- `_compile_yara_rules` left the facade; `avai rules` and the tests call
+  `YaraRulesetCompiler(rules_dir).compile()`.
+- `_cron_rows(scope, path, has_user_col, default_user)` became
+  `CronJob.parse(line, owner)`: the owner of a per-user crontab replaces
+  the boolean flag, since only those files lack a user column.
+- The magic-value count covered this area only: 7 in the package and 15 in
+  the three source-injected modules. The rest of the "74" is Phase 10.
+
+Behaviour changes: when `spctl --status` times out, whatever it printed
+before the cap is now read instead of giving None, and the journalctl
+timeout warning now names the timeout instead of repeating the exception.
+`FileScanCollector` no longer pulls one extra target past the per-cycle cap
+(no row changes).
+
+Coverage of `avai.host_monitor.collectors` on the full suite is 92%
+(`streams.py` 86% is the lowest). New tests beyond the characterization
+file: the compile summary, the namespace suffix for a repeated file stem,
+target dedup and the cap across sources (`test_file_scan.py`), cron
+discovery across every source (`test_collectors.py`),
+`CommandRunner.capture`, the Windows session parser and the ndp state
+fallback, which had no test. 34 deliberate breaks across the four
+refactor commits each turned a test red. One more stayed green at first:
+dropping the `KEY=value` check in the cron parser, because the old env-line
+test used lines too short to pass the field count anyway; a new test with a
+long `MAILTO=` line now catches it. The first version of the capture
+timeout test used a real child process with a 1 s cap and failed once under
+a loaded full run; it now fakes `TimeoutExpired`. 1054 tests pass.
+
 ## Phase 8: enrichment and indicators (small)
 
 - Split `EnrichmentChain.enrich` (mccabe 13, 73 lines) into cache lookup,

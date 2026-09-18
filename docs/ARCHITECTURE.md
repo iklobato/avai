@@ -112,7 +112,9 @@ src/avai/
 │   ├── control_loop.py         ControlSettings, ProgressHeartbeat, MaintenanceCommand, ControlLoop
 │   ├── sink.py                 Sink: the single DB gateway (schema, runs, writes, lookups, rotation)
 │   ├── models.py               SQLAlchemy ORM: Base, _RowBase, 52 mapped tables
-│   ├── collectors.py           Collector bases + 41 snapshot/streaming collectors + parsers + YARA compile
+│   ├── collectors/             Collector bases + 41 snapshot/streaming collectors, one module per area:
+│   │                           base, system, network, devices, persistence, software, integrity,
+│   │                           file_scan (YaraRulesetCompiler), streams, logs
 │   ├── net_collectors.py       ARP / NDP / routes / DNS resolvers (source-injected) + OS parsers
 │   ├── exposure_collectors.py  proxy / sessions / shares / promisc / trusted roots + OS parsers
 │   ├── persistence_collectors.py injection env / kernel modules / ssh known_hosts + parsers
@@ -155,7 +157,7 @@ packaging/    PyInstaller spec, Inno Setup (Windows), .deb builder (Linux), cask
 docker/       supervisord.conf (monitor + dashboard in one container)
 tools/        seed_demo_db.py (synthetic DB for demos)
 scripts/      update_rules.py (fetch pinned YARA packs into rules/vendor)
-tests/        44 pytest modules
+tests/        45 pytest modules
 ```
 
 ### Module dependency graph
@@ -241,7 +243,7 @@ graph TD
 | `avai monitor` | `start`, `scan` | `main` | `host_monitor.main.main()` (argv passed through) |
 | `avai dashboard` | `ui`, `serve` | `main` | `dashboard.serve.main()` |
 | `avai app` | `gui`, `desktop` | `main` | `desktop.main()` |
-| `avai rules [--list] [--rules-dir]` | | `_cmd_rules` | `collectors._compile_yara_rules` (no DB) |
+| `avai rules [--list] [--rules-dir]` | | `_cmd_rules` | `collectors.YaraRulesetCompiler` (no DB) |
 | `avai install-hosts [--remove] [--hostname]` | | `_cmd_install_hosts` | `hostsfile.HostsRegistrar` |
 | `avai migrate [--db]` | | `main` | `db_migrate.upgrade_to_head` |
 | `avai --version` / `--help` | `-v`, `-h`, `help` | `main` / `_print_usage` | |
@@ -252,7 +254,7 @@ graph LR
     m -->|monitor start scan| hm["host_monitor.main.main"]
     m -->|dashboard ui serve| dm["dashboard.serve.main"]
     m -->|app gui desktop| ap["desktop.main"]
-    m -->|rules| r["_cmd_rules → _compile_yara_rules"]
+    m -->|rules| r["_cmd_rules → YaraRulesetCompiler"]
     m -->|install-hosts| ih["_cmd_install_hosts → HostsRegistrar"]
     m -->|migrate| mg["db_migrate.upgrade_to_head"]
     m -->|--version| v["__version__"]
@@ -647,7 +649,7 @@ classDiagram
     CommandSnapshot o-- RowParser
     FileSnapshot o-- RowParser
 
-    class Native["40 native collectors (collectors.py, persistence_collectors.py, hosts/windows.py)"]
+    class Native["40 native collectors (collectors/, persistence_collectors.py, hosts/windows.py)"]
     class Sourced["11 source-injected collectors (net_ / exposure_ / persistence_collectors.py)"]
     class Streams["6 streaming collectors (auth_events x3, process_exec_events x3)"]
     SnapshotCollector <|-- Native
@@ -674,6 +676,13 @@ the filesystem, plists, external SQLite DBs, or `CommandRunner`:
 `WindowsSystemIntegrityCollector`, `WindowsUsbDevicesCollector`,
 `WindowsBluetoothCollector`, `WindowsWifiCollector`).
 
+They never build their own OS access. A collector that shells out takes a
+`runner` argument and the Linux and macOS hosts pass their one
+`CommandRunner`; psutil reads go through `PsutilConnections`, `SystemMetrics`
+and `DiskMetrics`. Each argument defaults to a fresh instance, the same pattern
+as the `services`/`ports`/`processes` controls, so a test can build a collector
+with no arguments and patch `subprocess`/`psutil` at the module level.
+
 **Source-injected collectors** (`_SourceSnapshotCollector`) hold no OS logic at
 all; the Host wires a `RowSource` whose `RowParser` is one of the Strategy
 classes below. This is how one collector class serves three operating systems.
@@ -699,11 +708,13 @@ a per-OS `LineParser` Strategy: `UnifiedLogAuthParser` (macOS `log stream
 `eslogger exec`), `AuditExecParser` (Linux audit `execve`),
 `WinSecurityExecParser` (event 4688).
 
-**Other helper objects in `collectors.py`:**
+**Other helper objects in the `collectors/` package:**
 
 - `BrowserExtensionReader(ABC)` → `ChromiumExtensionReader`, `FirefoxExtensionReader`: used by `BrowserExtensionsCollector` over the `BROWSER_PROFILES` table.
+- `SystemdUnitReader`, `CrontabReader`, `CronJob`: the two halves of `LinuxLaunchItemsCollector`. `CronJob.parse(line, owner)` reads one crontab(5) line; a per-user crontab passes its owner, which also means its lines have no user column.
 - `ProcessConnectionResolver`: `(local_ip, port) → (pid, name)` so tcpdump flows and DNS questions get attributed to a process.
-- `FileScanCollector`: compiles the YARA pack once (`_ruleset` → `_compile_yara_rules`), then scans a bounded target set (`_targets`: privileged bin dirs, app executables, recently modified Downloads), capped by `YARA_MAX_FILES_PER_CYCLE`; `_scan_file` emits one row per `(file, rule)` with redacted match strings (`_redact_match_strings`, `_redact_one_match`) and rule provenance (`_rule_source`). `compile_stats` is read by the Runner to persist `yara_status` and `yara_rule`.
+- `YaraRulesetCompiler(rules_dir).compile() -> (rules, stats)`: validates each rule file on its own (`_compile_one`, skipping and counting the broken ones), gives a repeated file stem its own namespace (`_unique_namespace`), records sources, categories and one inventory entry per rule (`_record`), then compiles the set. `stats` feeds the dashboard's File Scan panel.
+- `FileScanCollector`: compiles the YARA pack once (`_ruleset` → `YaraRulesetCompiler`), then scans a bounded target set (`_targets` dedups three generators: `_bin_dir_files`, `app_executables`, `_recent_downloads`), capped once in `collect` by `YARA_MAX_FILES_PER_CYCLE`; `_scan_file` emits one row per `(file, rule)` with redacted match strings (`_redact_match_strings`, `_redact_one_match`) and rule provenance (`_rule_source`). `compile_stats` is read by the Runner to persist `yara_status` and `yara_rule`.
 - Module functions: `_payload_bytes` (tcpdump packet length), `_crypto_hint` (why a rule failed to compile), `_file_type` (magic-bytes `filetype` external), `_journal_us_to_iso`, `_sniff_text_level` (log level from plain-text lines).
 
 ### 4.5 Runtime collaborators: `runtime/`
@@ -718,12 +729,12 @@ classDiagram
     Clock <|-- FrozenClock
     class Coerce { +jsonable(obj)$ +enum(value, enum_cls, default)$ }
     class Digest { +sha256_file(path)$ +of_row(row, fields)$ +ssh_fingerprint(b64key)$ }
-    class CommandRunner { +exists(name) +json(cmd) +ndjson(cmd) +exit_code(cmd) +text(cmd) }
+    class CommandRunner { +exists(name) +json(cmd) +ndjson(cmd) +exit_code(cmd) +text(cmd) +capture(cmd, timeout) CommandOutput }
     class HostPaths { +translate(p)$ +expand(p)$ +for_home(template)$ +read_sysfs(path)$ +read_plist(path)$ }
     class ExternalSqliteReader { +rows(path, table, columns) }
-    class PsutilConnections { +inet()$ }
-    class SystemMetrics { +virtual_memory() +swap_memory() +cpu_sample() +load_average() +cpu_count() +boot_time() +task_counts() }
-    class DiskMetrics { +partitions() +usage(mountpoint) +io_counters() }
+    class PsutilConnections { +inet()$ +listening()$ +process_name(pid)$ }
+    class SystemMetrics { +virtual_memory() +swap_memory() +cpu_sample() +load_average() +cpu_count() +boot_time() +task_counts() +process_table(attrs) +net_if_addrs() +net_if_stats() +net_io_counters() }
+    class DiskMetrics { +partitions() +mount_table() +usage(mountpoint) +io_counters() }
     class ServiceManager { <<Protocol>> +enabled(unit) }
     class PortInspector { <<Protocol>> +listening(port) +established(port) }
     class ProcessInspector { <<Protocol>> +running(name) }
@@ -748,7 +759,9 @@ Docker) so `/etc/...` reads become `/host/etc/...`. `DiskMetrics` reads the host
 mount table under the rootfs mount (`_parse_mounts`, `_host_partitions`,
 `_join_rootfs`, `_statvfs_usage`, `_unescape_mount_field`) so `disk_usage`
 reports real host filesystems inside the container. `tri_or` folds 1/0/None
-signals for the integrity checks.
+signals for the integrity checks. `CommandRunner.capture` returns stdout,
+stderr and a `timed_out` flag and keeps the partial output on timeout: tcpdump
+stops at its time cap on a quiet link and that output is still the answer.
 
 ### 4.6 Security controls
 
@@ -1502,7 +1515,7 @@ graph TD
 | `test_runner_cycle.py` | whole cycles through the public `Runner` API only: snapshot and streaming judging, reports, pruning, every maintenance command, streaming workers |
 | `test_runner.py`, `test_integration.py`, `test_host_monitor.py` | each finding stage, cycle step, `ControlSettings` and `ControlLoop` with fakes; end-to-end cycle against a temp DB |
 | `test_streaming_worker.py`, `test_stream_parsers.py` | `StreamingWorker` + `SupervisionPolicy`, `LineParser` strategies |
-| `test_collectors.py`, `test_new_collectors.py`, `test_listening_ports.py`, `test_network_flows.py`, `test_resources.py`, `test_disk_container.py`, `test_browser_readers.py`, `test_file_scan.py`, `test_security_controls.py` | snapshot collectors, tcpdump parsing, resource and disk metrics, YARA scanning, service controls |
+| `test_collectors.py`, `test_collectors_characterization.py`, `test_new_collectors.py`, `test_listening_ports.py`, `test_network_flows.py`, `test_resources.py`, `test_disk_container.py`, `test_browser_readers.py`, `test_file_scan.py`, `test_security_controls.py` | snapshot collectors, tcpdump parsing, resource and disk metrics, YARA scanning, service controls |
 | `test_net_collectors.py`, `test_exposure_collectors.py`, `test_persistence_collectors.py`, `test_hosts.py`, `test_windows.py` | source-injected collectors and every OS parser, host composition roots |
 | `test_runtime.py`, `test_row_source.py`, `test_misc_helpers.py` | `runtime/*`, `CommandSnapshot` / `FileSnapshot`, coercion and digest helpers |
 | `test_llm_judge.py`, `test_judge_auth.py` | `LlmJudge` parsing and batching, cost; the credential rule (one table-driven test) and `LlmStages.build` wiring |
@@ -1522,7 +1535,7 @@ plugin crash on this machine).
 
 | I want to… | Go to |
 |---|---|
-| Add a telemetry slice | ORM row in `models.py` (+ migration), collector in `collectors.py` (or a `_SourceSnapshotCollector` + `RowParser` in `net_/exposure_/persistence_collectors.py`), wire it in each `hosts/*Host.snapshot_collectors`, add a hint in `prompts.toml [collector_hints]`, declare it in `host_monitor/slices.py` (`tests/test_slices.py` fails until every step is done), optionally an `IndicatorExtractor` |
+| Add a telemetry slice | ORM row in `models.py` (+ migration), collector in the matching `collectors/<area>.py` (or a `_SourceSnapshotCollector` + `RowParser` in `net_/exposure_/persistence_collectors.py`), wire it in each `hosts/*Host.snapshot_collectors`, add a hint in `prompts.toml [collector_hints]`, declare it in `host_monitor/slices.py` (`tests/test_slices.py` fails until every step is done), optionally an `IndicatorExtractor` |
 | Support a new OS quirk | the `FilesystemLayout` / `PrivilegedAccounts` adapter in `hosts/<os>.py`; never branch on `platform.system()` elsewhere |
 | Add a threat-intel source | new file in `enrichers/sources/` subclassing `Enricher` with `_fetch`; auto-discovered |
 | Change what the LLM is told | `prompts.toml`; the context bundle is built by the stages in `finding_stages.py` (`evidence`, `baseline`, `related`, `rule_meta`) |
@@ -1638,44 +1651,151 @@ Constants: `DASHBOARD_HOSTNAME`, `LOOPBACK_IPV4`, `LOOPBACK_IPV6`, `LOOPBACK_ADD
 _avai.host_monitor: package facade._
 
 
-#### `avai.host_monitor.collectors` · `avai/host_monitor/collectors.py` · 3301 lines
+#### `avai.host_monitor.collectors` · `avai/host_monitor/collectors/__init__.py` · 125 lines
 
-_Snapshot + streaming collectors and their platform builders._
+_Snapshot and streaming collectors, one module per area. Importing from_
 
-Constants: `_YARA_EXTERNALS`, `_SYSLOG_LEVELS`, `_TEXT_LEVEL_PATTERNS`
+#### `avai.host_monitor.collectors.base` · `avai/host_monitor/collectors/base.py` · 74 lines
 
-- **class `Collector(ABC)`** (L67) : Common base for any host-state collector. Subclass
+_The collector contract: snapshot and streaming collectors and the slice_
+
+- **class `Collector(ABC)`** (L14) : Common base for any host-state collector. Subclass
   - fields: `slice: ClassVar[slices.Slice]`, `judge_enabled: ClassVar[bool]`, `judge_fields: ClassVar[tuple[str, ...]]`
   - `__init__(judge_hints)`
   - `name() -> str` `@property`
   - `model() -> type[_RowBase]` `@property`
   - `table() -> str` `@property`
-- **class `SnapshotCollector(Collector)`** (L96) : Pull model: the Runner calls :meth:`collect` once per cycle and
+- **class `SnapshotCollector(Collector)`** (L43) : Pull model: the Runner calls :meth:`collect` once per cycle and
   - `collect() -> Iterable[dict]` `@abstractmethod`
-- **class `StreamingCollector(Collector)`** (L109) : Push model: the Runner starts :meth:`stream` once in a dedicated
+- **class `StreamingCollector(Collector)`** (L56) : Push model: the Runner starts :meth:`stream` once in a dedicated
   - fields: `judge_enabled: ClassVar[bool]`
   - `stream(stop_event) -> Iterable[dict]` `@abstractmethod`
-- **class `BrowserExtensionReader(ABC)`** (L130)
-  - `read(base, browser) -> Iterable[dict]` `@abstractmethod`
-- **class `ChromiumExtensionReader(BrowserExtensionReader)`** (L135)
-  - `read(base, browser)`
-- **class `FirefoxExtensionReader(BrowserExtensionReader)`** (L173)
-  - `read(base, browser)`
-- **class `ProcessCollector(SnapshotCollector)`** (L204)
+
+#### `avai.host_monitor.collectors.devices` · `avai/host_monitor/collectors/devices.py` · 321 lines
+
+_Attached hardware: USB, Bluetooth and Wi-Fi, on macOS and Linux._
+
+- **class `UsbDevicesCollector(SnapshotCollector)`** (L18)
+  - fields: `slice`, `judge_fields`
+  - `__init__(judge_hints, runner) -> None`
+  - `collect()`
+  - `_walk(items, parent_location)`
+- **class `BluetoothCollector(SnapshotCollector)`** (L53)
+  - fields: `slice`, `judge_fields`, `_GROUPS`, `_PAIRED_GROUPS`
+  - `__init__(judge_hints, runner) -> None`
+  - `collect()`
+- **class `WifiCollector(SnapshotCollector)`** (L97)
+  - fields: `slice`, `judge_fields`
+  - `__init__(judge_hints, runner) -> None`
+  - `collect()`
+- **class `LinuxUsbDevicesCollector(SnapshotCollector)`** (L130) : Linux equivalent of :class:`UsbDevicesCollector`.
   - fields: `slice`, `judge_fields`, `_ATTRS`
   - `collect()`
-- **class `NetworkConnectionsCollector(SnapshotCollector)`** (L244)
+- **class `LinuxBluetoothCollector(SnapshotCollector)`** (L191) : Linux equivalent of :class:`BluetoothCollector`.
   - fields: `slice`, `judge_fields`
   - `collect()`
-- **class `ListeningPortsCollector(SnapshotCollector)`** (L268)
+- **class `LinuxWifiCollector(SnapshotCollector)`** (L256) : Linux equivalent of :class:`WifiCollector`.
+  - fields: `slice`, `judge_fields`
+  - `__init__(judge_hints, runner) -> None`
+  - `collect()`
+  - `_iw_link(iface) -> dict`
+
+#### `avai.host_monitor.collectors.file_scan` · `avai/host_monitor/collectors/file_scan.py` · 444 lines
+
+_YARA signature scanning of a bounded set of high-signal files._
+
+Constants: `_YARA_EXTERNALS`, `_PRINTABLE_ASCII`, `_TEXT_MIN_PRINTABLE_RATIO`, `_RULE_SUFFIXES`
+
+- **class `YaraRulesetCompiler`** (L157) : Compile every ``*.yar`` / ``*.yara`` under ``rules_dir`` into one
+  - `__init__(rules_dir) -> None`
+  - `compile() -> tuple[Optional['yara.Rules'], dict]`
+  - `_empty_stats() -> dict`
+  - `_load_files(stats) -> dict[str, str]`
+  - `_rule_files() -> Iterable[Path]`
+  - `_compile_one(path, skip_reasons) -> Optional['yara.Rules']` `@staticmethod`
+  - `_record(path, file_rules, stats) -> None`
+- **class `FileScanCollector(SnapshotCollector)`** (L276) : Signature scanning: match YARA rules against a bounded set of
+  - fields: `slice`, `judge_fields`, `_SECONDS_PER_DAY`
+  - `__init__(judge_hints, fs, rules_dir, clock)`
+  - `_ruleset()`
+  - `collect()`
+  - `_targets()`
+  - `_bin_dir_files() -> Iterable[Path]`
+  - `_recent_downloads() -> Iterable[Path]`
+  - `_recent_cutoff() -> float`
+  - `_scan_file(path, source, rules)`
+  - `_match_externals(path, st) -> dict` `@staticmethod`
+- `_crypto_hint(exc) -> str` (L29) : Append an actionable hint when a ruleset fails to compile because
+- `_file_type(path) -> str` (L61) : Best-effort ``filetype`` external from leading magic bytes, using the
+- `_redact_one_match(identifier, offset, data) -> dict` (L93) : Render one matched byte run for the judge: printable runs as ``text``,
+- `_redact_match_strings(match) -> list[dict]` (L109) : A bounded, redacted view of the bytes a YARA match fired on.
+- `_rule_source(path, rules_dir) -> str` (L144) : Label a rule file by where it came from: top-level files are
+- `_unique_namespace(stem, taken) -> str` (L267)
+- `_walk(base) -> list[Path]` (L429) : Every entry under ``base``, or [] when it is missing or unreadable.
+- `_modified_since(path, cutoff) -> bool` (L440)
+
+#### `avai.host_monitor.collectors.integrity` · `avai/host_monitor/collectors/integrity.py` · 372 lines
+
+_Security posture: system integrity settings, watched files and setuid binaries._
+
+- **class `SystemIntegrityCollector(SnapshotCollector)`** (L34)
+  - fields: `slice`, `judge_fields`, `_SERVICES`
+  - `__init__(judge_hints, services, ports, processes, runner) -> None`
+  - `collect()`
+  - `_gatekeeper_state() -> Optional[int]`
+- **class `FileIntegrityCollector(SnapshotCollector)`** (L121)
+  - fields: `slice`, `judge_fields`
+  - `__init__(watched, judge_hints)`
+  - `collect()`
+  - `_missing(p)` `@staticmethod`
+- **class `LinuxSystemIntegrityCollector(SnapshotCollector)`** (L164) : Linux equivalent of :class:`SystemIntegrityCollector`.
+  - fields: `slice`, `judge_fields`, `_SSH`, `_VNC_PORT`
+  - `__init__(judge_hints, services, ports, processes, runner) -> None`
+  - `collect()`
+  - `_selinux_state() -> Optional[str]` `@staticmethod`
+  - `_apparmor_state() -> dict` `@staticmethod`
+  - `_ufw_active() -> bool` `@staticmethod`
+  - `_service_active(unit) -> bool`
+  - `_luks_count() -> int`
+- **class `SetuidFilesCollector(SnapshotCollector)`** (L314) : Enumerate setuid / setgid files in common executable directories.
+  - fields: `slice`, `judge_fields`
+  - `__init__(judge_hints, fs)`
+  - `collect()`
+
+#### `avai.host_monitor.collectors.logs` · `avai/host_monitor/collectors/logs.py` · 185 lines
+
+_Generic host log capture: journald plus tailed plain-text files._
+
+Constants: `_SYSLOG_LEVELS`, `_TEXT_LEVEL_PATTERNS`
+
+- **class `LogTailCollector(SnapshotCollector)`** (L61) : Generic host log capture: a per-cycle snapshot of the most recent log
+  - fields: `slice`, `judge_enabled`, `MAX_JOURNAL_LINES`, `MAX_FILE_LINES`, `_TAIL_BYTES`, `_JOURNAL_TIMEOUT_S`, `_DEFAULT_FILES`
+  - `__init__(judge_hints, files, runner)`
+  - `collect()`
+  - `_journald()`
+  - `_parse_journal(line) -> Optional[dict]` `@staticmethod`
+  - `_tail_file(path_str)`
+- `_journal_us_to_iso(value) -> Optional[str]` (L41) : journald ``__REALTIME_TIMESTAMP`` (microseconds since epoch) → ISO-8601
+- `_sniff_text_level(line) -> Optional[str]` (L53)
+
+#### `avai.host_monitor.collectors.network` · `avai/host_monitor/collectors/network.py` · 504 lines
+
+_Sockets and traffic: connections, listeners, tcpdump flows and DNS, interfaces._
+
+- **class `NetworkConnectionsCollector(SnapshotCollector)`** (L19)
   - fields: `slice`, `judge_fields`
   - `collect()`
-- **class `ProcessConnectionResolver`** (L308) : Resolves which local process owns a socket to a remote endpoint by
+- **class `ListeningPortsCollector(SnapshotCollector)`** (L43)
+  - fields: `slice`, `judge_fields`
+  - `__init__(judge_hints, connections) -> None`
+  - `collect()`
+- **class `ProcessConnectionResolver`** (L101) : Resolves which local process owns a socket to a remote endpoint by
+  - `__init__(connections) -> None`
   - `snapshot() -> dict[tuple[str, int], tuple[str, int]]`
-  - `_proc_name(pid) -> str` `@staticmethod`
-- **class `NetworkFlowsCollector(SnapshotCollector)`** (L346) : tcpdump-based flow aggregator.
+  - `_proc_name(pid) -> str`
+- **class `NetworkFlowsCollector(SnapshotCollector)`** (L139) : tcpdump-based flow aggregator.
   - fields: `slice`, `judge_fields`, `CAPTURE_SECONDS`, `MAX_PACKETS`, `MAX_FLOWS`
-  - `__init__(judge_hints, resolver, iface_args)`
+  - `__init__(judge_hints, resolver, iface_args, runner)`
   - `collect()`
   - `_capture() -> tuple[str, Optional[str]]`
   - `_iface_from_banner(stderr) -> Optional[str]` `@staticmethod`
@@ -1683,170 +1803,152 @@ Constants: `_YARA_EXTERNALS`, `_SYSLOG_LEVELS`, `_TEXT_LEVEL_PATTERNS`
   - `_aggregate(output, default_iface) -> dict`
   - `_parse_line(line)` `@staticmethod`
   - `_service(port, proto)` `@staticmethod`
-- **class `DnsQueriesCollector(SnapshotCollector)`** (L528) : tcpdump-based DNS visibility.
-  - fields: `slice`, `judge_fields`, `CAPTURE_SECONDS`, `MAX_PACKETS`, `MAX_QUERIES`, `_DOH_IPS`
-  - `__init__(judge_hints, resolver, iface_args)`
+- **class `DnsQueriesCollector(SnapshotCollector)`** (L305) : tcpdump-based DNS visibility.
+  - fields: `slice`, `judge_fields`, `CAPTURE_SECONDS`, `MAX_PACKETS`, `MAX_QUERIES`, `_DOH_PORT`, `_DOH_IPS`
+  - `__init__(judge_hints, resolver, iface_args, runner)`
   - `collect()`
   - `_capture() -> tuple[str, Optional[str]]`
   - `_aggregate(output, default_iface, proc_map)`
   - `_parse_dns_line(line)` `@staticmethod`
-- **class `NetworkInterfacesCollector(SnapshotCollector)`** (L702)
+- **class `NetworkInterfacesCollector(SnapshotCollector)`** (L464)
   - fields: `slice`, `judge_enabled`
+  - `__init__(judge_hints, metrics) -> None`
   - `collect()`
-- **class `HostResourcesCollector(SnapshotCollector)`** (L739) : Aggregate resource meters (memory, swap, CPU, load, uptime, tasks) , 
-  - fields: `slice`, `judge_enabled`, `CPU_INTERVAL`
-  - `__init__(metrics, clock, judge_hints)`
-  - `collect()`
-  - `_cpu_aggregate(sample) -> dict` `@staticmethod`
-- **class `DiskUsageCollector(SnapshotCollector)`** (L848) : Per-filesystem capacity + best-effort per-device I/O counters: the
-  - fields: `slice`, `judge_enabled`
-  - `__init__(metrics, judge_hints)`
-  - `collect()`
-  - `_io_for(io, device)` `@staticmethod`
-- **class `UsbDevicesCollector(SnapshotCollector)`** (L897)
-  - fields: `slice`, `judge_fields`
-  - `collect()`
-  - `_walk(items, parent_location)`
-- **class `BluetoothCollector(SnapshotCollector)`** (L926)
-  - fields: `slice`, `judge_fields`, `_GROUPS`, `_PAIRED_GROUPS`
-  - `collect()`
-- **class `WifiCollector(SnapshotCollector)`** (L964)
-  - fields: `slice`, `judge_fields`
-  - `collect()`
-- **class `LaunchItemsCollector(SnapshotCollector)`** (L991)
+- `_payload_bytes(parts) -> int` (L70) : Pull the payload length tcpdump prints for one packet (so flows
+- `_run_tcpdump(runner, cmd, timeout) -> tuple[str, Optional[str]]` (L86) : Return (stdout, default_iface) of one bounded tcpdump capture.
+
+#### `avai.host_monitor.collectors.persistence` · `avai/host_monitor/collectors/persistence.py` · 538 lines
+
+_Ways back in: launch items, systemd units and cron, SSH keys, the hosts_
+
+- **class `LaunchItemsCollector(SnapshotCollector)`** (L28)
   - fields: `slice`, `judge_fields`
   - `collect()`
   - `_row(scope, path)` `@staticmethod`
-- **class `QuarantineCollector(SnapshotCollector)`** (L1049)
-  - fields: `slice`, `judge_fields`, `_COLUMN_MAP`
-  - `collect()`
-- **class `BrowserExtensionsCollector(SnapshotCollector)`** (L1075)
-  - fields: `slice`, `judge_fields`
-  - `__init__(readers, default_reader, judge_hints, profiles)`
-  - `collect()`
-- **class `SystemIntegrityCollector(SnapshotCollector)`** (L1109)
-  - fields: `slice`, `judge_fields`, `_SERVICES`
-  - `__init__(judge_hints, services, ports, processes) -> None`
-  - `collect()`
-- **class `UnifiedLogAuthParser`** (L1198) : Strategy: macOS ``log stream --style ndjson`` event → auth row.
-  - `parse(event) -> dict`
-- **class `AuthEventsCollector(StreamingCollector)`** (L1214) : Tails the macOS unified log forever via ``log stream``. Each
-  - fields: `slice`, `judge_enabled`, `judge_fields`
-  - `__init__(predicate, judge_hints)`
-  - `stream(stop_event)`
-- **class `FileIntegrityCollector(SnapshotCollector)`** (L1242)
-  - fields: `slice`, `judge_fields`
-  - `__init__(watched, judge_hints)`
-  - `collect()`
-  - `_missing(p)` `@staticmethod`
-- **class `FileScanCollector(SnapshotCollector)`** (L1503) : Signature scanning: match YARA rules against a bounded set of
-  - fields: `slice`, `judge_fields`, `_SECONDS_PER_DAY`
-  - `__init__(judge_hints, fs, rules_dir, clock)`
-  - `_ruleset()`
-  - `collect()`
-  - `_targets()`
-  - `_recent_cutoff() -> float`
-  - `_scan_file(path, source, rules)`
-  - `_match_externals(path, st) -> dict` `@staticmethod`
-- **class `InstalledAppsCollector(SnapshotCollector)`** (L1675)
+- **class `LinuxLaunchItemsCollector(SnapshotCollector)`** (L86) : Linux equivalent of :class:`LaunchItemsCollector`.
   - fields: `slice`, `judge_fields`
   - `collect()`
-- **class `LinuxInstalledAppsCollector(SnapshotCollector)`** (L1706) : Linux equivalent of :class:`InstalledAppsCollector`. Sources:
-  - fields: `slice`, `judge_fields`, `_DPKG_FIELDS`
-  - `collect()`
-  - `_dpkg_rows()`
-  - `_desktop_rows()`
-- **class `LinuxLaunchItemsCollector(SnapshotCollector)`** (L1838) : Linux equivalent of :class:`LaunchItemsCollector`.
-  - fields: `slice`, `judge_fields`, `_UNIT_DIRS`, `_CRON_FILE`, `_CRON_DROP_INS`, `_USER_CRONS`, `_ALWAYS_RESTART`
-  - `collect()`
-  - `_unit_row(scope, path)` `@staticmethod`
-  - `_cron_rows(scope, path, has_user_col, default_user)` `@staticmethod`
-- **class `LinuxAuthEventsCollector(StreamingCollector)`** (L2122) : Linux equivalent of :class:`AuthEventsCollector`: tails
-  - fields: `slice`, `judge_enabled`, `judge_fields`, `_MATCH_GROUPS`
-  - `__init__(judge_hints, priority)`
-  - `_cmd() -> list[str]`
-  - `stream(stop_event)`
-- **class `JournalAuthParser`** (L2187) : Strategy: ``journalctl --output=json`` event → auth row.
-  - `parse(event) -> dict`
-- **class `LinuxUsbDevicesCollector(SnapshotCollector)`** (L2220) : Linux equivalent of :class:`UsbDevicesCollector`.
-  - fields: `slice`, `judge_fields`, `_ATTRS`
-  - `collect()`
-- **class `LinuxBluetoothCollector(SnapshotCollector)`** (L2281) : Linux equivalent of :class:`BluetoothCollector`.
-  - fields: `slice`, `judge_fields`
-  - `collect()`
-- **class `LinuxWifiCollector(SnapshotCollector)`** (L2346) : Linux equivalent of :class:`WifiCollector`.
-  - fields: `slice`, `judge_fields`
-  - `collect()`
-  - `_iw_link(iface) -> dict` `@staticmethod`
-- **class `LinuxSystemIntegrityCollector(SnapshotCollector)`** (L2420) : Linux equivalent of :class:`SystemIntegrityCollector`.
-  - fields: `slice`, `judge_fields`, `_SSH`, `_VNC_PORT`
-  - `__init__(judge_hints, services, ports, processes) -> None`
-  - `collect()`
-  - `_selinux_state() -> Optional[str]` `@staticmethod`
-  - `_apparmor_state() -> dict` `@staticmethod`
-  - `_ufw_active() -> bool` `@staticmethod`
-  - `_service_active(unit) -> bool` `@staticmethod`
-  - `_luks_count() -> int` `@staticmethod`
-- **class `MountsCollector(SnapshotCollector)`** (L2588) : Cross-platform mount-table snapshot via ``psutil.disk_partitions``.
-  - fields: `slice`, `judge_fields`
-  - `collect()`
-- **class `SetuidFilesCollector(SnapshotCollector)`** (L2625) : Enumerate setuid / setgid files in common executable directories.
-  - fields: `slice`, `judge_fields`
-  - `__init__(judge_hints, fs)`
-  - `collect()`
-- **class `SshAuthorizedKeysCollector(SnapshotCollector)`** (L2686) : Enumerate every key in every user's ``authorized_keys``: each one
+- **class `SystemdUnitReader`** (L127) : Launch-item rows for the systemd ``.service`` and ``.timer`` units.
+  - fields: `_UNIT_DIRS`, `_ALWAYS_RESTART`
+  - `rows() -> Iterable[dict]`
+  - `_unit_files(dir_str, pattern) -> Iterable[Path]` `@staticmethod`
+  - `unit_row(scope, path)` `@staticmethod`
+- **class `CrontabReader`** (L252) : Launch-item rows for cron: ``/etc/crontab``, the drop-ins in
+  - fields: `_CRON_FILE`, `_CRON_DROP_INS`, `_USER_CRONS`
+  - `rows() -> Iterable[dict]`
+  - `file_rows(scope, path, owner)` `@staticmethod`
+- **class `CronJob(NamedTuple)`** (L306)
+  - fields: `schedule: str`, `user: Optional[str]`, `command: str`, `_SCHEDULE_FIELDS`
+  - `parse(line, owner) -> Optional['CronJob']` `@classmethod`
+  - `fields(lineno) -> dict`
+- **class `SshAuthorizedKeysCollector(SnapshotCollector)`** (L375) : Enumerate every key in every user's ``authorized_keys``: each one
   - fields: `slice`, `judge_fields`, `_KEY_TYPES`
   - `__init__(judge_hints, fs)`
   - `collect()`
   - `_parse_authorized_keys(content, path, owner)` `@classmethod`
-- **class `HostsFileCollector(SnapshotCollector)`** (L2751) : Snapshot ``/etc/hosts``. A mapping that points a real domain at an
+- **class `HostsFileCollector(SnapshotCollector)`** (L440) : Snapshot ``/etc/hosts``. A mapping that points a real domain at an
   - fields: `slice`, `judge_fields`
   - `__init__(judge_hints, fs)`
   - `collect()`
   - `_parse_hosts(content, path)` `@staticmethod`
-- **class `PrivilegeConfigCollector(SnapshotCollector)`** (L2792) : Enumerate the host's privilege-granting configuration: sudoers
+- **class `PrivilegeConfigCollector(SnapshotCollector)`** (L481) : Enumerate the host's privilege-granting configuration: sudoers
   - fields: `slice`, `judge_fields`
   - `__init__(judge_hints, fs, accounts)`
   - `collect()`
   - `_sudoers()`
   - `_parse_sudoers(content, path)` `@staticmethod`
-- **class `MdmProfilesCollector(SnapshotCollector)`** (L2852) : macOS configuration profiles (MDM payloads). Unauthorized MDM
+- `_visible_files(d) -> list[Path]` (L363) : The regular, non-dot files directly in ``d``; [] when it is missing
+
+#### `avai.host_monitor.collectors.software` · `avai/host_monitor/collectors/software.py` · 482 lines
+
+_Installed software: apps and packages, browser extensions, downloads,_
+
+- **class `BrowserExtensionReader(ABC)`** (L27)
+  - `read(base, browser) -> Iterable[dict]` `@abstractmethod`
+- **class `ChromiumExtensionReader(BrowserExtensionReader)`** (L32)
+  - `read(base, browser)`
+- **class `FirefoxExtensionReader(BrowserExtensionReader)`** (L70)
+  - `read(base, browser)`
+- **class `QuarantineCollector(SnapshotCollector)`** (L101)
+  - fields: `slice`, `judge_fields`, `_COLUMN_MAP`
+  - `collect()`
+- **class `BrowserExtensionsCollector(SnapshotCollector)`** (L127)
   - fields: `slice`, `judge_fields`
+  - `__init__(readers, default_reader, judge_hints, profiles)`
+  - `collect()`
+- **class `InstalledAppsCollector(SnapshotCollector)`** (L161)
+  - fields: `slice`, `judge_fields`
+  - `collect()`
+- **class `LinuxInstalledAppsCollector(SnapshotCollector)`** (L192) : Linux equivalent of :class:`InstalledAppsCollector`. Sources:
+  - fields: `slice`, `judge_fields`, `_DPKG_FIELDS`
+  - `__init__(judge_hints, runner) -> None`
+  - `collect()`
+  - `_dpkg_rows()`
+  - `_desktop_rows()`
+- **class `MdmProfilesCollector(SnapshotCollector)`** (L318) : macOS configuration profiles (MDM payloads). Unauthorized MDM
+  - fields: `slice`, `judge_fields`
+  - `__init__(judge_hints, runner) -> None`
   - `collect()`
   - `_walk(items)` `@classmethod`
-- **class `KernelExtensionsCollector(SnapshotCollector)`** (L2902) : macOS kernel extensions (kexts). Apple has deprecated them in
+- **class `KernelExtensionsCollector(SnapshotCollector)`** (L374) : macOS kernel extensions (kexts). Apple has deprecated them in
+  - fields: `slice`, `judge_fields`
+  - `__init__(judge_hints, runner) -> None`
+  - `collect()`
+- **class `SystemExtensionsCollector(SnapshotCollector)`** (L441) : macOS System Extensions: the post-Catalina replacement for
   - fields: `slice`, `judge_fields`
   - `collect()`
-- **class `SystemExtensionsCollector(SnapshotCollector)`** (L2963) : macOS System Extensions: the post-Catalina replacement for
-  - fields: `slice`, `judge_fields`
-  - `collect()`
-- **class `MacosProcessExecCollector(StreamingCollector)`** (L3007) : Tails ``eslogger exec``: Apple's Endpoint-Security CLI, shipped
+
+#### `avai.host_monitor.collectors.streams` · `avai/host_monitor/collectors/streams.py` · 290 lines
+
+_Streaming collectors: auth events and process execs, tailed from the OS log._
+
+- **class `UnifiedLogAuthParser`** (L20) : Strategy: macOS ``log stream --style ndjson`` event → auth row.
+  - `parse(event) -> dict`
+- **class `AuthEventsCollector(StreamingCollector)`** (L36) : Tails the macOS unified log forever via ``log stream``. Each
+  - fields: `slice`, `judge_enabled`, `judge_fields`
+  - `__init__(predicate, judge_hints)`
+  - `stream(stop_event)`
+- **class `LinuxAuthEventsCollector(StreamingCollector)`** (L64) : Linux equivalent of :class:`AuthEventsCollector`: tails
+  - fields: `slice`, `judge_enabled`, `judge_fields`, `_MATCH_GROUPS`
+  - `__init__(judge_hints, priority)`
+  - `_cmd() -> list[str]`
+  - `stream(stop_event)`
+- **class `JournalAuthParser`** (L129) : Strategy: ``journalctl --output=json`` event → auth row.
+  - `parse(event) -> dict`
+- **class `MacosProcessExecCollector(StreamingCollector)`** (L162) : Tails ``eslogger exec``: Apple's Endpoint-Security CLI, shipped
   - fields: `slice`, `judge_enabled`, `judge_fields`, `_EVENTS`
   - `stream(stop_event)`
-- **class `EsloggerExecParser`** (L3033) : Strategy: macOS ``eslogger exec`` Endpoint-Security event → exec row.
+- **class `EsloggerExecParser`** (L188) : Strategy: macOS ``eslogger exec`` Endpoint-Security event → exec row.
   - `parse(event) -> dict`
-- **class `LinuxProcessExecCollector(StreamingCollector)`** (L3063) : Tails the Linux audit subsystem for ``execve`` events via
+- **class `LinuxProcessExecCollector(StreamingCollector)`** (L218) : Tails the Linux audit subsystem for ``execve`` events via
   - fields: `slice`, `judge_enabled`, `judge_fields`
   - `_cmd() -> list[str]`
   - `stream(stop_event)`
-- **class `AuditExecParser`** (L3096) : Strategy: Linux audit ``journalctl --output=json`` event → exec row.
+- **class `AuditExecParser`** (L251) : Strategy: Linux audit ``journalctl --output=json`` event → exec row.
   - `parse(event) -> dict`
-- **class `LogTailCollector(SnapshotCollector)`** (L3186) : Generic host log capture: a per-cycle snapshot of the most recent log
-  - fields: `slice`, `judge_enabled`, `MAX_JOURNAL_LINES`, `MAX_FILE_LINES`, `_TAIL_BYTES`, `_JOURNAL_TIMEOUT_S`, `_DEFAULT_FILES`
-  - `__init__(judge_hints, files)`
+
+#### `avai.host_monitor.collectors.system` · `avai/host_monitor/collectors/system.py` · 256 lines
+
+_Processes and host resources: the process table, CPU and memory meters,_
+
+- **class `ProcessCollector(SnapshotCollector)`** (L19)
+  - fields: `slice`, `judge_fields`, `_ATTRS`
+  - `__init__(judge_hints, metrics) -> None`
   - `collect()`
-  - `_journald()`
-  - `_parse_journal(line) -> Optional[dict]` `@staticmethod`
-  - `_tail_file(path_str)`
-- `_payload_bytes(parts) -> int` (L292) : Pull the payload length tcpdump prints for one packet (so flows
-- `_crypto_hint(exc) -> str` (L1285) : Append an actionable hint when a ruleset fails to compile because
-- `_file_type(path) -> str` (L1317) : Best-effort ``filetype`` external from leading magic bytes, using the
-- `_redact_one_match(identifier, offset, data) -> dict` (L1344) : Render one matched byte run for the judge: printable runs as ``text``,
-- `_redact_match_strings(match) -> list[dict]` (L1360) : A bounded, redacted view of the bytes a YARA match fired on.
-- `_rule_source(path, rules_dir) -> str` (L1395) : Label a rule file by where it came from: top-level files are
-- `_compile_yara_rules(rules_dir)` (L1405) : Compile every ``*.yar`` / ``*.yara`` under ``rules_dir`` into one
-- `_journal_us_to_iso(value) -> Optional[str]` (L3166) : journald ``__REALTIME_TIMESTAMP`` (microseconds since epoch) → ISO-8601
-- `_sniff_text_level(line) -> Optional[str]` (L3178)
+- **class `HostResourcesCollector(SnapshotCollector)`** (L64) : Aggregate resource meters (memory, swap, CPU, load, uptime, tasks) , 
+  - fields: `slice`, `judge_enabled`, `CPU_INTERVAL`
+  - `__init__(metrics, clock, judge_hints)`
+  - `collect()`
+  - `_cpu_aggregate(sample) -> dict` `@staticmethod`
+- **class `DiskUsageCollector(SnapshotCollector)`** (L173) : Per-filesystem capacity + best-effort per-device I/O counters: the
+  - fields: `slice`, `judge_enabled`
+  - `__init__(metrics, judge_hints)`
+  - `collect()`
+  - `_io_for(io, device)` `@staticmethod`
+- **class `MountsCollector(SnapshotCollector)`** (L222) : Cross-platform mount-table snapshot via ``psutil.disk_partitions``.
+  - fields: `slice`, `judge_fields`
+  - `__init__(judge_hints, disks)`
+  - `collect()`
 
 
 #### `avai.host_monitor.constants` · `avai/host_monitor/constants.py` · 281 lines
@@ -1938,7 +2040,7 @@ _Typed categorical enums shared across the monitor._
 - **class `Browser(StrEnum)`** (L47)
   - fields: `CHROME`, `CHROME_BETA`, `CHROMIUM`, `BRAVE`, `EDGE`, `ARC`, `VIVALDI`, `FIREFOX`
 
-#### `avai.host_monitor.exposure_collectors` · `avai/host_monitor/exposure_collectors.py` · 399 lines
+#### `avai.host_monitor.exposure_collectors` · `avai/host_monitor/exposure_collectors.py` · 410 lines
 
 _Network exposure & MITM-surface collectors (Tier 2)._
 
@@ -1955,32 +2057,35 @@ Constants: `_NET_FS`
 - **class `TrustedRootsCollector(_SourceSnapshotCollector)`** (L44)
   - fields: `slice`, `judge_fields`
 - **class `WhoParser`** (L54) : ``who`` → user / tty / source / login time. A trailing ``(host)`` is
+  - fields: `_MIN_COLUMNS`
   - `parse(text) -> list[dict]`
-- **class `MacosProxyParser`** (L88) : ``scutil --proxy`` key/value dump → one row per *enabled* proxy.
+- **class `MacosProxyParser`** (L90) : ``scutil --proxy`` key/value dump → one row per *enabled* proxy.
   - fields: `_TYPES`
   - `parse(text) -> list[dict]`
-- **class `MacosMountSharesParser`** (L133) : ``mount`` → network mounts only (``REMOTE on MOUNT (fstype, ...)``).
+- **class `MacosMountSharesParser`** (L135) : ``mount`` → network mounts only (``REMOTE on MOUNT (fstype, ...)``).
   - `parse(text) -> list[dict]`
-- **class `MacosPromiscParser`** (L159) : ``ifconfig`` flag lines → promiscuous bit per interface.
+- **class `MacosPromiscParser`** (L161) : ``ifconfig`` flag lines → promiscuous bit per interface.
   - `parse(text) -> list[dict]`
-- **class `MacosCertParser`** (L180) : ``security find-certificate -a -Z`` → (subject, sha256) per cert.
+- **class `MacosCertParser`** (L182) : ``security find-certificate -a -Z`` → (subject, sha256) per cert.
   - `parse(text) -> list[dict]`
-- **class `LinuxProxyEnvParser`** (L209) : ``/etc/environment`` proxy variables.
+- **class `LinuxProxyEnvParser`** (L211) : ``/etc/environment`` proxy variables.
   - fields: `_VARS`
   - `parse(text) -> list[dict]`
-- **class `ProcMountsSharesParser`** (L236) : ``/proc/mounts`` → network mounts only.
+- **class `ProcMountsSharesParser`** (L238) : ``/proc/mounts`` → network mounts only.
+  - fields: `_MIN_COLUMNS`
   - `parse(text) -> list[dict]`
-- **class `LinuxPromiscParser`** (L257) : ``ip link`` → promiscuous bit per interface (PROMISC in flags).
+- **class `LinuxPromiscParser`** (L261) : ``ip link`` → promiscuous bit per interface (PROMISC in flags).
   - `parse(text) -> list[dict]`
-- **class `LinuxTrustListParser`** (L281) : ``trust list`` (p11-kit) → one row per anchor label.
+- **class `LinuxTrustListParser`** (L285) : ``trust list`` (p11-kit) → one row per anchor label.
   - `parse(text) -> list[dict]`
-- **class `WindowsProxyParser`** (L306) : Internet Settings registry: ProxyEnable / ProxyServer / AutoConfigURL.
+- **class `WindowsProxyParser`** (L310) : Internet Settings registry: ProxyEnable / ProxyServer / AutoConfigURL.
   - `parse(text) -> list[dict]`
-- **class `WindowsSessionParser`** (L338) : ``query user`` columns (best-effort; layout is whitespace-aligned).
+- **class `WindowsSessionParser`** (L342) : ``query user`` columns (best-effort; layout is whitespace-aligned).
+  - fields: `_MIN_COLUMNS`, `_LOGIN_AT_COLUMNS`
   - `parse(text) -> list[dict]`
-- **class `WindowsSharesParser`** (L362) : ``Get-SmbConnection \| ConvertTo-Json``.
+- **class `WindowsSharesParser`** (L373) : ``Get-SmbConnection \| ConvertTo-Json``.
   - `parse(text) -> list[dict]`
-- **class `WindowsCertParser`** (L383) : ``Get-ChildItem Cert:\LocalMachine\Root \| ConvertTo-Json``.
+- **class `WindowsCertParser`** (L394) : ``Get-ChildItem Cert:\LocalMachine\Root \| ConvertTo-Json``.
   - `parse(text) -> list[dict]`
 
 
@@ -2073,7 +2178,7 @@ _The single platform-detection point._
 - **class `HostFactory`** (L17) : Resolve the host for the current (or a named) platform.
   - `create(system) -> Host` `@staticmethod`
 
-#### `avai.host_monitor.hosts.linux` · `avai/host_monitor/hosts/linux.py` · 317 lines
+#### `avai.host_monitor.hosts.linux` · `avai/host_monitor/hosts/linux.py` · 325 lines
 
 _Linux host: capability adapters + collector set._
 
@@ -2097,7 +2202,7 @@ _Linux host: capability adapters + collector set._
   - `snapshot_collectors(prompts) -> list[SnapshotCollector]`
   - `streaming_collectors(prompts) -> list[StreamingCollector]`
 
-#### `avai.host_monitor.hosts.macos` · `avai/host_monitor/hosts/macos.py` · 286 lines
+#### `avai.host_monitor.hosts.macos` · `avai/host_monitor/hosts/macos.py` · 294 lines
 
 _macOS host: capability adapters + collector set._
 
@@ -2386,7 +2491,7 @@ _Second-stage LLM that turns active findings into an incident digest._
   - `_clean_timeline(raw) -> list[dict]`
   - `_clean_actions(raw) -> list[dict]`
 
-#### `avai.host_monitor.net_collectors` · `avai/host_monitor/net_collectors.py` · 388 lines
+#### `avai.host_monitor.net_collectors` · `avai/host_monitor/net_collectors.py` · 397 lines
 
 _Network neighborhood & topology collectors (Tier 1)._
 
@@ -2406,30 +2511,33 @@ Constants: `_MAC_RE`
 - **class `MacosArpParser`** (L83) : ``arp -an`` → ``? (IP) at MAC on IFACE [flags] [ethernet]``.
   - `parse(text) -> list[dict]`
 - **class `MacosNdpParser`** (L122) : ``ndp -an`` columns: Neighbor LinklayerAddr Netif Expire St ...
+  - fields: `_MIN_COLUMNS`
   - `parse(text) -> list[dict]`
-- **class `MacosRouteParser`** (L147) : ``netstat -rn``: keep default routes and IP-next-hop routes; drop
+- **class `MacosRouteParser`** (L152) : ``netstat -rn``: keep default routes and IP-next-hop routes; drop
+  - fields: `_MIN_COLUMNS`
   - `parse(text) -> list[dict]`
   - `_is_route(dest, gw) -> bool` `@staticmethod`
-- **class `MacosDnsParser`** (L190) : ``scutil --dns``: one row per nameserver per resolver block.
+- **class `MacosDnsParser`** (L197) : ``scutil --dns``: one row per nameserver per resolver block.
   - `parse(text) -> list[dict]`
-- **class `IpNeighParser`** (L234) : ``ip neigh`` / ``ip -6 neigh``:
+- **class `IpNeighParser`** (L241) : ``ip neigh`` / ``ip -6 neigh``:
+  - fields: `_MIN_COLUMNS`
   - `__init__(state_key)`
   - `parse(text) -> list[dict]`
-- **class `IpRouteParser`** (L264) : ``ip route``: ``default via GW dev IFACE proto P`` /
+- **class `IpRouteParser`** (L273) : ``ip route``: ``default via GW dev IFACE proto P`` /
   - `parse(text) -> list[dict]`
-- **class `ResolvConfParser`** (L291) : ``/etc/resolv.conf`` nameserver/search lines.
+- **class `ResolvConfParser`** (L300) : ``/etc/resolv.conf`` nameserver/search lines.
   - `parse(text) -> list[dict]`
-- **class `PsNeighborParser`** (L324) : ``Get-NetNeighbor ... \| ConvertTo-Json`` objects.
+- **class `PsNeighborParser`** (L333) : ``Get-NetNeighbor ... \| ConvertTo-Json`` objects.
   - `__init__(state_key)`
   - `parse(text) -> list[dict]`
-- **class `PsRouteParser`** (L347) : ``Get-NetRoute \| ConvertTo-Json``. Keep default + real next-hop.
+- **class `PsRouteParser`** (L356) : ``Get-NetRoute \| ConvertTo-Json``. Keep default + real next-hop.
   - `parse(text) -> list[dict]`
-- **class `PsDnsParser`** (L370) : ``Get-DnsClientServerAddress \| ConvertTo-Json``: one row per server.
+- **class `PsDnsParser`** (L379) : ``Get-DnsClientServerAddress \| ConvertTo-Json``: one row per server.
   - `parse(text) -> list[dict]`
 - `_load_ps_json(text) -> list` (L27) : Normalise PowerShell ``ConvertTo-Json`` output (bare object for one
 
 
-#### `avai.host_monitor.persistence_collectors` · `avai/host_monitor/persistence_collectors.py` · 207 lines
+#### `avai.host_monitor.persistence_collectors` · `avai/host_monitor/persistence_collectors.py` · 216 lines
 
 _Host persistence / injection collectors (Tier 3)._
 
@@ -2440,20 +2548,22 @@ Constants: `_KNOWN_HOST_KEY_TYPES`
 - **class `KernelModulesCollector(_SourceSnapshotCollector)`** (L49)
   - fields: `slice`, `judge_fields`
 - **class `SshKnownHostsCollector(SnapshotCollector)`** (L54) : Enumerate every host pinned in each user's ``known_hosts``. Walks the
-  - fields: `slice`, `judge_fields`
+  - fields: `slice`, `judge_fields`, `_MIN_COLUMNS`
   - `__init__(judge_hints, fs)`
   - `collect()`
   - `_parse_known_hosts(content, path) -> list[dict]` `@classmethod`
-- **class `EnvValueParser`** (L107) : A single env var's value (e.g. ``launchctl getenv X``) → one row when
+- **class `EnvValueParser`** (L109) : A single env var's value (e.g. ``launchctl getenv X``) → one row when
   - `__init__(variable, scope)`
   - `parse(text) -> list[dict]`
-- **class `LdSoPreloadParser`** (L129) : ``/etc/ld.so.preload``: each listed library is force-preloaded.
+- **class `LdSoPreloadParser`** (L131) : ``/etc/ld.so.preload``: each listed library is force-preloaded.
   - `parse(text) -> list[dict]`
-- **class `WindowsAppInitParser`** (L150) : Registry ``AppInit_DLLs`` value (injected into every GUI process).
+- **class `WindowsAppInitParser`** (L152) : Registry ``AppInit_DLLs`` value (injected into every GUI process).
   - `parse(text) -> list[dict]`
-- **class `ProcModulesParser`** (L171) : ``/proc/modules``: ``name size refcount used_by state addr``.
+- **class `ProcModulesParser`** (L173) : ``/proc/modules``: ``name size refcount used_by state addr``.
+  - fields: `_MIN_COLUMNS`
   - `parse(text) -> list[dict]`
-- **class `WindowsDriverParser`** (L191) : ``driverquery /fo csv``: Module Name, Display Name, Driver Type.
+- **class `WindowsDriverParser`** (L195) : ``driverquery /fo csv``: Module Name, Display Name, Driver Type.
+  - fields: `_MIN_COLUMNS`
   - `parse(text) -> list[dict]`
 
 
@@ -2526,16 +2636,20 @@ _Data-coercion helpers used at the storage / serialization boundary._
   - `jsonable(obj) -> Any` `@staticmethod`
   - `enum(value, enum_cls, default)` `@staticmethod`
 
-#### `avai.host_monitor.runtime.command_runner` · `avai/host_monitor/runtime/command_runner.py` · 82 lines
+#### `avai.host_monitor.runtime.command_runner` · `avai/host_monitor/runtime/command_runner.py` · 109 lines
 
 _The single subprocess seam._
 
-- **class `CommandRunner`** (L18) : Run external commands and decode their output.
+- **class `CommandOutput(NamedTuple)`** (L18)
+  - fields: `stdout: str`, `stderr: str`, `timed_out: bool`
+- **class `CommandRunner`** (L24) : Run external commands and decode their output.
   - `exists(name) -> bool`
   - `json(cmd, timeout) -> Any`
   - `ndjson(cmd, timeout) -> Iterable[dict]`
   - `exit_code(cmd, timeout) -> Optional[int]`
   - `text(cmd, timeout) -> str`
+  - `capture(cmd, timeout) -> CommandOutput`
+- `_as_text(partial) -> str` (L105)
 
 #### `avai.host_monitor.runtime.digest` · `avai/host_monitor/runtime/digest.py` · 63 lines
 
@@ -2557,7 +2671,7 @@ _Host filesystem access, with container-path translation._
   - `read_sysfs(path, encoding) -> Optional[str]` `@staticmethod`
   - `read_plist(path) -> Optional[dict]` `@staticmethod`
 
-#### `avai.host_monitor.runtime.probes` · `avai/host_monitor/runtime/probes.py` · 372 lines
+#### `avai.host_monitor.runtime.probes` · `avai/host_monitor/runtime/probes.py` · 409 lines
 
 _Host-state probes: network connections and service liveness._
 
@@ -2565,7 +2679,9 @@ Constants: `_PSEUDO_FSTYPES`
 
 - **class `PsutilConnections`** (L54) : Thin safety wrapper over psutil's connection table.
   - `inet() -> list` `@staticmethod`
-- **class `SystemMetrics`** (L70) : Thin seam over psutil's system-wide resource readings (memory, swap,
+  - `listening() -> list` `@classmethod`
+  - `process_name(pid) -> Optional[str]` `@staticmethod`
+- **class `SystemMetrics`** (L83) : Thin seam over psutil's system-wide resource readings (memory, swap,
   - `virtual_memory()`
   - `swap_memory()`
   - `cpu_sample(interval) -> list`
@@ -2573,38 +2689,43 @@ Constants: `_PSEUDO_FSTYPES`
   - `cpu_count() -> tuple[Optional[int], Optional[int]]`
   - `boot_time() -> float`
   - `task_counts() -> dict`
-- **class `DiskMetrics`** (L127) : Thin seam over psutil's filesystem + disk-I/O readings (the ``df``
+  - `process_table(attrs) -> Iterable[dict]`
+  - `net_if_addrs() -> dict`
+  - `net_if_stats() -> dict`
+  - `net_io_counters() -> dict`
+- **class `DiskMetrics`** (L156) : Thin seam over psutil's filesystem + disk-I/O readings (the ``df``
   - `__init__(rootfs) -> None`
   - `_rootfs() -> Optional[str]`
   - `partitions() -> list`
+  - `mount_table() -> list`
   - `usage(mountpoint)`
   - `io_counters() -> dict`
-- **class `ServiceManager(Protocol)`** (L290) : Whether a managed service is *enabled* (configured to be reachable),
+- **class `ServiceManager(Protocol)`** (L327) : Whether a managed service is *enabled* (configured to be reachable),
   - `enabled(unit) -> Optional[int]`
-- **class `PortInspector(Protocol)`** (L297) : Socket-level posture/behaviour: is something listening on a port
+- **class `PortInspector(Protocol)`** (L334) : Socket-level posture/behaviour: is something listening on a port
   - `listening(port) -> Optional[int]`
   - `established(port) -> Optional[int]`
-- **class `ProcessInspector(Protocol)`** (L305) : Whether a process with an exact name is running (behaviour signal).
+- **class `ProcessInspector(Protocol)`** (L342) : Whether a process with an exact name is running (behaviour signal).
   - `running(name) -> Optional[int]`
-- **class `LaunchdServiceManager`** (L311) : macOS: a system-domain launchd job is enabled when it's bootstrapped
+- **class `LaunchdServiceManager`** (L348) : macOS: a system-domain launchd job is enabled when it's bootstrapped
   - `__init__(runner) -> None`
   - `enabled(unit) -> Optional[int]`
-- **class `SystemdServiceManager`** (L324) : Linux: ``systemctl is-enabled <unit>`` exits 0 for enabled/static.
+- **class `SystemdServiceManager`** (L361) : Linux: ``systemctl is-enabled <unit>`` exits 0 for enabled/static.
   - `__init__(runner) -> None`
   - `enabled(unit) -> Optional[int]`
-- **class `PsutilPortInspector`** (L335) : Cross-platform port posture/behaviour from the psutil connection table
+- **class `PsutilPortInspector`** (L372) : Cross-platform port posture/behaviour from the psutil connection table
   - `__init__(connections) -> None`
   - `_count(port, status) -> Optional[int]`
   - `listening(port) -> Optional[int]`
   - `established(port) -> Optional[int]`
-- **class `PsutilProcessInspector`** (L361) : Cross-platform exact-name process check (one implementation for every
+- **class `PsutilProcessInspector`** (L398) : Cross-platform exact-name process check (one implementation for every
   - `running(name) -> Optional[int]`
-- `_unescape_mount_field(field) -> str` (L193) : Decode the octal escapes (\040 space, \011 tab, \012 nl, \134 \\)
-- `_parse_mounts(text) -> list` (L209) : Parse /proc/mounts content into ``_HostPart`` rows, dropping pseudo
-- `_host_partitions(rootfs) -> list` (L232) : Read the host's mount table. With ``pid: host`` the container's
-- `_join_rootfs(rootfs, mountpoint) -> str` (L246) : Resolve a host mountpoint to its path under the rootfs mount.
-- `_statvfs_usage(path) -> '_HostUsage'` (L257) : ``statvfs``-based usage matching psutil.disk_usage semantics: ``free``
-- `tri_or() -> Optional[int]` (L272) : Tri-state OR over 1/0/None signals: 1 if any signal is on, else 0 if
+- `_unescape_mount_field(field) -> str` (L230) : Decode the octal escapes (\040 space, \011 tab, \012 nl, \134 \\)
+- `_parse_mounts(text) -> list` (L246) : Parse /proc/mounts content into ``_HostPart`` rows, dropping pseudo
+- `_host_partitions(rootfs) -> list` (L269) : Read the host's mount table. With ``pid: host`` the container's
+- `_join_rootfs(rootfs, mountpoint) -> str` (L283) : Resolve a host mountpoint to its path under the rootfs mount.
+- `_statvfs_usage(path) -> '_HostUsage'` (L294) : ``statvfs``-based usage matching psutil.disk_usage semantics: ``free``
+- `tri_or() -> Optional[int]` (L309) : Tri-state OR over 1/0/None signals: 1 if any signal is on, else 0 if
 
 #### `avai.host_monitor.runtime.row_source` · `avai/host_monitor/runtime/row_source.py` · 81 lines
 
