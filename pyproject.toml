@@ -155,7 +155,6 @@ max-args = 5
 "src/avai/enrichers/sources/ipwhois_geo.py" = ["PLR2004"]
 "src/avai/enrichers/sources/malware_bazaar.py" = ["PLR2004"]
 "src/avai/enrichers/sources/nvd.py" = ["PLR2004"]
-"src/avai/enrichers/sources/osv.py" = ["C901", "PLR2004"]
 "src/avai/enrichers/sources/phishtank.py" = ["PLR2004"]
 "src/avai/enrichers/sources/safe_browsing.py" = ["PLR2004"]
 "src/avai/enrichers/sources/shodan_internetdb.py" = ["PLR2004"]

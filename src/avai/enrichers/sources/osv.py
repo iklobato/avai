@@ -7,6 +7,7 @@ https://osv.dev/docs/
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -20,6 +21,8 @@ from avai.enrichers.http import HttpClient
 
 _QUERY = "https://api.osv.dev/v1/query"
 _VULN = "https://api.osv.dev/v1/vulns"
+# Only the first few advisories are listed in the evidence.
+_MAX_LISTED_VULNS = 5
 
 
 # Heuristic ecosystem mapping. avai's `installed_apps` collector
@@ -43,43 +46,13 @@ class OSVEnricher(Enricher):
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         if indicator.type is IndicatorType.CVE:
-            # id lookups use GET /v1/vulns/{id}; POST /v1/query rejects a
-            # top-level {"id": ...} with HTTP 400 (verified against the API).
-            resp = self._http.get(f"{_VULN}/{indicator.value.upper()}")
-            if resp.status_code == 404:
-                return None
-            if resp.status_code != 200:
-                return None
-            vulns = [resp.json()]
+            vulns = self._vuln_by_id(indicator.value)
         else:
-            # PACKAGE is "<name>@<version>". Either piece may be missing.
-            name, _, version = indicator.value.partition("@")
-            if not name:
-                return None
-            pkg = {"name": name}
-            ecosystem = _ecosystem_for(name)
-            if ecosystem:
-                pkg["ecosystem"] = ecosystem
-            payload = {"package": pkg}
-            if version:
-                payload["version"] = version
-            resp = self._http.post(_QUERY, json=payload)
-            if resp.status_code != 200:
-                return None
-            vulns = resp.json().get("vulns") or []
+            vulns = self._vulns_for_package(indicator.value)
         if not vulns:
             return None
-        # Collect each vuln's primary id AND its aliases. OSV's primary
-        # id is often a GHSA-/PYSEC-/OSV- id with the CVE only in aliases;
-        # the chain forward-enriches CVE-/GHSA- ids (CVSS, KEV), so a
-        # CVE buried in aliases must be surfaced or that stage never runs.
-        seen: set[str] = set()
-        ids: list[str] = []
-        for v in vulns[:5]:
-            for cand in (v.get("id"), *(v.get("aliases") or [])):
-                if cand and cand not in seen:
-                    seen.add(cand)
-                    ids.append(cand)
+        listed = vulns[:_MAX_LISTED_VULNS]
+        ids = _advisory_ids(listed)
         # Treat severity-tagged vulns as suspicious. Without severity
         # data we still report — better signal than silence.
         return Evidence(
@@ -89,5 +62,39 @@ class OSVEnricher(Enricher):
             confidence   = 0.75,
             summary      = f"OSV: {len(vulns)} advisory hit(s): {','.join(ids)}",
             details      = {"vuln_ids": ids,
-                            "summaries": [v.get("summary") for v in vulns[:5]]},
+                            "summaries": [v.get("summary") for v in listed]},
         )
+
+    def _vuln_by_id(self, vuln_id: str) -> list[dict]:
+        # id lookups use GET /v1/vulns/{id}; POST /v1/query rejects a
+        # top-level {"id": ...} with HTTP 400 (verified against the API).
+        resp = self._http.get(f"{_VULN}/{vuln_id.upper()}")
+        if resp.status_code != HTTPStatus.OK:
+            return []
+        return [resp.json()]
+
+    def _vulns_for_package(self, package: str) -> list[dict]:
+        # PACKAGE is "<name>@<version>". Either piece may be missing.
+        name, _, version = package.partition("@")
+        if not name:
+            return []
+        pkg = {"name": name}
+        ecosystem = _ecosystem_for(name)
+        if ecosystem:
+            pkg["ecosystem"] = ecosystem
+        payload = {"package": pkg}
+        if version:
+            payload["version"] = version
+        resp = self._http.post(_QUERY, json=payload)
+        if resp.status_code != HTTPStatus.OK:
+            return []
+        return resp.json().get("vulns") or []
+
+
+def _advisory_ids(vulns: list[dict]) -> list[str]:
+    """Each vuln's primary id AND its aliases, deduplicated. OSV's primary
+    id is often a GHSA-/PYSEC-/OSV- id with the CVE only in aliases; the
+    chain forward-enriches CVE-/GHSA- ids (CVSS, KEV), so a CVE buried in
+    aliases must be surfaced or that stage never runs."""
+    ids = (cand for v in vulns for cand in (v.get("id"), *(v.get("aliases") or [])))
+    return list(dict.fromkeys(cand for cand in ids if cand))

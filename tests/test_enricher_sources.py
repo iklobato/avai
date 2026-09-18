@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from avai.enrichers.base import Indicator, IndicatorType, VerdictHint
 
 # ---------------------------------------------------------------------------
@@ -428,6 +430,52 @@ class TestOSV:
         vuln_ids = ev.details["vuln_ids"]
         assert "CVE-2024-9999" in vuln_ids  # alias surfaced
         assert "GHSA-1234-aaaa-bbbb" in vuln_ids  # primary id kept
+
+    @pytest.mark.parametrize(
+        "value,payload",
+        [
+            ("openssl@1.0.0", {"package": {"name": "openssl"}, "version": "1.0.0"}),
+            ("openssl", {"package": {"name": "openssl"}}),
+            (
+                "pip@24.0",
+                {"package": {"name": "pip", "ecosystem": "PyPI"}, "version": "24.0"},
+            ),
+        ],
+    )
+    def test_package_query_payload(self, value, payload):
+        http = _FakeHttp(_FakeResp(json_body={"vulns": []}))
+        self._enricher(http)._fetch(Indicator(IndicatorType.PACKAGE, value))
+        assert http.calls == [
+            ("POST", "https://api.osv.dev/v1/query", {"json": payload})
+        ]
+
+    def test_package_without_name_is_not_queried(self):
+        http = _FakeHttp(_FakeResp(json_body={"vulns": [{"id": "X"}]}))
+        ev = self._enricher(http)._fetch(Indicator(IndicatorType.PACKAGE, "@1.0"))
+        assert ev is None
+        assert http.calls == []
+
+    @pytest.mark.parametrize("status", [404, 500])
+    @pytest.mark.parametrize(
+        "indicator",
+        [
+            Indicator(IndicatorType.CVE, "CVE-2024-1"),
+            Indicator(IndicatorType.PACKAGE, "pkg@1.0"),
+        ],
+    )
+    def test_non_ok_status_returns_none(self, status, indicator):
+        body = {"id": "CVE-2024-1", "vulns": [{"id": "CVE-2024-1"}]}
+        http = _FakeHttp(_FakeResp(status=status, json_body=body))
+        assert self._enricher(http)._fetch(indicator) is None
+
+    def test_ids_are_deduped_across_the_first_five_vulns(self):
+        vulns = [{"id": f"GHSA-{n}", "aliases": ["CVE-2024-1"]} for n in range(7)]
+        http = _FakeHttp(_FakeResp(json_body={"vulns": vulns}))
+        ev = self._enricher(http)._fetch(Indicator(IndicatorType.PACKAGE, "pkg@1.0"))
+        expected = ["GHSA-0", "CVE-2024-1", "GHSA-1", "GHSA-2", "GHSA-3", "GHSA-4"]
+        assert ev.details["vuln_ids"] == expected
+        assert len(ev.details["summaries"]) == 5
+        assert ev.summary.startswith("OSV: 7 advisory hit(s): ")
 
 
 # ---------------------------------------------------------------------------
