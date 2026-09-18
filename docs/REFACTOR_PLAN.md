@@ -600,6 +600,57 @@ of the whole `avai` package on the full suite is 92%.
 Acceptance: the ignore list is gone, the layering test is green, coverage is
 at least 85%, and `docs/ARCHITECTURE.md` is regenerated.
 
+Done on `refactor/p10-facades` in seven commits.
+
+- The last 22 `PLR2004` entries went by naming each value: `HTTPStatus`
+  members in the enrichment sources and `http.py`, `CVSS_CRITICAL` and
+  `CVSS_HIGH` in `enrichers/base.py` (shared by NVD and GitHub Advisory),
+  the AbuseIPDB and VirusTotal verdict thresholds, the field counts in the
+  host parsers, `_MAX_HOSTNAME_LEN` and `_FORCE_QUIT_SIGNALS`. PhishTank's
+  509 stays a named constant, because `HTTPStatus` has no member for it.
+  No behaviour change.
+- `compute_risk_score` (mccabe 16) reads the seven integrity fields from
+  two tables and the four counted findings from one loop over their
+  `RISK_WEIGHTS` prefix. A new test pins every driver, its points and
+  their order, and it passes on the old code. The `count > 0` guard was
+  an equivalent mutant (a zero count gives zero points, which `penalise`
+  already skips) and is gone. The other 6 deliberate breaks turned the
+  test red, and so did dropping `points > 0` once the count guard was
+  gone.
+- `JsonLineStreamSource.stream` (mccabe 11) only wires three module
+  functions: the stop watchdog, the line decoder and the terminate/kill
+  shutdown. The blank-line check was an equivalent mutant (`json.loads`
+  rejects an empty line, and the decoder already skips that) and is gone.
+  4 new shutdown tests; 7 deliberate breaks turned a test red.
+- That emptied the `src/` ignore list. `pyproject.toml` keeps the rules
+  and the exemption for tests, tools, scripts and packaging, which compare
+  against literal expected values by design.
+- Every test imports from the submodule that defines the name (127 import
+  statements across 21 files). `host_monitor/__init__.py` went from 161
+  exported names to 44 (the ORM rows the dashboard and
+  `tools/seed_demo_db.py` read, `Sink`, `FeedbackLabel`, `main`,
+  `DEFAULT_DB_PATH`) and from 328 lines to 103. `dashboard/__init__.py`
+  went from 86 names to 4 (`create_app`, `DashboardConfig`, `main`,
+  `_ensure_db_exists`) and from 214 lines to 19. The entry points still
+  load the same 81 `avai` modules, so PyInstaller's static import walk
+  finds everything it found before.
+
+Deviation: `_ensure_db_exists` keeps its leading underscore while the
+desktop app imports it through the facade. Making it public means renaming
+it in 20 test lines and the docs, which is a rename for its own sake.
+
+Found on the way: under `pytest-cov` with a subpackage target
+(`--cov=avai.host_monitor.runtime`), every child Python a test starts
+takes about 29 s to boot, and two `CommandRunner` tests with a 10 s
+timeout fail. With `--cov=avai` the same child takes about 1 s. It is a
+measurement artifact, not a code bug: measure with `--cov=avai` and read
+the subpackage rows.
+
+The layering test is green. 1127 tests pass; line coverage of the whole
+`avai` package on the full suite is 92% (floor 85%). `ruff check` passes
+on `src`, `tests` and `tools`. The appendix of `docs/ARCHITECTURE.md` is
+regenerated from the code (122 modules, 0 mismatches).
+
 ## Order and why
 
 `0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10`

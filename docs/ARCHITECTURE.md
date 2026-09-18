@@ -104,7 +104,7 @@ src/avai/
 ├── static/vendor/              htmx, tailwind (Play build), chart.js
 ├── migrations/                 Alembic env + 12 versioned migrations
 ├── host_monitor/               THE ENGINE
-│   ├── __init__.py             facade: re-exports the public API
+│   ├── __init__.py             facade: ORM rows, Sink, main, DEFAULT_DB_PATH
 │   ├── main.py                 `avai monitor` argparse + LlmStages + build_runner() + main()
 │   ├── runner.py               RunnerConfig, CollectionCycle (one scan), Runner (thin coordinator)
 │   ├── finding_stages.py       FindingBatch, HostBaseline, the 7 finding stages, FindingPipeline
@@ -143,7 +143,7 @@ src/avai/
 │   ├── indicators.py           IndicatorExtractor + 18 extractors over 19 collectors + dispatch table
 │   └── sources/                19 concrete Enricher subclasses, one file per external API
 └── dashboard/                  read-only Flask + HTMX UI
-    ├── __init__.py             facade
+    ├── __init__.py             facade: create_app, DashboardConfig, main
     ├── app.py                  create_app(DashboardConfig): CSP headers, filters, services, blueprints
     ├── config.py               DashboardConfig (db path, control token / open mode, app mode, query log)
     ├── db.py                   the two SQLite engines (read-only mode=ro, writable WAL) + query log hook
@@ -230,7 +230,9 @@ graph TD
 - `enrichers/sources/*` depend only on `base` and `http`; `registry` and `chain` are the only modules that know every source.
 - `host_monitor` imports `enrichers` at module level. `requests` loads on every boot anyway, because
   `Sink.setup()` registers the `enrichers.cache` tables.
-- Each package `__init__.py` is a thin facade; callers write `from avai.host_monitor import X`.
+- The `host_monitor` and `dashboard` facades re-export only what code outside the package imports
+  (the dashboard reads the ORM rows through `avai.host_monitor`). Tests and everything else import
+  from the submodule that defines the name.
 
 ---
 
@@ -1621,27 +1623,27 @@ Constants: `_HERE`, `_SCRIPT_LOCATION`, `_BASELINE`
 - `_config(db_url)` (L19)
 - `upgrade_to_head(db_url) -> None` (L28) : Apply all pending migrations to ``db_url``.
 
-#### `avai.hostsfile` · `avai/hostsfile.py` · 331 lines
+#### `avai.hostsfile` · `avai/hostsfile.py` · 332 lines
 
 _Map ``avai.local`` (or any name) onto loopback in the OS hosts file so the_
 
-Constants: `DASHBOARD_HOSTNAME`, `LOOPBACK_IPV4`, `LOOPBACK_IPV6`, `LOOPBACK_ADDRESSES`, `_BLOCK_BEGIN`, `_BLOCK_END`, `_BLOCK_NOTE`, `_LABEL`, `_HOSTNAME_RE`
+Constants: `DASHBOARD_HOSTNAME`, `LOOPBACK_IPV4`, `LOOPBACK_IPV6`, `LOOPBACK_ADDRESSES`, `_BLOCK_BEGIN`, `_BLOCK_END`, `_BLOCK_NOTE`, `_LABEL`, `_HOSTNAME_RE`, `_MAX_HOSTNAME_LEN`
 
-- **class `HostsError(RuntimeError)`** (L59) : Base class for hosts-file management failures.
-- **class `UnsupportedPlatformError(HostsError)`** (L63)
+- **class `HostsError(RuntimeError)`** (L60) : Base class for hosts-file management failures.
+- **class `UnsupportedPlatformError(HostsError)`** (L64)
   - `__init__(system) -> None`
-- **class `HostsPermissionError(HostsError)`** (L69) : The hosts file exists but can't be written without more privilege.
+- **class `HostsPermissionError(HostsError)`** (L70) : The hosts file exists but can't be written without more privilege.
   - `__init__(path, hint) -> None`
-- **class `Platform(Protocol)`** `@runtime_checkable` (L79) : OS-varying hosts-file facts the registrar depends on (DIP).
+- **class `Platform(Protocol)`** `@runtime_checkable` (L80) : OS-varying hosts-file facts the registrar depends on (DIP).
   - `hosts_path() -> Path`
   - `elevation_hint(path) -> str`
-- **class `_PosixPlatform`** (L91) : macOS and Linux: ``/etc/hosts``, writable by root.
+- **class `_PosixPlatform`** (L92) : macOS and Linux: ``/etc/hosts``, writable by root.
   - `hosts_path() -> Path`
   - `elevation_hint(path) -> str`
-- **class `_WindowsPlatform`** (L101) : Windows: ``%SystemRoot%\System32\drivers\etc\hosts``, writable by
+- **class `_WindowsPlatform`** (L102) : Windows: ``%SystemRoot%\System32\drivers\etc\hosts``, writable by
   - `hosts_path() -> Path`
   - `elevation_hint(path) -> str`
-- **class `HostsTable`** `@dataclass(frozen=True)` (L139) : An I/O-free view of a hosts file's text.
+- **class `HostsTable`** `@dataclass(frozen=True)` (L140) : An I/O-free view of a hosts file's text.
   - fields: `text: str`
   - `resolves(hostname) -> bool`
   - `with_mapping(hostname, ips) -> 'HostsTable'`
@@ -1650,9 +1652,9 @@ Constants: `DASHBOARD_HOSTNAME`, `LOOPBACK_IPV4`, `LOOPBACK_IPV6`, `LOOPBACK_ADD
   - `_split_block() -> tuple[list[str], list[str], list[str]]`
   - `_block_entries() -> dict[str, list[str]]`
   - `_rewrite(entries) -> str`
-- **class `Outcome(Enum)`** (L216)
+- **class `Outcome(Enum)`** (L217)
   - fields: `CREATED`, `REMOVED`, `UNCHANGED`, `NEEDS_PRIVILEGE`
-- **class `HostsRegistrar`** (L267) : Read → transform → atomic-write the hosts file through a ``Platform``.
+- **class `HostsRegistrar`** (L268) : Read → transform → atomic-write the hosts file through a ``Platform``.
   - `__init__(platform_) -> None`
   - `for_current_platform() -> 'HostsRegistrar'` `@classmethod`
   - `hosts_path() -> Path` `@property`
@@ -1662,15 +1664,15 @@ Constants: `DASHBOARD_HOSTNAME`, `LOOPBACK_IPV4`, `LOOPBACK_IPV6`, `LOOPBACK_ADD
   - `ensure_reachable(hostname, ips) -> Outcome`
   - `_read() -> HostsTable`
   - `_write(text) -> None`
-- `resolve_platform(system) -> Platform` (L115) : Select the hosts-file strategy for the current (or a named) OS.
-- `_entry_hostnames(line) -> list[str]` (L129) : Hostnames declared by an active (non-comment) hosts line; ``[]`` for
-- `_validate_hostname(hostname) -> None` (L223)
-- `_atomic_write(path, text) -> None` (L228) : Write ``text`` to ``path`` via a same-directory temp file + ``os.replace``
+- `resolve_platform(system) -> Platform` (L116) : Select the hosts-file strategy for the current (or a named) OS.
+- `_entry_hostnames(line) -> list[str]` (L130) : Hostnames declared by an active (non-comment) hosts line; ``[]`` for
+- `_validate_hostname(hostname) -> None` (L224)
+- `_atomic_write(path, text) -> None` (L229) : Write ``text`` to ``path`` via a same-directory temp file + ``os.replace``
 
 ### A.2 host_monitor (engine)
 
 
-#### `avai.host_monitor` · `avai/host_monitor/__init__.py` · 328 lines
+#### `avai.host_monitor` · `avai/host_monitor/__init__.py` · 103 lines
 
 _avai.host_monitor: package facade._
 
@@ -2202,11 +2204,13 @@ _The single platform-detection point._
 - **class `HostFactory`** (L17) : Resolve the host for the current (or a named) platform.
   - `create(system) -> Host` `@staticmethod`
 
-#### `avai.host_monitor.hosts.linux` · `avai/host_monitor/hosts/linux.py` · 325 lines
+#### `avai.host_monitor.hosts.linux` · `avai/host_monitor/hosts/linux.py` · 330 lines
 
 _Linux host: capability adapters + collector set._
 
-- **class `LinuxFilesystemLayout`** (L75) : Linux filesystem facts. Absolute paths pass through ``host_path``
+Constants: `_GROUP_FIELDS`, `_PASSWD_FIELDS`
+
+- **class `LinuxFilesystemLayout`** (L80) : Linux filesystem facts. Absolute paths pass through ``host_path``
   - fields: `_BIN_DIRS`
   - `privileged_bin_dirs() -> list[Path]`
   - `app_executables() -> list[Path]`
@@ -2215,13 +2219,13 @@ _Linux host: capability adapters + collector set._
   - `sudoers_file() -> Path`
   - `sudoers_dir() -> Path`
   - `tcpdump_interface_args() -> list[str]`
-- **class `LinuxPrivilegedAccounts`** (L125) : Linux privileged-account state parsed from ``/etc/group`` and
+- **class `LinuxPrivilegedAccounts`** (L130) : Linux privileged-account state parsed from ``/etc/group`` and
   - fields: `_PRIV_GROUPS`
   - `privileged_group_members() -> Iterable[dict]`
   - `uid0_accounts() -> Iterable[dict]`
   - `_parse_groups(content, path, priv_groups) -> list[dict]` `@staticmethod`
   - `_parse_passwd_uid0(content, path) -> list[dict]` `@staticmethod`
-- **class `LinuxHost`** (L188) : Composition root for Linux. Drops macOS-only slices (quarantine
+- **class `LinuxHost`** (L193) : Composition root for Linux. Drops macOS-only slices (quarantine
   - `__init__() -> None`
   - `snapshot_collectors(prompts) -> list[SnapshotCollector]`
   - `streaming_collectors(prompts) -> list[StreamingCollector]`
@@ -2249,13 +2253,13 @@ _macOS host: capability adapters + collector set._
   - `snapshot_collectors(prompts) -> list[SnapshotCollector]`
   - `streaming_collectors(prompts) -> list[StreamingCollector]`
 
-#### `avai.host_monitor.hosts.windows` · `avai/host_monitor/hosts/windows.py` · 907 lines
+#### `avai.host_monitor.hosts.windows` · `avai/host_monitor/hosts/windows.py` · 909 lines
 
 _Windows host: capability adapters, Windows-native collectors, and the_
 
-Constants: `_NONEXISTENT`
+Constants: `_NONEXISTENT`, `_SCHTASKS_MIN_COLUMNS`
 
-- **class `WindowsFilesystemLayout`** (L83) : Windows filesystem facts.
+- **class `WindowsFilesystemLayout`** (L85) : Windows filesystem facts.
   - `privileged_bin_dirs() -> list[Path]`
   - `app_executables() -> list[Path]`
   - `home_dirs() -> list[Path]`
@@ -2263,59 +2267,59 @@ Constants: `_NONEXISTENT`
   - `sudoers_file() -> Path`
   - `sudoers_dir() -> Path`
   - `tcpdump_interface_args() -> list[str]`
-- **class `WindowsPrivilegedAccounts`** (L125) : Local Administrators membership via ``net localgroup``. Windows has
+- **class `WindowsPrivilegedAccounts`** (L127) : Local Administrators membership via ``net localgroup``. Windows has
   - `__init__(runner) -> None`
   - `privileged_group_members() -> Iterable[dict]`
   - `uid0_accounts() -> Iterable[dict]`
   - `_parse_localgroup(text) -> list[str]` `@staticmethod`
-- **class `WindowsInstalledAppsCollector(SnapshotCollector)`** (L170) : Installed programs from the registry Uninstall keys, read as JSON
+- **class `WindowsInstalledAppsCollector(SnapshotCollector)`** (L172) : Installed programs from the registry Uninstall keys, read as JSON
   - fields: `slice`, `judge_fields`, `_PS`
   - `__init__(runner, judge_hints)`
   - `collect()`
   - `_rows_from_json(data) -> list[dict]` `@staticmethod`
-- **class `WindowsLaunchItemsCollector(SnapshotCollector)`** (L224) : Autostart persistence: registry Run keys (HKLM + HKCU) plus
+- **class `WindowsLaunchItemsCollector(SnapshotCollector)`** (L226) : Autostart persistence: registry Run keys (HKLM + HKCU) plus
   - fields: `slice`, `judge_fields`, `_RUN_PS`
   - `__init__(runner, judge_hints)`
   - `collect()`
   - `_rows_from_run_keys(data) -> list[dict]` `@staticmethod`
   - `_rows_from_schtasks(text) -> list[dict]` `@staticmethod`
-- **class `WindowsSystemIntegrityCollector(SnapshotCollector)`** (L333) : Windows security posture mapped into the macOS-shaped
+- **class `WindowsSystemIntegrityCollector(SnapshotCollector)`** (L335) : Windows security posture mapped into the macOS-shaped
   - fields: `slice`, `judge_fields`, `_PS`
   - `__init__(runner, judge_hints)`
   - `collect()`
   - `_row_from_status(data) -> Optional[dict]` `@staticmethod`
-- **class `WindowsUsbDevicesCollector(SnapshotCollector)`** (L435) : Present USB devices via ``Get-PnpDevice -Class USB``. Vendor/product
+- **class `WindowsUsbDevicesCollector(SnapshotCollector)`** (L437) : Present USB devices via ``Get-PnpDevice -Class USB``. Vendor/product
   - fields: `slice`, `judge_fields`, `_PS`
   - `__init__(runner, judge_hints)`
   - `collect()`
   - `_rows_from_json(data) -> list[dict]` `@staticmethod`
   - `_ids_from_instance(instance) -> tuple[Optional[str], Optional[str]]` `@staticmethod`
-- **class `WindowsBluetoothCollector(SnapshotCollector)`** (L499) : Present Bluetooth devices via ``Get-PnpDevice -Class Bluetooth``.
+- **class `WindowsBluetoothCollector(SnapshotCollector)`** (L501) : Present Bluetooth devices via ``Get-PnpDevice -Class Bluetooth``.
   - fields: `slice`, `judge_fields`, `_PS`
   - `__init__(runner, judge_hints)`
   - `collect()`
   - `_rows_from_json(data) -> list[dict]` `@staticmethod`
   - `_addr_from_instance(instance) -> Optional[str]` `@staticmethod`
-- **class `WindowsWifiCollector(SnapshotCollector)`** (L557) : Wireless interface state via ``netsh wlan show interfaces`` (text,
+- **class `WindowsWifiCollector(SnapshotCollector)`** (L559) : Wireless interface state via ``netsh wlan show interfaces`` (text,
   - fields: `slice`, `judge_fields`
   - `__init__(runner, judge_hints)`
   - `collect()`
   - `_rows_from_netsh(text) -> list[dict]` `@staticmethod`
   - `_row(block) -> dict` `@staticmethod`
-- **class `WinSecurityAuthParser`** (L607) : Strategy: a Windows Security-log event (as emitted by the
+- **class `WinSecurityAuthParser`** (L609) : Strategy: a Windows Security-log event (as emitted by the
   - `parse(event) -> dict`
-- **class `WinSecurityExecParser`** (L632) : Strategy: a Windows 4688 process-creation event (with its
+- **class `WinSecurityExecParser`** (L634) : Strategy: a Windows 4688 process-creation event (with its
   - `parse(event) -> dict`
   - `_pid(value) -> Optional[int]` `@staticmethod`
-- **class `WindowsAuthEventsCollector(StreamingCollector)`** (L666) : Windows equivalent of :class:`LinuxAuthEventsCollector`. Tails the
+- **class `WindowsAuthEventsCollector(StreamingCollector)`** (L668) : Windows equivalent of :class:`LinuxAuthEventsCollector`. Tails the
   - fields: `slice`, `judge_enabled`, `judge_fields`, `_EVENT_IDS`, `_PS`
   - `_cmd() -> list[str]`
   - `stream(stop_event)`
-- **class `WindowsProcessExecCollector(StreamingCollector)`** (L715) : Windows equivalent of :class:`MacosProcessExecCollector` /
+- **class `WindowsProcessExecCollector(StreamingCollector)`** (L717) : Windows equivalent of :class:`MacosProcessExecCollector` /
   - fields: `slice`, `judge_enabled`, `judge_fields`, `_PS`
   - `_cmd() -> list[str]`
   - `stream(stop_event)`
-- **class `WindowsHost`** (L759) : Composition root for Windows.
+- **class `WindowsHost`** (L761) : Composition root for Windows.
   - `__init__(runner) -> None`
   - `snapshot_collectors(prompts) -> list[SnapshotCollector]`
   - `_ps(script, parser) -> CommandSnapshot`
@@ -2377,18 +2381,20 @@ _LLM plumbing shared by every stage: credentials, completion clients, and_
   - `ask() -> dict`
   - `ask_or_none() -> Optional[dict]`
 
-#### `avai.host_monitor.main` · `avai/host_monitor/main.py` · 390 lines
+#### `avai.host_monitor.main` · `avai/host_monitor/main.py` · 393 lines
 
 _CLI entrypoint and argument parser for `avai monitor`._
 
-- **class `LlmStages`** `@dataclass(frozen=True)` (L51) : Every LLM stage, sharing one completion client. A stage stays off (the
+Constants: `_FORCE_QUIT_SIGNALS`
+
+- **class `LlmStages`** `@dataclass(frozen=True)` (L54) : Every LLM stage, sharing one completion client. A stage stays off (the
   - fields: `judge: Judge`, `narrator: Optional[IncidentNarrator]`, `coverage: Optional[YaraCoverageAssessor]`, `verifier: Optional[MaliciousVerdictVerifier]`, `investigator: Optional[UnknownFindingInvestigator]`
   - `build(args, prompts, credentials) -> LlmStages` `@classmethod`
   - `_judge(args, prompts, client) -> Judge` `@staticmethod`
-- `_has_prompt(system, stage) -> bool` (L44)
-- `_build_parser() -> argparse.ArgumentParser` (L119)
-- `build_runner(args) -> 'tuple[Runner, object]'` (L249) : Wire a fully-configured Runner (collectors, judge, sink, seeded control
-- `main() -> int` (L341)
+- `_has_prompt(system, stage) -> bool` (L47)
+- `_build_parser() -> argparse.ArgumentParser` (L122)
+- `build_runner(args) -> 'tuple[Runner, object]'` (L252) : Wire a fully-configured Runner (collectors, judge, sink, seeded control
+- `main() -> int` (L344)
 
 #### `avai.host_monitor.models` · `avai/host_monitor/models.py` · 830 lines
 
@@ -2600,12 +2606,14 @@ _Prompt-file loading (per-collector judge hints)._
   - `load(path) -> 'Prompts'` `@classmethod`
   - `hint_for(collector_name) -> str`
 
-#### `avai.host_monitor.risk` · `avai/host_monitor/risk.py` · 87 lines
+#### `avai.host_monitor.risk` · `avai/host_monitor/risk.py` · 73 lines
 
 _Deterministic 0-100 host posture score (no LLM)._
 
+Constants: `_PROTECTIONS`, `_EXPOSURES`
+
 - `_risk_grade(score) -> str` (L9)
-- `compute_risk_score(integrity, malicious, suspicious, nopasswd_sudoers, extra_uid0) -> dict` (L16) : Deterministic host posture score in [0, 100] with a letter grade and
+- `compute_risk_score(integrity, malicious, suspicious, nopasswd_sudoers, extra_uid0) -> dict` (L31) : Deterministic host posture score in [0, 100] with a letter grade and
 
 #### `avai.host_monitor.runner` · `avai/host_monitor/runner.py` · 331 lines
 
@@ -2695,11 +2703,11 @@ _Host filesystem access, with container-path translation._
   - `read_sysfs(path, encoding) -> Optional[str]` `@staticmethod`
   - `read_plist(path) -> Optional[dict]` `@staticmethod`
 
-#### `avai.host_monitor.runtime.probes` · `avai/host_monitor/runtime/probes.py` · 409 lines
+#### `avai.host_monitor.runtime.probes` · `avai/host_monitor/runtime/probes.py` · 413 lines
 
 _Host-state probes: network connections and service liveness._
 
-Constants: `_PSEUDO_FSTYPES`
+Constants: `_PSEUDO_FSTYPES`, `_MOUNTS_FIELDS`
 
 - **class `PsutilConnections`** (L54) : Thin safety wrapper over psutil's connection table.
   - `inet() -> list` `@staticmethod`
@@ -2724,32 +2732,32 @@ Constants: `_PSEUDO_FSTYPES`
   - `mount_table() -> list`
   - `usage(mountpoint)`
   - `io_counters() -> dict`
-- **class `ServiceManager(Protocol)`** (L327) : Whether a managed service is *enabled* (configured to be reachable),
+- **class `ServiceManager(Protocol)`** (L331) : Whether a managed service is *enabled* (configured to be reachable),
   - `enabled(unit) -> Optional[int]`
-- **class `PortInspector(Protocol)`** (L334) : Socket-level posture/behaviour: is something listening on a port
+- **class `PortInspector(Protocol)`** (L338) : Socket-level posture/behaviour: is something listening on a port
   - `listening(port) -> Optional[int]`
   - `established(port) -> Optional[int]`
-- **class `ProcessInspector(Protocol)`** (L342) : Whether a process with an exact name is running (behaviour signal).
+- **class `ProcessInspector(Protocol)`** (L346) : Whether a process with an exact name is running (behaviour signal).
   - `running(name) -> Optional[int]`
-- **class `LaunchdServiceManager`** (L348) : macOS: a system-domain launchd job is enabled when it's bootstrapped
+- **class `LaunchdServiceManager`** (L352) : macOS: a system-domain launchd job is enabled when it's bootstrapped
   - `__init__(runner) -> None`
   - `enabled(unit) -> Optional[int]`
-- **class `SystemdServiceManager`** (L361) : Linux: ``systemctl is-enabled <unit>`` exits 0 for enabled/static.
+- **class `SystemdServiceManager`** (L365) : Linux: ``systemctl is-enabled <unit>`` exits 0 for enabled/static.
   - `__init__(runner) -> None`
   - `enabled(unit) -> Optional[int]`
-- **class `PsutilPortInspector`** (L372) : Cross-platform port posture/behaviour from the psutil connection table
+- **class `PsutilPortInspector`** (L376) : Cross-platform port posture/behaviour from the psutil connection table
   - `__init__(connections) -> None`
   - `_count(port, status) -> Optional[int]`
   - `listening(port) -> Optional[int]`
   - `established(port) -> Optional[int]`
-- **class `PsutilProcessInspector`** (L398) : Cross-platform exact-name process check (one implementation for every
+- **class `PsutilProcessInspector`** (L402) : Cross-platform exact-name process check (one implementation for every
   - `running(name) -> Optional[int]`
 - `_unescape_mount_field(field) -> str` (L230) : Decode the octal escapes (\040 space, \011 tab, \012 nl, \134 \\)
-- `_parse_mounts(text) -> list` (L246) : Parse /proc/mounts content into ``_HostPart`` rows, dropping pseudo
-- `_host_partitions(rootfs) -> list` (L269) : Read the host's mount table. With ``pid: host`` the container's
-- `_join_rootfs(rootfs, mountpoint) -> str` (L283) : Resolve a host mountpoint to its path under the rootfs mount.
-- `_statvfs_usage(path) -> '_HostUsage'` (L294) : ``statvfs``-based usage matching psutil.disk_usage semantics: ``free``
-- `tri_or() -> Optional[int]` (L309) : Tri-state OR over 1/0/None signals: 1 if any signal is on, else 0 if
+- `_parse_mounts(text) -> list` (L250) : Parse /proc/mounts content into ``_HostPart`` rows, dropping pseudo
+- `_host_partitions(rootfs) -> list` (L273) : Read the host's mount table. With ``pid: host`` the container's
+- `_join_rootfs(rootfs, mountpoint) -> str` (L287) : Resolve a host mountpoint to its path under the rootfs mount.
+- `_statvfs_usage(path) -> '_HostUsage'` (L298) : ``statvfs``-based usage matching psutil.disk_usage semantics: ``free``
+- `tri_or() -> Optional[int]` (L313) : Tri-state OR over 1/0/None signals: 1 if any signal is on, else 0 if
 
 #### `avai.host_monitor.runtime.row_source` · `avai/host_monitor/runtime/row_source.py` · 81 lines
 
@@ -2773,15 +2781,20 @@ _Read-only reader for external SQLite databases._
 - **class `ExternalSqliteReader`** (L17) : Reflect an external SQLite table and yield row dicts.
   - `rows(path, table_name, columns) -> Iterable[dict]`
 
-#### `avai.host_monitor.runtime.stream_source` · `avai/host_monitor/runtime/stream_source.py` · 94 lines
+#### `avai.host_monitor.runtime.stream_source` · `avai/host_monitor/runtime/stream_source.py` · 109 lines
 
 _Long-lived line-stream source for streaming collectors._
+
+Constants: `_TERMINATE_GRACE_S`
 
 - **class `LineParser(Protocol)`** (L25) : Converts one decoded JSON event from a tool's stream into a row
   - `parse(event) -> dict`
 - **class `JsonLineStreamSource`** (L32) : Tail a subprocess that emits one JSON object per stdout line.
   - `__init__(command, parser) -> None`
   - `stream(stop_event) -> Iterable[dict]`
+- `_terminate_on(stop_event, proc) -> None` (L78)
+- `_json_events(lines, stop_event) -> Iterable[dict]` (L87) : Each line decoded as JSON, until ``stop_event`` is set. Lines that
+- `_shut_down(proc) -> None` (L100)
 
 #### `avai.host_monitor.security_controls` · `avai/host_monitor/security_controls.py` · 104 lines
 
@@ -2959,31 +2972,31 @@ _Second-opinion LLM that adversarially checks ``malicious`` verdicts._
 _Threat-intel enrichment layer._
 
 
-#### `avai.enrichers.base` · `avai/enrichers/base.py` · 184 lines
+#### `avai.enrichers.base` · `avai/enrichers/base.py` · 188 lines
 
 _Core abstractions for the enrichment layer._
 
-Constants: `LOG`, `_HINT_PRIORITY`
+Constants: `LOG`, `CVSS_CRITICAL`, `CVSS_HIGH`, `_HINT_PRIORITY`
 
-- **class `IndicatorType(StrEnum)`** `@unique` (L23) : Kinds of artifact an external source can be asked about.
+- **class `IndicatorType(StrEnum)`** `@unique` (L27) : Kinds of artifact an external source can be asked about.
   - fields: `SHA256`, `SHA1`, `MD5`, `IPV4`, `IPV6`, `DOMAIN`, `URL`, `CVE`, `PACKAGE`, `OS_VERSION`
-- **class `VerdictHint(StrEnum)`** `@unique` (L44) : Coarse signal an enricher contributes toward the LLM verdict.
+- **class `VerdictHint(StrEnum)`** `@unique` (L48) : Coarse signal an enricher contributes toward the LLM verdict.
   - fields: `MALICIOUS`, `SUSPICIOUS`, `BENIGN`, `UNKNOWN`
-- **class `Indicator`** `@dataclass(frozen=True)` (L54) : An artifact extracted from a collector row.
+- **class `Indicator`** `@dataclass(frozen=True)` (L58) : An artifact extracted from a collector row.
   - fields: `type: IndicatorType`, `value: str`, `context: Mapping[str, str]`
   - `__post_init__()`
-- **class `Evidence`** `@dataclass(frozen=True)` (L85) : Result of an enricher lookup.
+- **class `Evidence`** `@dataclass(frozen=True)` (L89) : Result of an enricher lookup.
   - fields: `source: str`, `indicator: Indicator`, `verdict_hint: VerdictHint`, `confidence: float`, `summary: str`, `details: Mapping[str, Any]`, `fetched_at: datetime`
-- **class `EnricherError(Exception)`** (L103) : Base of all enricher-side problems. Chain catches and logs.
-- **class `RateLimitedError(EnricherError)`** (L107) : Source replied with 429 or equivalent. Caller should back off.
-- **class `Enricher(ABC)`** (L111) : One source of threat intel.
+- **class `EnricherError(Exception)`** (L107) : Base of all enricher-side problems. Chain catches and logs.
+- **class `RateLimitedError(EnricherError)`** (L111) : Source replied with 429 or equivalent. Caller should back off.
+- **class `Enricher(ABC)`** (L115) : One source of threat intel.
   - fields: `name: ClassVar[str]`, `supports_types: ClassVar[frozenset[IndicatorType]]`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours: ClassVar[int]`
   - `env_token() -> Optional[str]` `@classmethod`
   - `from_env() -> Optional['Enricher']` `@classmethod`
   - `supports(indicator) -> bool`
   - `_fetch(indicator) -> Optional[Evidence]` `@abstractmethod`
   - `freshness_cutoff() -> datetime`
-- `worst_hint(hints) -> VerdictHint` (L180) : Aggregate multiple evidence hints to the worst-case verdict.
+- `worst_hint(hints) -> VerdictHint` (L184) : Aggregate multiple evidence hints to the worst-case verdict.
 
 #### `avai.enrichers.cache` · `avai/enrichers/cache.py` · 180 lines
 
@@ -3021,16 +3034,16 @@ Constants: `LOG`
   - `_forward_chain(evidence) -> list[Evidence]`
 - `_advisory_ids(evidence) -> Iterable[str]` (L141) : The distinct CVE/GHSA ids reported across ``evidence``, upper-cased,
 
-#### `avai.enrichers.http` · `avai/enrichers/http.py` · 151 lines
+#### `avai.enrichers.http` · `avai/enrichers/http.py` · 155 lines
 
 _Shared HTTP client for all enrichers._
 
-Constants: `LOG`, `_USER_AGENT`, `_DEFAULT_TIMEOUT`, `_RETRY_STATUS`, `_RETRY_BACKOFFS`
+Constants: `LOG`, `_USER_AGENT`, `_DEFAULT_TIMEOUT`, `_RETRY_STATUS`, `_RETRY_BACKOFFS`, `_MAX_RETRY_AFTER_S`
 
-- **class `_TokenBucket`** (L36) : Per-host rate limiter. Sleeps the calling thread to stay under
+- **class `_TokenBucket`** (L40) : Per-host rate limiter. Sleeps the calling thread to stay under
   - `__init__(rate_per_second)`
   - `take() -> None`
-- **class `HttpClient`** (L61) : One per process. Pass to enrichers via constructor; never
+- **class `HttpClient`** (L65) : One per process. Pass to enrichers via constructor; never
   - `__init__(default_rate)`
   - `set_rate(host, rate_per_second) -> None`
   - `get(url) -> requests.Response`
@@ -3110,24 +3123,24 @@ Constants: `LOG`
 _Concrete enrichers. Each module owns one external source._
 
 
-#### `avai.enrichers.sources.abuseipdb` · `avai/enrichers/sources/abuseipdb.py` · 67 lines
+#### `avai.enrichers.sources.abuseipdb` · `avai/enrichers/sources/abuseipdb.py` · 72 lines
 
 _AbuseIPDB: IP reputation + abuse-confidence score._
 
-Constants: `_URL`
+Constants: `_URL`, `_MALICIOUS_SCORE`, `_SUSPICIOUS_SCORE`, `_SUSPICIOUS_REPORTS`
 
-- **class `AbuseIpDbEnricher(Enricher)`** (L22)
+- **class `AbuseIpDbEnricher(Enricher)`** (L27)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.circl_hashlookup` · `avai/enrichers/sources/circl_hashlookup.py` · 80 lines
+#### `avai.enrichers.sources.circl_hashlookup` · `avai/enrichers/sources/circl_hashlookup.py` · 81 lines
 
 _CIRCL hashlookup: NSRL "known-good" filter._
 
 Constants: `_BASE`, `_MIN_TRUST`
 
-- **class `CirclHashlookupEnricher(Enricher)`** (L30)
+- **class `CirclHashlookupEnricher(Enricher)`** (L31)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
@@ -3144,24 +3157,24 @@ Constants: `_URL`
   - `_ensure_catalog() -> None`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.crtsh` · `avai/enrichers/sources/crtsh.py` · 75 lines
+#### `avai.enrichers.sources.crtsh` · `avai/enrichers/sources/crtsh.py` · 76 lines
 
 _crt.sh: certificate transparency log search by domain._
 
 Constants: `_URL`
 
-- **class `CrtShEnricher(Enricher)`** (L27)
+- **class `CrtShEnricher(Enricher)`** (L28)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.endoflife` · `avai/enrichers/sources/endoflife.py` · 66 lines
+#### `avai.enrichers.sources.endoflife` · `avai/enrichers/sources/endoflife.py` · 67 lines
 
 _endoflife.date: EOL status of OSes / runtimes._
 
 Constants: `_BASE`
 
-- **class `EndOfLifeEnricher(Enricher)`** (L23)
+- **class `EndOfLifeEnricher(Enricher)`** (L24)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
@@ -3178,35 +3191,35 @@ Constants: `_URL`
   - `_ensure_feed() -> None`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.github_advisory` · `avai/enrichers/sources/github_advisory.py` · 68 lines
+#### `avai.enrichers.sources.github_advisory` · `avai/enrichers/sources/github_advisory.py` · 71 lines
 
 _GitHub Advisory Database: curated advisories with CVSS + fix versions._
 
 Constants: `_URL`
 
-- **class `GitHubAdvisoryEnricher(Enricher)`** (L22)
+- **class `GitHubAdvisoryEnricher(Enricher)`** (L25)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.greynoise` · `avai/enrichers/sources/greynoise.py` · 71 lines
+#### `avai.enrichers.sources.greynoise` · `avai/enrichers/sources/greynoise.py` · 72 lines
 
 _GreyNoise Community API: "is this IP internet background noise?"_
 
 Constants: `_BASE`
 
-- **class `GreyNoiseEnricher(Enricher)`** (L23)
+- **class `GreyNoiseEnricher(Enricher)`** (L24)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.ipwhois_geo` · `avai/enrichers/sources/ipwhois_geo.py` · 71 lines
+#### `avai.enrichers.sources.ipwhois_geo` · `avai/enrichers/sources/ipwhois_geo.py` · 72 lines
 
 _ipwho.is: free, keyless IP geolocation (country / region / city / ASN)._
 
 Constants: `_BASE`
 
-- **class `IpwhoisGeoEnricher(Enricher)`** (L27)
+- **class `IpwhoisGeoEnricher(Enricher)`** (L28)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
@@ -3221,24 +3234,24 @@ _Offline known-bad hash deny-list: an instant malicious verdict_
   - `_load(path) -> frozenset[str]` `@staticmethod`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.malware_bazaar` · `avai/enrichers/sources/malware_bazaar.py` · 72 lines
+#### `avai.enrichers.sources.malware_bazaar` · `avai/enrichers/sources/malware_bazaar.py` · 73 lines
 
 _abuse.ch MalwareBazaar: SHA256 → known-malware family._
 
 Constants: `_URL`
 
-- **class `MalwareBazaarEnricher(Enricher)`** (L23)
+- **class `MalwareBazaarEnricher(Enricher)`** (L24)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.nvd` · `avai/enrichers/sources/nvd.py` · 80 lines
+#### `avai.enrichers.sources.nvd` · `avai/enrichers/sources/nvd.py` · 83 lines
 
 _NIST NVD: CVE detail lookup (description + CVSS)._
 
 Constants: `_URL`
 
-- **class `NvdEnricher(Enricher)`** (L25)
+- **class `NvdEnricher(Enricher)`** (L28)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
@@ -3258,77 +3271,77 @@ Constants: `_QUERY`, `_VULN`, `_MAX_LISTED_VULNS`
 - `_ecosystem_for(name) -> str` (L30)
 - `_advisory_ids(vulns) -> list[str]` (L94) : Each vuln's primary id AND its aliases, deduplicated. OSV's primary
 
-#### `avai.enrichers.sources.phishtank` · `avai/enrichers/sources/phishtank.py` · 63 lines
+#### `avai.enrichers.sources.phishtank` · `avai/enrichers/sources/phishtank.py` · 66 lines
 
 _PhishTank: community-maintained phishing URL DB._
 
-Constants: `_URL`
+Constants: `_URL`, `_BANDWIDTH_LIMIT_EXCEEDED`
 
-- **class `PhishTankEnricher(Enricher)`** (L23)
+- **class `PhishTankEnricher(Enricher)`** (L26)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.safe_browsing` · `avai/enrichers/sources/safe_browsing.py` · 72 lines
+#### `avai.enrichers.sources.safe_browsing` · `avai/enrichers/sources/safe_browsing.py` · 73 lines
 
 _Google Safe Browsing v4: phishing / malware URL classifier._
 
 Constants: `_URL`, `_CLIENT_INFO`, `_THREAT_TYPES`
 
-- **class `SafeBrowsingEnricher(Enricher)`** (L36)
+- **class `SafeBrowsingEnricher(Enricher)`** (L37)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.shodan_internetdb` · `avai/enrichers/sources/shodan_internetdb.py` · 67 lines
+#### `avai.enrichers.sources.shodan_internetdb` · `avai/enrichers/sources/shodan_internetdb.py` · 68 lines
 
 _Shodan InternetDB: open ports + CVEs + hostnames for an IP._
 
 Constants: `_BASE`
 
-- **class `ShodanInternetDBEnricher(Enricher)`** (L24)
+- **class `ShodanInternetDBEnricher(Enricher)`** (L25)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.threatfox` · `avai/enrichers/sources/threatfox.py` · 64 lines
+#### `avai.enrichers.sources.threatfox` · `avai/enrichers/sources/threatfox.py` · 65 lines
 
 _abuse.ch ThreatFox: mixed IOC search (IP / domain / URL / hash)._
 
 Constants: `_URL`
 
-- **class `ThreatFoxEnricher(Enricher)`** (L23)
+- **class `ThreatFoxEnricher(Enricher)`** (L24)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.urlhaus` · `avai/enrichers/sources/urlhaus.py` · 90 lines
+#### `avai.enrichers.sources.urlhaus` · `avai/enrichers/sources/urlhaus.py` · 91 lines
 
 _abuse.ch URLhaus: malware-distribution URLs and domains._
 
 Constants: `_URL_LOOKUP`, `_HOST_LOOKUP`
 
-- **class `URLhausEnricher(Enricher)`** (L24)
+- **class `URLhausEnricher(Enricher)`** (L25)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.virustotal` · `avai/enrichers/sources/virustotal.py` · 97 lines
+#### `avai.enrichers.sources.virustotal` · `avai/enrichers/sources/virustotal.py` · 104 lines
 
 _VirusTotal v3: multi-engine reputation for files, URLs, domains, IPs._
 
-Constants: `_BASE`
+Constants: `_BASE`, `_MALICIOUS_ENGINES`, `_MALICIOUS_RATIO`, `_SUSPICIOUS_ENGINES`, `_BENIGN_MIN_ENGINES`
 
-- **class `VirusTotalEnricher(Enricher)`** (L38)
+- **class `VirusTotalEnricher(Enricher)`** (L45)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
-- `_path_for(indicator) -> Optional[str]` (L22)
+- `_path_for(indicator) -> Optional[str]` (L29)
 
 ### A.4 dashboard (Flask + HTMX)
 
 
-#### `avai.dashboard` · `avai/dashboard/__init__.py` · 214 lines
+#### `avai.dashboard` · `avai/dashboard/__init__.py` · 19 lines
 
 _avai.dashboard: package facade._
 
