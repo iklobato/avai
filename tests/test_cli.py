@@ -196,7 +196,7 @@ class TestDefaultArgs:
     def test_monitor_defaults(self):
         from pathlib import Path
 
-        from avai.host_monitor import _build_parser
+        from avai.host_monitor.main import _build_parser
 
         ns = _build_parser().parse_args([])
         assert ns.db == str(Path.home() / ".avai" / "avai.db")
@@ -206,7 +206,7 @@ class TestDefaultArgs:
     def test_dashboard_defaults(self):
         from pathlib import Path
 
-        from avai.dashboard import _build_parser
+        from avai.dashboard.serve import _build_parser
 
         ns = _build_parser().parse_args([])
         assert ns.db == str(Path.home() / ".avai" / "avai.db")
@@ -218,7 +218,7 @@ class TestDashboardServer:
     (no Werkzeug 'development server' warning); --debug uses app.run."""
 
     def test_default_serves_via_waitress(self):
-        import avai.dashboard as d
+        import avai.dashboard.serve as d
 
         app = MagicMock()
         with patch("waitress.serve") as wserve:
@@ -228,7 +228,7 @@ class TestDashboardServer:
         app.run.assert_not_called()
 
     def test_debug_uses_dev_server(self):
-        import avai.dashboard as d
+        import avai.dashboard.serve as d
 
         app = MagicMock()
         with patch("waitress.serve") as wserve:

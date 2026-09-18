@@ -21,29 +21,27 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import (
-    DashboardConfig,
-    create_app,
-    dns_queries,
-    network_flows,
-    persistence_tampering,
-)
+from avai.dashboard.app import create_app
+from avai.dashboard.config import DashboardConfig
+from avai.dashboard.queries import dns_queries, network_flows, persistence_tampering
 from avai.enrichers import IndicatorType, extract_indicators
 from avai.host_monitor.runtime import Digest
-from avai.host_monitor import (
+from avai.host_monitor.collectors import (
     DnsQueriesCollector,
-    DnsQueryRow,
     HostsFileCollector,
-    HostsFileRow,
-    NetworkFlowRow,
     NetworkFlowsCollector,
     PrivilegeConfigCollector,
-    PrivilegeConfigRow,
     ProcessConnectionResolver,
-    Sink,
-    SshAuthorizedKeyRow,
     SshAuthorizedKeysCollector,
 )
+from avai.host_monitor.models import (
+    DnsQueryRow,
+    HostsFileRow,
+    NetworkFlowRow,
+    PrivilegeConfigRow,
+    SshAuthorizedKeyRow,
+)
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 
 # ---------------------------------------------------------------------------
@@ -344,7 +342,7 @@ class TestDashboardDns:
         assert by_name["Cloudflare"] == "DoH (encrypted)"
 
     def test_resolution_level_classification(self):
-        from avai.dashboard import _dns_resolution_level
+        from avai.dashboard.queries.dns import _dns_resolution_level
 
         assert _dns_resolution_level("192.168.1.1", "A") == "local resolver"
         assert _dns_resolution_level("127.0.0.1", "A") == "local resolver"

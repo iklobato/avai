@@ -15,21 +15,13 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from avai.dashboard import (
-    DashboardConfig,
-    create_app,
-    disk_usage,
-    host_resources,
-    resource_trend,
-)
-from avai.host_monitor import (
-    DiskUsageCollector,
-    DiskUsageRow,
-    FrozenClock,
-    HostResourceRow,
-    HostResourcesCollector,
-    Sink,
-)
+from avai.dashboard.app import create_app
+from avai.dashboard.config import DashboardConfig
+from avai.dashboard.queries import disk_usage, host_resources, resource_trend
+from avai.host_monitor.collectors import DiskUsageCollector, HostResourcesCollector
+from avai.host_monitor.models import DiskUsageRow, HostResourceRow
+from avai.host_monitor.runtime import FrozenClock
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.runtime import Digest
 
 # psutil-shaped fakes ---------------------------------------------------------

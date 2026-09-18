@@ -10,13 +10,10 @@ from __future__ import annotations
 
 import pytest
 
-from avai.host_monitor import (
-    CompletionRequest,
-    LlmJudge,
-    Prompts,
-    ThreatCategory,
-    Verdict,
-)
+from avai.host_monitor.enums import ThreatCategory, Verdict
+from avai.host_monitor.judge import LlmJudge
+from avai.host_monitor.llm import CompletionRequest
+from avai.host_monitor.prompts import Prompts
 
 
 class _FakeClient:

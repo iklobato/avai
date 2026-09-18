@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import create_engine
 
-from avai.host_monitor import Sink
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.models import (
     DnsQueryRow,
     ListeningPortRow,

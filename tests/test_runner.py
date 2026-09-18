@@ -21,16 +21,11 @@ from avai.enrichers import (
     IndicatorType,
     VerdictHint,
 )
-from avai.host_monitor import (
-    DEFAULT_BASELINE_MIN_RUNS,
-    Base,
-    CollectionRun,
-    FileScanRow,
-    NullJudge,
-    ProcessRow,
-    Runner,
-    Sink,
-)
+from avai.host_monitor.constants import DEFAULT_BASELINE_MIN_RUNS
+from avai.host_monitor.judge import NullJudge
+from avai.host_monitor.models import Base, CollectionRun, FileScanRow, ProcessRow
+from avai.host_monitor.runner import Runner
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.control_loop import (
     ControlLoop,
     ControlSettings,
@@ -145,7 +140,7 @@ class TestEvidenceStage:
         stage = _evidence_stage(sink, chain)
         # Two distinct hashes — the chain enriches each via an indicator
         # extracted from `network_connections`. Build rows directly.
-        from avai.host_monitor import NetworkConnectionRow
+        from avai.host_monitor.models import NetworkConnectionRow
 
         collector = _StubCollector()
         collector.name = "network_connections"
@@ -185,7 +180,7 @@ class TestEvidenceStage:
 
     def test_enrichment_turned_off_means_no_evidence_no_lookups(self, sink, chain):
         stage = _evidence_stage(sink, chain, enrich_on=False)
-        from avai.host_monitor import NetworkConnectionRow
+        from avai.host_monitor.models import NetworkConnectionRow
 
         collector = _StubCollector()
         collector.name = "network_connections"
@@ -212,7 +207,7 @@ class TestEvidenceStage:
         assert "evidence" not in unjudged[0]
 
     def test_entry_without_matching_row_is_skipped_cleanly(self, sink, chain):
-        from avai.host_monitor import NetworkConnectionRow
+        from avai.host_monitor.models import NetworkConnectionRow
 
         collector = _StubCollector()
         collector.name = "network_connections"
@@ -238,7 +233,7 @@ class TestEvidenceStage:
 
         cache = EvidenceCache(sink.engine, Base)
         chain = EnrichmentChain([_Broken()], cache)
-        from avai.host_monitor import NetworkConnectionRow
+        from avai.host_monitor.models import NetworkConnectionRow
 
         collector = _StubCollector()
         collector.name = "network_connections"
@@ -546,7 +541,7 @@ class TestCorrelationStage:
         _add_run(sink, _TS[1])
 
     def test_processes_get_full_related_object(self, sink):
-        from avai.host_monitor import (
+        from avai.host_monitor.models import (
             DnsQueryRow,
             ListeningPortRow,
             NetworkConnectionRow,
@@ -626,7 +621,7 @@ class TestCorrelationStage:
     def test_launch_items_correlate_via_program_to_process(self, sink):
         # A launch item has no PID; its program is resolved to the live
         # process running it, then that process's behaviour is attached.
-        from avai.host_monitor import LaunchItemRow, NetworkFlowRow, ProcessRow
+        from avai.host_monitor.models import LaunchItemRow, NetworkFlowRow, ProcessRow
 
         self._setup_two_runs(sink)
         _w(
@@ -665,7 +660,7 @@ class TestCorrelationStage:
         assert rel["outbound_flows"][0]["packets"] == 99
 
     def test_launch_item_without_running_program_gets_no_related(self, sink):
-        from avai.host_monitor import LaunchItemRow
+        from avai.host_monitor.models import LaunchItemRow
 
         self._setup_two_runs(sink)
 
@@ -681,7 +676,7 @@ class TestCorrelationStage:
         assert "related" not in unjudged[0]
 
     def test_non_process_collector_is_not_correlated(self, sink):
-        from avai.host_monitor import ListeningPortRow
+        from avai.host_monitor.models import ListeningPortRow
 
         self._setup_two_runs(sink)
         _w(
@@ -717,7 +712,7 @@ class TestCorrelationStage:
         # A flow from two cycles ago (_TS[0]) must NOT leak in when judging
         # at _TS[2], whose prior run is _TS[1]: the time-bound is the PID's
         # previous-cycle behaviour only, so PID reuse can't pollute it.
-        from avai.host_monitor import NetworkFlowRow
+        from avai.host_monitor.models import NetworkFlowRow
 
         _add_run(sink, _TS[0])
         _add_run(sink, _TS[1])
@@ -781,7 +776,7 @@ class _FakeNarrator:
 def _add_judgement(
     sink, h, verdict, last_seen, collector="processes", created="2026-01-01T00:00:00Z"
 ):
-    from avai.host_monitor import Judgement
+    from avai.host_monitor.models import Judgement
 
     with Session(sink.engine) as s:
         s.add(
@@ -803,7 +798,8 @@ def _add_judgement(
 
 class TestJudgmentContext:
     def _judgment(self, h):
-        from avai.host_monitor import Judgment, ThreatCategory, Verdict
+        from avai.host_monitor.enums import ThreatCategory, Verdict
+        from avai.host_monitor.judge import Judgment
 
         return Judgment(
             content_hash=h,
@@ -835,7 +831,7 @@ class TestJudgmentContext:
     def test_write_judgments_persists_novel_and_context(self, sink):
         import json as _json
 
-        from avai.host_monitor import Judgement
+        from avai.host_monitor.models import Judgement
 
         ctx = {
             "h1": {
@@ -852,7 +848,7 @@ class TestJudgmentContext:
         assert parsed["related"]["listening_ports"] == ["0.0.0.0:4444"]
 
     def test_write_judgments_without_context_leaves_columns_null(self, sink):
-        from avai.host_monitor import Judgement
+        from avai.host_monitor.models import Judgement
 
         sink.write_judgments([self._judgment("h2")])
         with Session(sink.engine) as s:
@@ -913,7 +909,7 @@ class TestNarrativeStep:
 
 
 def latest_narrative_row(sink):
-    from avai.host_monitor import IncidentNarrativeRow
+    from avai.host_monitor.models import IncidentNarrativeRow
 
     with Session(sink.engine) as s:
         return s.execute(select_desc_incident(IncidentNarrativeRow)).scalars().first()
@@ -927,7 +923,9 @@ def select_desc_incident(model):
 
 class TestIncidentNarratorNormalization:
     def _narrator(self, payload):
-        from avai.host_monitor import DEFAULT_PROMPTS_PATH, IncidentNarrator, Prompts
+        from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
+        from avai.host_monitor.narrator import IncidentNarrator
+        from avai.host_monitor.prompts import Prompts
 
         class _FakeClient:
             def __init__(self):
@@ -978,7 +976,9 @@ class TestIncidentNarratorNormalization:
         # Regression: an unbounded findings list could blow the LLM context
         # window and fail the digest every cycle. narrate() caps to
         # MAX_FINDINGS, keeping the most severe/confident.
-        from avai.host_monitor import DEFAULT_PROMPTS_PATH, IncidentNarrator, Prompts
+        from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
+        from avai.host_monitor.narrator import IncidentNarrator
+        from avai.host_monitor.prompts import Prompts
 
         class _FakeClient:
             def __init__(self):
@@ -1055,13 +1055,13 @@ _HARDENED = {
 
 class TestComputeRiskScore:
     def test_hardened_host_scores_100_grade_a(self):
-        from avai.host_monitor import compute_risk_score
+        from avai.host_monitor.risk import compute_risk_score
 
         r = compute_risk_score(_HARDENED, 0, 0, 0, 0)
         assert r["score"] == 100 and r["grade"] == "A" and r["drivers"] == []
 
     def test_disabled_protections_deduct(self):
-        from avai.host_monitor import compute_risk_score
+        from avai.host_monitor.risk import compute_risk_score
 
         integ = dict(_HARDENED, filevault_active=0, firewall_global_state=0)
         r = compute_risk_score(integ, 0, 0, 0, 0)
@@ -1071,26 +1071,26 @@ class TestComputeRiskScore:
         assert any("Firewall off" in lbl for lbl in labels)
 
     def test_finding_penalties_are_capped(self):
-        from avai.host_monitor import compute_risk_score
+        from avai.host_monitor.risk import compute_risk_score
 
         # 5 malicious → capped at 40; 5 suspicious → capped at 24 → 100-64=36
         r = compute_risk_score(None, 5, 5, 0, 0)
         assert r["score"] == 36 and r["grade"] == "F"
 
     def test_none_integrity_fields_cost_nothing(self):
-        from avai.host_monitor import compute_risk_score
+        from avai.host_monitor.risk import compute_risk_score
 
         r = compute_risk_score(None, 0, 0, 0, 0)
         assert r["score"] == 100 and r["grade"] == "A"
 
     def test_privilege_penalties(self):
-        from avai.host_monitor import compute_risk_score
+        from avai.host_monitor.risk import compute_risk_score
 
         r = compute_risk_score(_HARDENED, 0, 0, 1, 1)  # -10 nopasswd -15 uid0
         assert r["score"] == 75 and r["grade"] == "C"
 
     def test_every_driver_with_its_points_in_order(self):
-        from avai.host_monitor import compute_risk_score
+        from avai.host_monitor.risk import compute_risk_score
 
         worst = {
             "filevault_active": 0,
@@ -1143,7 +1143,7 @@ class TestRiskExplanation:
 
 class TestRiskScoreSink:
     def test_privilege_and_integrity_queries(self, sink):
-        from avai.host_monitor import PrivilegeConfigRow, SystemIntegrityRow
+        from avai.host_monitor.models import PrivilegeConfigRow, SystemIntegrityRow
 
         _w(
             sink,
@@ -1209,14 +1209,14 @@ class TestRiskScoreSink:
 
 class TestEstimateCost:
     def test_haiku_tier_pricing(self):
-        from avai.host_monitor import estimate_cost
+        from avai.host_monitor.judge import estimate_cost
 
         # 1M input @ $1, 1M output @ $5
         assert estimate_cost("claude-haiku-4-5", 1_000_000, 0) == pytest.approx(1.0)
         assert estimate_cost("claude-haiku-4-5", 0, 1_000_000) == pytest.approx(5.0)
 
     def test_tier_matched_by_substring(self):
-        from avai.host_monitor import estimate_cost
+        from avai.host_monitor.judge import estimate_cost
 
         assert estimate_cost("claude-opus-4-8", 1_000_000, 0) == pytest.approx(15.0)
         assert estimate_cost(
@@ -1224,14 +1224,16 @@ class TestEstimateCost:
         ) == pytest.approx(15.0)
 
     def test_unknown_model_uses_default_tier(self):
-        from avai.host_monitor import estimate_cost
+        from avai.host_monitor.judge import estimate_cost
 
         assert estimate_cost("mystery-model", 1_000_000, 0) == pytest.approx(1.0)
 
 
 class TestJudgmentCostPersistence:
     def test_cost_usd_persisted(self, sink):
-        from avai.host_monitor import Judgement, Judgment, ThreatCategory, Verdict
+        from avai.host_monitor.enums import ThreatCategory, Verdict
+        from avai.host_monitor.judge import Judgment
+        from avai.host_monitor.models import Judgement
 
         j = Judgment(
             content_hash="hc",
@@ -1260,7 +1262,7 @@ def _set_control(sink, **vals):
     """Write fields onto the single control row (creating it if needed)."""
     from sqlalchemy import update
 
-    from avai.host_monitor import ControlState
+    from avai.host_monitor.models import ControlState
 
     sink.ensure_control_row(interval=300, judge_enabled=True, enrich_enabled=True)
     with Session(sink.engine) as s:
@@ -1353,7 +1355,7 @@ def _loop_once(sink, cycle=None, max_db_bytes=0):
 
 class TestControlCommands:
     def test_rejudge_clears_judgements_and_acks(self, sink):
-        from avai.host_monitor import Judgement
+        from avai.host_monitor.models import Judgement
 
         with Session(sink.engine) as s:
             s.add(
@@ -1530,7 +1532,7 @@ def _seed_yara_status(sink, rules_loaded=10, sources=None, by_category=None):
 def _latest_coverage_row(sink):
     from sqlalchemy import desc, select
 
-    from avai.host_monitor import YaraCoverageRow
+    from avai.host_monitor.models import YaraCoverageRow
 
     with Session(sink.engine) as s:
         return (
@@ -1589,7 +1591,8 @@ class TestCoverageStep:
 
 class TestYaraCoverageAssessor:
     def _assessor(self, payload):
-        from avai.host_monitor import DEFAULT_PROMPTS_PATH, Prompts
+        from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
+        from avai.host_monitor.prompts import Prompts
         from avai.host_monitor.coverage import YaraCoverageAssessor
 
         class _FakeClient:
@@ -1607,7 +1610,8 @@ class TestYaraCoverageAssessor:
     _RULESET = {"rules_loaded": 5, "sources": {"bundled": 5}, "by_category": {"gen": 5}}
 
     def test_prompt_section_loads(self):
-        from avai.host_monitor import DEFAULT_PROMPTS_PATH, Prompts
+        from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
+        from avai.host_monitor.prompts import Prompts
 
         p = Prompts.load(DEFAULT_PROMPTS_PATH)
         assert p.coverage_system and "$ruleset" in p.coverage_user_template
@@ -1662,7 +1666,8 @@ class TestYaraCoverageAssessor:
 
 
 def _mk_judgment(h, verdict, collector="processes"):
-    from avai.host_monitor import Judgment, ThreatCategory
+    from avai.host_monitor.enums import ThreatCategory
+    from avai.host_monitor.judge import Judgment
 
     return Judgment(
         content_hash=h,
@@ -1713,7 +1718,7 @@ class _Procs(_ProcStub):
 
 
 def _stored_verdict(sink):
-    from avai.host_monitor import Judgement
+    from avai.host_monitor.models import Judgement
 
     with Session(sink.engine) as s:
         return s.query(Judgement.verdict).scalar()
@@ -1721,7 +1726,7 @@ def _stored_verdict(sink):
 
 class TestVerifyStage:
     def test_refuted_malicious_downgraded_to_suspicious(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         v = _FakeVerifier(refuted=True)
         j = _mk_judgment("h1", Verdict.MALICIOUS)
@@ -1732,7 +1737,7 @@ class TestVerifyStage:
         assert v.calls[0]["name"] == "x"  # the skeptic sees the entry's fields
 
     def test_unrefuted_malicious_is_kept(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         v = _FakeVerifier(refuted=False)
         j = _mk_judgment("h1", Verdict.MALICIOUS)
@@ -1741,7 +1746,7 @@ class TestVerifyStage:
         assert len(v.calls) == 1
 
     def test_non_malicious_is_not_verified(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         v = _FakeVerifier(refuted=True)
         j = _mk_judgment("h1", Verdict.SUSPICIOUS)
@@ -1750,7 +1755,7 @@ class TestVerifyStage:
         assert v.calls == []  # skeptic only runs on malicious
 
     def test_checks_are_capped_per_collector(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         v = _FakeVerifier(refuted=True)
         judgments = [_mk_judgment(f"h{i}", Verdict.MALICIOUS) for i in range(12)]
@@ -1759,7 +1764,7 @@ class TestVerifyStage:
         assert [j.verdict for j in out[10:]] == [Verdict.MALICIOUS] * 2
 
     def test_without_a_verifier_malicious_is_stored_as_is(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         _runner(sink, [_Procs()], judge=_FixedJudge(Verdict.MALICIOUS)).run_once()
         assert _stored_verdict(sink) == "malicious"
@@ -1767,7 +1772,8 @@ class TestVerifyStage:
 
 class TestMaliciousVerdictVerifier:
     def _verifier(self, payload):
-        from avai.host_monitor import DEFAULT_PROMPTS_PATH, Prompts
+        from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
+        from avai.host_monitor.prompts import Prompts
         from avai.host_monitor.verifier import MaliciousVerdictVerifier
 
         class _FakeClient:
@@ -1802,7 +1808,7 @@ class TestMaliciousVerdictVerifier:
 
 class _FakeInvestigator:
     def __init__(self, verdict, category=None):
-        from avai.host_monitor import ThreatCategory
+        from avai.host_monitor.enums import ThreatCategory
 
         self._verdict = verdict
         self._category = category or ThreatCategory.COMMAND_AND_CONTROL
@@ -1825,7 +1831,7 @@ def _investigate(sink, inv):
 
 class TestInvestigateStage:
     def test_unknown_resolved_replaces_verdict(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         inv = _FakeInvestigator(Verdict.MALICIOUS)
         j = _mk_judgment("h1", Verdict.UNKNOWN)
@@ -1837,7 +1843,7 @@ class TestInvestigateStage:
         assert len(inv.calls) == 1
 
     def test_unknown_kept_when_still_unknown(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         inv = _FakeInvestigator(Verdict.UNKNOWN)
         j = _mk_judgment("h1", Verdict.UNKNOWN)
@@ -1846,7 +1852,7 @@ class TestInvestigateStage:
         assert len(inv.calls) == 1  # investigated, but couldn't commit
 
     def test_non_unknown_not_investigated(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         inv = _FakeInvestigator(Verdict.MALICIOUS)
         j = _mk_judgment("h1", Verdict.SUSPICIOUS)
@@ -1855,7 +1861,7 @@ class TestInvestigateStage:
         assert inv.calls == []
 
     def test_investigations_are_capped_per_collector(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         inv = _FakeInvestigator(Verdict.MALICIOUS)
         judgments = [_mk_judgment(f"h{i}", Verdict.UNKNOWN) for i in range(12)]
@@ -1864,13 +1870,14 @@ class TestInvestigateStage:
         assert [j.verdict for j in out[10:]] == [Verdict.UNKNOWN] * 2
 
     def test_without_an_investigator_unknown_is_stored_as_is(self, sink):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         _runner(sink, [_Procs()], judge=_FixedJudge(Verdict.UNKNOWN)).run_once()
         assert _stored_verdict(sink) == "unknown"
 
     def test_finding_carries_full_history_behaviour(self, sink):
-        from avai.host_monitor import NetworkFlowRow, Verdict
+        from avai.host_monitor.enums import Verdict
+        from avai.host_monitor.models import NetworkFlowRow
 
         # A flow for pid 42 in history (no run-time bound applies under
         # investigation), resolved via the process row passed in.
@@ -1897,7 +1904,8 @@ class TestInvestigateStage:
 
 class TestUnknownFindingInvestigator:
     def _inv(self, payload):
-        from avai.host_monitor import DEFAULT_PROMPTS_PATH, Prompts
+        from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
+        from avai.host_monitor.prompts import Prompts
         from avai.host_monitor.investigator import UnknownFindingInvestigator
 
         class _FakeClient:
@@ -1909,7 +1917,7 @@ class TestUnknownFindingInvestigator:
         )
 
     def test_parses_and_clamps(self):
-        from avai.host_monitor import ThreatCategory, Verdict
+        from avai.host_monitor.enums import ThreatCategory, Verdict
 
         out = self._inv(
             {
@@ -1925,7 +1933,7 @@ class TestUnknownFindingInvestigator:
         assert out["confidence"] == 1.0  # clamped to [0,1]
 
     def test_bad_verdict_coerces_to_unknown(self):
-        from avai.host_monitor import Verdict
+        from avai.host_monitor.enums import Verdict
 
         out = self._inv(
             {
@@ -1945,7 +1953,7 @@ class TestUnknownFindingInvestigator:
 
 
 def _add_feedback(sink, h, collector, label, note=None, artifact=None, applied=0):
-    from avai.host_monitor import FeedbackRow
+    from avai.host_monitor.models import FeedbackRow
 
     with Session(sink.engine) as s:
         s.add(
@@ -1964,7 +1972,8 @@ def _add_feedback(sink, h, collector, label, note=None, artifact=None, applied=0
 
 class TestFeedback:
     def test_apply_feedback_flips_to_benign_and_marks_applied(self, sink):
-        from avai.host_monitor import Judgement, Verdict
+        from avai.host_monitor.enums import Verdict
+        from avai.host_monitor.models import Judgement
 
         _add_judgement(sink, "h1", "malicious", last_seen=_TS[1])
         _add_feedback(sink, "h1", "processes", "false_positive", note="known dev tool")
@@ -1976,7 +1985,8 @@ class TestFeedback:
         assert sink.apply_feedback() == 0  # already applied → not reprocessed
 
     def test_apply_feedback_confirmed_to_malicious(self, sink):
-        from avai.host_monitor import Judgement, Verdict
+        from avai.host_monitor.enums import Verdict
+        from avai.host_monitor.models import Judgement
 
         _add_judgement(sink, "h2", "suspicious", last_seen=_TS[1])
         _add_feedback(sink, "h2", "processes", "confirmed")

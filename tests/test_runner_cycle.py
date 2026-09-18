@@ -23,7 +23,9 @@ from avai.enrichers import (
     IndicatorType,
     VerdictHint,
 )
-from avai.host_monitor import (
+from avai.host_monitor.enums import ThreatCategory, Verdict
+from avai.host_monitor.judge import Judgment, NullJudge
+from avai.host_monitor.models import (
     AuthEventRow,
     Base,
     CollectionRun,
@@ -32,17 +34,13 @@ from avai.host_monitor import (
     FeedbackRow,
     IncidentNarrativeRow,
     Judgement,
-    Judgment,
     NetworkConnectionRow,
-    NullJudge,
     ProcessRow,
     RiskScoreRow,
-    Runner,
-    Sink,
-    ThreatCategory,
-    Verdict,
     YaraCoverageRow,
 )
+from avai.host_monitor.runner import Runner
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.runner import RunnerConfig
 from avai.host_monitor.runtime import Digest
 

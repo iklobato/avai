@@ -10,7 +10,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import OperationalError
 
 from avai.db_migrate import _config, upgrade_to_head
-from avai.host_monitor import Base, Sink
+from avai.host_monitor.models import Base
+from avai.host_monitor.sink import Sink
 
 _IDX = [
     "ix_collection_runs_started_at",

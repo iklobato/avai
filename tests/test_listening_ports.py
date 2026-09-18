@@ -15,18 +15,16 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from avai.dashboard import DashboardConfig, _addr_scope, create_app, listening_ports
+from avai.dashboard.app import create_app
+from avai.dashboard.config import DashboardConfig
+from avai.dashboard.queries import listening_ports
+from avai.dashboard.queries.ports import _addr_scope
 from avai.dashboard.queries import RowFilter
 from avai.host_monitor.runtime import Digest
-from avai.host_monitor import (
-    Judgment,
-    ListeningPortRow,
-    NetworkConnectionRow,
-    ProcessRow,
-    Sink,
-    ThreatCategory,
-    Verdict,
-)
+from avai.host_monitor.enums import ThreatCategory, Verdict
+from avai.host_monitor.judge import Judgment
+from avai.host_monitor.models import ListeningPortRow, NetworkConnectionRow, ProcessRow
+from avai.host_monitor.sink import Sink
 
 LP_FIELDS = ("process_name", "family", "type", "laddr_ip", "laddr_port")
 

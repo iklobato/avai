@@ -21,7 +21,10 @@ from pathlib import Path
 import pytest
 
 import avai.host_monitor as hm
-from avai.host_monitor import LinuxLaunchItemsCollector
+from avai.host_monitor.collectors import (
+    LinuxAuthEventsCollector,
+    LinuxLaunchItemsCollector,
+)
 from avai.host_monitor.collectors.persistence import CrontabReader, SystemdUnitReader
 from avai.host_monitor.runtime import HostPaths
 
@@ -311,7 +314,7 @@ class TestLinuxAuthEventsJournalDir:
 
     def test_no_directory_flag_without_prefix(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
-        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector()._cmd()
         assert "--directory" not in cmd
 
     def test_prefers_persistent_journal(self, monkeypatch, tmp_path):
@@ -320,7 +323,7 @@ class TestLinuxAuthEventsJournalDir:
         runtime = tmp_path / "run" / "log" / "journal"
         persistent.mkdir(parents=True)
         runtime.mkdir(parents=True)
-        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector()._cmd()
         assert self._directory_arg(cmd) == str(persistent)
 
     def test_falls_back_to_runtime_journal(self, monkeypatch, tmp_path):
@@ -328,14 +331,14 @@ class TestLinuxAuthEventsJournalDir:
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         runtime = tmp_path / "run" / "log" / "journal"
         runtime.mkdir(parents=True)
-        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector()._cmd()
         assert self._directory_arg(cmd) == str(runtime)
 
     def test_no_directory_flag_when_no_host_journal_present(
         self, monkeypatch, tmp_path
     ):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
-        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector()._cmd()
         assert "--directory" not in cmd
 
 

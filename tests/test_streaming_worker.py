@@ -14,7 +14,9 @@ import time
 import pytest
 from sqlalchemy import create_engine
 
-from avai.host_monitor import AuthEventRow, Sink, StreamingWorker
+from avai.host_monitor.models import AuthEventRow
+from avai.host_monitor.sink import Sink
+from avai.host_monitor.streaming import StreamingWorker
 from avai.host_monitor.streaming import SupervisionPolicy
 from avai.host_monitor.supervision import ExponentialBackoff, LoggingSupervisionListener
 

@@ -9,7 +9,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from avai.dashboard.queries import FindingFilter, LogFilter, RowFilter, findings
-from avai.host_monitor import Judgment, Sink, ThreatCategory, Verdict
+from avai.host_monitor.enums import ThreatCategory, Verdict
+from avai.host_monitor.judge import Judgment
+from avai.host_monitor.sink import Sink
 
 _ROWS = [
     {"verdict": "malicious", "process": "curl", "port": 4444},

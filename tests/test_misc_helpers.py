@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from avai.dashboard import _ensure_db_exists
+from avai.dashboard.serve import _ensure_db_exists
 from avai.dashboard.db import read_only_engine
 from avai.enrichers import EnrichmentChain, EvidenceCache, Indicator, IndicatorType
 from avai.enrichers.indicators import _safe_loads, _sha256_of_file
@@ -195,13 +195,10 @@ class TestSinkUnjudgedAll:
     def test_returns_distinct_hashes_across_runs(self, tmp_path):
         # The streaming variant of unjudged ignores run_id so streaming
         # rows that span runs are still classified once each.
-        from avai.host_monitor import (
-            AuthEventRow,
-            Judgment,
-            Sink,
-            ThreatCategory,
-            Verdict,
-        )
+        from avai.host_monitor.enums import ThreatCategory, Verdict
+        from avai.host_monitor.judge import Judgment
+        from avai.host_monitor.models import AuthEventRow
+        from avai.host_monitor.sink import Sink
         from avai.host_monitor.runtime import Clock, Digest
 
         class _S:
@@ -278,7 +275,8 @@ class TestSinkUnjudgedAll:
         assert result[0]["event_message"] == "bob"
 
     def test_returns_empty_when_collector_has_no_judge_fields(self, tmp_path):
-        from avai.host_monitor import AuthEventRow, Sink
+        from avai.host_monitor.models import AuthEventRow
+        from avai.host_monitor.sink import Sink
 
         class _S:
             name = "auth_events"

@@ -13,10 +13,14 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import DashboardConfig, create_app, network_flows
+from avai.dashboard.app import create_app
+from avai.dashboard.config import DashboardConfig
+from avai.dashboard.queries import network_flows
 from avai.dashboard.queries import RowFilter
 from avai.enrichers import IndicatorType, extract_indicators
-from avai.host_monitor import NetworkFlowRow, NetworkFlowsCollector, Sink
+from avai.host_monitor.collectors import NetworkFlowsCollector
+from avai.host_monitor.models import NetworkFlowRow
+from avai.host_monitor.sink import Sink
 
 # macOS/default form (no interface prefix), -t (no timestamp)
 SAMPLE_MACOS = """\
@@ -95,18 +99,18 @@ class TestParseLine:
 
 class TestPayloadBytes:
     def test_tcp_trailing_length(self):
-        from avai.host_monitor import _payload_bytes
+        from avai.host_monitor.collectors import _payload_bytes
 
         assert _payload_bytes("IP a > b: tcp 1380".split()) == 1380
         assert _payload_bytes("IP a > b: tcp 0".split()) == 0
 
     def test_udp_length_token(self):
-        from avai.host_monitor import _payload_bytes
+        from avai.host_monitor.collectors import _payload_bytes
 
         assert _payload_bytes("IP a > b: UDP, length 45".split()) == 45
 
     def test_absent_returns_zero(self):
-        from avai.host_monitor import _payload_bytes
+        from avai.host_monitor.collectors import _payload_bytes
 
         assert _payload_bytes("IP a > b: Flags [S]".split()) == 0
         assert _payload_bytes([]) == 0
@@ -183,7 +187,8 @@ def seeded(tmp_path):
     sink = Sink(engine)
     sink.setup()
     run_id, ts = sink.start_run("h", 5)
-    from avai.host_monitor import Judgment, ThreatCategory, Verdict
+    from avai.host_monitor.enums import ThreatCategory, Verdict
+    from avai.host_monitor.judge import Judgment
     from avai.host_monitor.runtime import Digest
 
     fields = ("iface", "proto", "dst_ip", "dst_port")
@@ -353,7 +358,7 @@ def _seed_geo(engine, evidence: list[dict]) -> None:
     import json
 
     from avai.enrichers.cache import register_schema
-    from avai.host_monitor import Base
+    from avai.host_monitor.models import Base
 
     model = register_schema(Base)
     with Session(engine) as s:
@@ -566,13 +571,13 @@ class TestGeolocationColumn:
 
 class TestFlagEmoji:
     def test_two_letter_code_to_flag(self):
-        from avai.dashboard import _flag_emoji
+        from avai.dashboard.filters import _flag_emoji
 
         assert _flag_emoji("US") == "\U0001f1fa\U0001f1f8"
         assert _flag_emoji("de") == "\U0001f1e9\U0001f1ea"  # case-insensitive
 
     def test_non_code_returns_empty(self):
-        from avai.dashboard import _flag_emoji
+        from avai.dashboard.filters import _flag_emoji
 
         assert _flag_emoji("United States") == ""
         assert _flag_emoji(None) == ""
@@ -582,7 +587,7 @@ class TestFlagEmoji:
 
 class TestHumanBytes:
     def test_scales(self):
-        from avai.dashboard import _human_bytes
+        from avai.dashboard.filters import _human_bytes
 
         assert _human_bytes(927) == "927 B"
         assert _human_bytes(12345) == "12.1 KB"
@@ -590,7 +595,7 @@ class TestHumanBytes:
         assert _human_bytes(3_000_000_000) == "2.8 GB"
 
     def test_zero_or_none_empty(self):
-        from avai.dashboard import _human_bytes
+        from avai.dashboard.filters import _human_bytes
 
         assert _human_bytes(0) == ""
         assert _human_bytes(None) == ""
@@ -707,7 +712,7 @@ class TestMissingTableGraceful:
         assert "no network flows match the current filters" in r.data.decode()
 
     def test_row_counts_skips_missing_table(self, tmp_path):
-        from avai.dashboard import row_counts
+        from avai.dashboard.queries import row_counts
 
         engine, _ = self._db_without_flows(tmp_path)
         with Session(engine) as s:

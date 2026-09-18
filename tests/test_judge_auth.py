@@ -7,16 +7,12 @@ from unittest.mock import patch
 
 import pytest
 
-from avai.host_monitor import (
-    DEFAULT_PROMPTS_PATH,
-    LlmCredentials,
-    LlmJudge,
-    LlmStages,
-    NullJudge,
-    Prompts,
-    _build_parser,
-    llm,
-)
+from avai.host_monitor import llm
+from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
+from avai.host_monitor.judge import LlmJudge, NullJudge
+from avai.host_monitor.llm import LlmCredentials
+from avai.host_monitor.main import LlmStages, _build_parser
+from avai.host_monitor.prompts import Prompts
 
 OAUTH = {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-token"}
 ANTHROPIC = {"ANTHROPIC_API_KEY": "sk-ant"}

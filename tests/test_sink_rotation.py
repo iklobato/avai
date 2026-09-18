@@ -14,7 +14,8 @@ import pytest
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
-from avai.host_monitor import CollectionRun, LaunchItemRow, Sink
+from avai.host_monitor.models import CollectionRun, LaunchItemRow
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.models import (
     AuthEventRow,
     CollectorErrorRow,
@@ -356,7 +357,8 @@ class TestPruneToSizeBehaviour:
 
 class TestTouchJudgments:
     def test_marks_observed_hashes_as_seen_now(self, file_sink):
-        from avai.host_monitor import Judgment, ThreatCategory, Verdict
+        from avai.host_monitor.enums import ThreatCategory, Verdict
+        from avai.host_monitor.judge import Judgment
 
         h = "a" * 64
         # Pre-seed a judgement.
@@ -379,7 +381,7 @@ class TestTouchJudgments:
         new_ts = Clock().now_iso()
         file_sink.touch_judgments("processes", [h], new_ts)
         # Read it back.
-        from avai.host_monitor import Judgement
+        from avai.host_monitor.models import Judgement
 
         with Session(file_sink.engine) as s:
             row = s.execute(

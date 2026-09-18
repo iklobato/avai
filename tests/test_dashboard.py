@@ -16,16 +16,14 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import (
-    DashboardConfig,
-    _ensure_db_exists,
-    create_app,
-    latest_run,
-    system_integrity,
-)
+from avai.dashboard.app import create_app
+from avai.dashboard.config import DashboardConfig
+from avai.dashboard.queries import latest_run, system_integrity
+from avai.dashboard.serve import _ensure_db_exists
 from avai.dashboard.db import read_only_engine
 from avai.dashboard.queries import LogFilter, Page
-from avai.host_monitor import Sink, SystemIntegrityRow
+from avai.host_monitor.models import SystemIntegrityRow
+from avai.host_monitor.sink import Sink
 
 # ---------------------------------------------------------------------------
 # _ensure_db_exists — regression for the read-only 500 bug
@@ -52,7 +50,8 @@ class TestEnsureDbExists:
         500 on the new panel. This is the general 'every new table' fix."""
         import sqlite3
 
-        from avai.host_monitor import CollectionRun, Sink
+        from avai.host_monitor.models import CollectionRun
+        from avai.host_monitor.sink import Sink
 
         db = tmp_path / "old.db"
         Sink(create_engine(f"sqlite:///{db}")).setup()  # full current schema
@@ -254,7 +253,7 @@ class TestDashboardEndpoints:
     ):
         from datetime import datetime, timedelta, timezone
 
-        from avai.host_monitor import AuthEventRow, CollectionRun, Judgement
+        from avai.host_monitor.models import AuthEventRow, CollectionRun, Judgement
 
         recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(
             timespec="seconds"
@@ -336,7 +335,7 @@ class TestDashboardEndpoints:
         # A configured proxy and an active remote login session (with a
         # verdict joined on content_hash/collector) must surface in the
         # exposure panel.
-        from avai.host_monitor import (
+        from avai.host_monitor.models import (
             CollectionRun,
             Judgement,
             LoginSessionRow,
@@ -404,7 +403,7 @@ class TestDashboardEndpoints:
         # A YARA match (file_scan collector) must render its rule + path in
         # the findings table — regression for file_scan missing from the
         # dashboard's COLLECTOR_MODELS / DISPLAY_FIELDS maps.
-        from avai.host_monitor import CollectionRun, FileScanRow, Judgement
+        from avai.host_monitor.models import CollectionRun, FileScanRow, Judgement
 
         with Session(_engine_rw(db_path)) as s:
             s.add(
@@ -454,7 +453,8 @@ class TestDashboardEndpoints:
     def test_file_scan_panel_renders_ruleset_summary_and_matches(self, client, db_path):
         # The File Scan panel shows the persisted ruleset summary (counts,
         # sources, categories) AND this run's matches with rule/path/author.
-        from avai.host_monitor import CollectionRun, FileScanRow, Judgement, Sink
+        from avai.host_monitor.models import CollectionRun, FileScanRow, Judgement
+        from avai.host_monitor.sink import Sink
 
         Sink(_engine_rw(db_path)).write_yara_status(
             {
@@ -544,7 +544,7 @@ class TestDashboardEndpoints:
         # WCAG 1.3.1/3.3.2 — placeholder is not a label. Every search box and
         # select in the data panels must carry an aria-label. The panels only
         # render their filter bar once a run exists, so seed one first.
-        from avai.host_monitor import CollectionRun
+        from avai.host_monitor.models import CollectionRun
 
         with Session(_engine_rw(db_path)) as s:
             s.add(
@@ -574,7 +574,7 @@ class TestDashboardEndpoints:
         # Regression for centralising the verdict palette: the per-partial
         # colour maps were removed in favour of the shared verdict_pill macro,
         # which must still render the verdict text AND the confidence suffix.
-        from avai.host_monitor import CollectionRun, DnsQueryRow, Judgement
+        from avai.host_monitor.models import CollectionRun, DnsQueryRow, Judgement
 
         with Session(_engine_rw(db_path)) as s:
             s.add(
@@ -622,7 +622,7 @@ class TestDashboardEndpoints:
     def test_network_topology_renders_rows_with_verdicts(self, client, db_path):
         # A configured resolver and an ARP entry (with a verdict joined on
         # content_hash/collector) must surface in the topology panel.
-        from avai.host_monitor import (
+        from avai.host_monitor.models import (
             ArpEntryRow,
             CollectionRun,
             DnsResolverRow,
@@ -691,7 +691,7 @@ class TestDashboardEndpoints:
     def test_vulnerabilities_panel_renders_cves_and_kev(self, client, db_path):
         import json as _json
 
-        from avai.dashboard import Base
+        from avai.host_monitor.models import Base
         from avai.enrichers.cache import register_schema
 
         model = register_schema(Base)
@@ -775,9 +775,9 @@ class TestDashboardEndpoints:
     ):
         import json as _json
 
-        from avai.dashboard import Base
+        from avai.host_monitor.models import Base
         from avai.enrichers.cache import register_schema
-        from avai.host_monitor import CollectionRun, ListeningPortRow
+        from avai.host_monitor.models import CollectionRun, ListeningPortRow
 
         model = register_schema(Base)
         with Session(_engine_rw(db_path)) as s:
@@ -843,7 +843,7 @@ class TestDashboardEndpoints:
         assert b"no incident digest yet" in r.data
 
     def test_incident_fragment_renders_latest_narrative(self, client, db_path):
-        from avai.host_monitor import IncidentNarrativeRow
+        from avai.host_monitor.models import IncidentNarrativeRow
 
         with Session(_engine_rw(db_path)) as s:
             s.add(
@@ -886,7 +886,7 @@ class TestDashboardEndpoints:
         # A digest written before the structured format (only the old
         # `narrative` field) must still render via the markdown fallback,
         # with any injected <script> stripped.
-        from avai.host_monitor import IncidentNarrativeRow
+        from avai.host_monitor.models import IncidentNarrativeRow
 
         with Session(_engine_rw(db_path)) as s:
             s.add(
@@ -910,7 +910,7 @@ class TestDashboardEndpoints:
     def test_findings_surface_novel_badge_and_context(self, client, db_path):
         # A finding carrying the baseline novelty + correlated process story
         # must render the 'novel' badge and the behavioural-context block.
-        from avai.host_monitor import CollectionRun, Judgement
+        from avai.host_monitor.models import CollectionRun, Judgement
 
         with Session(_engine_rw(db_path)) as s:
             s.add(
@@ -953,7 +953,7 @@ class TestDashboardEndpoints:
         assert "9.9.9.9:443" in body  # correlated outbound flow
 
     def test_risk_fragment_renders_score_and_drivers(self, client, db_path):
-        from avai.host_monitor import RiskScoreRow
+        from avai.host_monitor.models import RiskScoreRow
 
         with Session(_engine_rw(db_path)) as s:
             s.add(
@@ -984,7 +984,7 @@ class TestDashboardEndpoints:
         assert b"no posture score yet" in r.data
 
     def test_overview_shows_total_llm_cost(self, client, db_path):
-        from avai.host_monitor import CollectionRun, Judgement
+        from avai.host_monitor.models import CollectionRun, Judgement
 
         with Session(_engine_rw(db_path)) as s:
             s.add(
@@ -1020,7 +1020,7 @@ class TestDashboardEndpoints:
         assert "$0.0015" in body  # 0.001 + 0.0005, summed since the run
 
     def test_row_counts_shows_total_and_delta(self, client, db_path):
-        from avai.host_monitor import CollectionRun, ProcessRow
+        from avai.host_monitor.models import CollectionRun, ProcessRow
 
         with Session(_engine_rw(db_path)) as s:
             for rid, ts in (
@@ -1063,7 +1063,7 @@ class TestDashboardEndpoints:
         assert "empty" in body  # other collectors have 0 rows
 
     def test_finding_detail_shows_per_judgement_cost(self, client, db_path):
-        from avai.host_monitor import CollectionRun, Judgement
+        from avai.host_monitor.models import CollectionRun, Judgement
 
         with Session(_engine_rw(db_path)) as s:
             s.add(
@@ -1100,8 +1100,9 @@ class TestDashboardEndpoints:
 
 class TestRowCountsDelta:
     def test_delta_and_is_new(self, tmp_path):
-        from avai.dashboard import row_counts
-        from avai.host_monitor import ListeningPortRow, ProcessRow, Sink
+        from avai.dashboard.queries import row_counts
+        from avai.host_monitor.models import ListeningPortRow, ProcessRow
+        from avai.host_monitor.sink import Sink
 
         eng = create_engine(
             f"sqlite:///{tmp_path / 'rc.db'}",
@@ -1140,19 +1141,19 @@ class TestRowCountsDelta:
 
 class TestDatetimeFmt:
     def test_formats_iso_to_human_utc(self):
-        from avai.dashboard import _datetime_fmt
+        from avai.dashboard.filters import _datetime_fmt
 
         assert (
             _datetime_fmt("2026-05-30T18:57:20+00:00") == "May 30, 2026 · 18:57:20 UTC"
         )
 
     def test_naive_timestamp_assumed_utc(self):
-        from avai.dashboard import _datetime_fmt
+        from avai.dashboard.filters import _datetime_fmt
 
         assert _datetime_fmt("2026-05-30T18:57:20") == "May 30, 2026 · 18:57:20 UTC"
 
     def test_non_utc_offset_converted_to_utc(self):
-        from avai.dashboard import _datetime_fmt
+        from avai.dashboard.filters import _datetime_fmt
 
         # 20:57 +02:00 == 18:57 UTC
         assert (
@@ -1160,7 +1161,7 @@ class TestDatetimeFmt:
         )
 
     def test_empty_and_garbage_pass_through(self):
-        from avai.dashboard import _datetime_fmt
+        from avai.dashboard.filters import _datetime_fmt
 
         assert _datetime_fmt("") == ""
         assert _datetime_fmt("not-a-date") == "not-a-date"
@@ -1501,7 +1502,7 @@ class TestFeedbackEndpoint:
         )
         assert r.status_code == 200
         assert b"recorded" in r.data
-        from avai.host_monitor import FeedbackRow
+        from avai.host_monitor.models import FeedbackRow
 
         with Session(_engine_rw(db_path)) as s:
             row = s.get(FeedbackRow, (self._HASH, "processes"))
@@ -1526,7 +1527,7 @@ class TestFeedbackEndpoint:
             headers={"X-Avai-Token": "secret"},
         )
         assert r.status_code == 200
-        from avai.host_monitor import FeedbackRow
+        from avai.host_monitor.models import FeedbackRow
 
         with Session(_engine_rw(db_path)) as s:
             row = s.get(FeedbackRow, (self._HASH, collector))
@@ -1799,7 +1800,7 @@ class TestLogsPanel:
             s.commit()
 
     def _run(self, tmp_path):
-        from avai.host_monitor import CollectionRun
+        from avai.host_monitor.models import CollectionRun
 
         db = tmp_path / "logs.db"
         _ensure_db_exists(str(db))
@@ -1966,7 +1967,7 @@ class TestLogAggregates:
             s.commit()
 
     def _run(self, tmp_path):
-        from avai.host_monitor import CollectionRun
+        from avai.host_monitor.models import CollectionRun
 
         db = tmp_path / "agg.db"
         _ensure_db_exists(str(db))

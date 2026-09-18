@@ -20,7 +20,10 @@ import json
 import pytest
 from sqlalchemy import create_engine
 
-from avai.host_monitor import Judgment, LlmJudge, Prompts, Sink, ThreatCategory, Verdict
+from avai.host_monitor.enums import ThreatCategory, Verdict
+from avai.host_monitor.judge import Judgment, LlmJudge
+from avai.host_monitor.prompts import Prompts
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.runtime import Digest
 
 # ===========================================================================
@@ -179,7 +182,9 @@ class TestContentHashStability:
 def seeded_dashboard(tmp_path):
     """A dashboard bound to a DB containing one active malicious finding
     and one benign one, with a latest run so active/resolved resolves."""
-    from avai.dashboard import DashboardConfig, _ensure_db_exists, create_app
+    from avai.dashboard.app import create_app
+    from avai.dashboard.config import DashboardConfig
+    from avai.dashboard.serve import _ensure_db_exists
 
     db = tmp_path / "seeded.db"
     _ensure_db_exists(str(db))

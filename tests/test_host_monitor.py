@@ -12,17 +12,11 @@ import pytest
 from sqlalchemy import create_engine
 
 from avai.host_monitor.runtime import Clock, Coerce, Digest
-from avai.host_monitor import (
-    Base,
-    CollectionRun,
-    Judgement,
-    NullJudge,
-    Prompts,
-    ProcessRow,
-    Sink,
-    ThreatCategory,
-    Verdict,
-)
+from avai.host_monitor.enums import ThreatCategory, Verdict
+from avai.host_monitor.judge import NullJudge
+from avai.host_monitor.models import Base, CollectionRun, Judgement, ProcessRow
+from avai.host_monitor.prompts import Prompts
+from avai.host_monitor.sink import Sink
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +278,7 @@ class TestSinkUnjudged:
             "content_hash": h,
         }])
         # Pre-seed the judgement so this hash is "already judged".
-        from avai.host_monitor import Judgment
+        from avai.host_monitor.judge import Judgment
         sink.write_judgments([Judgment(
             content_hash=h, collector="processes",
             verdict=Verdict.BENIGN, category=ThreatCategory.NONE,
@@ -303,7 +297,7 @@ class TestSinkUnjudged:
 
 class TestSinkWriteJudgments:
     def test_write_is_idempotent_on_pk_conflict(self, sink):
-        from avai.host_monitor import Judgment
+        from avai.host_monitor.judge import Judgment
         j = Judgment(
             content_hash="aa" * 32, collector="processes",
             verdict=Verdict.BENIGN, category=ThreatCategory.NONE,
@@ -330,7 +324,7 @@ class TestSinkWriteJudgments:
 
         from sqlalchemy import select
         from sqlalchemy.orm import Session
-        from avai.host_monitor import CollectorErrorRow
+        from avai.host_monitor.models import CollectorErrorRow
         with Session(sink.engine) as s:
             row = s.execute(select(CollectorErrorRow)).scalar_one()
         assert row.collector == "processes"
