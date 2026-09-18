@@ -5,6 +5,7 @@ Runner."""
 from __future__ import annotations
 
 import ast
+import os
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +29,25 @@ def test_desktop_does_no_subprocess_orchestration():
     assert "subprocess" not in _imports(src)  # not imported
     assert "subprocess." not in src  # no subprocess.run / .Popen call
     assert "Popen" not in src
+
+
+def test_dashboard_opens_control_and_app_mode_without_touching_env(
+    tmp_path, monkeypatch
+):
+    from unittest.mock import patch
+
+    import waitress
+
+    monkeypatch.delenv("AVAI_CONTROL_OPEN", raising=False)
+    monkeypatch.delenv("AVAI_APP_MODE", raising=False)
+    monkeypatch.setattr(waitress, "serve", lambda *a, **k: None)
+    with patch("avai.dashboard.create_app") as create_app:
+        desktop._start_dashboard(str(tmp_path / "avai.db"), 0).join(timeout=5)
+    config = create_app.call_args.args[0]
+    assert config.control_open and config.app_mode
+    # .get, not `in os.environ`: a failure must not print the whole env.
+    assert os.environ.get("AVAI_CONTROL_OPEN") is None
+    assert os.environ.get("AVAI_APP_MODE") is None
 
 
 def test_dashboard_serves_in_process(tmp_path):

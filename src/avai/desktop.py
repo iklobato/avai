@@ -47,11 +47,11 @@ def _start_dashboard(db: str, port: int) -> threading.Thread:
 
     # The window is a single-user loopback webview the user owns, so control
     # needs no token (the token is only a CSRF defence for a network dashboard).
-    os.environ.setdefault("AVAI_CONTROL_OPEN", "1")
     # App mode -> antivirus-style protection home at the top of the dashboard.
-    os.environ.setdefault("AVAI_APP_MODE", "1")
+    # Defaults only: a value the user exported still wins.
+    environ = {"AVAI_CONTROL_OPEN": "1", "AVAI_APP_MODE": "1", **os.environ}
     _ensure_db_exists(db)
-    app = create_app(DashboardConfig.from_env(db))
+    app = create_app(DashboardConfig.from_env(db, environ))
     thread = threading.Thread(
         target=lambda: waitress.serve(app, host="127.0.0.1", port=port),
         daemon=True,
