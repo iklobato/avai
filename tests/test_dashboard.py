@@ -1604,7 +1604,7 @@ class TestSeverityHelpers:
     """Pure CVSS-band → severity mapping that drives the panel's sort/filter."""
 
     def test_cvss_bands(self):
-        from avai.dashboard.queries import _severity_from_cvss
+        from avai.dashboard.queries.vulnerabilities import _severity_from_cvss
 
         assert _severity_from_cvss(9.8) == "critical"
         assert _severity_from_cvss(7.0) == "high"
@@ -1614,7 +1614,7 @@ class TestSeverityHelpers:
         assert _severity_from_cvss(None) is None
 
     def test_item_severity_falls_back_to_cve_label_then_kev(self):
-        from avai.dashboard.queries import _item_severity
+        from avai.dashboard.queries.vulnerabilities import _item_severity
 
         # No score on the item, but a labelled CVE → use the worst label.
         cves = [{"severity": "high"}, {"severity": "low"}]

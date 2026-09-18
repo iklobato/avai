@@ -12,7 +12,6 @@ from ..control import monitor_alive, read_control_state
 from ..queries import (
     DEFAULT_PER_PAGE,
     PER_PAGE_OPTIONS,
-    _parse_json_list,
     auth_events_aggregated,
     category_options,
     collector_errors,
@@ -43,6 +42,9 @@ from ..queries import (
     system_integrity,
     verdict_counts,
     vulnerabilities,
+)
+from ..queries.common import (
+    _parse_json_list,
 )
 from . import read_session, services
 

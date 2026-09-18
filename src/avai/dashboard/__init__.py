@@ -40,37 +40,6 @@ from .queries import (
     PER_PAGE_OPTIONS,
     SEVERITY_ORDER,
     VERDICTS,
-    _AUTH_AGG_WINDOW_HOURS,
-    _AUTH_SUBSYSTEM_LABELS,
-    _AUTH_VERDICT_SEV,
-    _FAMILY_LABEL,
-    _FLOW_SEV,
-    _HIDDEN_SOURCE_FIELDS,
-    _PROTO_BY_SOCK,
-    _SCHEMA_TTL,
-    _SCOPE_SEV,
-    _SEVERITY_CASE,
-    _SORT_FIELDS,
-    _STREAMING_COLLECTORS,
-    _VULN_SOURCES,
-    _addr_scope,
-    _attach_ip_enrichment,
-    _cache_key,
-    _cmdline_str,
-    _collector_rows_with_verdict,
-    _columns_cache,
-    _dns_resolution_level,
-    _existing_columns,
-    _existing_tables,
-    _geo_from_details,
-    _geo_richness,
-    _host_from_details,
-    _paginate,
-    _parse_json_list,
-    _parse_json_obj,
-    _port_sort_key,
-    _row_and_artifact,
-    _tables_cache,
     auth_events_aggregated,
     category_options,
     collector_errors,
@@ -97,6 +66,53 @@ from .queries import (
     verdict_counts,
     verdict_timeseries,
     vulnerabilities,
+)
+from .queries.auth_events import (
+    _AUTH_AGG_WINDOW_HOURS,
+    _AUTH_SUBSYSTEM_LABELS,
+    _AUTH_VERDICT_SEV,
+)
+from .queries.collection import (
+    _STREAMING_COLLECTORS,
+)
+from .queries.common import (
+    _FLOW_SEV,
+    _HIDDEN_SOURCE_FIELDS,
+    _SCHEMA_TTL,
+    _cache_key,
+    _collector_rows_with_verdict,
+    _columns_cache,
+    _existing_columns,
+    _existing_tables,
+    _paginate,
+    _parse_json_list,
+    _parse_json_obj,
+    _port_sort_key,
+    _row_and_artifact,
+    _tables_cache,
+)
+from .queries.dns import (
+    _dns_resolution_level,
+)
+from .queries.findings import (
+    _SEVERITY_CASE,
+    _SORT_FIELDS,
+)
+from .queries.ip_enrichment import (
+    _attach_ip_enrichment,
+    _geo_from_details,
+    _geo_richness,
+    _host_from_details,
+)
+from .queries.ports import (
+    _FAMILY_LABEL,
+    _PROTO_BY_SOCK,
+    _SCOPE_SEV,
+    _addr_scope,
+    _cmdline_str,
+)
+from .queries.vulnerabilities import (
+    _VULN_SOURCES,
 )
 from .routes.fragments import (
     _int_arg,
