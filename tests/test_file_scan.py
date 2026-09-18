@@ -23,7 +23,7 @@ from avai.enrichers.registry import discover_enricher_classes
 from avai.enrichers.sources.local_denylist import LocalHashDenylistEnricher
 from avai.host_monitor.collectors import (
     FileScanCollector,
-    _compile_yara_rules,
+    YaraRulesetCompiler,
     _crypto_hint,
     _file_type,
 )
@@ -182,6 +182,27 @@ class TestFileScanCollector:
         rows = list(FileScanCollector(fs=fs, rules_dir=_rules_dir(tmp_path)).collect())
         assert len(rows) == 1  # only one file scanned before the cap
 
+    def test_file_reached_by_two_sources_is_scanned_once(self, tmp_path):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        evil = bindir / "evil.bin"
+        evil.write_text(_MARKER)
+        fs = _FakeFs(bin_dirs=[bindir], app_exes=[evil])
+        rows = list(FileScanCollector(fs=fs, rules_dir=_rules_dir(tmp_path)).collect())
+        assert [r["scan_source"] for r in rows] == ["bin_dirs"]
+
+    def test_per_cycle_cap_counts_across_sources(self, tmp_path, monkeypatch):
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        (bindir / "evil.bin").write_text(_MARKER)
+        exes = [tmp_path / f"app{i}" for i in range(2)]
+        for exe in exes:
+            exe.write_text(_MARKER)
+        monkeypatch.setattr(C, "YARA_MAX_FILES_PER_CYCLE", 2)
+        fs = _FakeFs(bin_dirs=[bindir], app_exes=exes)
+        rows = list(FileScanCollector(fs=fs, rules_dir=_rules_dir(tmp_path)).collect())
+        assert [Path(r["path"]).name for r in rows] == ["evil.bin", "app0"]
+
     def test_no_fs_yields_nothing(self, tmp_path):
         rows = list(
             FileScanCollector(fs=None, rules_dir=_rules_dir(tmp_path)).collect()
@@ -190,7 +211,7 @@ class TestFileScanCollector:
 
     def test_bundled_eicar_rules_compile(self):
         # Guards against a broken shipped rule silently disabling scanning.
-        rules, stats = _compile_yara_rules(C.YARA_RULES_DIR)
+        rules, stats = YaraRulesetCompiler(C.YARA_RULES_DIR).compile()
         assert rules is not None
         assert stats["rules_loaded"] >= 1
         assert "bundled" in stats["sources"]
@@ -201,6 +222,87 @@ class TestFileScanCollector:
         )
         assert eicar["source"] == "bundled"
         assert eicar["category"] == "eicar"
+
+
+class TestYaraRulesetCompiler:
+    def _tree(self, tmp_path: Path) -> Path:
+        d = tmp_path / "rules"
+        (d / "vendor" / "pack").mkdir(parents=True)
+        (d / "gen_a.yar").write_text(
+            "rule a1 { condition: true }\n"
+            'rule a2 { meta: author = "Ann" condition: true }'
+        )
+        (d / "mal_x.YARA").write_text("rule c1 { condition: true }")
+        (d / "broken.yar").write_text("rule { nope")
+        (d / "readme.txt").write_text("rule ignored { condition: true }")
+        (d / "vendor" / "pack" / "gen_a.yar").write_text(
+            "rule b1 : t1 t2 { condition: true }"
+        )
+        return d
+
+    def test_summary_counts_sources_categories_and_skips(self, tmp_path):
+        d = self._tree(tmp_path)
+        _rules, stats = YaraRulesetCompiler(d).compile()
+        assert {k: v for k, v in stats.items() if k != "inventory"} == {
+            "rules_loaded": 4,
+            "files_loaded": 3,
+            "files_skipped": 1,
+            "skip_reasons": {"other": 1},
+            "by_category": {"gen": 2, "mal": 1},
+            "sources": {"bundled": 2, "pack": 1},
+            "rules_dir": str(d),
+        }
+        assert stats["inventory"] == [
+            {
+                "identifier": "a1",
+                "tags": "",
+                "author": "",
+                "source": "bundled",
+                "category": "gen",
+            },
+            {
+                "identifier": "a2",
+                "tags": "",
+                "author": "Ann",
+                "source": "bundled",
+                "category": "gen",
+            },
+            {
+                "identifier": "c1",
+                "tags": "",
+                "author": "",
+                "source": "bundled",
+                "category": "mal",
+            },
+            {
+                "identifier": "b1",
+                "tags": "t1 t2",
+                "author": "",
+                "source": "pack",
+                "category": "gen",
+            },
+        ]
+
+    def test_same_file_stem_gets_its_own_namespace(self, tmp_path):
+        rules, _stats = YaraRulesetCompiler(self._tree(tmp_path)).compile()
+        hits = {(m.namespace, m.rule) for m in rules.match(data=b"")}
+        assert hits == {
+            ("gen_a", "a1"),
+            ("gen_a", "a2"),
+            ("mal_x", "c1"),
+            ("gen_a_1", "b1"),
+        }
+
+    def test_missing_dir_gives_no_rules_and_an_empty_summary(self, tmp_path):
+        rules, stats = YaraRulesetCompiler(tmp_path / "absent").compile()
+        assert rules is None
+        assert (stats["files_loaded"], stats["inventory"]) == (0, [])
+
+    def test_only_broken_files_gives_no_rules(self, tmp_path):
+        (tmp_path / "bad.yar").write_text("rule { nope")
+        rules, stats = YaraRulesetCompiler(tmp_path).compile()
+        assert rules is None
+        assert stats["skip_reasons"] == {"other": 1}
 
 
 class TestYaraExternals:

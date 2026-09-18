@@ -10,7 +10,12 @@ from .devices import (
     UsbDevicesCollector,
     WifiCollector,
 )
-from .file_scan import FileScanCollector, _compile_yara_rules, _crypto_hint, _file_type
+from .file_scan import (
+    FileScanCollector,
+    YaraRulesetCompiler,
+    _crypto_hint,
+    _file_type,
+)
 from .integrity import (
     FileIntegrityCollector,
     LinuxSystemIntegrityCollector,
@@ -112,7 +117,7 @@ __all__ = [
     "UnifiedLogAuthParser",
     "UsbDevicesCollector",
     "WifiCollector",
-    "_compile_yara_rules",
+    "YaraRulesetCompiler",
     "_crypto_hint",
     "_file_type",
     "_payload_bytes",

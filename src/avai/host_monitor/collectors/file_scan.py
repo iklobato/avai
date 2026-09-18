@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from itertools import islice
+from typing import TYPE_CHECKING, Iterable, Optional
 
 if TYPE_CHECKING:
     from ..hosts.capabilities import FilesystemLayout
@@ -145,12 +146,14 @@ def _rule_source(path: Path, rules_dir: Path) -> str:
     return "bundled" if len(parts) == 1 else parts[-2]
 
 
-def _compile_yara_rules(rules_dir: Path):
+_RULE_SUFFIXES = (".yar", ".yara")
+
+
+class YaraRulesetCompiler:
     """Compile every ``*.yar`` / ``*.yara`` under ``rules_dir`` into one
-    :class:`yara.Rules`. Returns ``(rules, stats)`` — ``rules`` is ``None``
-    when the directory is absent or holds no compilable rules; ``stats`` is
-    always a summary dict (counts, sources, skip reasons, per-category) for
-    the dashboard's File Scan panel.
+    :class:`yara.Rules`, plus a summary dict (counts, sources, skip
+    reasons, per-category, one inventory entry per rule) for the
+    dashboard's File Scan panel.
 
     Each file is validated independently first and uncompilable ones are
     skipped with a warning, so a single malformed rule in a fetched pack
@@ -160,30 +163,71 @@ def _compile_yara_rules(rules_dir: Path):
     files. ``_YARA_EXTERNALS`` is supplied so rules referencing scanner
     externals (filename/filepath/extension/filetype/…) compile.
     """
-    stats = {
-        "rules_loaded": 0,
-        "files_loaded": 0,
-        "files_skipped": 0,
-        "skip_reasons": {},
-        "by_category": {},
-        "sources": {},
-        "rules_dir": str(rules_dir),
-        "inventory": [],  # one entry per rule, for the dashboard's rule browser
-    }
-    if not rules_dir.is_dir():
-        return None, stats
-    filepaths: dict[str, str] = {}
-    skip_reasons: dict[str, int] = {}
-    by_category: dict[str, int] = {}
-    sources: dict[str, int] = {}
-    inventory: list[dict] = []
-    for path in sorted(rules_dir.rglob("*")):
-        if path.suffix.lower() not in (".yar", ".yara") or not path.is_file():
-            continue
+
+    def __init__(self, rules_dir: Path) -> None:
+        self._rules_dir = rules_dir
+
+    def compile(self) -> tuple[Optional["yara.Rules"], dict]:
+        """Return ``(rules, stats)``. ``rules`` is None when the directory
+        is absent or holds no compilable rules; ``stats`` is always set."""
+        stats = self._empty_stats()
+        if not self._rules_dir.is_dir():
+            return None, stats
+        filepaths = self._load_files(stats)
+        if not filepaths:
+            return None, stats
         try:
-            # Iterate the per-file compile (otherwise discarded) to record each
-            # rule's identity for the inventory — no extra compile cost.
-            file_rules = yara.compile(filepath=str(path), externals=_YARA_EXTERNALS)
+            compiled = yara.compile(filepaths=filepaths, externals=_YARA_EXTERNALS)
+        except yara.Error as exc:
+            constants.LOG.warning("yara: combined compile failed: %s", exc)
+            return None, stats
+        stats["rules_loaded"] = sum(1 for _ in compiled)
+        # One-line visibility into what the scanner actually loaded — the only
+        # place rule counts surface, since there's no per-match log.
+        constants.LOG.info(
+            "yara: loaded %d rules from %d files (skipped %d) under %s",
+            stats["rules_loaded"],
+            stats["files_loaded"],
+            stats["files_skipped"],
+            self._rules_dir,
+        )
+        return compiled, stats
+
+    def _empty_stats(self) -> dict:
+        return {
+            "rules_loaded": 0,
+            "files_loaded": 0,
+            "files_skipped": 0,
+            "skip_reasons": {},
+            "by_category": {},
+            "sources": {},
+            "rules_dir": str(self._rules_dir),
+            "inventory": [],  # one entry per rule, for the dashboard's rule browser
+        }
+
+    def _load_files(self, stats: dict) -> dict[str, str]:
+        """Validate each rule file on its own, record it in ``stats`` and
+        return ``{namespace: path}`` for the ones that compile."""
+        filepaths: dict[str, str] = {}
+        for path in self._rule_files():
+            file_rules = self._compile_one(path, stats["skip_reasons"])
+            if file_rules is None:
+                continue
+            filepaths[_unique_namespace(path.stem, filepaths)] = str(path)
+            self._record(path, file_rules, stats)
+        stats["files_loaded"] = len(filepaths)
+        stats["files_skipped"] = sum(stats["skip_reasons"].values())
+        return filepaths
+
+    def _rule_files(self) -> Iterable[Path]:
+        for path in sorted(self._rules_dir.rglob("*")):
+            if path.suffix.lower() in _RULE_SUFFIXES and path.is_file():
+                yield path
+
+    @staticmethod
+    def _compile_one(path: Path, skip_reasons: dict) -> Optional["yara.Rules"]:
+        try:
+            return yara.compile(filepath=str(path), externals=_YARA_EXTERNALS)
         except yara.Error as exc:
             reason = "needs crypto-enabled yara" if _crypto_hint(exc) else "other"
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
@@ -193,54 +237,35 @@ def _compile_yara_rules(rules_dir: Path):
                 exc,
                 _crypto_hint(exc),
             )
-            continue
-        namespace = path.stem
-        unique = namespace
-        suffix = 1
-        while unique in filepaths:
-            unique = f"{namespace}_{suffix}"
-            suffix += 1
-        filepaths[unique] = str(path)
+            return None
+
+    def _record(self, path: Path, file_rules: "yara.Rules", stats: dict) -> None:
+        # The per-file compile is otherwise discarded; iterating it records
+        # each rule's identity for the inventory at no extra compile cost.
         category = path.stem.split("_", 1)[0]
+        source = _rule_source(path, self._rules_dir)
+        by_category, sources = stats["by_category"], stats["sources"]
         by_category[category] = by_category.get(category, 0) + 1
-        source = _rule_source(path, rules_dir)
         sources[source] = sources.get(source, 0) + 1
-        for rule in file_rules:
-            inventory.append(
-                {
-                    "identifier": rule.identifier,
-                    "tags": " ".join(rule.tags),
-                    "author": str((rule.meta or {}).get("author") or ""),
-                    "source": source,
-                    "category": category,
-                }
-            )
-    stats.update(
-        files_loaded=len(filepaths),
-        files_skipped=sum(skip_reasons.values()),
-        skip_reasons=skip_reasons,
-        by_category=by_category,
-        sources=sources,
-        inventory=inventory,
-    )
-    if not filepaths:
-        return None, stats
-    try:
-        compiled = yara.compile(filepaths=filepaths, externals=_YARA_EXTERNALS)
-    except yara.Error as exc:
-        constants.LOG.warning("yara: combined compile failed: %s", exc)
-        return None, stats
-    stats["rules_loaded"] = sum(1 for _ in compiled)
-    # One-line visibility into what the scanner actually loaded — the only
-    # place rule counts surface, since there's no per-match log.
-    constants.LOG.info(
-        "yara: loaded %d rules from %d files (skipped %d) under %s",
-        stats["rules_loaded"],
-        stats["files_loaded"],
-        stats["files_skipped"],
-        rules_dir,
-    )
-    return compiled, stats
+        stats["inventory"].extend(
+            {
+                "identifier": rule.identifier,
+                "tags": " ".join(rule.tags),
+                "author": str((rule.meta or {}).get("author") or ""),
+                "source": source,
+                "category": category,
+            }
+            for rule in file_rules
+        )
+
+
+def _unique_namespace(stem: str, taken: dict[str, str]) -> str:
+    unique = stem
+    suffix = 1
+    while unique in taken:
+        unique = f"{stem}_{suffix}"
+        suffix += 1
+    return unique
 
 
 class FileScanCollector(SnapshotCollector):
@@ -283,7 +308,8 @@ class FileScanCollector(SnapshotCollector):
 
     def _ruleset(self):
         if not self._compiled:
-            self._rules, self.compile_stats = _compile_yara_rules(self._rules_dir)
+            compiler = YaraRulesetCompiler(self._rules_dir)
+            self._rules, self.compile_stats = compiler.compile()
             self._compiled = True
         return self._rules
 
@@ -291,62 +317,42 @@ class FileScanCollector(SnapshotCollector):
         rules = self._ruleset()
         if rules is None:
             return
-        scanned = 0
-        for path, source in self._targets():
-            if scanned >= constants.YARA_MAX_FILES_PER_CYCLE:
-                return
+        # The cap counts every scan attempt, matched or not.
+        targets = islice(self._targets(), constants.YARA_MAX_FILES_PER_CYCLE)
+        for path, source in targets:
             yield from self._scan_file(path, source, rules)
-            scanned += 1  # count every scan attempt, matched or not
 
     def _targets(self):
         """Yield ``(path, scan_source)`` for each file to scan, deduped by
-        path. Bounded by construction; the per-cycle cap is enforced by the
-        caller. No ``fs`` ⇒ nothing to scan."""
+        path. Bounded by construction; ``collect`` applies the per-cycle
+        cap. No ``fs`` ⇒ nothing to scan."""
         if self._fs is None:
             return
+        sources = (
+            # privileged bin dirs: recursive, but a small file set.
+            ("bin_dirs", self._bin_dir_files()),
+            # application executables (macOS bundles; [] elsewhere).
+            ("app_bundle", self._fs.app_executables()),
+            ("downloads", self._recent_downloads()),
+        )
         seen: set[str] = set()
+        for label, paths in sources:
+            for path in paths:
+                key = str(path)
+                if key not in seen:
+                    seen.add(key)
+                    yield path, label
 
-        def _fresh(path: Path) -> bool:
-            sp = str(path)
-            if sp in seen:
-                return False
-            seen.add(sp)
-            return True
-
-        # 1) privileged bin dirs — recursive, but a small file set.
+    def _bin_dir_files(self) -> Iterable[Path]:
         for base in self._fs.privileged_bin_dirs():
-            # is_dir() re-raises EACCES, so guard it together with the walk.
-            try:
-                if not base.is_dir():
-                    continue
-                files = list(base.rglob("*"))
-            except OSError:
-                continue
-            for p in files:
-                if _fresh(p):
-                    yield p, "bin_dirs"
-        # 2) application executables (macOS bundles; [] elsewhere).
-        for p in self._fs.app_executables():
-            if _fresh(p):
-                yield p, "app_bundle"
-        # 3) recently modified Downloads in each home.
+            yield from _walk(base)
+
+    def _recent_downloads(self) -> Iterable[Path]:
         cutoff = self._recent_cutoff()
         for home in self._fs.home_dirs():
-            downloads = home / "Downloads"
-            try:
-                if not downloads.is_dir():
-                    continue
-                files = list(downloads.rglob("*"))
-            except OSError:
-                continue
-            for p in files:
-                try:
-                    if p.stat().st_mtime < cutoff:
-                        continue
-                except (PermissionError, OSError):
-                    continue
-                if _fresh(p):
-                    yield p, "downloads"
+            for path in _walk(home / "Downloads"):
+                if _modified_since(path, cutoff):
+                    yield path
 
     def _recent_cutoff(self) -> float:
         now = datetime.fromisoformat(self._clock.now_iso()).timestamp()
@@ -413,3 +419,21 @@ class FileScanCollector(SnapshotCollector):
             "md5": "",
             "owner": owner,
         }
+
+
+def _walk(base: Path) -> list[Path]:
+    """Every entry under ``base``, or [] when it is missing or unreadable."""
+    # is_dir() re-raises EACCES, so guard it together with the walk.
+    try:
+        if not base.is_dir():
+            return []
+        return list(base.rglob("*"))
+    except OSError:
+        return []
+
+
+def _modified_since(path: Path, cutoff: float) -> bool:
+    try:
+        return path.stat().st_mtime >= cutoff
+    except OSError:
+        return False
