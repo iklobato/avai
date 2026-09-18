@@ -477,6 +477,55 @@ a loaded full run; it now fakes `TimeoutExpired`. 1054 tests pass.
   single `_safe_loads` result type plus small helpers.
 - Simplify `OSVEnricher._fetch` (mccabe 12).
 
+Done on `refactor/p8-enrichment` in three commits, one per bullet. The
+largest function in `chain.py`, `indicators.py` and `sources/osv.py` is now
+mccabe 5, and their three entries are gone from the ruff ignores
+(`indicators.py` keeps none: its only magic value, the sha256 hex length, is
+named).
+
+- `EnrichmentChain.enrich` is now `_lookup` (cache, then fetch), `_fetch`
+  (the three guarded failure paths) and `_forward_chain`; the id discovery
+  is a generator capped with `islice` instead of a `break` in a nested loop.
+  `SourceStats` is a dataclass and `stats()` keeps its dict shape. Nothing
+  in production reads `stats()` (only three test files do; the per-cycle
+  log that used it went away in `3bf0760`), so it is a candidate to delete
+  or to wire back into the cycle summary.
+- `indicators.py` did not need a `_safe_loads` result type: it has one
+  caller. The 10 elif chains were host classification repeated in nine
+  extractors, and they disagreed on privacy. `_public_host_type` classifies
+  once and `_host_indicators` yields the host when it is a kind the
+  extractor asks for. The four hash-a-file extractors share
+  `_file_hash_indicators`, and the identical `FileIntegrityExtractor` and
+  `FileScanExtractor` became one `RecordedDigestExtractor`. elif went from
+  10 to 1 and `isinstance` from 26 to 20; the rest guard `row.get()` values
+  from collector rows, which is the input edge.
+- `OSVEnricher._fetch` is split into `_vuln_by_id` and `_vulns_for_package`
+  plus a module `_advisory_ids`; the separate 404 branch folded into the
+  non-OK one (both returned None), and `HTTPStatus.OK` replaces the bare
+  200. The other sources still compare against literal status codes; that
+  is Phase 10.
+
+Behaviour change: `proxy_config`, `login_sessions` and `dns_resolvers`
+used to emit private IPv6 addresses (`fe80::1`, `::1`) and
+`quarantine_events` a private IPv4 download host, all sent on to
+threat-intel sources. Their docstrings say public only; now no extractor
+emits a private, loopback or link-local address. I did not measure how
+often that happened on a real host.
+
+New tests: a forward-chain test (dedup, case, prefix filter, cap), a
+35-row table of what each host-classifying extractor yields (30 rows pass
+on the old code; the 5 private-address rows fail on it), and 9 OSV tests
+(query payload, empty name, non-OK status on both paths, id dedup and the
+five-vuln cap) that pass on the old code. 30 deliberate breaks turned a
+test red. Two stayed green: dropping `.upper()` in the forward chain, until
+the test used a lower-case id with no upper-case twin; and dropping the
+`context` an extractor attaches to a host indicator. Nothing outside tests
+reads `Indicator.context`, so that one changes no output; it is dead data,
+not a missing test.
+
+Coverage of `avai.enrichers` on the full suite is 94% (`chain.py` 96%,
+`indicators.py` 93%, `osv.py` 100%). 1099 tests pass.
+
 ## Phase 9: entry points and configuration (OCP, DIP)
 
 - `cli.main` (88 lines of `if cmd ==`): a `{name: Command}` table with a
