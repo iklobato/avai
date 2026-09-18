@@ -189,26 +189,6 @@ class TestChainStats:
         chain.enrich(ind)
         assert chain.stats()["x"]["error"] == 1
 
-    def test_reset_stats_clears(self, cache):
-        ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
-        from avai.enrichers.base import Evidence, VerdictHint
-
-        e = _Fake(
-            "x",
-            VerdictHint.MALICIOUS,
-            ret=Evidence(
-                source="x",
-                indicator=ind,
-                verdict_hint=VerdictHint.MALICIOUS,
-                confidence=0.9,
-                summary="s",
-            ),
-        )
-        chain = EnrichmentChain([e], cache)
-        chain.enrich(ind)
-        chain.reset_stats()
-        assert chain.stats() == {}
-
 
 # ---------------------------------------------------------------------------
 # Sink.unjudged_all — streaming variant (no run_id filter)
@@ -219,7 +199,6 @@ class TestSinkUnjudgedAll:
     def test_returns_distinct_hashes_across_runs(self, tmp_path):
         # The streaming variant of unjudged ignores run_id so streaming
         # rows that span runs are still classified once each.
-        from avai.host_monitor.runtime import Clock, Digest
         from avai.host_monitor import (
             AuthEventRow,
             Judgment,
@@ -227,6 +206,7 @@ class TestSinkUnjudgedAll:
             ThreatCategory,
             Verdict,
         )
+        from avai.host_monitor.runtime import Clock, Digest
 
         class _S:
             name = "auth_events"

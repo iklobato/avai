@@ -151,10 +151,6 @@ class HostsTable:
         added by hand outside our block. Used to avoid nagging/duplicating."""
         return any(hostname in _entry_hostnames(ln) for ln in self.text.splitlines())
 
-    def is_managed(self, hostname: str) -> bool:
-        """True only if ``hostname`` lives inside the avai-managed block."""
-        return hostname in self._block_entries()
-
     def with_mapping(self, hostname: str, ips: tuple[str, ...]) -> "HostsTable":
         """Map ``hostname`` to one line per address in ``ips`` (e.g. an IPv4 and
         an IPv6 loopback), replacing any existing managed lines for it."""

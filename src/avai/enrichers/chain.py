@@ -14,7 +14,6 @@ need a single summary.
 from __future__ import annotations
 
 import logging
-from typing import Iterable
 
 from avai.enrichers.base import (
     Enricher,
@@ -43,9 +42,6 @@ class EnrichmentChain:
     @property
     def sources(self) -> list[str]:
         return [e.name for e in self._enrichers]
-
-    def reset_stats(self) -> None:
-        self._stats.clear()
 
     def stats(self) -> dict[str, dict[str, int]]:
         return dict(self._stats)
@@ -123,14 +119,3 @@ class EnrichmentChain:
                         break
                     out.extend(self.enrich(Indicator(IndicatorType.CVE, cid)))
         return out
-
-    def enrich_many(
-        self, indicators: Iterable[Indicator]
-    ) -> dict[Indicator, list[Evidence]]:
-        """Convenience for the monitor cycle — one call per batch."""
-        result: dict[Indicator, list[Evidence]] = {}
-        for ind in indicators:
-            if ind in result:
-                continue
-            result[ind] = self.enrich(ind)
-        return result
