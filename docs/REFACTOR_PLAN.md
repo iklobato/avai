@@ -174,6 +174,36 @@ Acceptance: `os.environ` is read in no LLM module, one client instance is
 shared by every stage, and the credential rule has one implementation and one
 table-driven test.
 
+Done on `refactor/p3-llm-stages`, with two changes from the design above:
+
+- No `StructuredLlmStage` base class. Each stage holds a `StructuredCall`
+  (its fixed `CompletionRequest` plus the client) and delegates to it. The
+  stages keep `judge`, `verify`, `investigate`, `narrate` and `assess`.
+- `LlmStages` lives in `main.py`, the composition root. Putting it in
+  `llm.py` would make `llm.py` import the stages that import it.
+
+Credentials are read from `os.environ` once, in `build_runner`, and
+`LlmCredentials` is the only place the rule lives. One client is built and
+passed to every stage, and the stages now require it. The one `os.environ`
+touch left in an LLM module is `llm.py` setting `LITELLM_LOG` to quiet
+litellm on import; it reads no credentials. The `temperature` and
+`max_tokens` arguments nobody passed became class constants, `auth_mode` is
+gone (`LlmStages.build` logs the client type once), and `judge.py` no longer
+needs its `PLR0913` exemption. The OAuth token is kept out of the repr.
+
+Behaviour changes: with no usable credentials there is now one warning,
+"LLM stages disabled", instead of a judge-only warning, even under
+`--no-judge`. The stage flags are read as `args.no_verify` and so on,
+not through `getattr` defaults. The facade drops `build_judge`,
+`build_narrator` and `build_completion_client` and adds `LlmStages`,
+`LlmCredentials` and `CompletionRequest`.
+
+`tests/test_judge_auth.py` holds the table-driven credential test and the
+`LlmStages.build` wiring tests. Five deliberate breaks were each seen to
+turn a test red: ignoring litellm, preferring the API key over OAuth, a
+second client for one stage, the token in the repr, and a narrator under
+`--no-judge`. 910 tests pass.
+
 ## Phase 4: split `Runner` (SRP, OCP, primitive obsession)
 
 Today `Runner` owns the control loop, maintenance commands, the cycle, seven

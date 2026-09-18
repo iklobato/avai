@@ -5,10 +5,10 @@ runtime flows that connect them, and how the pieces are deployed. Diagrams are
 [Mermaid](https://mermaid.js.org/) and render on GitHub, in VS Code preview and
 in any Mermaid viewer.
 
-Snapshot: `avai-monitor` 0.7.3, branch `refactor/p2-slice-catalog` at commit `2a9239c` (2026-09-17).
+Snapshot: `avai-monitor` 0.7.3, branch `refactor/p3-llm-stages` at commit `fea1db3` (2026-09-17).
 The inventory in Appendix A was generated from the AST of `src/avai`, so it is
-exhaustive: 88 modules, 286 classes, 232 module-level functions, 548 methods,
-about 21.1k lines. Tests: 40 modules, 835 test functions.
+exhaustive: 89 modules, 290 classes, 227 module-level functions, 550 methods,
+about 21.0k lines. Tests: 40 modules, 838 test functions.
 
 > **One-line model.** `avai` is a host-security telemetry engine. A platform
 > object assembles OS-specific **collectors**; the **Runner** drives them each
@@ -105,7 +105,7 @@ src/avai/
 ├── migrations/                 Alembic env + 12 versioned migrations
 ├── host_monitor/               THE ENGINE
 │   ├── __init__.py             facade: re-exports the public API
-│   ├── main.py                 `avai monitor` argparse + build_runner() + main()
+│   ├── main.py                 `avai monitor` argparse + LlmStages + build_runner() + main()
 │   ├── runner.py               Runner: control loop, collection cycle, LLM pipeline orchestration
 │   ├── sink.py                 Sink: the single DB gateway (schema, runs, writes, lookups, rotation)
 │   ├── models.py               SQLAlchemy ORM: Base, _RowBase, 52 mapped tables
@@ -119,7 +119,8 @@ src/avai/
 │   ├── slices.py               Slice catalog: each telemetry table's name, model and streaming flag, once
 │   ├── streaming.py            StreamingWorker (one thread per StreamingCollector)
 │   ├── supervision.py          restart policy: outcomes, backoff, sleeper, listener
-│   ├── judge.py                CompletionClient strategies, Judge / LlmJudge / NullJudge, cost estimate
+│   ├── llm.py                  LlmCredentials, CompletionRequest, CompletionClient strategies, StructuredCall
+│   ├── judge.py                Judge / LlmJudge / NullJudge, cost estimate
 │   ├── verifier.py             MaliciousVerdictVerifier (skeptic second opinion)
 │   ├── investigator.py         UnknownFindingInvestigator (deep re-judge of unknowns)
 │   ├── narrator.py             IncidentNarrator (incident digest)
@@ -171,17 +172,19 @@ graph TD
     hmmain --> runner["host_monitor.runner"]
     hmmain --> hosts["host_monitor.hosts/*"]
     hmmain --> stages["judge · narrator · coverage<br/>verifier · investigator"]
-    hmmain -. "lazy, unless --no-enrich" .-> reg["enrichers.registry"]
+    hmmain -. "unless --no-enrich" .-> reg["enrichers.registry"]
+    hmmain --> llm["host_monitor.llm"]
     runner --> sink["host_monitor.sink"]
     runner --> streaming["host_monitor.streaming"]
     runner --> risk["host_monitor.risk"]
-    runner -. "lazy" .-> ind["enrichers.indicators"]
+    runner --> ind["enrichers.indicators"]
     streaming --> supervision["host_monitor.supervision"]
     hosts --> collectors["collectors · net_collectors<br/>exposure_collectors · persistence_collectors"]
     collectors --> runtime["host_monitor.runtime/*"]
     collectors --> seccontrols["security_controls"]
     collectors --> models
     stages --> prompts["prompts · constants · enums"]
+    stages --> llm
     sink --> models
     sink --> dbm
     sink -. "register_schema" .-> cache["enrichers.cache"]
@@ -203,12 +206,13 @@ graph TD
 **Layering rules (by convention, no cycles):**
 
 - `host_monitor` layering, one way only:
-  `enums → constants → runtime → prompts / models → risk / judge → verifier / investigator / narrator / coverage → sink → security_controls / collectors → net / exposure / persistence collectors → hosts → supervision → streaming → runner → main`.
+  `enums → constants → runtime → prompts / models → risk / llm → judge → verifier / investigator / narrator / coverage → sink → security_controls / collectors → net / exposure / persistence collectors → hosts → supervision → streaming → runner → main`.
 - `hosts/factory.py` is the **only** place that reads `platform.system()`.
 - `runtime/command_runner.py` is the **only** subprocess seam; collectors never call `subprocess` directly.
 - `sink.py` is the **only** telemetry writer. The dashboard's `control.py` writes two tables and nothing else.
 - `enrichers/sources/*` depend only on `base` and `http`; `registry` and `chain` are the only modules that know every source.
-- `host_monitor` imports `enrichers` **lazily** so `--no-enrich` never loads `requests`.
+- `host_monitor` imports `enrichers` at module level. `requests` loads on every boot anyway, because
+  `Sink.setup()` registers the `enrichers.cache` tables.
 - Each package `__init__.py` is a thin facade; callers write `from avai.host_monitor import X`.
 
 ---
@@ -266,7 +270,7 @@ sequenceDiagram
     participant M as main() / desktop._start_monitor
     participant B as build_runner(args)
     participant P as Prompts
-    participant F as build_* factories
+    participant L as LlmStages
     participant H as HostFactory / Host
     participant E as Engine (SQLite)
     participant S as Sink
@@ -275,14 +279,14 @@ sequenceDiagram
     M->>B: parsed args
     B->>B: os.umask(0o002), mkdir db dir
     B->>P: Prompts.load(prompts.toml)
-    B->>F: build_judge, build_narrator, build_coverage_assessor, build_verifier, build_investigator
-    Note over F: each returns None / NullJudge when disabled or no credentials
+    B->>L: LlmStages.build(args, prompts, LlmCredentials.from_env(os.environ))
+    Note over L: one client for every stage, and a stage is None / NullJudge when its flag, its prompt or the credentials say so
     B->>E: create_engine(sqlite, check_same_thread=False)
     B->>S: Sink(engine)
     B->>H: HostFactory.create() → MacOSHost / LinuxHost / WindowsHost
     H-->>B: host.snapshot_collectors(prompts), host.streaming_collectors(prompts)
-    B->>F: build_default_chain(engine, Base, enable=--enrich-only) unless --no-enrich
-    B->>R: Runner(sink, snapshot, streaming, judge, lookback, max_db_bytes, chain, baseline_runs, narrator, coverage, verifier, investigator)
+    B->>B: build_default_chain(engine, Base, enable=--enrich-only) unless --no-enrich
+    B->>R: Runner(sink, snapshot, streaming, llm.judge, lookback, max_db_bytes, chain, baseline_runs, llm.narrator, llm.coverage, llm.verifier, llm.investigator)
     B->>S: runner.setup() → Sink.setup()
     Note over S: register_schema(Base) → create_all → _migrate_add_columns → upgrade_to_head → _relax_db_permissions
     B->>S: ensure_control_row(interval, judge_enabled, enrich_enabled)
@@ -799,22 +803,35 @@ Tuning constants (`constants.py`): `STREAM_RESTART_BASE_BACKOFF_S`,
 
 ### 4.8 LLM stages, prompts and risk
 
-Five LLM stages share one `CompletionClient` strategy and one `Prompts`
-object. Every stage enforces structured output (JSON schema via litellm
-JSON-mode, or a `tool_use` block via the Anthropic OAuth flow).
+Five LLM stages share one `CompletionClient` instance and one `Prompts`
+object. `LlmStages.build` (in `main.py`, the composition root) builds that
+client once from `LlmCredentials` and injects it. Each stage holds a
+`StructuredCall`: its fixed `CompletionRequest` (model, system prompt, user
+template, schema, token cap, temperature) plus the client. Every stage enforces
+structured output (JSON schema via litellm JSON-mode, or a `tool_use` block via
+the Anthropic OAuth flow).
 
 ```mermaid
 classDiagram
-    class CompletionClient { <<ABC>> +complete_structured(...) dict }
-    class LitellmClient { +complete_structured() }
-    class AnthropicOAuthClient { +OAUTH_BETA_HEADER +SYSTEM_PROMPT_PREFIX +complete_structured() }
+    class LlmCredentials { <<frozen dataclass>> oauth_token has_api_key +from_env(environ)$ +can_call() bool +client() CompletionClient }
+    class LlmStages { <<frozen dataclass>> judge narrator coverage verifier investigator +build(args, prompts, credentials)$ }
+    class CompletionRequest { <<frozen dataclass>> model system user schema schema_name max_tokens temperature }
+    class CompletionClient { <<ABC>> +complete_structured(request) dict }
+    class LitellmClient { +complete_structured(request) }
+    class AnthropicOAuthClient { +OAUTH_BETA_HEADER +SYSTEM_PROMPT_PREFIX +complete_structured(request) }
+    class StructuredCall { <<frozen dataclass>> label client request +ask(fields) dict +ask_or_none(fields) dict }
     CompletionClient <|-- LitellmClient
     CompletionClient <|-- AnthropicOAuthClient
+    LlmCredentials ..> CompletionClient : builds one
+    LlmStages ..> LlmCredentials : reads
+    StructuredCall o-- CompletionClient
+    StructuredCall o-- CompletionRequest
+    CompletionClient ..> CompletionRequest : takes
 
     class Judge { <<ABC>> +judge(collector, hints, entries) list~Judgment~ }
     class NullJudge { +judge() []
     }
-    class LlmJudge { +SCHEMA_NAME +auth_mode +judge() -_batches() -_call() -_parse() -_judgment_schema()$ }
+    class LlmJudge { +SCHEMA_NAME +judge() -_batches() -_call() -_parse() -_judgment_schema()$ }
     class Judgment { <<frozen dataclass>> content_hash collector verdict category confidence reasoning remediation model created_at cost_usd }
     Judge <|-- NullJudge
     Judge <|-- LlmJudge
@@ -826,11 +843,12 @@ classDiagram
     class YaraCoverageAssessor { +POSTURES +assess(ruleset, host) dict -_clean_items()$ }
     class Prompts { <<frozen dataclass>> system user_template collector_hints narrator_* coverage_* verifier_* investigator_* +load(path)$ +hint_for(name) }
 
-    LlmJudge o-- CompletionClient
-    MaliciousVerdictVerifier o-- CompletionClient
-    UnknownFindingInvestigator o-- CompletionClient
-    IncidentNarrator o-- CompletionClient
-    YaraCoverageAssessor o-- CompletionClient
+    LlmJudge o-- StructuredCall
+    MaliciousVerdictVerifier o-- StructuredCall
+    UnknownFindingInvestigator o-- StructuredCall
+    IncidentNarrator o-- StructuredCall
+    YaraCoverageAssessor o-- StructuredCall
+    LlmStages o-- LlmJudge
     LlmJudge --> Prompts
     MaliciousVerdictVerifier --> Prompts
     UnknownFindingInvestigator --> Prompts
@@ -838,17 +856,19 @@ classDiagram
     YaraCoverageAssessor --> Prompts
 ```
 
-| Stage | Class / factory | When it runs | Input | Output |
+| Stage | Class | When it runs | Input | Output |
 |---|---|---|---|---|
-| Judge | `LlmJudge` via `build_judge` | every new `content_hash` of a judged collector | batch of entries (≤ `--judge-batch-size`, ≤ `--judge-max-per-collector` per cycle) with `evidence`, `baseline`, `related`, `rule_meta` | `Judgment` per entry: verdict, category (MITRE-style `ThreatCategory`), confidence, reasoning, remediation, cost |
-| Verifier | `MaliciousVerdictVerifier` via `build_verifier` | each `malicious` verdict (≤ 10 per collector per cycle) | the finding | `refuted` + reasoning; refuted → downgraded to `suspicious` |
-| Investigator | `UnknownFindingInvestigator` via `build_investigator` | each `unknown` verdict (≤ 10 per collector) | finding + `related_full` (all history) + `host_context` (15 other non-benign findings) | a committed verdict replacing `unknown` |
-| Narrator | `IncidentNarrator` via `build_narrator` | end of cycle, only if the active-finding set changed | active non-benign findings (capped by `MAX_FINDINGS`) | `incident_narratives` row: severity, headline, summary, timeline, actions |
-| Coverage | `YaraCoverageAssessor` via `build_coverage_assessor` | end of cycle, only if the ruleset fingerprint changed | `yara_status` summary + host profile | `yara_coverage` row: posture, gaps, recommendations |
+| Judge | `LlmJudge` (`--no-judge` → `NullJudge`) | every new `content_hash` of a judged collector | batch of entries (≤ `--judge-batch-size`, ≤ `--judge-max-per-collector` per cycle) with `evidence`, `baseline`, `related`, `rule_meta` | `Judgment` per entry: verdict, category (MITRE-style `ThreatCategory`), confidence, reasoning, remediation, cost |
+| Verifier | `MaliciousVerdictVerifier` (`--no-verify`) | each `malicious` verdict (≤ 10 per collector per cycle) | the finding | `refuted` + reasoning; refuted → downgraded to `suspicious` |
+| Investigator | `UnknownFindingInvestigator` (`--no-investigate`) | each `unknown` verdict (≤ 10 per collector) | finding + `related_full` (all history) + `host_context` (15 other non-benign findings) | a committed verdict replacing `unknown` |
+| Narrator | `IncidentNarrator` (`--no-narrative` or `--no-judge`) | end of cycle, only if the active-finding set changed | active non-benign findings (capped by `MAX_FINDINGS`) | `incident_narratives` row: severity, headline, summary, timeline, actions |
+| Coverage | `YaraCoverageAssessor` (`--no-coverage`) | end of cycle, only if the ruleset fingerprint changed | `yara_status` summary + host profile | `yara_coverage` row: posture, gaps, recommendations |
 
-Auth strategy (`build_completion_client`): `CLAUDE_CODE_OAUTH_TOKEN` →
-`AnthropicOAuthClient`; else `LitellmClient` reading `ANTHROPIC_API_KEY` /
-`OPENAI_API_KEY`; nothing set → `NullJudge` and every optional stage `None`.
+Credential rule (`LlmCredentials`, the only place it lives):
+`CLAUDE_CODE_OAUTH_TOKEN` → `AnthropicOAuthClient`; else `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` with litellm installed → `LitellmClient`; otherwise, or when
+the client cannot be built, `NullJudge` and every optional stage `None`. The
+flag in the table above, or a missing prompt section, turns off one stage.
 `estimate_cost(model, in, out)` uses `MODEL_PRICING` / `DEFAULT_PRICING` and is
 stored per judgment (`cost_usd`) and summed by the dashboard.
 
@@ -1403,7 +1423,7 @@ graph TD
 | `test_collectors.py`, `test_new_collectors.py`, `test_listening_ports.py`, `test_network_flows.py`, `test_resources.py`, `test_disk_container.py`, `test_browser_readers.py`, `test_file_scan.py`, `test_security_controls.py` | snapshot collectors, tcpdump parsing, resource and disk metrics, YARA scanning, service controls |
 | `test_net_collectors.py`, `test_exposure_collectors.py`, `test_persistence_collectors.py`, `test_hosts.py`, `test_windows.py` | source-injected collectors and every OS parser, host composition roots |
 | `test_runtime.py`, `test_row_source.py`, `test_misc_helpers.py` | `runtime/*`, `CommandSnapshot` / `FileSnapshot`, coercion and digest helpers |
-| `test_llm_judge.py`, `test_judge_auth.py` | `LlmJudge` parsing and batching, client selection, cost |
+| `test_llm_judge.py`, `test_judge_auth.py` | `LlmJudge` parsing and batching, cost; the credential rule (one table-driven test) and `LlmStages.build` wiring |
 | `test_sink_rotation.py`, `test_sink_setup_concurrency.py`, `test_migrations.py` | `prune_to_size`, concurrent `setup()`, Alembic upgrade path |
 | `test_enrichers.py`, `test_enricher_sources.py`, `test_more_sources.py`, `test_indicators_edge.py`, `test_http.py`, `test_registry.py` | chain, cache, every source, extractors, `HttpClient`, discovery |
 | `test_dashboard.py` | routes, query layer, control plane, feedback |
@@ -1531,7 +1551,7 @@ Constants: `DASHBOARD_HOSTNAME`, `LOOPBACK_IPV4`, `LOOPBACK_IPV6`, `LOOPBACK_ADD
 ### A.2 host_monitor (engine)
 
 
-#### `avai.host_monitor` · `avai/host_monitor/__init__.py` · 332 lines
+#### `avai.host_monitor` · `avai/host_monitor/__init__.py` · 328 lines
 
 _avai.host_monitor: package facade._
 
@@ -1754,18 +1774,16 @@ _Defaults, tunables, pricing tables, and static data tables._
 Constants: `LOG`, `_PKG_DIR`, `DEFAULT_DB_PATH`, `DEFAULT_INTERVAL`, `DEFAULT_LOOKBACK_MIN`, `DEFAULT_JUDGE_MODEL`, `DEFAULT_JUDGE_BATCH`, `DEFAULT_JUDGE_MAX_PER_COLLECTOR`, `DEFAULT_JUDGE_TIMEOUT_S`, `DEFAULT_BASELINE_MIN_RUNS`, `MONITOR_LIVENESS_WINDOW_S`, `MONITOR_PROGRESS_HEARTBEAT_S`, `STREAM_RESTART_BASE_BACKOFF_S`, `STREAM_RESTART_MAX_BACKOFF_S`, `STREAM_RESTART_BACKOFF_FACTOR`, `STREAM_CRASH_ESCALATE_THRESHOLD`, `STREAM_HEALTHY_RESET_S`, `_CORRELATED_COLLECTOR`, `_FILE_SCAN_COLLECTOR`, `_LAUNCH_ITEM_COLLECTOR`, `DEFAULT_NARRATIVE_MODEL`, `RISK_WEIGHTS`, `RISK_GRADES`, `MODEL_PRICING`, `DEFAULT_PRICING`, `DEFAULT_PROMPTS_PATH`, `WATCHED_FILES`, `WATCHED_FILES_LINUX`, `AUTH_LOG_PREDICATE`, `APP_INFO_KEYS`, `HOST_PREFIX`, `YARA_RULES_DIR`, `YARA_MAX_FILE_BYTES`, `YARA_MATCH_TIMEOUT_S`, `YARA_MAX_FILES_PER_CYCLE`, `YARA_DOWNLOADS_RECENT_DAYS`, `YARA_MAX_MATCH_STRINGS`, `YARA_MATCH_STRING_MAX_BYTES`, `HASH_DENYLIST_PATH`
 
 
-#### `avai.host_monitor.coverage` · `avai/host_monitor/coverage.py` · 158 lines
+#### `avai.host_monitor.coverage` · `avai/host_monitor/coverage.py` · 118 lines
 
 _Second-stage LLM that assesses YARA ruleset coverage for the host._
 
-- **class `YaraCoverageAssessor`** (L22) : Second-stage LLM that reads the loaded YARA ruleset + a host profile
-  - fields: `SCHEMA_NAME`, `POSTURES`
+- **class `YaraCoverageAssessor`** (L20) : Second-stage LLM that reads the loaded YARA ruleset + a host profile
+  - fields: `SCHEMA_NAME`, `POSTURES`, `TEMPERATURE`, `MAX_TOKENS`
   - `_coverage_schema() -> dict` `@classmethod`
-  - `__init__(prompts, model, temperature, max_tokens, client)`
-  - `auth_mode() -> str` `@property`
+  - `__init__(prompts, client, model)`
   - `assess(ruleset, host) -> Optional[dict]`
   - `_clean_items(raw, label_key) -> list[dict]` `@staticmethod`
-- `build_coverage_assessor(args, prompts) -> 'Optional[YaraCoverageAssessor]'` (L135) : Build the coverage assessor when enabled and credentials exist.
 
 #### `avai.host_monitor.enums` · `avai/host_monitor/enums.py` · 55 lines
 
@@ -1979,57 +1997,73 @@ Constants: `_NONEXISTENT`
   - `streaming_collectors(prompts) -> list[StreamingCollector]`
 
 
-#### `avai.host_monitor.investigator` · `avai/host_monitor/investigator.py` · 154 lines
+#### `avai.host_monitor.investigator` · `avai/host_monitor/investigator.py` · 106 lines
 
 _Deep second pass that re-judges findings the first pass left ``unknown``._
 
-- **class `UnknownFindingInvestigator`** (L29) : Re-judge a single ``unknown`` finding given a richer context bundle.
-  - fields: `SCHEMA_NAME`
+- **class `UnknownFindingInvestigator`** (L27) : Re-judge a single ``unknown`` finding given a richer context bundle.
+  - fields: `SCHEMA_NAME`, `TEMPERATURE`, `MAX_TOKENS`
   - `_investigation_schema() -> dict` `@classmethod`
-  - `__init__(prompts, model, temperature, max_tokens, client)`
-  - `auth_mode() -> str` `@property`
+  - `__init__(prompts, client, model)`
   - `investigate(collector, finding) -> Optional[dict]`
-- `build_investigator(args, prompts) -> 'Optional[UnknownFindingInvestigator]'` (L123) : Build the investigator when enabled and credentials exist. Returns None
 
-#### `avai.host_monitor.judge` · `avai/host_monitor/judge.py` · 426 lines
+#### `avai.host_monitor.judge` · `avai/host_monitor/judge.py` · 230 lines
 
-_LLM judging: completion clients, the judge, and cost estimation._
+_LLM judging: the judge and cost estimation._
 
-- **class `Judgment`** `@dataclass(frozen=True)` (L48)
+- **class `Judgment`** `@dataclass(frozen=True)` (L36)
   - fields: `content_hash: str`, `collector: str`, `verdict: Verdict`, `category: ThreatCategory`, `confidence: float`, `reasoning: str`, `remediation: str`, `model: str`, `created_at: str`, `cost_usd: float`
-- **class `Judge(ABC)`** (L63) : Classifies entries as security threats.
+- **class `Judge(ABC)`** (L51) : Classifies entries as security threats.
   - `judge(collector, hints, entries) -> list[Judgment]` `@abstractmethod`
-- **class `NullJudge(Judge)`** (L72)
+- **class `NullJudge(Judge)`** (L60)
   - `judge(collector, hints, entries)`
-- **class `CompletionClient(ABC)`** (L77) : Strategy for issuing an LLM chat completion that returns
-  - `complete_structured() -> dict` `@abstractmethod`
-- **class `LitellmClient(CompletionClient)`** (L96) : Multi-provider completion via litellm. Uses ANTHROPIC_API_KEY /
-  - `__init__()`
-  - `complete_structured()`
-- **class `AnthropicOAuthClient(CompletionClient)`** (L136) : Anthropic completion via the OAuth Bearer flow used by Claude Code
-  - fields: `OAUTH_BETA_HEADER`, `SYSTEM_PROMPT_PREFIX`
-  - `__init__(oauth_token)`
-  - `complete_structured()`
-- **class `LlmJudge(Judge)`** (L219) : Threat judge backed by an LLM. Auth strategy is decided by
-  - fields: `SCHEMA_NAME`
+- **class `LlmJudge(Judge)`** (L65) : Threat judge backed by an LLM through the injected completion client.
+  - fields: `SCHEMA_NAME`, `TEMPERATURE`, `MAX_TOKENS`
   - `_judgment_schema() -> dict` `@classmethod`
-  - `__init__(prompts, model, batch_size, max_per_collector, temperature, max_tokens, client)`
-  - `auth_mode() -> str` `@property`
+  - `__init__(prompts, client, model, batch_size, max_per_collector)`
   - `judge(collector, hints, entries)`
   - `_batches(entries)`
   - `_call(collector, hints, batch, now)`
   - `_parse(parsed, batch, collector, now, cost_usd)`
-- `estimate_cost(model, input_tokens, output_tokens) -> float` (L35) : Estimated USD cost for one completion given its token counts, matched
-- `build_completion_client() -> CompletionClient` (L206) : Pick the right strategy from the environment.
-- `build_judge(args, prompts) -> Judge` (L394)
+- `estimate_cost(model, input_tokens, output_tokens) -> float` (L23) : Estimated USD cost for one completion given its token counts, matched
 
-#### `avai.host_monitor.main` · `avai/host_monitor/main.py` · 314 lines
+#### `avai.host_monitor.llm` · `avai/host_monitor/llm.py` · 200 lines
+
+_LLM plumbing shared by every stage: credentials, completion clients, and_
+
+- **class `CompletionRequest`** `@dataclass(frozen=True)` (L27)
+  - fields: `model: str`, `system: str`, `user: str`, `schema: dict`, `schema_name: str`, `max_tokens: int`, `temperature: float`
+- **class `CompletionClient(ABC)`** (L37) : Strategy for issuing an LLM chat completion that returns
+  - `complete_structured(request) -> dict` `@abstractmethod`
+- **class `LitellmClient(CompletionClient)`** (L46) : Multi-provider completion via litellm. Uses ANTHROPIC_API_KEY /
+  - `__init__()`
+  - `complete_structured(request)`
+- **class `AnthropicOAuthClient(CompletionClient)`** (L84) : Anthropic completion via the OAuth Bearer flow used by Claude Code
+  - fields: `OAUTH_BETA_HEADER`, `SYSTEM_PROMPT_PREFIX`
+  - `__init__(oauth_token)`
+  - `complete_structured(request)`
+- **class `LlmCredentials`** `@dataclass(frozen=True)` (L150) : The LLM auth the environment offers, read once at the composition root.
+  - fields: `oauth_token: Optional[str]`, `has_api_key: bool`
+  - `from_env(environ) -> LlmCredentials` `@classmethod`
+  - `can_call() -> bool`
+  - `client() -> CompletionClient`
+- **class `StructuredCall`** `@dataclass(frozen=True)` (L177) : One stage's fixed LLM call. ``request.user`` holds the user prompt
+  - fields: `label: str`, `client: CompletionClient`, `request: CompletionRequest`
+  - `ask() -> dict`
+  - `ask_or_none() -> Optional[dict]`
+
+#### `avai.host_monitor.main` · `avai/host_monitor/main.py` · 388 lines
 
 _CLI entrypoint and argument parser for `avai monitor`._
 
-- `_build_parser() -> argparse.ArgumentParser` (L41)
-- `build_runner(args) -> 'tuple[Runner, object]'` (L171) : Wire a fully-configured Runner (collectors, judge, sink, seeded control
-- `main() -> int` (L265)
+- **class `LlmStages`** `@dataclass(frozen=True)` (L51) : Every LLM stage, sharing one completion client. A stage stays off (the
+  - fields: `judge: Judge`, `narrator: Optional[IncidentNarrator]`, `coverage: Optional[YaraCoverageAssessor]`, `verifier: Optional[MaliciousVerdictVerifier]`, `investigator: Optional[UnknownFindingInvestigator]`
+  - `build(args, prompts, credentials) -> LlmStages` `@classmethod`
+  - `_judge(args, prompts, client) -> Judge` `@staticmethod`
+- `_has_prompt(system, stage) -> bool` (L44)
+- `_build_parser() -> argparse.ArgumentParser` (L119)
+- `build_runner(args) -> 'tuple[Runner, object]'` (L249) : Wire a fully-configured Runner (collectors, judge, sink, seeded control
+- `main() -> int` (L339)
 
 #### `avai.host_monitor.models` · `avai/host_monitor/models.py` · 830 lines
 
@@ -2143,20 +2177,18 @@ _SQLAlchemy ORM models: the database schema._
 - **class `SshKnownHostRow(_RowBase)`** (L821) : A host pinned in a user's ``known_hosts``: reveals pivot targets and
   - fields: `host: Mapped[Optional[str]]`, `key_type: Mapped[Optional[str]]`, `fingerprint: Mapped[Optional[str]]`, `source_path: Mapped[Optional[str]]`, `raw_json: Mapped[Optional[str]]`
 
-#### `avai.host_monitor.narrator` · `avai/host_monitor/narrator.py` · 217 lines
+#### `avai.host_monitor.narrator` · `avai/host_monitor/narrator.py` · 177 lines
 
 _Second-stage LLM that turns active findings into an incident digest._
 
-- **class `IncidentNarrator`** (L15) : Second-stage LLM that reads the host's currently-active non-benign
-  - fields: `SCHEMA_NAME`, `SEVERITIES`, `PRIORITIES`, `MAX_FINDINGS`, `_VERDICT_RANK`
+- **class `IncidentNarrator`** (L13) : Second-stage LLM that reads the host's currently-active non-benign
+  - fields: `SCHEMA_NAME`, `TEMPERATURE`, `MAX_TOKENS`, `SEVERITIES`, `PRIORITIES`, `MAX_FINDINGS`, `_VERDICT_RANK`
   - `_narrative_schema() -> dict` `@classmethod`
-  - `__init__(prompts, model, temperature, max_tokens, client)`
-  - `auth_mode() -> str` `@property`
+  - `__init__(prompts, client, model)`
   - `_cap(findings) -> list[dict]`
   - `narrate(findings) -> Optional[dict]`
   - `_clean_timeline(raw) -> list[dict]`
   - `_clean_actions(raw) -> list[dict]`
-- `build_narrator(args, prompts) -> 'Optional[IncidentNarrator]'` (L194) : Build the incident narrator when enabled and credentials exist.
 
 #### `avai.host_monitor.net_collectors` · `avai/host_monitor/net_collectors.py` · 388 lines
 
@@ -2569,17 +2601,15 @@ _Supervision policy for long-lived streaming workers._
   - `report_session_end(collector, rows) -> None`
 - `default_backoff() -> ExponentialBackoff` (L173) : Production backoff wired from the tuned constants.
 
-#### `avai.host_monitor.verifier` · `avai/host_monitor/verifier.py` · 112 lines
+#### `avai.host_monitor.verifier` · `avai/host_monitor/verifier.py` · 70 lines
 
 _Second-opinion LLM that adversarially checks ``malicious`` verdicts._
 
-- **class `MaliciousVerdictVerifier`** (L23) : Independent skeptic pass over a single ``malicious`` finding.
-  - fields: `SCHEMA_NAME`
+- **class `MaliciousVerdictVerifier`** (L21) : Independent skeptic pass over a single ``malicious`` finding.
+  - fields: `SCHEMA_NAME`, `TEMPERATURE`, `MAX_TOKENS`
   - `_verification_schema() -> dict` `@classmethod`
-  - `__init__(prompts, model, temperature, max_tokens, client)`
-  - `auth_mode() -> str` `@property`
+  - `__init__(prompts, client, model)`
   - `verify(finding) -> Optional[dict]`
-- `build_verifier(args, prompts) -> 'Optional[MaliciousVerdictVerifier]'` (L89) : Build the verifier when enabled and credentials exist. Returns None
 
 ### A.3 enrichers (threat intel)
 
