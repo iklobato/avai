@@ -1,214 +1,269 @@
-# Refactor plan — split the two God-modules, change nothing else
+# Refactor plan: object orientation, SOLID, YAGNI
 
-**Goal:** make the code easier to read and maintain by fixing the *one* real
-SOLID violation in this codebase — module-level SRP. `host_monitor.py` (6,138
-lines) and `dashboard.py` (2,599 lines) each do many unrelated jobs in one file.
+Goal: make the codebase aggressively object oriented and SOLID while
+deleting everything nobody uses. Every phase ships as one PR, keeps behaviour
+identical (except the one bug fix called out in Phase 2), and leaves ruff and
+the full test suite green.
 
-**This is a pure structural refactor. Zero behavior change.**
+This replaces the 2026-05-31 plan from commit `8ca219c`. That plan split
+`host_monitor.py` and `dashboard.py` into packages and has been carried out:
+neither file exists any more, and the later `refactor/os-abstraction` work
+added the Host and runtime layers. One of its anti-goals is reversed on
+purpose, following the new request for aggressive OO and SOLID: it said to add
+no new abstractions, and Phases 2 to 6 here add value objects, pipeline stages
+and parameter objects. Each one replaces measured duplication or complexity.
 
-## Principles (and the tension, resolved)
+Its other anti-goals still hold: `Sink` stays one class (decided 2026-09-17),
+no DI container, no plugin discovery for collectors, and no interface with one
+implementation.
 
-The brief was "aggressive SOLID + perfect patterns" *and* "keep it extremely
-simple, avoid all overengineering." Those pull in opposite directions, so the
-stance here is explicit:
+Decisions taken 2026-09-17: "YARN" in the request means YAGNI; `Sink` is not
+split; the unused scan-root catalog is deleted; Phases 0 and 1 run first.
 
-- The architecture is **already good**. The patterns that belong here are
-  already present — Strategy (`BrowserExtensionReader`, `IndicatorExtractor`,
-  `CompletionClient`), Chain-of-Responsibility (`EnrichmentChain`), Template
-  Method (`Enricher`, `Collector`), Registry (`discover_enricher_classes`),
-  Factory (`build_*`), and constructor DI (`Runner`).
-- So this refactor **adds no new patterns and no new abstractions.** It only
-  *moves code into files*, applying SRP at the module level.
-- The `enrichers/` package is exemplary — **do not touch it.**
+Baseline measured on `dev` at `7af815d`, 2026-09-17:
 
-## Anti-goals (do NOT do these — they are the overengineering to avoid)
-
-- ❌ No repository / Unit-of-Work layer over SQLAlchemy. Models are the data
-  layer; `Sink` is the single write gateway. That's enough.
-- ❌ No splitting `Sink` into per-table repositories. It's large but cohesive.
-- ❌ No DI container/framework. Constructor injection is already correct.
-- ❌ No plugin-discovery for collectors. Two platforms → an explicit list is
-  clearer than magic.
-- ❌ No new interface that would have exactly one implementation.
-
-## The safety contract: the facade
-
-Every test, plus `dashboard.py` and `migrations/env.py`, imports
-`from avai.host_monitor import X`. **66 distinct symbols** are imported this way
-(including privates: `_build_parser`, `_payload_bytes`, `coerce_enum`).
-
-→ `host_monitor/` becomes a **package** whose `__init__.py` re-exports all 66.
-Nothing outside the package changes. If the facade is complete, the existing
-test suite is the regression net and passes **untouched**.
-
----
-
-## Phase 1 — `host_monitor.py` → `host_monitor/` package
-
-The file already has comment-banner sections that map 1:1 to submodules.
-Layered so imports flow one direction only (no cycles):
-
-```
-constants/enums/shell  →  models  →  prompts/risk/judge/narrator  →  sink
-   →  collectors  →  streaming  →  runner  →  main
-```
-
-### Module map
-
-| New file | Symbols moved in |
+| Measure | Value |
 |---|---|
-| `constants.py` | `DEFAULT_DB_PATH`, `DEFAULT_PROMPTS_PATH`, `DEFAULT_BASELINE_MIN_RUNS`, `_CORRELATED_COLLECTOR`, `WATCHED_FILES`, `WATCHED_FILES_LINUX`, `AUTH_LOG_PREDICATE`, `IS_MACOS`, `IS_LINUX`, `HOST_PREFIX`, LLM-timeout + risk-weight constants |
-| `enums.py` | `Verdict`, `ThreatCategory`, `LaunchScope`, `Browser` |
-| `shell.py` | `run_json`, `run_ndjson`, `exit_code`, `service_loaded`, `process_running`, `sha256_file`, `read_plist`, `jsonable`, `external_sqlite_rows`, `safe_psutil_connections`, `content_hash`, `coerce_enum`, `expand`, `host_path`, `host_paths_for_home`, `utcnow`, `_read_sysfs`, `_ssh_fingerprint` |
-| `prompts.py` | `Prompts` |
-| `models.py` | `Base`, `_RowBase`, `CollectionRun`, `CollectorErrorRow`, `Judgement`, `IncidentNarrativeRow`, `RiskScoreRow`, `StreamingSession`, **all `*Row` models** (~25) |
-| `risk.py` | `compute_risk_score`, `_risk_grade` |
-| `judge.py` | `Judgment`, `Judge`, `NullJudge`, `LlmJudge`, `CompletionClient`, `LitellmClient`, `AnthropicOAuthClient`, `build_completion_client`, `build_judge`, `estimate_cost` |
-| `narrator.py` | `IncidentNarrator`, `build_narrator` |
-| `sink.py` | `Sink`, `_set_sqlite_pragmas`, `_migrate_add_columns` |
-| `collectors/base.py` | `Collector`, `SnapshotCollector`, `StreamingCollector`, `BrowserExtensionReader`, `ChromiumExtensionReader`, `FirefoxExtensionReader`, `ProcessConnectionResolver`, `_payload_bytes` |
-| `collectors/macos.py` | macOS-only collectors (`ProcessCollector`, `NetworkFlowsCollector`, `DnsQueriesCollector`, `AuthEventsCollector`, `MacosProcessExecCollector`, `MdmProfilesCollector`, …) |
-| `collectors/linux.py` | the `Linux*` collectors |
-| `collectors/common.py` | cross-platform collectors (`MountsCollector`, `SetuidFilesCollector`, `SshAuthorizedKeysCollector`, `HostsFileCollector`, `PrivilegeConfigCollector`, `FileIntegrityCollector`) |
-| `collectors/build.py` | `build_snapshot_collectors`, `build_streaming_collectors`, `_build_macos_*`, `_build_linux_*` (platform dispatch) |
-| `streaming.py` | `StreamingWorker` |
-| `runner.py` | `Runner` |
-| `main.py` | `main`, `_build_parser`, signal handling |
-| `__init__.py` | **facade** — re-export the 66 symbols below + `main` |
+| Tests | 897 passed in 59 s |
+| Line coverage | 83% total; `collectors.py` 65%, `desktop.py` 46%, `runtime/probes.py` 61% |
+| Functions over mccabe 10 | 12 (worst: `LinuxLaunchItemsCollector.collect` 19, `FileScanCollector._targets` 18, `queries.listening_ports` 18) |
+| Functions with more than 5 parameters | 15 (`Runner.__init__` 12, `StreamingWorker.__init__` 10, `queries.findings` 10) |
+| Magic-value comparisons (PLR2004) | 74 |
+| Classes over 15 methods or 300 lines | `Sink` 49 methods / 1028 lines, `Runner` 40 methods / 1005 lines |
+| Functions of 100+ lines | 11 (5 of them in `dashboard/queries.py`, 150 to 193 lines each) |
+| `isinstance` / `hasattr` / `getattr` calls | 42 in `collectors.py`, 27 in `indicators.py`, 14 in `queries.py`, 11 in `runner.py` |
+| `os.environ` reads outside a composition root | 30 across 10 modules |
+| Slice identity (`name`, `model`, `judge_fields`) declared more than once | 8 slices, 3 copies each |
 
-> Pragmatic option: if splitting `collectors/` four ways feels fussy, a single
-> `collectors.py` (~2.4k lines) is an acceptable simpler stop. Don't agonize.
+## Rules for every phase
 
-### The facade `__init__.py`
+- **Tests first.** A module under 80% coverage gets characterization tests
+  before it moves. Those tests pin today's output, even where it looks wrong.
+- **The facade is the compatibility seam.** 103 test imports use
+  `from avai.host_monitor import ...`. Code moves behind the facade and the
+  facade keeps its exports until Phase 10, so tests stay stable while the
+  internals change.
+- **The DB schema is a contract.** No migration in this plan. The monitor and
+  the dashboard can be different versions against the same file.
+- **Ruff ratchet.** Phase 0 turns on `C901` (max 10), `PLR0913` (max 5) and
+  `PLR2004`, with a per-file ignore list of today's offenders. Each phase
+  deletes its entries from that list. Nothing new can be added to it.
+- **What "aggressive" does not mean.** No DI container, no new dependency, no
+  interface with one implementation unless it is an I/O seam (subprocess,
+  filesystem, network, clock, DB) that a test fake already uses. The existing
+  Strategy parsers, enrichment sources and supervision protocols already
+  follow SOLID and stay as they are.
+- **Branching.** One branch per phase (`refactor/p<N>-<topic>`), each
+  stacked on the previous one and rooted at `dev`, because `main` is 10+
+  merges behind `dev`. Never commit to `dev` or `main` directly.
 
-```python
-"""avai.host_monitor — facade. Public API unchanged after the package split.
+## Phase 0: guardrails (no production change)
 
-Everything tests / dashboard / migrations import from `avai.host_monitor`
-is re-exported here, so no caller changes. Submodules hold the real code.
-"""
-from .constants import *          # noqa: F401,F403
-from .enums import Verdict, ThreatCategory, LaunchScope, Browser  # noqa: F401
-from .shell import (              # noqa: F401
-    content_hash, coerce_enum, host_path, host_paths_for_home, utcnow,
-)
-from .models import *             # noqa: F401,F403  (Base, all *Row, Judgement, …)
-from .prompts import Prompts, DEFAULT_PROMPTS_PATH   # noqa: F401
-from .risk import compute_risk_score                 # noqa: F401
-from .judge import (              # noqa: F401
-    Judgment, Judge, NullJudge, LlmJudge,
-    build_completion_client, build_judge, estimate_cost,
-)
-from .narrator import IncidentNarrator               # noqa: F401
-from .sink import Sink                                # noqa: F401
-from .collectors.base import (    # noqa: F401
-    ChromiumExtensionReader, FirefoxExtensionReader,
-    ProcessConnectionResolver, _payload_bytes,
-)
-from .collectors.macos import NetworkFlowsCollector, DnsQueriesCollector  # noqa: F401
-from .collectors.linux import LinuxLaunchItemsCollector                   # noqa: F401
-from .collectors.common import (  # noqa: F401
-    SshAuthorizedKeysCollector, HostsFileCollector, PrivilegeConfigCollector,
-)
-from .collectors.build import build_snapshot_collectors  # noqa: F401
-from .streaming import StreamingWorker                    # noqa: F401
-from .runner import Runner                                # noqa: F401
-from .main import main, _build_parser                     # noqa: F401
-```
+- Enable the ruff ratchet above in `pyproject.toml`.
+- Add a layering test (plain pytest plus `ast`, no new dependency) that fails
+  when a lower layer imports a higher one: `runtime` must not import
+  `collectors`, `collectors` must not import `runner`, and `dashboard` must not
+  import `runner`, `sink` or `collectors`.
+- Add a golden test for the dashboard. Seed a temp DB with
+  `tools/seed_demo_db.py`, render all 38 routes, and store status code plus
+  normalized HTML. Phase 6 must reproduce that output byte for byte.
+- Add a golden test for one cycle. Run `Runner.run_once` with stub collectors
+  and a fake judge against a temp DB, then snapshot the row count per table and
+  the `judgements` rows.
 
-**Care item:** keep the enricher-chain import lazy inside `runner`/`main`
-(as it is today) so `--no-enrich` never pulls in `requests`.
+Acceptance: the suite is green with the three new tests, and ruff passes with
+the ignore list in place.
 
-### Ordered, verifiable steps (one commit each)
+## Phase 1: YAGNI, delete what nothing uses
 
-Move bottom-up so each step compiles against already-moved modules:
+Each item below was checked with a word-level reference count over `src/`,
+`tests/` and `templates/`.
 
-1. `constants.py`, `enums.py`, `shell.py` (leaf modules, no internal deps)
-2. `models.py`
-3. `risk.py`, `judge.py`, `narrator.py`
-4. `sink.py`
-5. `collectors/` (base → macos/linux/common → build)
-6. `streaming.py`, `runner.py`, `main.py`
-7. Replace `host_monitor.py` with `host_monitor/__init__.py` facade; delete the old file.
-
-**After every step:** `pytest -q && ruff check src tests`. The suite must stay
-green the whole way — if a symbol is missing from the facade, a test import
-fails immediately and tells you exactly which one.
-
----
-
-## Phase 2 — `dashboard.py` → `dashboard/` package (the MVC seam)
-
-The one place a clear SRP split genuinely helps: separate the controller, the
-data access, and the presentation. Routes shrink to 2–3 lines each.
-
-| New file | Holds |
+| Remove | Evidence |
 |---|---|
-| `queries.py` | all read functions — `latest_run`, `findings`, `network_flows`, `listening_ports`, `dns_queries`, `vulnerabilities`, `persistence_tampering`, `auth_events_aggregated`, `system_integrity`, `verdict_counts`, `verdict_timeseries`, `new_alerts`, + the `_engine`/`_session`/`_attach_ip_enrichment` data helpers |
-| `format.py` | presentation helpers — `render_markdown`, `_relative_time`, `_datetime_fmt`, `_pretty_json`, `_human_bytes`, `_flag_emoji`, `_sparkline_points`, `_geo_*`, `_addr_scope`, `_cmdline_str`, `_paginate`, `_parse_json_*` |
-| `app.py` | Flask `app` + the `@app.route` handlers (thin: call query → `render_template`) |
-| `serve.py` | `main`, `_build_parser`, `_serve`, `_open_browser`, `_ensure_db_exists` |
-| `__init__.py` | re-export `app`, `main` |
+| `EnrichmentChain.enrich_many` | no caller, no test |
+| `EvidenceCache.for_indicator` | no caller, no test |
+| `EnrichmentChain.reset_stats` | called only by one test |
+| `HostsTable.is_managed` | called only by tests |
+| `runtime.ServiceProbe` | only re-exported, never called |
+| `runtime.WindowsScmServiceManager` | only re-exported, never wired into `WindowsHost` |
+| `dashboard/__init__.py` re-exports of 20 route functions | Flask dispatches routes by URL, and nothing imports the handlers |
+| `file_scanner/` package (`ScanRootCatalog` and 9 related types) | added in `36e1a70`, never wired into `FileScanCollector`, used only by `tests/test_scan_roots.py`. Recoverable from git if scan planning is picked up again |
 
-Same discipline: pure moves, `pytest` + `ruff` green after each commit.
+Acceptance: the listed symbols are gone, their test-only callers are removed or
+rewritten against public behaviour, and the suite is green.
 
----
+## Phase 2: one source of truth per telemetry slice (DRY, OCP, and a bug fix)
 
-## Authoritative facade export set (Phase 1)
+Problem: the string name of a slice, its ORM model and its `judge_fields` are
+repeated in each OS variant. The same string is repeated again as a key in the
+dashboard's `COLLECTOR_MODELS`, `_STREAMING_COLLECTORS`, the enrichment
+`EXTRACTORS` table, `prompts.toml` hints and three constants. The copies have
+already drifted: `COLLECTOR_MODELS` is missing `trusted_roots`,
+`injection_env`, `kernel_modules` and `ssh_known_hosts`, so the dashboard
+cannot show their source row, count them, toggle them or accept feedback on
+them.
 
-These 66 symbols are imported from `avai.host_monitor` somewhere in
-`src/` or `tests/`. The facade **must** export all of them (verified by grep):
+- Add a frozen value object `Slice(name, model, judge_fields, judge_enabled,
+  streaming)` and a `SliceCatalog` that holds every slice exactly once.
+- Each collector class points at its slice (`slice = SLICES.usb_devices`), and
+  `Collector.name`, `model` and `judge_fields` become properties read from it.
+- The dashboard derives `COLLECTOR_MODELS` and `_STREAMING_COLLECTORS` from the
+  catalog. `EXTRACTORS` and the prompt hints are validated against it.
+- Add catalog tests: every `_RowBase` model has exactly one slice, every
+  judged slice has a prompt hint, and every extractor key is a real slice.
 
-```
-AuthEventRow, Base, BluetoothDeviceRow, Browser, BrowserExtensionRow,
-ChromiumExtensionReader, CollectionRun, CollectorErrorRow,
-DEFAULT_BASELINE_MIN_RUNS, DEFAULT_PROMPTS_PATH, DnsQueriesCollector,
-DnsQueryRow, FileIntegrityRow, FirefoxExtensionReader, HostsFileCollector,
-HostsFileRow, IncidentNarrativeRow, IncidentNarrator, InstalledAppRow,
-Judgement, Judgment, KernelExtensionRow, LaunchItemRow,
-LinuxLaunchItemsCollector, ListeningPortRow, LlmJudge, MdmProfileRow,
-MountRow, NetworkConnectionRow, NetworkFlowRow, NetworkFlowsCollector,
-NetworkInterfaceRow, NullJudge, PrivilegeConfigCollector, PrivilegeConfigRow,
-ProcessConnectionResolver, ProcessExecRow, ProcessRow, Prompts,
-QuarantineEventRow, RiskScoreRow, Runner, SetuidFileRow, Sink,
-SshAuthorizedKeyRow, SshAuthorizedKeysCollector, StreamingWorker,
-SystemExtensionRow, SystemIntegrityRow, ThreatCategory, UsbDeviceRow,
-Verdict, WifiStateRow, _build_parser, _payload_bytes, build_completion_client,
-build_judge, build_snapshot_collectors, coerce_enum, compute_risk_score,
-content_hash, estimate_cost, host_path, host_paths_for_home, utcnow
-```
+Acceptance: slice identity is declared once per slice, the four missing
+slices appear in the dashboard, a regression test proves feedback is accepted
+for `trusted_roots`, and the dashboard golden output changes only on those
+four slices.
 
-> Re-confirm with this command before declaring the facade complete:
-> ```
-> python3 - <<'PY'
-> import re, pathlib
-> roots = ["src/avai/dashboard.py","src/avai/cli.py","src/avai/__init__.py",
->          "src/avai/migrations/env.py", *map(str, pathlib.Path("tests").glob("*.py"))]
-> pat = re.compile(r"from avai\.host_monitor import\s+(\([^)]*\)|[^\n]+)")
-> syms=set()
-> for f in roots:
->     for m in pat.finditer(pathlib.Path(f).read_text()):
->         for s in m.group(1).strip("() \n").split(","):
->             s=s.split(" as ")[0].strip()
->             if s and not s.startswith("#"): syms.add(s)
-> print(len(syms)); print("\n".join(sorted(syms)))
-> PY
-> ```
+## Phase 3: LLM stages (SRP, DRY, DIP)
 
----
+Problem: `build_judge`, `build_verifier`, `build_investigator`,
+`build_narrator` and `build_coverage_assessor` each re-read the same three env
+vars and repeat the same credential rule. Each stage then builds its own
+`CompletionClient`. `complete_structured` takes 7 parameters.
 
-## Verification & rollback
+- Add a value object `LlmCredentials.from_env()`. It is read once, in the
+  composition root, and answers `can_call()` and `client()`.
+- Build one `CompletionClient` and inject it into every stage. This is the
+  same `client=` seam the tests already use with `_FakeClient`.
+- Add `StructuredLlmStage` as a small Template Method base. It holds the
+  prompt pair, the schema and the client, with `call(payload) -> dict | None`.
+  `MaliciousVerdictVerifier`, `UnknownFindingInvestigator`,
+  `IncidentNarrator`, `YaraCoverageAssessor` and `LlmJudge` keep their public
+  methods and delegate the call.
+- Add `LlmStages.build(args, prompts, credentials)`, which returns all five
+  stages or `None`/`NullJudge`, and replaces the five `build_*` functions.
+- Add a `CompletionRequest` parameter object in place of the 7 arguments.
 
-- **Per-commit gate:** `pytest -q && ruff check src tests` (add `mypy`/`pyright`
-  if configured). Never commit on red.
-- **Behavioral smoke test** after Phase 1: `avai monitor --once --no-enrich`
-  and `avai dashboard` both start cleanly.
-- **Rollback:** each step is one mechanical commit → `git revert` any single
-  step in isolation.
+Acceptance: `os.environ` is read in no LLM module, one client instance is
+shared by every stage, and the credential rule has one implementation and one
+table-driven test.
 
-## Sequencing note
+## Phase 4: split `Runner` (SRP, OCP, primitive obsession)
 
-Decided: execute **on the current `release/0.1.0` branch** (per your call). Be
-aware it carries a large pile of uncommitted release work — commit that first
-so the refactor commits stay cleanly separated and individually revertable.
-Recommended order: Phase 1, stop and review (tests green), then Phase 2.
+Today `Runner` owns the control loop, maintenance commands, the cycle, seven
+finding-enrichment steps, four end-of-cycle reports and the streaming
+workers. It passes loose dicts whose keys (`evidence`, `baseline`, `related`,
+`rule_meta`, `matched_strings`) are added by different methods.
+
+| New type | Takes over |
+|---|---|
+| `Finding` (dataclass) and `FindingBatch` | the entry dicts. Typed fields, plus `to_prompt()` at the LLM edge |
+| `FindingStage` protocol with one class per step: `EvidenceStage`, `BaselineStage`, `CorrelationStage`, `YaraContextStage`, `JudgeStage`, `VerifyStage`, `InvestigateStage` | `_enrich_entries`, `_annotate_baseline`, `_attach_correlation` and its three pid-map helpers, `_attach_yara_context`, the judge call, `_verify_judgments`, `_investigate_unknowns` |
+| `FindingPipeline(stages)` | the middle of `_run_collector`. The stage order is built in the composition root, so a new stage never edits the Runner |
+| `CycleStep` protocol: `NarrativeStep`, `RiskScoreStep`, `YaraStatusStep`, `CoverageStep` | the four `_generate_*` / `_write_*` methods and their "skip if unchanged" fingerprints |
+| `MaintenanceCommand` enum with an `apply(repos)` method | the `if cmd == ...` chain in `_dispatch_command` |
+| `ControlLoop` | `run_forever`, `_refresh_control`, the heartbeats and the scan-now handling |
+| `StreamingSupervisor` | `start_streaming` and `stop_streaming` |
+| `RunnerConfig` (dataclass) | the 12-argument `Runner.__init__` |
+| `SupervisionPolicy` (dataclass) | the 10-argument `StreamingWorker.__init__` (backoff, sleeper, listener, batch size, flush interval, healthy reset) |
+
+`Runner` stays as the thin coordinator of `CollectionCycle`, `ControlLoop` and
+`StreamingSupervisor`, so `desktop.py` and `main.py` keep calling the same
+three methods.
+
+Acceptance: no class in `runner.py` or its new modules exceeds 15 methods or
+300 lines, the cycle golden test is identical, and each stage has its own unit
+test with a fake collaborator.
+
+## Phase 5: dropped
+
+The `Sink` split into repositories was dropped on 2026-09-17. `Sink` keeps
+its 49 methods. Its two worst methods are still simplified where they are:
+`correlation_context` (mccabe 15) gets one private method per signal, and
+`prune_to_size` (122 lines) gets one private method per table group. Both
+are covered by the Phase 0 cycle golden test.
+
+## Phase 6: dashboard (SRP, DIP, parameter objects)
+
+- Replace the module-level `app` and its 5 env reads with
+  `create_app(DashboardConfig)`. `serve.py` and `desktop.py` call the factory.
+- Split routes into three Blueprints: fragments, api and control.
+- Turn `queries.py` (2774 lines of module functions tied to `current_app`)
+  into query classes per panel: `FindingsQueries`, `NetworkQueries`,
+  `VulnerabilityQueries`, `LogQueries`, `AuthEventQueries`, `PostureQueries`,
+  `ResourceQueries` and `CollectionQueries`. Each is built with a session
+  factory and never touches Flask.
+- Break each 150 to 193 line function into select, map and aggregate methods.
+- Add parameter objects `Page(page, per_page)` and `FindingFilter(verdict,
+  status, collector, category, q, sort)` in place of the 6 to 10 argument
+  signatures.
+
+Acceptance: the dashboard golden output is identical, no function in
+`dashboard/` is over mccabe 10 or 60 lines, and query classes are tested
+without a Flask app.
+
+## Phase 7: collectors (SRP, DIP, magic values)
+
+Characterization tests come first. `collectors.py` is at 65% coverage and is
+3362 lines long.
+
+- Split `collectors.py` into a `collectors/` package by area: network,
+  devices, persistence, integrity, files and streams. The facade keeps
+  exports stable.
+- Inject collaborators instead of building them inline: 6 `CommandRunner()`
+  calls and 14 direct `psutil.` calls move behind the existing
+  `CommandRunner`, `SystemMetrics` and `PsutilConnections` seams, wired by the
+  Host composition roots as the newer collectors already are.
+- Extract `YaraRulesetCompiler` from `_compile_yara_rules` (96 lines). Split
+  `LinuxLaunchItemsCollector.collect` (mccabe 19) and `_cron_rows` (80 lines)
+  into systemd and cron readers.
+- `FileScanCollector._targets` (mccabe 18): split it into the three target
+  sources it already walks (privileged bin dirs, app executables, recent
+  Downloads), with the per-cycle cap applied once.
+- Turn the 74 magic comparisons into named constants or enum members.
+
+Acceptance: coverage for the collector package is at least 80%, no function
+exceeds mccabe 10, and zero `CommandRunner()` or `psutil.` calls remain inside
+collector classes.
+
+## Phase 8: enrichment and indicators (small)
+
+- Split `EnrichmentChain.enrich` (mccabe 13, 73 lines) into cache lookup,
+  fetch and forward-chain methods. Per-source counters become a
+  `SourceStats` object.
+- Replace the 10 elif chains and 27 type checks in `indicators.py` with a
+  single `_safe_loads` result type plus small helpers.
+- Simplify `OSVEnricher._fetch` (mccabe 12).
+
+## Phase 9: entry points and configuration (OCP, DIP)
+
+- `cli.main` (88 lines of `if cmd ==`): a `{name: Command}` table with a
+  `run(argv)` method per subcommand. Aliases become table entries.
+- `HostFactory.create`: a `{system: HostClass}` table instead of three string
+  compares.
+- `host_monitor.main.build_runner` becomes the single composition root. It
+  builds `LlmCredentials`, the repositories, the pipeline and the steps from a
+  `MonitorSettings` object parsed once from argv and env.
+
+Acceptance: `os.environ` is read only in `desktop.py`, `main.py`,
+`serve.py` and `create_app`.
+
+## Phase 10: trim the facades
+
+- Point tests at the real modules and shrink `host_monitor/__init__.py` (334
+  lines) and `dashboard/__init__.py` (260 lines) to the names a caller outside
+  the package actually uses.
+- Empty the ruff ignore list and delete it.
+
+Acceptance: the ignore list is gone, the layering test is green, coverage is
+at least 85%, and `docs/ARCHITECTURE.md` is regenerated.
+
+## Order and why
+
+`0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10`
+
+- Deleting code comes before moving it, so nothing dead gets refactored.
+- The slice catalog comes before the Runner, because the Runner, dashboard,
+  extractors and prompts all key on slice names.
+- The LLM stages come before the Runner, because the Phase 4 pipeline stages
+  wrap them.
+- The dashboard and collectors are independent of each other and are kept
+  sequential to hold three open fronts at most.
+
+Not measured yet: the size of each PR, and whether Phase 4's extra
+indirection changes cycle wall time. Phase 4 should time `run_once` before
+and after on this Mac.
