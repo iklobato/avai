@@ -19,7 +19,7 @@ from avai.host_monitor import (
     ProcessRow,
 )
 
-from .common import _FLOW_SEV, Page, _existing_tables
+from .common import _FLOW_SEV, Page, RowFilter, _existing_tables, _take_worse_verdict
 
 _PROTO_BY_SOCK = {"SOCK_STREAM": "TCP", "SOCK_DGRAM": "UDP"}
 
@@ -61,82 +61,59 @@ def _cmdline_str(raw) -> str | None:
     return None
 
 
-def listening_ports(
-    session: Session,
-    run_id: str,
-    limit: int = 1000,
-    verdict: str = "",
-    scope_filter: str = "",
-    q: str = "",
-    page: Page = Page(),
-):
-    """Listening sockets for ``run_id`` as a glanceable table: one row per
-    (port, pid) socket, annotated with its LLM verdict (LEFT JOIN
-    Judgement, same as :func:`network_flows`) and enriched with
-    owning-process detail (user, exe, cmdline, cpu/mem, ppid) from the
-    ``processes`` snapshot plus a count of established connections to that
-    local port from ``network_connections``.
+_PORT_LIMIT = 1000
+_PORT_SEARCH = ("process", "port")
+_PROC_COLUMNS = (
+    "ppid",
+    "exe",
+    "cmdline_json",
+    "username",
+    "uid",
+    "status",
+    "cpu_percent",
+    "memory_rss",
+    "num_fds",
+    "num_threads",
+)
 
-    Wildcard binds (0.0.0.0 + :: on the same port/pid) merge into one row
-    carrying the worst bind scope, so the table reads as "what is this
-    process exposing, and to whom". Worst-verdict-first, then by port.
-    Returns ``{"summary": {...}, "rows": [...]}``; degrades to empty when
-    the table predates this collector."""
-    empty = {
-        "summary": {"ports": 0, "exposed": 0, "malicious": 0, "suspicious": 0},
-        "rows": [],
-    }
-    if "listening_ports" not in _existing_tables(session):
-        return empty
 
-    # Owning-process detail, keyed by pid, from the same run's snapshot.
-    proc_by_pid: dict[int, dict] = {}
-    if "processes" in _existing_tables(session):
-        for p in session.execute(
-            select(
-                ProcessRow.pid,
-                ProcessRow.ppid,
-                ProcessRow.exe,
-                ProcessRow.cmdline_json,
-                ProcessRow.username,
-                ProcessRow.uid,
-                ProcessRow.status,
-                ProcessRow.cpu_percent,
-                ProcessRow.memory_rss,
-                ProcessRow.num_fds,
-                ProcessRow.num_threads,
-            ).where(ProcessRow.run_id == run_id)
-        ).all():
-            if p.pid is None:
-                continue
-            proc_by_pid[p.pid] = {
-                "ppid": p.ppid,
-                "exe": p.exe,
-                "cmdline": _cmdline_str(p.cmdline_json),
-                "username": p.username,
-                "uid": p.uid,
-                "status": p.status,
-                "cpu_percent": p.cpu_percent,
-                "memory_rss": p.memory_rss,
-                "num_fds": p.num_fds,
-                "num_threads": p.num_threads,
-            }
+def _processes_by_pid(session: Session, run_id: str) -> dict[int, dict]:
+    """Owning-process detail, keyed by pid, from the same run's snapshot."""
+    if "processes" not in _existing_tables(session):
+        return {}
+    stmt = select(
+        ProcessRow.pid, *(getattr(ProcessRow, c) for c in _PROC_COLUMNS)
+    ).where(ProcessRow.run_id == run_id)
+    procs = {}
+    for p in session.execute(stmt).all():
+        if p.pid is None:
+            continue
+        detail = {c: getattr(p, c) for c in _PROC_COLUMNS}
+        detail["cmdline"] = _cmdline_str(detail.pop("cmdline_json"))
+        procs[p.pid] = detail
+    return procs
 
-    # Established connections terminating on each local port — "is anyone
-    # actually talking to this listener right now".
-    conn_count: dict[int, int] = {}
-    if "network_connections" in _existing_tables(session):
-        for port, n in session.execute(
-            select(NetworkConnectionRow.laddr_port, func.count())
-            .where(
-                NetworkConnectionRow.run_id == run_id,
-                NetworkConnectionRow.status == "ESTABLISHED",
-            )
-            .group_by(NetworkConnectionRow.laddr_port)
-        ).all():
-            if port is not None:
-                conn_count[port] = n
 
+def _established_by_port(session: Session, run_id: str) -> dict[int, int]:
+    """Established connections terminating on each local port: "is anyone
+    actually talking to this listener right now"."""
+    if "network_connections" not in _existing_tables(session):
+        return {}
+    counts = session.execute(
+        select(NetworkConnectionRow.laddr_port, func.count())
+        .where(
+            NetworkConnectionRow.run_id == run_id,
+            NetworkConnectionRow.status == "ESTABLISHED",
+        )
+        .group_by(NetworkConnectionRow.laddr_port)
+    ).all()
+    return {port: n for port, n in counts if port is not None}
+
+
+def _sockets_by_port_and_pid(session: Session, run_id: str) -> list[dict]:
+    """One group per (port, pid): wildcard binds (0.0.0.0 + :: on the same
+    port/pid) merge, keeping every address, protocol and family and the
+    worst verdict."""
     stmt = (
         select(
             ListeningPortRow.pid,
@@ -157,28 +134,17 @@ def listening_ports(
             ),
         )
         .where(ListeningPortRow.run_id == run_id)
-        .limit(limit)
+        .limit(_PORT_LIMIT)
     )
-
     groups: dict[tuple, dict] = {}
-    for (
-        pid,
-        process_name,
-        family,
-        type_,
-        laddr_ip,
-        laddr_port,
-        row_verdict,
-        conf,
-        reason,
-    ) in session.execute(stmt).all():
-        key = (laddr_port, pid)
+    for sock in session.execute(stmt).all():
+        key = (sock.laddr_port, sock.pid)
         g = groups.get(key)
         if g is None:
             g = groups[key] = {
-                "port": laddr_port,
-                "pid": pid,
-                "process": process_name,
+                "port": sock.laddr_port,
+                "pid": sock.pid,
+                "process": sock.process_name,
                 "_addrs": set(),
                 "_protos": set(),
                 "_families": set(),
@@ -186,53 +152,67 @@ def listening_ports(
                 "confidence": None,
                 "reasoning": "",
             }
-        if laddr_ip:
-            g["_addrs"].add(laddr_ip)
-        if type_:
-            g["_protos"].add(_PROTO_BY_SOCK.get(type_, type_))
-        if family:
-            g["_families"].add(_FAMILY_LABEL.get(family, family))
-        if _FLOW_SEV.get(row_verdict, 4) < _FLOW_SEV.get(g["verdict"], 4):
-            g["verdict"] = row_verdict
-            g["confidence"] = conf
-            g["reasoning"] = reason or ""
+        g["_addrs"].add(sock.laddr_ip)
+        g["_protos"].add(_PROTO_BY_SOCK.get(sock.type, sock.type))
+        g["_families"].add(_FAMILY_LABEL.get(sock.family, sock.family))
+        _take_worse_verdict(g, sock.verdict, sock.confidence, sock.reasoning)
+    return list(groups.values())
 
-    rows = []
-    for g in groups.values():
-        scopes = {_addr_scope(a) for a in g["_addrs"]} or {"unknown"}
-        scope = min(scopes, key=lambda s: _SCOPE_SEV.get(s, 2))
-        rows.append(
-            {
-                "port": g["port"],
-                "pid": g["pid"],
-                "process": g["process"] or "—",
-                "addrs": sorted(g["_addrs"]),
-                "scope": scope,
-                "exposed": scope in ("all", "specific"),
-                "proto": sorted(g["_protos"]),
-                "family": sorted(g["_families"]),
-                "conns": conn_count.get(g["port"], 0),
-                "proc": proc_by_pid.get(g["pid"]),
-                "verdict": g["verdict"],
-                "confidence": g["confidence"],
-                "reasoning": g["reasoning"],
-            }
-        )
 
+def _port_row(group: dict, procs: dict[int, dict], conns: dict[int, int]) -> dict:
+    addrs = sorted(filter(None, group["_addrs"]))
+    scopes = {_addr_scope(a) for a in addrs} or {"unknown"}
+    scope = min(scopes, key=lambda s: _SCOPE_SEV.get(s, 2))
+    return {
+        "port": group["port"],
+        "pid": group["pid"],
+        "process": group["process"] or "—",
+        "addrs": addrs,
+        "scope": scope,
+        "exposed": scope in ("all", "specific"),
+        "proto": sorted(filter(None, group["_protos"])),
+        "family": sorted(filter(None, group["_families"])),
+        "conns": conns.get(group["port"], 0),
+        "proc": procs.get(group["pid"]),
+        "verdict": group["verdict"],
+        "confidence": group["confidence"],
+        "reasoning": group["reasoning"],
+    }
+
+
+def listening_ports(
+    session: Session,
+    run_id: str,
+    filters: RowFilter = RowFilter(),
+    scope_filter: str = "",
+    page: Page = Page(),
+):
+    """Listening sockets for ``run_id`` as a glanceable table: one row per
+    (port, pid) socket, annotated with its LLM verdict (LEFT JOIN
+    Judgement, same as :func:`network_flows`) and enriched with
+    owning-process detail (user, exe, cmdline, cpu/mem, ppid) from the
+    ``processes`` snapshot plus a count of established connections to that
+    local port from ``network_connections``.
+
+    Each row carries the worst bind scope of its merged addresses, so the
+    table reads as "what is this process exposing, and to whom".
+    Worst-verdict-first, then by port. Returns ``{"summary": {...},
+    "rows": [...]}``; degrades to empty when the table predates this
+    collector."""
+    if "listening_ports" not in _existing_tables(session):
+        return {
+            "summary": {"ports": 0, "exposed": 0, "malicious": 0, "suspicious": 0},
+            "rows": [],
+        }
+    procs = _processes_by_pid(session, run_id)
+    conns = _established_by_port(session, run_id)
+    rows = [
+        _port_row(g, procs, conns) for g in _sockets_by_port_and_pid(session, run_id)
+    ]
     rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), r["port"] or 0))
-
-    # Apply filters
-    if verdict:
-        rows = [r for r in rows if r.get("verdict") == verdict]
+    rows = filters.keep(rows, _PORT_SEARCH)
     if scope_filter:
         rows = [r for r in rows if r.get("scope") == scope_filter]
-    if q:
-        ql = q.lower()
-        rows = [
-            r
-            for r in rows
-            if ql in (r.get("process") or "").lower() or ql in str(r.get("port") or "")
-        ]
 
     summary = {
         "ports": len(rows),
@@ -240,13 +220,11 @@ def listening_ports(
         "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
         "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
     }
-
     page_rows, paging = page.slice(rows)
     return {
         "summary": summary,
         "rows": page_rows,
         **paging,
-        "q": q,
-        "verdict": verdict,
+        **filters.fields(),
         "scope_filter": scope_filter,
     }

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from sqlalchemy import (
     and_,
-    literal,
     select,
 )
 from sqlalchemy.orm import Session
@@ -17,75 +16,33 @@ from avai.host_monitor import (
 from .common import (
     _FLOW_SEV,
     Page,
+    RowFilter,
+    _column_or_null,
     _existing_columns,
     _existing_tables,
     _port_sort_key,
+    _take_worse_verdict,
 )
 from .ip_enrichment import _attach_ip_enrichment
 
+_FLOW_LIMIT = 1000
+_FLOW_SEARCH = ("dst_ip", "hostname", "process")
 
-def network_flows(
-    session: Session,
-    run_id: str,
-    limit: int = 1000,
-    verdict: str = "",
-    q: str = "",
-    page: Page = Page(),
-):
-    """Tcpdump flows for ``run_id``, **aggregated by destination IP** for
-    a compact, glanceable table.
 
-    Each raw flow is one (iface, proto, dst_ip, dst_port) with a packet
-    count and (LEFT JOIN) its LLM verdict. We roll those up per dst_ip:
-    SUM(packets), COUNT(flows), the set of interfaces / protocols /
-    ports, and the worst verdict among the destination's flows. Returns
-    ``{"summary": {...}, "rows": [...]}`` with rows worst-verdict first
-    then by total packets.
-
-    Degrades to empty if the network_flows table doesn't exist yet
-    (DB written by a monitor that predates this collector)."""
-    empty = {
-        "summary": {
-            "destinations": 0,
-            "flows": 0,
-            "packets": 0,
-            "malicious": 0,
-            "suspicious": 0,
-        },
-        "rows": [],
-    }
-    if "network_flows" not in _existing_tables(session):
-        return empty
-
-    # Tolerate a network_flows table written by an older monitor that
-    # lacks newer columns (iface / service) — substitute a NULL literal
-    # so the SELECT doesn't 500 on "no such column".
+def _flows_with_verdict(session: Session, run_id: str):
+    """This run's raw flows, each LEFT JOINed to its LLM verdict. Tolerates a
+    table written by an older monitor that lacks the newer columns."""
     cols = _existing_columns(session, "network_flows")
-    iface_sel = (
-        NetworkFlowRow.iface if "iface" in cols else literal(None).label("iface")
-    )
-    service_sel = (
-        NetworkFlowRow.service if "service" in cols else literal(None).label("service")
-    )
-    process_sel = (
-        NetworkFlowRow.process if "process" in cols else literal(None).label("process")
-    )
-    bytes_sel = (
-        NetworkFlowRow.byte_count
-        if "byte_count" in cols
-        else literal(None).label("byte_count")
-    )
-
-    stmt = (
+    return session.execute(
         select(
-            iface_sel,
+            _column_or_null(NetworkFlowRow, "iface", cols),
             NetworkFlowRow.proto,
             NetworkFlowRow.dst_ip,
             NetworkFlowRow.dst_port,
-            service_sel,
+            _column_or_null(NetworkFlowRow, "service", cols),
             NetworkFlowRow.packets,
-            bytes_sel,
-            process_sel,
+            _column_or_null(NetworkFlowRow, "byte_count", cols),
+            _column_or_null(NetworkFlowRow, "process", cols),
             Judgement.verdict,
             Judgement.confidence,
             Judgement.reasoning,
@@ -98,27 +55,20 @@ def network_flows(
             ),
         )
         .where(NetworkFlowRow.run_id == run_id)
-        .limit(limit)
-    )
+        .limit(_FLOW_LIMIT)
+    ).all()
 
+
+def _flows_by_destination(flows) -> list[dict]:
+    """Roll raw flows up per destination IP: summed packets and bytes, the
+    flow count, the sets of interfaces / protocols / ports / processes, and
+    the worst verdict among them."""
     groups: dict[str, dict] = {}
-    for (
-        iface,
-        proto,
-        dst_ip,
-        dst_port,
-        service,
-        packets,
-        byte_count,
-        process,
-        row_verdict,
-        conf,
-        reason,
-    ) in session.execute(stmt).all():
-        g = groups.get(dst_ip)
+    for flow in flows:
+        g = groups.get(flow.dst_ip)
         if g is None:
-            g = groups[dst_ip] = {
-                "dst_ip": dst_ip,
+            g = groups[flow.dst_ip] = {
+                "dst_ip": flow.dst_ip,
                 "packets": 0,
                 "bytes": 0,
                 "flows": 0,
@@ -130,62 +80,68 @@ def network_flows(
                 "confidence": None,
                 "reasoning": "",
             }
-        g["packets"] += packets or 0
-        g["bytes"] += byte_count or 0
+        g["packets"] += flow.packets or 0
+        g["bytes"] += flow.byte_count or 0
         g["flows"] += 1
-        if iface:
-            g["_ifaces"].add(iface)
-        if proto:
-            g["_protos"].add(proto)
-        if process:
-            g["_procs"].add(process)
-        if dst_port is not None:
-            g["_ports"].add(f"{dst_port}/{service}" if service else str(dst_port))
-        # Keep the worst (lowest-severity-number) verdict + its reasoning.
-        if _FLOW_SEV.get(row_verdict, 4) < _FLOW_SEV.get(g["verdict"], 4):
-            g["verdict"] = row_verdict
-            g["confidence"] = conf
-            g["reasoning"] = reason or ""
+        g["_ifaces"].add(flow.iface)
+        g["_protos"].add(flow.proto)
+        g["_procs"].add(flow.process)
+        if flow.dst_port is not None:
+            port = flow.dst_port
+            g["_ports"].add(f"{port}/{flow.service}" if flow.service else str(port))
+        _take_worse_verdict(g, flow.verdict, flow.confidence, flow.reasoning)
+    return [_destination_row(g) for g in groups.values()]
 
-    rows = []
-    for g in groups.values():
-        rows.append(
-            {
-                "dst_ip": g["dst_ip"],
-                "iface": ", ".join(sorted(g["_ifaces"])) or "—",
-                "proto": [p.upper() for p in sorted(g["_protos"])],
-                "ports": sorted(g["_ports"], key=_port_sort_key),
-                "process": ", ".join(sorted(g["_procs"])) or "—",
-                "packets": g["packets"],
-                "bytes": g["bytes"],
-                "flows": g["flows"],
-                "verdict": g["verdict"],
-                "confidence": g["confidence"],
-                "reasoning": g["reasoning"],
-                "geo": None,  # filled below from the enrichment cache
-                "hostname": None,  # filled below from the enrichment cache
-            }
-        )
 
-    # Attach geolocation + resolved hostname per destination IP from the
-    # enrichment_evidence cache the monitor already populated (ipwho.is
-    # geo, Shodan/AbuseIPDB hostnames, AbuseIPDB/Feodo geo fallbacks).
+def _destination_row(group: dict) -> dict:
+    ifaces = sorted(filter(None, group["_ifaces"]))
+    procs = sorted(filter(None, group["_procs"]))
+    return {
+        "dst_ip": group["dst_ip"],
+        "iface": ", ".join(ifaces) or "—",
+        "proto": [p.upper() for p in sorted(filter(None, group["_protos"]))],
+        "ports": sorted(group["_ports"], key=_port_sort_key),
+        "process": ", ".join(procs) or "—",
+        "packets": group["packets"],
+        "bytes": group["bytes"],
+        "flows": group["flows"],
+        "verdict": group["verdict"],
+        "confidence": group["confidence"],
+        "reasoning": group["reasoning"],
+        "geo": None,  # filled from the enrichment cache
+        "hostname": None,  # filled from the enrichment cache
+    }
+
+
+def network_flows(
+    session: Session,
+    run_id: str,
+    filters: RowFilter = RowFilter(),
+    page: Page = Page(),
+):
+    """Tcpdump flows for ``run_id``, **aggregated by destination IP** for
+    a compact, glanceable table, worst verdict first then by total packets.
+    Returns ``{"summary": {...}, "rows": [...]}``.
+
+    Degrades to empty if the network_flows table doesn't exist yet
+    (DB written by a monitor that predates this collector)."""
+    if "network_flows" not in _existing_tables(session):
+        return {
+            "summary": {
+                "destinations": 0,
+                "flows": 0,
+                "packets": 0,
+                "malicious": 0,
+                "suspicious": 0,
+            },
+            "rows": [],
+        }
+    rows = _flows_by_destination(_flows_with_verdict(session, run_id))
+    # Geolocation + resolved hostname per destination, from the evidence
+    # cache the monitor already populated.
     _attach_ip_enrichment(session, rows)
-
     rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -r["packets"]))
-
-    # Apply filters
-    if verdict:
-        rows = [r for r in rows if r.get("verdict") == verdict]
-    if q:
-        ql = q.lower()
-        rows = [
-            r
-            for r in rows
-            if ql in (r.get("dst_ip") or "").lower()
-            or ql in (r.get("hostname") or "").lower()
-            or ql in (r.get("process") or "").lower()
-        ]
+    rows = filters.keep(rows, _FLOW_SEARCH)
 
     summary = {
         "destinations": len(rows),
@@ -195,12 +151,5 @@ def network_flows(
         "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
         "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
     }
-
     page_rows, paging = page.slice(rows)
-    return {
-        "summary": summary,
-        "rows": page_rows,
-        **paging,
-        "q": q,
-        "verdict": verdict,
-    }
+    return {"summary": summary, "rows": page_rows, **paging, **filters.fields()}

@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from avai.dashboard import DashboardConfig, _addr_scope, create_app, listening_ports
+from avai.dashboard.queries import RowFilter
 from avai.host_monitor.runtime import Digest
 from avai.host_monitor import (
     Judgment,
@@ -169,7 +170,7 @@ class TestListeningPortsRollup:
         # and its echo took the last socket's verdict instead of the user's.
         engine, run_id = seeded
         with Session(engine) as s:
-            data = listening_ports(s, run_id, verdict="malicious")
+            data = listening_ports(s, run_id, RowFilter(verdict="malicious"))
         assert [r["port"] for r in data["rows"]] == [22]
         assert data["verdict"] == "malicious"
 

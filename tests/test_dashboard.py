@@ -24,7 +24,7 @@ from avai.dashboard import (
     system_integrity,
 )
 from avai.dashboard.db import read_only_engine
-from avai.dashboard.queries import Page
+from avai.dashboard.queries import LogFilter, Page
 from avai.host_monitor import Sink, SystemIntegrityRow
 
 # ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ class TestDashboardEndpoints:
     def test_findings_huge_page_does_not_500(self, client):
         # Regression: an out-of-range ?page= used to build an OFFSET past
         # SQLite's 64-bit INTEGER range, raising OverflowError -> HTTP 500.
-        # findings() now clamps page to the last page (like _paginate).
+        # findings() now clamps page to the last page (Page.within).
         for page in ("10000000000000000000", "99999999", "-5"):
             r = client.get(f"/fragments/findings?page={page}&per_page=200")
             assert r.status_code == 200, f"page={page} returned {r.status_code}"
@@ -1837,14 +1837,18 @@ class TestLogsPanel:
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
             assert [
-                r["message"][:7] for r in log_entries(s, "r1", level="err")["rows"]
+                r["message"][:7]
+                for r in log_entries(s, "r1", LogFilter(level="err"))["rows"]
             ] == ["EXT4-fs"]
             assert [
                 r["unit"]
-                for r in log_entries(s, "r1", source="/var/log/dpkg.log")["rows"]
+                for r in log_entries(s, "r1", LogFilter(source="/var/log/dpkg.log"))[
+                    "rows"
+                ]
             ] == ["dpkg.log"]
             assert [
-                r["message"][:7] for r in log_entries(s, "r1", q="openssl")["rows"]
+                r["message"][:7]
+                for r in log_entries(s, "r1", LogFilter(q="openssl"))["rows"]
             ] == ["status "]
 
     def test_pagination(self, tmp_path):
@@ -2019,10 +2023,10 @@ class TestLogAggregates:
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = log_aggregates(s, "r1", source="journald")
+            res = log_aggregates(s, "r1", LogFilter(source="journald"))
         assert res["summary"]["lines"] == 10
         none = log_aggregates(  # a source with no rows aggregates to empty
-            Session(_engine_rw(str(db))), "r1", source="/var/log/nope.log"
+            Session(_engine_rw(str(db))), "r1", LogFilter(source="/var/log/nope.log")
         )
         assert none["groups"] == []
 

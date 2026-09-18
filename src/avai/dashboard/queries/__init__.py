@@ -24,12 +24,13 @@ from .common import (
     PER_PAGE_OPTIONS,
     VERDICTS,
     Page,
+    RowFilter,
 )
 from .dns import dns_queries
 from .exposure import network_exposure, network_topology
-from .findings import category_options, collector_options, findings
+from .findings import FindingFilter, category_options, collector_options, findings
 from .flows import network_flows
-from .logs import LOG_LEVELS, log_aggregates, log_entries
+from .logs import LOG_LEVELS, LogFilter, log_aggregates, log_entries
 from .ports import listening_ports
 from .posture import (
     PersistencePages,
@@ -49,6 +50,9 @@ from .resources import (
 from .vulnerabilities import SEVERITY_ORDER, vulnerabilities
 
 __all__ = [
+    "FindingFilter",
+    "LogFilter",
+    "RowFilter",
     "AUTH_SUBSYSTEM_OPTIONS",
     "COLLECTOR_MODELS",
     "DEFAULT_PER_PAGE",

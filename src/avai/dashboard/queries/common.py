@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, replace
+from typing import NamedTuple
 
 from sqlalchemy import (
     and_,
@@ -112,6 +113,23 @@ def _existing_columns(session: Session, table: str) -> set[str]:
     return cols
 
 
+def _source_row(row_obj) -> dict:
+    """A collector row as a dict, minus the internal SQL plumbing columns."""
+    return {
+        col.name: getattr(row_obj, col.name)
+        for col in row_obj.__table__.columns
+        if col.name not in _HIDDEN_SOURCE_FIELDS
+    }
+
+
+def _artifact_label(collector: str, source_row: dict) -> str:
+    """The short "what is this" text for a finding, from its display fields."""
+    fields = DISPLAY_FIELDS.get(collector, ())
+    return " · ".join(
+        str(source_row[f]) for f in fields if source_row.get(f) not in (None, "")
+    )
+
+
 def _row_and_artifact(session: Session, j: Judgement) -> tuple[dict, str]:
     """Return ``(source_row_dict, artifact_display_string)`` for a judgment.
 
@@ -131,16 +149,8 @@ def _row_and_artifact(session: Session, j: Judgement) -> tuple[dict, str]:
     ).scalar_one_or_none()
     if row_obj is None:
         return {}, ""
-    full = {
-        col.name: getattr(row_obj, col.name)
-        for col in model.__table__.columns
-        if col.name not in _HIDDEN_SOURCE_FIELDS
-    }
-    fields = DISPLAY_FIELDS.get(j.collector, ())
-    artifact_parts = [
-        str(full[f]) for f in fields if full.get(f) is not None and full[f] != ""
-    ]
-    return full, " · ".join(artifact_parts)
+    full = _source_row(row_obj)
+    return full, _artifact_label(j.collector, full)
 
 
 _FLOW_SEV = {"malicious": 0, "suspicious": 1, "unknown": 2, "benign": 3, None: 4}
@@ -197,53 +207,117 @@ def _port_sort_key(p: str):
     return int(head) if head.isdigit() else 0
 
 
-def _collector_rows_with_verdict(
+def _column_or_null(model, name: str, present: set[str]):
+    """``model.name``, or a NULL labelled ``name`` when an older monitor wrote
+    the table before that column existed (selecting it would 500)."""
+    return getattr(model, name) if name in present else literal(None).label(name)
+
+
+class VerdictTable(NamedTuple):
+    """One collector table as a panel shows it: the columns it reads, the ones
+    the search box looks in, and how many rows it reads at most."""
+
+    collector: str
+    columns: tuple[str, ...]
+    search: tuple[str, ...]
+    limit: int = 500
+
+    def rows(self, session: Session, run_id: str) -> list[dict]:
+        """Every row for ``run_id``, each annotated with its LLM verdict (LEFT
+        JOIN Judgement on content_hash), worst verdict first. A missing newer
+        column reads as NULL and a missing table returns ``[]``."""
+        model = COLLECTOR_MODELS[self.collector]
+        if model.__tablename__ not in _existing_tables(session):
+            return []
+        present = _existing_columns(session, model.__tablename__)
+        stmt = (
+            select(
+                *(_column_or_null(model, c, present) for c in self.columns),
+                Judgement.verdict,
+                Judgement.confidence,
+                Judgement.reasoning,
+            )
+            .outerjoin(
+                Judgement,
+                and_(
+                    Judgement.content_hash == model.content_hash,
+                    Judgement.collector == self.collector,
+                ),
+            )
+            .where(model.run_id == run_id)
+            .limit(self.limit)
+        )
+        n = len(self.columns)
+        out = []
+        for row in session.execute(stmt).all():
+            d = dict(zip(self.columns, row[:n]))
+            d["verdict"], d["confidence"], d["reasoning"] = row[n : n + 3]
+            out.append(d)
+        out.sort(key=lambda r: _FLOW_SEV.get(r["verdict"], 4))
+        return out
+
+
+@dataclass(frozen=True)
+class RowFilter:
+    """The verdict pick and search box most panels share."""
+
+    verdict: str = ""
+    q: str = ""
+
+    def keep(self, rows: list[dict], search: tuple[str, ...]) -> list[dict]:
+        """``rows`` with the picked verdict whose ``search`` fields hold ``q``
+        (case-insensitive)."""
+        if self.verdict:
+            rows = [r for r in rows if r.get("verdict") == self.verdict]
+        if self.q:
+            needle = self.q.lower()
+            rows = [
+                r
+                for r in rows
+                if any(needle in str(r.get(k) or "").lower() for k in search)
+            ]
+        return rows
+
+    def fields(self) -> dict:
+        """The filter values a panel echoes back to its form."""
+        return {"verdict": self.verdict, "q": self.q}
+
+
+def _tally(rows: list[dict]) -> dict:
+    """Row count plus how many of them the judge flagged."""
+    return {
+        "total": len(rows),
+        "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
+        "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
+    }
+
+
+def _verdict_tables(
     session: Session,
     run_id: str,
-    model,
-    collector: str,
-    fields: tuple[str, ...],
-    limit: int = 500,
-) -> list[dict]:
-    """Generic: every ``collector`` row for ``run_id``, each annotated
-    with its LLM verdict (LEFT JOIN Judgement on content_hash). ``fields``
-    are the model attributes to return; a missing newer column degrades
-    to NULL (older DB) and a missing table returns ``[]``. Worst verdict
-    first. Shared by the DNS and persistence dashboard sections so they
-    don't each re-implement the join."""
-    if model.__tablename__ not in _existing_tables(session):
-        return []
-    present = _existing_columns(session, model.__tablename__)
-    selected = [
-        getattr(model, f) if f in present else literal(None).label(f) for f in fields
-    ]
-    stmt = (
-        select(
-            *selected,
-            Judgement.verdict,
-            Judgement.confidence,
-            Judgement.reasoning,
-        )
-        .outerjoin(
-            Judgement,
-            and_(
-                Judgement.content_hash == model.content_hash,
-                Judgement.collector == collector,
-            ),
-        )
-        .where(model.run_id == run_id)
-        .limit(limit)
-    )
-    out: list[dict] = []
-    n = len(fields)
-    for row in session.execute(stmt).all():
-        d = {f: row[i] for i, f in enumerate(fields)}
-        d["verdict"] = row[n]
-        d["confidence"] = row[n + 1]
-        d["reasoning"] = row[n + 2]
-        out.append(d)
-    out.sort(key=lambda r: _FLOW_SEV.get(r["verdict"], 4))
-    return out
+    tables: dict[str, VerdictTable],
+    filters: RowFilter,
+) -> dict:
+    """A panel of small, bounded tables shown whole (no paging) behind one
+    shared verdict + search filter, with per-table counts for the header."""
+    rows = {
+        name: filters.keep(table.rows(session, run_id), table.search)
+        for name, table in tables.items()
+    }
+    return {
+        **rows,
+        "counts": {name: _tally(r) for name, r in rows.items()},
+        **filters.fields(),
+        "any": any(rows.values()),
+    }
+
+
+def _take_worse_verdict(group: dict, verdict, confidence, reasoning) -> None:
+    """Keep the worst verdict a grouped row has seen, with its reasoning."""
+    if _FLOW_SEV.get(verdict, 4) < _FLOW_SEV.get(group["verdict"], 4):
+        group["verdict"] = verdict
+        group["confidence"] = confidence
+        group["reasoning"] = reasoning or ""
 
 
 def _parse_json_list(raw) -> list:

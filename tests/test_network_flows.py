@@ -14,6 +14,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from avai.dashboard import DashboardConfig, create_app, network_flows
+from avai.dashboard.queries import RowFilter
 from avai.enrichers import IndicatorType, extract_indicators
 from avai.host_monitor import NetworkFlowRow, NetworkFlowsCollector, Sink
 
@@ -273,7 +274,7 @@ class TestNetworkFlowsAggregation:
         # and its echo took the last flow's verdict instead of the user's.
         engine, run_id = seeded
         with Session(engine) as s:
-            data = network_flows(s, run_id, verdict="malicious")
+            data = network_flows(s, run_id, RowFilter(verdict="malicious"))
         assert [r["dst_ip"] for r in data["rows"]] == ["203.0.113.9"]
         assert data["verdict"] == "malicious"
 

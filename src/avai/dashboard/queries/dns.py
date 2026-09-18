@@ -6,11 +6,7 @@ import ipaddress
 
 from sqlalchemy.orm import Session
 
-from avai.host_monitor import (
-    DnsQueryRow,
-)
-
-from .common import _FLOW_SEV, Page, _collector_rows_with_verdict
+from .common import _FLOW_SEV, Page, RowFilter, VerdictTable
 
 
 def _dns_resolution_level(server_ip, qtype) -> str:
@@ -40,44 +36,33 @@ def _dns_resolution_level(server_ip, qtype) -> str:
     return "external DNS"
 
 
+_DNS_TABLE = VerdictTable(
+    "dns_queries",
+    ("qname", "qtype", "server_ip", "process", "count"),
+    search=("qname", "process"),
+    limit=1000,
+)
+
+
 def dns_queries(
     session: Session,
     run_id: str,
-    limit: int = 1000,
-    verdict: str = "",
+    filters: RowFilter = RowFilter(),
     level: str = "",
-    q: str = "",
     page: Page = Page(),
 ):
     """DNS questions seen this run (+ detected DoH endpoints), each with
     its LLM verdict and the resolution level (where/how it resolved).
     Returns ``{"summary": {...}, "rows": [...]}`` sorted worst-verdict
     then most-queried."""
-    rows = _collector_rows_with_verdict(
-        session,
-        run_id,
-        DnsQueryRow,
-        "dns_queries",
-        ("qname", "qtype", "server_ip", "process", "count"),
-        limit=limit,
-    )
+    rows = _DNS_TABLE.rows(session, run_id)
     for r in rows:
         r["level"] = _dns_resolution_level(r["server_ip"], r["qtype"])
     rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -(r["count"] or 0)))
 
-    # Apply filters
-    if verdict:
-        rows = [r for r in rows if r.get("verdict") == verdict]
+    rows = filters.keep(rows, _DNS_TABLE.search)
     if level:
         rows = [r for r in rows if r.get("level") == level]
-    if q:
-        ql = q.lower()
-        rows = [
-            r
-            for r in rows
-            if ql in (r.get("qname") or "").lower()
-            or ql in (r.get("process") or "").lower()
-        ]
 
     summary = {
         "domains": len({r["qname"] for r in rows}),
@@ -92,7 +77,6 @@ def dns_queries(
         "summary": summary,
         "rows": page_rows,
         **paging,
-        "q": q,
-        "verdict": verdict,
+        **filters.fields(),
         "level": level,
     }

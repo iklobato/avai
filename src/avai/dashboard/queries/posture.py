@@ -12,10 +12,6 @@ from sqlalchemy import (
 from sqlalchemy.orm import Session
 
 from avai.host_monitor import (
-    FileScanRow,
-    HostsFileRow,
-    PrivilegeConfigRow,
-    SshAuthorizedKeyRow,
     SystemIntegrityRow,
     YaraCoverageRow,
     YaraStatusRow,
@@ -23,8 +19,10 @@ from avai.host_monitor import (
 
 from .common import (
     Page,
-    _collector_rows_with_verdict,
+    RowFilter,
+    VerdictTable,
     _existing_tables,
+    _tally,
 )
 
 
@@ -54,45 +52,27 @@ def yara_status(session: Session) -> "dict | None":
     }
 
 
-def file_scan(
-    session: Session,
-    run_id: str,
-    verdict: str = "",
-    q: str = "",
-    limit: int = 500,
-) -> dict:
+_FILE_SCAN_TABLE = VerdictTable(
+    "file_scan",
+    ("rule", "path", "sha256", "scan_source", "tags_json", "meta_json"),
+    search=("rule", "path", "author"),
+)
+
+
+def file_scan(session: Session, run_id: str, filters: RowFilter = RowFilter()) -> dict:
     """The File Scan panel: the compiled-ruleset summary plus this run's
     YARA matches (file_scan rows annotated with their LLM verdict), each
     carrying the matched rule's author parsed from its meta for attribution.
     """
-    matches = _collector_rows_with_verdict(
-        session,
-        run_id,
-        FileScanRow,
-        "file_scan",
-        ("rule", "path", "sha256", "scan_source", "tags_json", "meta_json"),
-        limit,
-    )
+    matches = _FILE_SCAN_TABLE.rows(session, run_id)
     for m in matches:
         meta = json.loads(m.get("meta_json") or "{}")
         m["author"] = meta.get("author") or ""
-    if verdict:
-        matches = [m for m in matches if m.get("verdict") == verdict]
-    if q:
-        ql = q.lower()
-        matches = [
-            m
-            for m in matches
-            if any(
-                ql in str(m.get(f) or "").lower() for f in ("rule", "path", "author")
-            )
-        ]
     return {
         "status": yara_status(session),
         "coverage": yara_coverage(session),
-        "matches": matches,
-        "verdict": verdict,
-        "q": q,
+        "matches": filters.keep(matches, _FILE_SCAN_TABLE.search),
+        **filters.fields(),
     }
 
 
@@ -126,63 +106,34 @@ class PersistencePages(NamedTuple):
     priv: Page = Page()
 
 
+_SSH_KEYS_TABLE = VerdictTable(
+    "ssh_authorized_keys",
+    ("owner", "key_type", "fingerprint", "comment", "options", "path"),
+    search=("owner", "key_type", "fingerprint", "comment"),
+)
+_HOSTS_TABLE = VerdictTable(
+    "hosts_file", ("ip", "hostnames", "source_path"), search=("ip", "hostnames")
+)
+_PRIVILEGE_TABLE = VerdictTable(
+    "privilege_config",
+    ("kind", "subject", "detail", "source_path"),
+    search=("kind", "subject", "detail"),
+)
+
+
 def persistence_tampering(
     session: Session,
     run_id: str,
-    limit: int = 500,
-    verdict: str = "",
-    q: str = "",
+    filters: RowFilter = RowFilter(),
     pages: PersistencePages = PersistencePages(),
 ):
     """The persistence & tampering posture for ``run_id``: SSH authorized
-    keys, /etc/hosts mappings, and privilege config — each list annotated
+    keys, /etc/hosts mappings, and privilege config, each list annotated
     with LLM verdicts, plus per-table counts for the section header."""
-    ssh = _collector_rows_with_verdict(
-        session,
-        run_id,
-        SshAuthorizedKeyRow,
-        "ssh_authorized_keys",
-        ("owner", "key_type", "fingerprint", "comment", "options", "path"),
-        limit,
+    ssh, hosts, priv = (
+        filters.keep(table.rows(session, run_id), table.search)
+        for table in (_SSH_KEYS_TABLE, _HOSTS_TABLE, _PRIVILEGE_TABLE)
     )
-    hosts = _collector_rows_with_verdict(
-        session,
-        run_id,
-        HostsFileRow,
-        "hosts_file",
-        ("ip", "hostnames", "source_path"),
-        limit,
-    )
-    priv = _collector_rows_with_verdict(
-        session,
-        run_id,
-        PrivilegeConfigRow,
-        "privilege_config",
-        ("kind", "subject", "detail", "source_path"),
-        limit,
-    )
-
-    def _counts(rs: list[dict]) -> dict:
-        return {
-            "total": len(rs),
-            "malicious": sum(1 for r in rs if r["verdict"] == "malicious"),
-            "suspicious": sum(1 for r in rs if r["verdict"] == "suspicious"),
-        }
-
-    def _filter_rows(rs, fields):
-        if verdict:
-            rs = [r for r in rs if r.get("verdict") == verdict]
-        if q:
-            ql = q.lower()
-            rs = [
-                r for r in rs if any(ql in str(r.get(f) or "").lower() for f in fields)
-            ]
-        return rs
-
-    ssh = _filter_rows(ssh, ("owner", "key_type", "fingerprint", "comment"))
-    hosts = _filter_rows(hosts, ("ip", "hostnames"))
-    priv = _filter_rows(priv, ("kind", "subject", "detail"))
-
     ssh_rows, ssh_paging = pages.ssh.slice(ssh)
     hosts_rows, hosts_paging = pages.hosts.slice(hosts)
     priv_rows, priv_paging = pages.priv.slice(priv)
@@ -192,15 +143,14 @@ def persistence_tampering(
         "hosts": hosts_rows,
         "privilege": priv_rows,
         "counts": {
-            "ssh_keys": _counts(ssh),
-            "hosts": _counts(hosts),
-            "privilege": _counts(priv),
+            "ssh_keys": _tally(ssh),
+            "hosts": _tally(hosts),
+            "privilege": _tally(priv),
         },
         "pagination": {"ssh": ssh_paging, "hosts": hosts_paging, "priv": priv_paging},
         # The route sizes all three tables alike.
         "per_page": pages.ssh.size,
-        "verdict": verdict,
-        "q": q,
+        **filters.fields(),
         "any": bool(ssh or hosts or priv),
     }
 

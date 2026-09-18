@@ -12,8 +12,11 @@ from ..control import monitor_alive, read_control_state
 from ..queries import (
     DEFAULT_PER_PAGE,
     PER_PAGE_OPTIONS,
+    FindingFilter,
+    LogFilter,
     Page,
     PersistencePages,
+    RowFilter,
     auth_events_aggregated,
     category_options,
     collector_errors,
@@ -64,10 +67,10 @@ def fragment_triage():
     suspicious finding counts, and monitor liveness."""
     with read_session() as s:
         active_malicious = findings(
-            s, verdict="malicious", status="active", page=Page(1, 1)
+            s, filters=FindingFilter(verdict="malicious"), page=Page(1, 1)
         )["total"]
         active_suspicious = findings(
-            s, verdict="suspicious", status="active", page=Page(1, 1)
+            s, filters=FindingFilter(verdict="suspicious"), page=Page(1, 1)
         )["total"]
         risk = latest_risk(s)
         state = read_control_state(s)  # reused for both alive and the ctrl chips
@@ -256,7 +259,9 @@ def fragment_network_flows():
         return render_template(
             "partials/_network_flows.html",
             flows=(
-                network_flows(s, latest.run_id, verdict=verdict, q=q, page=page)
+                network_flows(
+                    s, latest.run_id, filters=RowFilter(verdict, q), page=page
+                )
                 if latest
                 else None
             ),
@@ -278,9 +283,8 @@ def fragment_listening_ports():
                 listening_ports(
                     s,
                     latest.run_id,
-                    verdict=verdict,
+                    filters=RowFilter(verdict, q),
                     scope_filter=scope_filter,
-                    q=q,
                     page=page,
                 )
                 if latest
@@ -304,9 +308,8 @@ def fragment_dns_queries():
                 dns_queries(
                     s,
                     latest.run_id,
-                    verdict=verdict,
+                    filters=RowFilter(verdict, q),
                     level=level,
-                    q=q,
                     page=page,
                 )
                 if latest
@@ -330,9 +333,8 @@ def fragment_log_summary():
                 log_aggregates(
                     s,
                     latest.run_id,
+                    filters=LogFilter(source=source, q=q),
                     group_by=group_by,
-                    source=source,
-                    q=q,
                     page=page,
                 )
                 if latest
@@ -356,9 +358,7 @@ def fragment_logs():
                 log_entries(
                     s,
                     latest.run_id,
-                    source=source,
-                    level=level,
-                    q=q,
+                    filters=LogFilter(source, level, q),
                     page=page,
                 )
                 if latest
@@ -377,7 +377,7 @@ def fragment_network_topology():
         return render_template(
             "partials/_network_topology.html",
             topo=(
-                network_topology(s, latest.run_id, verdict=verdict, q=q)
+                network_topology(s, latest.run_id, filters=RowFilter(verdict, q))
                 if latest
                 else None
             ),
@@ -393,7 +393,7 @@ def fragment_network_exposure():
         return render_template(
             "partials/_network_exposure.html",
             expo=(
-                network_exposure(s, latest.run_id, verdict=verdict, q=q)
+                network_exposure(s, latest.run_id, filters=RowFilter(verdict, q))
                 if latest
                 else None
             ),
@@ -417,8 +417,7 @@ def fragment_persistence():
                 persistence_tampering(
                     s,
                     latest.run_id,
-                    verdict=verdict,
-                    q=q,
+                    filters=RowFilter(verdict, q),
                     pages=pages,
                 )
                 if latest
@@ -440,9 +439,8 @@ def fragment_auth_events():
             "partials/_auth_events.html",
             events=auth_events_aggregated(
                 s,
-                q=q,
+                filters=RowFilter(verdict, q),
                 subsystem=subsystem,
-                verdict=verdict,
                 sort=sort,
                 page=page,
             ),
@@ -486,11 +484,7 @@ def fragment_findings():
     with read_session() as s:
         result = findings(
             s,
-            verdict=verdict,
-            collector=collector,
-            category=category,
-            search=search,
-            status=status,
+            filters=FindingFilter(verdict, collector, category, search, status),
             sort=sort,
             order=order,
             page=page,
@@ -524,7 +518,9 @@ def fragment_file_scan():
         return render_template(
             "partials/_file_scan.html",
             data=(
-                file_scan(s, latest.run_id, verdict=verdict, q=q) if latest else None
+                file_scan(s, latest.run_id, filters=RowFilter(verdict, q))
+                if latest
+                else None
             ),
         )
 
