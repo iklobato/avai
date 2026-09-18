@@ -25,7 +25,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, Optional
 from urllib.parse import urlparse
 
 from avai.enrichers.base import Indicator, IndicatorType
@@ -35,6 +35,9 @@ LOG = logging.getLogger("avai.enrichers.indicators")
 # ---------------------------------------------------------------------------
 # Helpers — small, defensive parsers used by multiple extractors.
 # ---------------------------------------------------------------------------
+
+_SHA256_HEX_LEN = 64
+_ANY_HOST = (IndicatorType.IPV4, IndicatorType.IPV6, IndicatorType.DOMAIN)
 
 _DOMAIN_RE = re.compile(
     r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
@@ -77,6 +80,38 @@ def _is_domain(s: str) -> bool:
     return bool(_DOMAIN_RE.match(s)) and "." in s and not _is_ipv4(s)
 
 
+def _public_host_type(host: str) -> Optional[IndicatorType]:
+    """IPV4, IPV6 or DOMAIN for a host worth sending to threat-intel. None
+    for private/local addresses (no intel, and they map the LAN to a third
+    party) and for anything that isn't a host."""
+    if _is_private_ip(host):
+        return None
+    if _is_ipv4(host):
+        return IndicatorType.IPV4
+    if _is_ipv6(host):
+        return IndicatorType.IPV6
+    if _is_domain(host):
+        return IndicatorType.DOMAIN
+    return None
+
+
+def _host_indicators(
+    host: object, *kinds: IndicatorType, context: Mapping[str, str] | None = None
+) -> Iterable[Indicator]:
+    """The host as an indicator when it's public and one of ``kinds``."""
+    if not isinstance(host, str):
+        return
+    kind = _public_host_type(host)
+    if kind in kinds:
+        yield Indicator(kind, host, context=context or {})
+
+
+def _file_hash_indicators(path: str, context: Mapping[str, str]) -> Iterable[Indicator]:
+    digest = _sha256_of_file(path)
+    if digest:
+        yield Indicator(IndicatorType.SHA256, digest, context=context)
+
+
 def _safe_loads(s: object) -> object:
     if not isinstance(s, str) or not s:
         return None
@@ -117,11 +152,7 @@ class ProcessExtractor(IndicatorExtractor):
     def extract(self, row):
         exe = row.get("exe")
         if isinstance(exe, str) and exe:
-            digest = _sha256_of_file(exe)
-            if digest:
-                yield Indicator(
-                    IndicatorType.SHA256, digest, context={"binary_path": exe}
-                )
+            yield from _file_hash_indicators(exe, {"binary_path": exe})
 
 
 class NetworkConnectionExtractor(IndicatorExtractor):
@@ -135,8 +166,9 @@ class NetworkConnectionExtractor(IndicatorExtractor):
             raddr = row.get("raddr")
             if isinstance(raddr, str) and ":" in raddr:
                 host = raddr.rsplit(":", 1)[0]
-        if isinstance(host, str) and _is_ipv4(host) and not _is_private_ip(host):
-            yield Indicator(IndicatorType.IPV4, host, context={"raddr_ip": host})
+        yield from _host_indicators(
+            host, IndicatorType.IPV4, context={"raddr_ip": str(host)}
+        )
 
 
 class NetworkFlowExtractor(IndicatorExtractor):
@@ -145,18 +177,10 @@ class NetworkFlowExtractor(IndicatorExtractor):
     geolocation for the destination."""
 
     def extract(self, row):
-        ip = row.get("dst_ip")
-        if not isinstance(ip, str) or _is_private_ip(ip):
-            return
-        if _is_ipv4(ip):
-            itype = IndicatorType.IPV4
-        elif _is_ipv6(ip):
-            itype = IndicatorType.IPV6
-        else:
-            return
-        yield Indicator(
-            itype,
-            ip,
+        yield from _host_indicators(
+            row.get("dst_ip"),
+            IndicatorType.IPV4,
+            IndicatorType.IPV6,
             context={"dst_port": str(row.get("dst_port") or "")},
         )
 
@@ -182,17 +206,13 @@ class HostsFileExtractor(IndicatorExtractor):
     pointed at an attacker IP) gets threat-intel."""
 
     def extract(self, row):
-        ip = row.get("ip")
-        if isinstance(ip, str) and not _is_private_ip(ip):
-            if _is_ipv4(ip):
-                yield Indicator(IndicatorType.IPV4, ip)
-            elif _is_ipv6(ip):
-                yield Indicator(IndicatorType.IPV6, ip)
+        yield from _host_indicators(
+            row.get("ip"), IndicatorType.IPV4, IndicatorType.IPV6
+        )
         names = row.get("hostnames")
         if isinstance(names, str):
             for host in names.split():
-                if _is_domain(host):
-                    yield Indicator(IndicatorType.DOMAIN, host)
+                yield from _host_indicators(host, IndicatorType.DOMAIN)
 
 
 class ListeningPortExtractor(IndicatorExtractor):
@@ -200,9 +220,9 @@ class ListeningPortExtractor(IndicatorExtractor):
         # listening_ports has laddr (bind ip) — only flag publicly bound.
         laddr = row.get("laddr")
         if isinstance(laddr, str) and ":" in laddr:
-            host = laddr.rsplit(":", 1)[0]
-            if _is_ipv4(host) and not _is_private_ip(host):
-                yield Indicator(IndicatorType.IPV4, host, context={"laddr": laddr})
+            yield from _host_indicators(
+                laddr.rsplit(":", 1)[0], IndicatorType.IPV4, context={"laddr": laddr}
+            )
 
 
 class LaunchItemExtractor(IndicatorExtractor):
@@ -210,20 +230,14 @@ class LaunchItemExtractor(IndicatorExtractor):
         # Try the program first; fall back to the first argv element.
         target = row.get("program") or row.get("exec_start")
         if isinstance(target, str) and target.startswith("/"):
-            digest = _sha256_of_file(target.split()[0])
-            if digest:
-                yield Indicator(
-                    IndicatorType.SHA256, digest, context={"target": target}
-                )
+            yield from _file_hash_indicators(target.split()[0], {"target": target})
 
 
 class SetuidFileExtractor(IndicatorExtractor):
     def extract(self, row):
         path = row.get("path")
         if isinstance(path, str):
-            digest = _sha256_of_file(path)
-            if digest:
-                yield Indicator(IndicatorType.SHA256, digest, context={"path": path})
+            yield from _file_hash_indicators(path, {"path": path})
 
 
 class QuarantineExtractor(IndicatorExtractor):
@@ -234,11 +248,9 @@ class QuarantineExtractor(IndicatorExtractor):
         url = row.get("origin_url") or row.get("data_url")
         if isinstance(url, str) and url.startswith(("http://", "https://")):
             yield Indicator(IndicatorType.URL, url)
-            host = urlparse(url).hostname or ""
-            if _is_domain(host):
-                yield Indicator(IndicatorType.DOMAIN, host)
-            elif _is_ipv4(host):
-                yield Indicator(IndicatorType.IPV4, host)
+            yield from _host_indicators(
+                urlparse(url).hostname, IndicatorType.DOMAIN, IndicatorType.IPV4
+            )
 
 
 class BrowserExtensionExtractor(IndicatorExtractor):
@@ -290,30 +302,18 @@ class ProcessExecEventExtractor(IndicatorExtractor):
     def extract(self, row):
         exe = row.get("exe") or row.get("path")
         if isinstance(exe, str):
-            digest = _sha256_of_file(exe.split()[0])
-            if digest:
-                yield Indicator(IndicatorType.SHA256, digest, context={"exe": exe})
+            yield from _file_hash_indicators(exe.split()[0], {"exe": exe})
 
 
-class FileIntegrityExtractor(IndicatorExtractor):
-    def extract(self, row):
-        # avai already records sha256 — use it directly.
-        digest = row.get("sha256")
-        path = row.get("path")
-        if isinstance(digest, str) and len(digest) == 64:
-            yield Indicator(
-                IndicatorType.SHA256, digest, context={"path": str(path or "")}
-            )
-
-
-class FileScanExtractor(IndicatorExtractor):
-    """YARA-matched files — enrich the file's own sha256 so a rule hit
-    converges with hash threat-intel (VirusTotal / MalwareBazaar / CIRCL /
-    the local deny-list) on the same finding."""
+class RecordedDigestExtractor(IndicatorExtractor):
+    """Rows that already carry the file's sha256 (file_integrity, and the
+    YARA-matched files of file_scan), so a finding converges with hash
+    threat-intel (VirusTotal / MalwareBazaar / CIRCL / the local deny-list)
+    without hashing the file again."""
 
     def extract(self, row):
         digest = row.get("sha256")
-        if isinstance(digest, str) and len(digest) == 64:
+        if isinstance(digest, str) and len(digest) == _SHA256_HEX_LEN:
             yield Indicator(
                 IndicatorType.SHA256,
                 digest,
@@ -340,14 +340,7 @@ class ProxyConfigExtractor(IndicatorExtractor):
     """Enrich a configured proxy host (public IP/domain) and PAC URL."""
 
     def extract(self, row):
-        host = row.get("host")
-        if isinstance(host, str) and host:
-            if _is_ipv4(host) and not _is_private_ip(host):
-                yield Indicator(IndicatorType.IPV4, host)
-            elif _is_ipv6(host):
-                yield Indicator(IndicatorType.IPV6, host)
-            elif _is_domain(host):
-                yield Indicator(IndicatorType.DOMAIN, host)
+        yield from _host_indicators(row.get("host"), *_ANY_HOST)
         pac = row.get("pac_url")
         if isinstance(pac, str) and pac.startswith(("http://", "https://")):
             yield Indicator(IndicatorType.URL, pac)
@@ -358,30 +351,18 @@ class NetworkShareExtractor(IndicatorExtractor):
 
     def extract(self, row):
         remote = row.get("remote")
-        if not isinstance(remote, str) or not remote:
-            return
-        server = _share_server(remote)
-        if not server:
-            return
-        if _is_ipv4(server) and not _is_private_ip(server):
-            yield Indicator(IndicatorType.IPV4, server)
-        elif _is_domain(server):
-            yield Indicator(IndicatorType.DOMAIN, server)
+        if isinstance(remote, str):
+            yield from _host_indicators(
+                _share_server(remote), IndicatorType.IPV4, IndicatorType.DOMAIN
+            )
 
 
 class LoginSessionExtractor(IndicatorExtractor):
     """Enrich a remote login source when it's a public IP/domain."""
 
     def extract(self, row):
-        src = row.get("source")
-        if not isinstance(src, str) or not src or src == "local":
-            return
-        if _is_ipv4(src) and not _is_private_ip(src):
-            yield Indicator(IndicatorType.IPV4, src)
-        elif _is_ipv6(src):
-            yield Indicator(IndicatorType.IPV6, src)
-        elif _is_domain(src):
-            yield Indicator(IndicatorType.DOMAIN, src)
+        # A console login's source is "local", which isn't a host.
+        yield from _host_indicators(row.get("source"), *_ANY_HOST)
 
 
 class DnsResolverExtractor(IndicatorExtractor):
@@ -391,13 +372,9 @@ class DnsResolverExtractor(IndicatorExtractor):
     value and are skipped."""
 
     def extract(self, row):
-        server = row.get("server")
-        if not isinstance(server, str) or not server:
-            return
-        if _is_ipv4(server) and not _is_private_ip(server):
-            yield Indicator(IndicatorType.IPV4, server)
-        elif _is_ipv6(server):
-            yield Indicator(IndicatorType.IPV6, server)
+        yield from _host_indicators(
+            row.get("server"), IndicatorType.IPV4, IndicatorType.IPV6
+        )
 
 
 class _NoOp(IndicatorExtractor):
@@ -425,8 +402,8 @@ EXTRACTORS: dict[str, IndicatorExtractor] = {
     "installed_apps": InstalledAppExtractor(),
     "system_integrity": SystemIntegrityExtractor(),
     "process_exec_events": ProcessExecEventExtractor(),
-    "file_integrity": FileIntegrityExtractor(),
-    "file_scan": FileScanExtractor(),
+    "file_integrity": RecordedDigestExtractor(),
+    "file_scan": RecordedDigestExtractor(),
     "dns_resolvers": DnsResolverExtractor(),
     "proxy_config": ProxyConfigExtractor(),
     "network_shares": NetworkShareExtractor(),

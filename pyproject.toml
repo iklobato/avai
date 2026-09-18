@@ -146,7 +146,6 @@ max-args = 5
 "scripts/**" = ["C901", "PLR0913", "PLR2004"]
 "packaging/**" = ["C901", "PLR0913", "PLR2004"]
 "src/avai/enrichers/http.py" = ["PLR2004"]
-"src/avai/enrichers/indicators.py" = ["PLR2004"]
 "src/avai/enrichers/sources/abuseipdb.py" = ["PLR2004"]
 "src/avai/enrichers/sources/circl_hashlookup.py" = ["PLR2004"]
 "src/avai/enrichers/sources/crtsh.py" = ["PLR2004"]

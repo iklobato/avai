@@ -233,3 +233,89 @@ class TestExtractIndicatorsEdgeCases:
             assert len(out) == 1
         finally:
             del EXTRACTORS["_dup"]
+
+
+# ---------------------------------------------------------------------------
+# Host classification per extractor: which of IPv4 / IPv6 / domain each
+# collector enriches, and that private or local addresses never leave.
+# ---------------------------------------------------------------------------
+
+V4, V6, DOM, URL = (
+    IndicatorType.IPV4,
+    IndicatorType.IPV6,
+    IndicatorType.DOMAIN,
+    IndicatorType.URL,
+)
+PUBLIC_V6 = "2606:4700::1111"
+
+HOST_CASES = [
+    ("network_connections", {"raddr_ip": "8.8.8.8"}, [(V4, "8.8.8.8")]),
+    ("network_connections", {"raddr": "8.8.8.8:443"}, [(V4, "8.8.8.8")]),
+    ("network_connections", {"raddr_ip": "10.0.0.1"}, []),
+    ("network_connections", {"raddr_ip": PUBLIC_V6}, []),
+    ("network_flows", {"dst_ip": "8.8.8.8", "dst_port": 53}, [(V4, "8.8.8.8")]),
+    ("network_flows", {"dst_ip": PUBLIC_V6}, [(V6, PUBLIC_V6)]),
+    ("network_flows", {"dst_ip": "fe80::1"}, []),
+    ("network_flows", {"dst_ip": "evil.example.com"}, []),
+    (
+        "hosts_file",
+        {"ip": PUBLIC_V6, "hostnames": "evil.example.com localhost"},
+        [(V6, PUBLIC_V6), (DOM, "evil.example.com")],
+    ),
+    (
+        "hosts_file",
+        {"ip": "127.0.0.1", "hostnames": "bank.example.com"},
+        [(DOM, "bank.example.com")],
+    ),
+    ("hosts_file", {"ip": "fe80::1"}, []),
+    ("listening_ports", {"laddr": "8.8.8.8:22"}, [(V4, "8.8.8.8")]),
+    ("listening_ports", {"laddr": "0.0.0.0:22"}, []),
+    (
+        "quarantine_events",
+        {"origin_url": "https://evil.example.com/x"},
+        [(URL, "https://evil.example.com/x"), (DOM, "evil.example.com")],
+    ),
+    (
+        "quarantine_events",
+        {"origin_url": "http://8.8.8.8/x"},
+        [(URL, "http://8.8.8.8/x"), (V4, "8.8.8.8")],
+    ),
+    (
+        "quarantine_events",
+        {"origin_url": "http://192.168.1.10/x"},
+        [(URL, "http://192.168.1.10/x")],
+    ),
+    ("proxy_config", {"host": "8.8.8.8"}, [(V4, "8.8.8.8")]),
+    ("proxy_config", {"host": "10.0.0.1"}, []),
+    ("proxy_config", {"host": PUBLIC_V6}, [(V6, PUBLIC_V6)]),
+    ("proxy_config", {"host": "fe80::1"}, []),
+    (
+        "proxy_config",
+        {"host": "proxy.example.com", "pac_url": "http://wpad.example.com/p.pac"},
+        [(DOM, "proxy.example.com"), (URL, "http://wpad.example.com/p.pac")],
+    ),
+    ("network_shares", {"remote": "//8.8.8.8/share"}, [(V4, "8.8.8.8")]),
+    (
+        "network_shares",
+        {"remote": "nas.example.com:/export"},
+        [(DOM, "nas.example.com")],
+    ),
+    ("network_shares", {"remote": "//192.168.1.5/share"}, []),
+    ("network_shares", {"remote": "/local/dir"}, []),
+    ("login_sessions", {"source": "8.8.8.8"}, [(V4, "8.8.8.8")]),
+    ("login_sessions", {"source": PUBLIC_V6}, [(V6, PUBLIC_V6)]),
+    ("login_sessions", {"source": "fe80::1"}, []),
+    ("login_sessions", {"source": "host.example.com"}, [(DOM, "host.example.com")]),
+    ("login_sessions", {"source": "local"}, []),
+    ("dns_resolvers", {"server": "1.1.1.1"}, [(V4, "1.1.1.1")]),
+    ("dns_resolvers", {"server": "192.168.1.1"}, []),
+    ("dns_resolvers", {"server": PUBLIC_V6}, [(V6, PUBLIC_V6)]),
+    ("dns_resolvers", {"server": "fe80::1"}, []),
+    ("dns_resolvers", {"server": "::1"}, []),
+]
+
+
+@pytest.mark.parametrize("collector,row,expected", HOST_CASES)
+def test_extractor_classifies_hosts(collector, row, expected):
+    got = [(i.type, i.value) for i in extract_indicators(collector, row)]
+    assert got == expected
