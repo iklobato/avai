@@ -175,7 +175,6 @@ max-args = 5
 "src/avai/host_monitor/net_collectors.py" = ["PLR2004"]
 "src/avai/host_monitor/persistence_collectors.py" = ["PLR2004"]
 "src/avai/host_monitor/risk.py" = ["C901"]
-"src/avai/host_monitor/runner.py" = ["PLR0913"]
 "src/avai/host_monitor/runtime/probes.py" = ["PLR2004"]
 "src/avai/host_monitor/runtime/stream_source.py" = ["C901"]
 "src/avai/host_monitor/sink.py" = ["C901"]

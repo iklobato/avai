@@ -36,7 +36,7 @@ from .llm import CompletionClient, LlmCredentials
 from .models import Base
 from .narrator import IncidentNarrator
 from .prompts import Prompts
-from .runner import Runner
+from .runner import Runner, RunnerConfig
 from .sink import Sink
 from .verifier import MaliciousVerdictVerifier
 
@@ -309,18 +309,20 @@ def build_runner(args) -> "tuple[Runner, object]":
                 enable=args.enrich_only,
             )
         runner = Runner(
-            sink,
-            snapshot_collectors,
-            streaming_collectors,
-            llm.judge,
-            args.lookback_min,
-            max_db_bytes=max(0, args.max_db_mb) * 1024 * 1024,
-            enrichment_chain=enrichment_chain,
-            baseline_min_runs=max(1, args.baseline_runs),
-            narrator=llm.narrator,
-            coverage=llm.coverage,
-            verifier=llm.verifier,
-            investigator=llm.investigator,
+            RunnerConfig(
+                sink,
+                snapshot_collectors,
+                streaming_collectors,
+                llm.judge,
+                args.lookback_min,
+                max_db_bytes=max(0, args.max_db_mb) * 1024 * 1024,
+                enrichment_chain=enrichment_chain,
+                baseline_min_runs=max(1, args.baseline_runs),
+                narrator=llm.narrator,
+                coverage=llm.coverage,
+                verifier=llm.verifier,
+                investigator=llm.investigator,
+            )
         )
         runner.setup()
         # Seed the cooperative control row with this run's settings so the

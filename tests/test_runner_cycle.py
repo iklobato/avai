@@ -43,6 +43,7 @@ from avai.host_monitor import (
     Verdict,
     YaraCoverageRow,
 )
+from avai.host_monitor.runner import RunnerConfig
 from avai.host_monitor.runtime import Digest
 
 PROC_FIELDS = ("name", "exe")
@@ -64,12 +65,14 @@ def sink():
 
 def _runner(sink, snapshot=(), streaming=(), judge=None, **options) -> Runner:
     return Runner(
-        sink,
-        list(snapshot),
-        list(streaming),
-        judge or NullJudge(),
-        5,
-        **options,
+        RunnerConfig(
+            sink,
+            list(snapshot),
+            list(streaming),
+            judge or NullJudge(),
+            5,
+            **options,
+        )
     )
 
 

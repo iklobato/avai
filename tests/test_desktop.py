@@ -52,7 +52,7 @@ def test_build_runner_constructs_without_network(tmp_path):
     )
     runner, engine = build_runner(args)
     try:
-        assert runner.snapshot_collectors  # collectors wired
-        assert runner.streaming_collectors == []  # --no-streaming honored
+        assert runner.config.snapshot_collectors  # collectors wired
+        assert runner.config.streaming_collectors == []  # --no-streaming honored
     finally:
         engine.dispose()

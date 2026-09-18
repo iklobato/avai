@@ -26,7 +26,17 @@ _LLM_STAGES = tuple(
     f"{_HM}.{name}"
     for name in ("llm", "judge", "narrator", "verifier", "investigator", "coverage")
 )
-_ORCHESTRATION = (f"{_HM}.runner", f"{_HM}.streaming", f"{_HM}.main")
+_ORCHESTRATION = tuple(
+    f"{_HM}.{name}"
+    for name in (
+        "runner",
+        "streaming",
+        "main",
+        "control_loop",
+        "finding_stages",
+        "cycle_steps",
+    )
+)
 
 # (importing module prefixes, forbidden target prefixes, allowed exceptions)
 RULES: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...] = (

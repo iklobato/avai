@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
@@ -36,6 +37,39 @@ class SupervisionPolicy:
     healthy_reset_s: float = STREAM_HEALTHY_RESET_S
     backoff: BackoffPolicy = field(default_factory=default_backoff)
     listener: SupervisionListener = field(default_factory=LoggingSupervisionListener)
+
+
+class StreamingSupervisor:
+    """Starts one worker per streaming collector at boot and joins them all on
+    shutdown."""
+
+    def __init__(
+        self,
+        sink: Sink,
+        collectors: list[StreamingCollector],
+        policy: Optional[SupervisionPolicy] = None,
+    ):
+        self._sink = sink
+        self._collectors = collectors
+        self._policy = policy or SupervisionPolicy()
+        self._workers: list[StreamingWorker] = []
+
+    def start(self) -> None:
+        if not self._collectors:
+            return
+        hostname = socket.gethostname()
+        for collector in self._collectors:
+            worker = StreamingWorker(collector, self._sink, hostname, self._policy)
+            worker.start()
+            self._workers.append(worker)
+        LOG.info("started %d streaming worker(s)", len(self._workers))
+
+    def stop(self) -> None:
+        for worker in self._workers:
+            worker.stop()
+        if self._workers:
+            LOG.info("stopped %d streaming worker(s)", len(self._workers))
+        self._workers.clear()
 
 
 class StreamingWorker:
