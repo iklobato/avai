@@ -10,6 +10,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,6 +53,14 @@ from avai.host_monitor.collectors import (
 )
 from avai.host_monitor.enums import Browser
 from avai.host_monitor.runtime import HostPaths
+
+
+# These classes drive the macOS and Linux collectors over a fake POSIX
+# layout (forward-slash joins, a sysfs name with a colon). Those collectors
+# never run on Windows, where the paths and file names do not hold.
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32", reason="macOS / Linux collector over a POSIX layout"
+)
 
 
 class FakeRun:
@@ -557,6 +566,7 @@ def _plist(path: Path, data: dict) -> Path:
     return path
 
 
+@_posix_only
 class TestMacFileCollectors:
     def test_user_launch_agent_row(self, home):
         agent = _plist(
@@ -732,6 +742,7 @@ class _Accounts:
         return []
 
 
+@_posix_only
 class TestLayoutCollectors:
     def test_setuid_and_setgid_files_only(self, tmp_path):
         suid = _write(tmp_path / "bin" / "passwd", "x")
@@ -774,6 +785,7 @@ class TestLayoutCollectors:
 # ---- Linux collectors under HOST_PREFIX ---------------------------------
 
 
+@_posix_only
 class TestLinuxDevices:
     def test_usb_devices_skip_interfaces_and_empty_hubs(self, host_root):
         devices = host_root / "sys" / "bus" / "usb" / "devices"
@@ -841,6 +853,7 @@ class TestLinuxDevices:
         assert row["raw_json"] == "{}"
 
 
+@_posix_only
 class TestLinuxInstalledApps:
     DPKG = (
         "installed\tcurl\t8.5\tamd64\tcommand line tool\n"
@@ -883,6 +896,7 @@ class TestLinuxInstalledApps:
         assert list(LinuxInstalledAppsCollector().collect()) == []
 
 
+@_posix_only
 class TestLinuxSystemIntegrity:
     def _collect(self, **kw):
         col = LinuxSystemIntegrityCollector(
@@ -950,6 +964,7 @@ class TestLinuxSystemIntegrity:
         assert row["filevault_active"] == 0
 
 
+@_posix_only
 class TestLinuxStreamCommands:
     def test_auth_events_fall_back_to_the_runtime_journal(self, host_root):
         (host_root / "run" / "log" / "journal").mkdir(parents=True)
