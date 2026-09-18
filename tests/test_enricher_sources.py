@@ -586,3 +586,54 @@ class TestAbuseIpDb:
         ev = e._fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# Every keyed source sends the key from its env var
+# ---------------------------------------------------------------------------
+
+
+class _RequestSeen(Exception):
+    pass
+
+
+class _RecordingHttp:
+    """Records the request, then stops: only what is sent matters here."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def get(self, url, **kw):
+        self.calls.append({"url": url, **kw})
+        raise _RequestSeen
+
+    post = get
+
+    def set_rate(self, host, rate):
+        pass
+
+
+_SAMPLE_VALUES = {
+    IndicatorType.SHA256: "a" * 64,
+    IndicatorType.IPV4: "8.8.8.8",
+    IndicatorType.DOMAIN: "example.com",
+    IndicatorType.URL: "http://example.com/x",
+    IndicatorType.CVE: "CVE-2024-1",
+}
+
+
+def _keyed_sources():
+    from avai.enrichers.registry import discover_enricher_classes
+
+    return [c for c in discover_enricher_classes() if c.requires_token]
+
+
+@pytest.mark.parametrize("cls", _keyed_sources(), ids=lambda c: c.name)
+def test_keyed_source_sends_its_env_key(cls, monkeypatch):
+    monkeypatch.setenv(cls.requires_token, "k-secret-123")
+    http = _RecordingHttp()
+    source = cls(http=http)
+    itype = next(t for t in _SAMPLE_VALUES if t in cls.supports_types)
+    with pytest.raises(_RequestSeen):
+        source._fetch(Indicator(itype, _SAMPLE_VALUES[itype]))
+    assert "k-secret-123" in repr(http.calls[0])

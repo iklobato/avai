@@ -5,7 +5,6 @@ https://docs.virustotal.com/reference/files
 """
 from __future__ import annotations
 
-import os
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -49,7 +48,7 @@ class VirusTotalEnricher(Enricher):
         self._http = http or HttpClient()
         # Free tier: 4 req / minute → ~0.066 rps. Pad to 0.06 for safety.
         self._http.set_rate("www.virustotal.com", 0.06)
-        self._key = os.environ.get("VT_API_KEY", "")
+        self._key = self.env_token() or ""
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         path = _path_for(indicator)

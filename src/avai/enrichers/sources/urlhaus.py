@@ -6,7 +6,6 @@ https://urlhaus-api.abuse.ch/
 """
 from __future__ import annotations
 
-import os
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -31,7 +30,7 @@ class URLhausEnricher(Enricher):
     def __init__(self, http: Optional[HttpClient] = None):
         self._http = http or HttpClient()
         self._http.set_rate("urlhaus-api.abuse.ch", 2.0)
-        self._key = os.environ.get("ABUSE_CH_AUTH_KEY", "")
+        self._key = self.env_token() or ""
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         if indicator.type is IndicatorType.URL:

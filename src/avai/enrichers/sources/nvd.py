@@ -31,15 +31,14 @@ class NvdEnricher(Enricher):
 
     def __init__(self, http: Optional[HttpClient] = None):
         self._http = http or HttpClient()
+        # Optional: sent when set, and it buys a faster rate lane.
+        self._key = os.environ.get("NVD_API_KEY", "")
         # Slow lane without a key; bump if the user supplied one.
-        rate = 1.5 if os.environ.get("NVD_API_KEY") else 0.15
+        rate = 1.5 if self._key else 0.15
         self._http.set_rate("services.nvd.nist.gov", rate)
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
-        headers = {}
-        key = os.environ.get("NVD_API_KEY")
-        if key:
-            headers["apiKey"] = key
+        headers = {"apiKey": self._key} if self._key else {}
         resp = self._http.get(
             _URL,
             params={"cveId": indicator.value.upper()},

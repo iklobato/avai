@@ -5,7 +5,6 @@ https://docs.greynoise.io/reference/get_v3-community-ip
 """
 from __future__ import annotations
 
-import os
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -30,7 +29,7 @@ class GreyNoiseEnricher(Enricher):
     def __init__(self, http: Optional[HttpClient] = None):
         self._http = http or HttpClient()
         self._http.set_rate("api.greynoise.io", 1.0)
-        self._key = os.environ.get("GREYNOISE_API_KEY", "")
+        self._key = self.env_token() or ""
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         resp = self._http.get(

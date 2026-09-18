@@ -5,7 +5,6 @@ https://docs.github.com/en/rest/security-advisories/global-advisories
 """
 from __future__ import annotations
 
-import os
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -29,7 +28,7 @@ class GitHubAdvisoryEnricher(Enricher):
     def __init__(self, http: Optional[HttpClient] = None):
         self._http = http or HttpClient()
         self._http.set_rate("api.github.com", 4.0)
-        self._token = os.environ.get("GITHUB_TOKEN", "")
+        self._token = self.env_token() or ""
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         resp = self._http.get(
