@@ -49,9 +49,13 @@ class TestDispatch:
         assert rc == 0
         d.assert_called_once_with()
 
-    def test_remaining_argv_passed_through(self):
+    @pytest.mark.parametrize(
+        "cmd,target",
+        [("monitor", "avai.host_monitor"), ("dashboard", "avai.dashboard")],
+    )
+    def test_remaining_argv_passed_through(self, cmd, target):
         """sys.argv is rewritten so the called main() sees only its
-        own arguments — the original `monitor` token is dropped."""
+        own arguments: the original subcommand token is dropped."""
         import sys
 
         captured: list[str] = []
@@ -60,11 +64,90 @@ class TestDispatch:
             captured.extend(sys.argv)
             return 0
 
-        with patch("avai.host_monitor.main", side_effect=fake_main):
-            main(["monitor", "--once", "--db", "/tmp/x"])
+        with patch(f"{target}.main", side_effect=fake_main):
+            main([cmd, "--once", "--db", "/tmp/x"])
 
-        assert captured[0] == "avai monitor"
+        assert captured[0] == f"avai {cmd}"
         assert captured[1:] == ["--once", "--db", "/tmp/x"]
+
+
+class TestAppCommand:
+    @pytest.mark.parametrize("alias", ["app", "gui", "desktop"])
+    def test_app_aliases_route_to_desktop(self, alias):
+        with patch("avai.desktop.main", return_value=0) as d:
+            rc = main([alias])
+        assert rc == 0
+        d.assert_called_once_with()
+
+
+class TestInstallHostsCommand:
+    def _registrar(self, outcome):
+        from avai.hostsfile import Outcome
+
+        registrar = MagicMock(hosts_path="/etc/hosts")
+        registrar.install.return_value = Outcome[outcome]
+        registrar.remove.return_value = Outcome[outcome]
+        return registrar
+
+    def _run(self, argv, registrar):
+        with patch(
+            "avai.hostsfile.HostsRegistrar.for_current_platform",
+            return_value=registrar,
+        ):
+            return main(["install-hosts", *argv])
+
+    def test_install_maps_the_default_hostname(self, capsys):
+        registrar = self._registrar("CREATED")
+        rc = self._run([], registrar)
+        assert rc == 0
+        registrar.install.assert_called_once_with("avai.local")
+        registrar.remove.assert_not_called()
+        assert "mapped avai.local" in capsys.readouterr().out
+
+    def test_remove_with_a_custom_hostname(self, capsys):
+        registrar = self._registrar("REMOVED")
+        rc = self._run(["--remove", "--hostname", "box.local"], registrar)
+        assert rc == 0
+        registrar.remove.assert_called_once_with("box.local")
+        assert "removed box.local" in capsys.readouterr().out
+
+    def test_unchanged_says_so(self, capsys):
+        rc = self._run(["--remove"], self._registrar("UNCHANGED"))
+        assert rc == 0
+        assert "already absent" in capsys.readouterr().out
+
+    def test_permission_error_prints_the_hint(self, capsys):
+        from pathlib import Path
+
+        from avai.hostsfile import HostsPermissionError
+
+        registrar = self._registrar("CREATED")
+        registrar.install.side_effect = HostsPermissionError(
+            Path("/etc/hosts"), "run with sudo"
+        )
+        rc = self._run([], registrar)
+        assert rc == 1
+        assert capsys.readouterr().err.strip() == "avai: run with sudo"
+
+    def test_other_hosts_error_is_reported(self, capsys):
+        from avai.hostsfile import HostsError
+
+        with patch(
+            "avai.hostsfile.HostsRegistrar.for_current_platform",
+            side_effect=HostsError("no hosts file here"),
+        ):
+            rc = main(["install-hosts"])
+        assert rc == 1
+        assert capsys.readouterr().err.strip() == "avai: no hosts file here"
+
+
+class TestMigrateCommand:
+    def test_migrate_upgrades_the_given_db(self, capsys):
+        with patch("avai.db_migrate.upgrade_to_head") as up:
+            rc = main(["migrate", "--db", "/tmp/x.db"])
+        assert rc == 0
+        up.assert_called_once_with("sqlite:////tmp/x.db")
+        assert "migrations applied to /tmp/x.db" in capsys.readouterr().out
 
 
 class TestRulesCommand:

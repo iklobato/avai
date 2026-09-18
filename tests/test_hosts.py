@@ -36,6 +36,11 @@ class TestHostFactory:
         assert isinstance(HostFactory.create("Darwin"), MacOSHost)
         assert isinstance(HostFactory.create("Linux"), LinuxHost)
 
+    def test_resolves_windows(self):
+        from avai.host_monitor.hosts.windows import WindowsHost
+
+        assert isinstance(HostFactory.create("Windows"), WindowsHost)
+
     def test_unknown_platform_raises_loudly(self):
         with pytest.raises(RuntimeError) as exc:
             HostFactory.create("Plan9")
