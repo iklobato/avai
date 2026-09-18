@@ -331,6 +331,7 @@ class DnsQueriesCollector(SnapshotCollector):
     # Well-known DoH resolver endpoints. Plaintext DNS (53) is visible to
     # us; DoH (TLS/443) isn't — so a host talking to one of these on 443
     # is resolving names out of our sight.
+    _DOH_PORT = 443
     _DOH_IPS = {
         "1.1.1.1": "Cloudflare",
         "1.0.0.1": "Cloudflare",
@@ -363,7 +364,7 @@ class DnsQueriesCollector(SnapshotCollector):
         # DoH: connections to known DoH endpoints on :443 bypass plaintext
         # DNS visibility entirely — surface them alongside the queries.
         for (ip, port), (name, _pid) in proc_map.items():
-            if port != 443 or ip not in self._DOH_IPS:
+            if port != self._DOH_PORT or ip not in self._DOH_IPS:
                 continue
             provider = self._DOH_IPS[ip]
             key = (provider, "DoH", ip)

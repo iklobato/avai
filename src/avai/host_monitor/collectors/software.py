@@ -235,7 +235,7 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
             cmd[1:1] = ["--admindir", str(host_admindir)]
         for line in self._runner.text(cmd, timeout=30).splitlines():
             parts = line.split("\t")
-            if len(parts) < 5:
+            if len(parts) < len(self._DPKG_FIELDS):
                 continue
             status, name, version, arch, summary = (
                 parts[0],

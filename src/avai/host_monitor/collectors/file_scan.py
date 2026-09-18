@@ -85,6 +85,11 @@ def _file_type(path: Path) -> str:
     return ""
 
 
+_PRINTABLE_ASCII = range(0x20, 0x7F)
+# Share of printable bytes above which a match is shown as text, not hex.
+_TEXT_MIN_PRINTABLE_RATIO = 0.8
+
+
 def _redact_one_match(identifier: str, offset: int, data: bytes) -> dict:
     """Render one matched byte run for the judge: printable runs as ``text``,
     anything else as ``hex``, truncated to ``YARA_MATCH_STRING_MAX_BYTES`` so
@@ -92,9 +97,9 @@ def _redact_one_match(identifier: str, offset: int, data: bytes) -> dict:
     raw = bytes(data or b"")
     truncated = len(raw) > constants.YARA_MATCH_STRING_MAX_BYTES
     raw = raw[: constants.YARA_MATCH_STRING_MAX_BYTES]
-    printable = sum(1 for b in raw if 0x20 <= b < 0x7F)
+    printable = sum(1 for b in raw if b in _PRINTABLE_ASCII)
     out = {"id": identifier, "offset": int(offset), "truncated": truncated}
-    if raw and printable / len(raw) >= 0.8:
+    if raw and printable / len(raw) >= _TEXT_MIN_PRINTABLE_RATIO:
         out["text"] = raw.decode("ascii", "replace")
     else:
         out["hex"] = raw.hex()

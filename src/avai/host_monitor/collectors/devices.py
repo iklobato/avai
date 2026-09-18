@@ -308,9 +308,9 @@ class LinuxWifiCollector(SnapshotCollector):
             if not line:
                 continue
             if line.startswith("Connected to"):
-                tokens = line.split()
-                if len(tokens) >= 3:
-                    out["BSSID"] = tokens[2]
+                bssid = line.removeprefix("Connected to").split()
+                if bssid:
+                    out["BSSID"] = bssid[0]
                 continue
             if line.startswith("Not connected"):
                 out["connected"] = "no"

@@ -465,14 +465,14 @@ class HostsFileCollector(SnapshotCollector):
             s = line.split("#", 1)[0].strip()
             if not s:
                 continue
-            parts = s.split()
-            if len(parts) < 2:
+            ip, *hostnames = s.split()
+            if not hostnames:
                 continue
             rows.append(
                 {
                     "source_path": path,
-                    "ip": parts[0],
-                    "hostnames": " ".join(parts[1:]),
+                    "ip": ip,
+                    "hostnames": " ".join(hostnames),
                 }
             )
         return rows

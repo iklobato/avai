@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 import sys
 
 import pytest
@@ -66,11 +67,14 @@ class TestCommandRunner:
         out = CommandRunner().capture([sys.executable, "-c", script], timeout=10)
         assert out == ("out\n", "err", False)
 
-    def test_capture_keeps_partial_output_on_timeout(self):
-        script = "import time; print('early', flush=True); time.sleep(30)"
-        out = CommandRunner().capture([sys.executable, "-c", script], timeout=1)
-        assert out.stdout == "early\n"
-        assert out.timed_out is True
+    def test_capture_keeps_partial_output_on_timeout(self, monkeypatch):
+        # TimeoutExpired carries bytes even for a text-mode run.
+        def run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, 1, output=b"early\n", stderr=None)
+
+        monkeypatch.setattr(subprocess, "run", run)
+        out = CommandRunner().capture(["tcpdump"], timeout=1)
+        assert out == ("early\n", "", True)
 
     def test_capture_missing_binary_raises(self):
         with pytest.raises(FileNotFoundError):
