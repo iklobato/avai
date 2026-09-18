@@ -5,10 +5,10 @@ runtime flows that connect them, and how the pieces are deployed. Diagrams are
 [Mermaid](https://mermaid.js.org/) and render on GitHub, in VS Code preview and
 in any Mermaid viewer.
 
-Snapshot: `avai-monitor` 0.7.3, branch `refactor/p4-runner` at commit `ecbad97` (2026-09-18).
+Snapshot: `avai-monitor` 0.7.3, branch `refactor/p5-sink` at commit `f4d69ab` (2026-09-18).
 The inventory in Appendix A was generated from the AST of `src/avai`, so it is
-exhaustive: 92 modules, 316 classes, 235 module-level functions, 591 methods,
-about 21.3k lines. Tests: 41 modules, 862 test functions.
+exhaustive: 92 modules, 316 classes, 246 module-level functions, 592 methods,
+about 21.3k lines. Tests: 42 modules, 882 test functions.
 
 > **One-line model.** `avai` is a host-security telemetry engine. A platform
 > object assembles OS-specific **collectors**; the **Runner** drives them each
@@ -920,7 +920,7 @@ explanation of what changed.
 ### 4.9 `Sink`: the DB gateway
 
 `Sink` wraps the SQLAlchemy engine and is the single telemetry writer and the
-Runner's only read path. All 49 methods by category:
+Runner's only read path. All 50 methods by category:
 
 | Category | Methods |
 |---|---|
@@ -932,9 +932,12 @@ Runner's only read path. All 49 methods by category:
 | Findings and posture | `active_findings(started)`, `recent_nonbenign(limit)`, `latest_narrative_finding_hashes`, `system_integrity_row`, `privilege_risk_counts`, `latest_risk_row`, `coverage_profile`, `latest_yara_coverage_fingerprint`, `read_yara_status` |
 | Operator feedback | `apply_feedback` (pins verdicts, marks rows applied), `feedback_examples(collector, limit)` |
 | Control plane | `ensure_control_row`, `read_control`, `write_heartbeat`, `touch_heartbeat`, `ack_scan_now`, `ack_command` |
-| Maintenance | `database_size_bytes`, `database_live_bytes`, `prune_to_size(max_bytes)` (drops oldest completed runs and their child rows, trims `auth_events` by `collected_at`, always keeps one run), `clear_data`, `clear_judgements`, `clear_narratives`, `reset_baseline` |
+| Maintenance | `database_size_bytes`, `database_live_bytes`, `prune_to_size(max_bytes)` (drops oldest completed runs and their child rows, trims every streaming table (`auth_events`, `process_exec_events`) and `streaming_sessions` by date, always keeps one run), `_vacuum`, `clear_data`, `clear_judgements`, `clear_narratives`, `reset_baseline` |
 
-Module-level: `_set_sqlite_pragmas` (WAL, busy timeout), `_migrate_add_columns`
+Module-level: one query function per correlation signal (`_listening_ports`,
+`_outbound_flows`, `_remote_conns`, `_dns_queries`, `_latest_execs`) grouped
+by `_capped`; the prune steps `_completed_runs_oldest_first`, `_delete_run`,
+`_trim_streaming`; `_set_sqlite_pragmas` (WAL, busy timeout), `_migrate_add_columns`
 (additive ALTER for columns missing on older DBs), `_relax_db_permissions`
 (group-writable DB dir and files), `_is_benign_concurrent_ddl` (tolerate two
 processes bootstrapping the same file).
@@ -1459,7 +1462,7 @@ graph TD
 | `test_net_collectors.py`, `test_exposure_collectors.py`, `test_persistence_collectors.py`, `test_hosts.py`, `test_windows.py` | source-injected collectors and every OS parser, host composition roots |
 | `test_runtime.py`, `test_row_source.py`, `test_misc_helpers.py` | `runtime/*`, `CommandSnapshot` / `FileSnapshot`, coercion and digest helpers |
 | `test_llm_judge.py`, `test_judge_auth.py` | `LlmJudge` parsing and batching, cost; the credential rule (one table-driven test) and `LlmStages.build` wiring |
-| `test_sink_rotation.py`, `test_sink_setup_concurrency.py`, `test_migrations.py` | `prune_to_size`, concurrent `setup()`, Alembic upgrade path |
+| `test_sink_rotation.py`, `test_sink_correlation.py`, `test_sink_setup_concurrency.py`, `test_migrations.py` | `prune_to_size`, `correlation_context`, concurrent `setup()`, Alembic upgrade path |
 | `test_enrichers.py`, `test_enricher_sources.py`, `test_more_sources.py`, `test_indicators_edge.py`, `test_http.py`, `test_registry.py` | chain, cache, every source, extractors, `HttpClient`, discovery |
 | `test_dashboard.py` | routes, query layer, control plane, feedback |
 | `test_hostsfile.py` | `HostsTable`, `HostsRegistrar`, platforms |
@@ -2607,13 +2610,13 @@ _Security-control detection: the proper-abstraction layer for the_
   - `topic() -> str` `@property`
   - `inspect() -> IntegrityFinding`
 
-#### `avai.host_monitor.sink` · `avai/host_monitor/sink.py` · 1194 lines
+#### `avai.host_monitor.sink` · `avai/host_monitor/sink.py` · 1156 lines
 
 _The single DB write/read gateway used by the runner._
 
-Constants: `_BUSY_TIMEOUT_MS`, `_DB_DIR_MODE`, `_DB_FILE_MODE`, `_FEEDBACK_VERDICT`
+Constants: `_BUSY_TIMEOUT_MS`, `_DB_DIR_MODE`, `_DB_FILE_MODE`, `_STREAMING_MODELS`, `_SNAPSHOT_MODELS`, `_EXTRA_DNS_PER_NAME`, `_FEEDBACK_VERDICT`
 
-- **class `Sink`** (L86) : SQLAlchemy repository: owns schema, run lifecycle, writes, lookups.
+- **class `Sink`** (L95) : SQLAlchemy repository: owns schema, run lifecycle, writes, lookups.
   - fields: `_RISK_INTEGRITY_FIELDS`, `_COVERAGE_INVENTORY`
   - `__init__(engine)`
   - `setup() -> None`
@@ -2651,6 +2654,7 @@ Constants: `_BUSY_TIMEOUT_MS`, `_DB_DIR_MODE`, `_DB_FILE_MODE`, `_FEEDBACK_VERDI
   - `database_size_bytes() -> int`
   - `database_live_bytes() -> int`
   - `prune_to_size(max_bytes) -> dict`
+  - `_vacuum() -> None`
   - `touch_judgments(collector, content_hashes, at) -> None`
   - `start_streaming_session(collector, hostname) -> str`
   - `end_streaming_session(run_id, row_count) -> None`
@@ -2664,10 +2668,21 @@ Constants: `_BUSY_TIMEOUT_MS`, `_DB_DIR_MODE`, `_DB_FILE_MODE`, `_FEEDBACK_VERDI
   - `clear_judgements() -> int`
   - `clear_narratives() -> int`
   - `reset_baseline() -> int`
-- `_is_benign_concurrent_ddl(exc) -> bool` (L1116) : True when a DDL statement failed only because another process ran
-- `_set_sqlite_pragmas(dbapi_conn, _connection_record)` (L1126)
-- `_relax_db_permissions(db_path) -> None` (L1142) : Make the DB dir + files group-writable so a root monitor and a
-- `_migrate_add_columns(engine) -> None` (L1163) : Idempotent forward-only migration: add any columns that exist on
+- `_since(stmt, model, since)` (L979)
+- `_capped(pairs, cap) -> dict[object, list]` (L983) : Group (key, value) pairs into per-key lists of at most ``cap``.
+- `_listening_ports(session, pids, since)` (L993)
+- `_outbound_flows(session, pids, since)` (L1000)
+- `_remote_conns(session, pids, since)` (L1010)
+- `_dns_queries(session, names, since)` (L1019)
+- `_latest_execs(session, pids, since) -> dict` (L1026)
+- `_prune_stats(runs, events, before, after) -> dict` (L1036)
+- `_completed_runs_oldest_first(session) -> list[CollectionRun]` (L1045)
+- `_delete_run(session, run) -> None` (L1056)
+- `_trim_streaming(session, before) -> int` (L1065) : Delete streaming events and sessions older than ``before`` (the
+- `_is_benign_concurrent_ddl(exc) -> bool` (L1078) : True when a DDL statement failed only because another process ran
+- `_set_sqlite_pragmas(dbapi_conn, _connection_record)` (L1088)
+- `_relax_db_permissions(db_path) -> None` (L1104) : Make the DB dir + files group-writable so a root monitor and a
+- `_migrate_add_columns(engine) -> None` (L1125) : Idempotent forward-only migration: add any columns that exist on
 
 #### `avai.host_monitor.slices` · `avai/host_monitor/slices.py` · 152 lines
 

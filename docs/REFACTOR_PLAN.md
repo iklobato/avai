@@ -283,6 +283,30 @@ its 49 methods. Its two worst methods are still simplified where they are:
 get characterization tests first (`tests/test_sink_rotation.py` already
 covers pruning; correlation needs its own).
 
+Done on `refactor/p5-sink` in three commits: characterization tests (13 new
+in `tests/test_sink_correlation.py`, 8 more in `test_sink_rotation.py`), a
+bug fix, then the split. Five deliberate breaks (the DNS cap, the keep-one-run
+guard, error-row deletion, the `since` bound, the null remote address filter)
+each turned a test red before the split.
+
+The bug: `prune_to_size` trimmed only `auth_events` by date and deleted every
+other collector table by `CollectionRun` run id. `process_exec_events` rows
+carry a streaming session's run id, so no prune ever reached them. On a host
+with `--max-db-mb` they grew without a bound while the loop deleted
+collection runs to make room, and they outlived their deleted
+`StreamingSession` rows. Every streaming slice is now trimmed by
+`collected_at`, taken from the slice catalog. `events_pruned` counts both
+tables and the rotation log says `streaming_events=` instead of
+`auth_events=`. Proven with a regression test that failed first
+(0 events pruned instead of 20); I did not measure how large the table is
+on a real host.
+
+One change from the design: the per-signal and per-table-group helpers are
+module-level functions taking the session, not private `Sink` methods, since
+none of them needs `self`. `Sink` gained only `_vacuum` (50 methods).
+`correlation_context` lost its copied group-and-cap loop (`_capped`), and
+`sink.py` no longer needs its `C901` exemption. 962 tests pass.
+
 ## Phase 6: dashboard (SRP, DIP, parameter objects)
 
 - Replace the module-level `app` and its 5 env reads with
