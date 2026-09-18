@@ -268,6 +268,15 @@ class TestNetworkFlowsAggregation:
         assert summary["packets"] == 650
         assert summary["malicious"] == 1
 
+    def test_verdict_filter_uses_the_picked_verdict(self, seeded):
+        # Regression: the row loop reused the name ``verdict``, so the filter
+        # and its echo took the last flow's verdict instead of the user's.
+        engine, run_id = seeded
+        with Session(engine) as s:
+            data = network_flows(s, run_id, verdict="malicious")
+        assert [r["dst_ip"] for r in data["rows"]] == ["203.0.113.9"]
+        assert data["verdict"] == "malicious"
+
     def test_fragment_renders_interface_and_verdict(self, seeded):
         engine, run_id = seeded
         db = str(engine.url).replace("sqlite:///", "")

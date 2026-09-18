@@ -168,7 +168,7 @@ def listening_ports(
         type_,
         laddr_ip,
         laddr_port,
-        verdict,
+        row_verdict,
         conf,
         reason,
     ) in session.execute(stmt).all():
@@ -192,8 +192,8 @@ def listening_ports(
             g["_protos"].add(_PROTO_BY_SOCK.get(type_, type_))
         if family:
             g["_families"].add(_FAMILY_LABEL.get(family, family))
-        if _FLOW_SEV.get(verdict, 4) < _FLOW_SEV.get(g["verdict"], 4):
-            g["verdict"] = verdict
+        if _FLOW_SEV.get(row_verdict, 4) < _FLOW_SEV.get(g["verdict"], 4):
+            g["verdict"] = row_verdict
             g["confidence"] = conf
             g["reasoning"] = reason or ""
 

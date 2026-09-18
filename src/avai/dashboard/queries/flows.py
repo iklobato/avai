@@ -111,7 +111,7 @@ def network_flows(
         packets,
         byte_count,
         process,
-        verdict,
+        row_verdict,
         conf,
         reason,
     ) in session.execute(stmt).all():
@@ -142,8 +142,8 @@ def network_flows(
         if dst_port is not None:
             g["_ports"].add(f"{dst_port}/{service}" if service else str(dst_port))
         # Keep the worst (lowest-severity-number) verdict + its reasoning.
-        if _FLOW_SEV.get(verdict, 4) < _FLOW_SEV.get(g["verdict"], 4):
-            g["verdict"] = verdict
+        if _FLOW_SEV.get(row_verdict, 4) < _FLOW_SEV.get(g["verdict"], 4):
+            g["verdict"] = row_verdict
             g["confidence"] = conf
             g["reasoning"] = reason or ""
 

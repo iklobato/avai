@@ -164,6 +164,15 @@ def seeded(tmp_path):
 
 
 class TestListeningPortsRollup:
+    def test_verdict_filter_uses_the_picked_verdict(self, seeded):
+        # Regression: the row loop reused the name ``verdict``, so the filter
+        # and its echo took the last socket's verdict instead of the user's.
+        engine, run_id = seeded
+        with Session(engine) as s:
+            data = listening_ports(s, run_id, verdict="malicious")
+        assert [r["port"] for r in data["rows"]] == [22]
+        assert data["verdict"] == "malicious"
+
     def test_wildcard_v4_v6_collapse_to_one_row(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
