@@ -240,13 +240,18 @@ graph TD
 
 | Command | Aliases | Handler | Delegates to |
 |---|---|---|---|
-| `avai monitor` | `start`, `scan` | `main` | `host_monitor.main.main()` (argv passed through) |
-| `avai dashboard` | `ui`, `serve` | `main` | `dashboard.serve.main()` |
-| `avai app` | `gui`, `desktop` | `main` | `desktop.main()` |
-| `avai rules [--list] [--rules-dir]` | | `_cmd_rules` | `collectors.YaraRulesetCompiler` (no DB) |
-| `avai install-hosts [--remove] [--hostname]` | | `_cmd_install_hosts` | `hostsfile.HostsRegistrar` |
-| `avai migrate [--db]` | | `main` | `db_migrate.upgrade_to_head` |
+| `avai monitor` | `start`, `scan` | `_run_monitor` | `host_monitor.main.main()` (argv passed through) |
+| `avai dashboard` | `ui`, `serve` | `_run_dashboard` | `dashboard.serve.main()` (argv passed through) |
+| `avai app` | `gui`, `desktop` | `_run_app` | `desktop.main()` |
+| `avai rules [--list] [--rules-dir]` | | `_run_rules` → `_cmd_rules` | `collectors.YaraRulesetCompiler` (no DB) |
+| `avai install-hosts [--remove] [--hostname]` | | `_run_install_hosts` → `_cmd_install_hosts` | `hostsfile.HostsRegistrar` |
+| `avai migrate [--db]` | | `_run_migrate` | `db_migrate.upgrade_to_head` |
 | `avai --version` / `--help` | `-v`, `-h`, `help` | `main` / `_print_usage` | |
+
+`main` handles `--help` and `--version`, then looks the subcommand up in the
+`_COMMANDS` table (every name and alias maps to one `_run_*` handler that
+takes the remaining argv). Handlers import their target lazily, so
+`avai --version` loads neither the monitor nor the dashboard.
 
 ```mermaid
 graph LR
@@ -254,8 +259,8 @@ graph LR
     m -->|monitor start scan| hm["host_monitor.main.main"]
     m -->|dashboard ui serve| dm["dashboard.serve.main"]
     m -->|app gui desktop| ap["desktop.main"]
-    m -->|rules| r["_cmd_rules → YaraRulesetCompiler"]
-    m -->|install-hosts| ih["_cmd_install_hosts → HostsRegistrar"]
+    m -->|rules| r["_run_rules → _cmd_rules → YaraRulesetCompiler"]
+    m -->|install-hosts| ih["_run_install_hosts → _cmd_install_hosts → HostsRegistrar"]
     m -->|migrate| mg["db_migrate.upgrade_to_head"]
     m -->|--version| v["__version__"]
     m -->|--help / unknown| usage["_print_usage"]
@@ -1119,6 +1124,9 @@ walks `sources/` with `pkgutil`, keeps concrete `Enricher` subclasses, drops
 those whose `env_token()` is missing (or not in `--enrich-only`), constructs
 each with the shared `HttpClient`, and returns `EnrichmentChain(enrichers,
 EvidenceCache)`. No source is named anywhere: adding one is a new file.
+A keyed source names its env var once, in `requires_token`, and reads its
+key through `env_token()` too, so `Enricher.env_token` is the only place the
+package reads the environment (NVD's optional `NVD_API_KEY` aside).
 
 `extract_indicators(collector, row)` looks up the `EXTRACTORS` dispatch
 table by collector `name` (falling back to `_NoOp`), dedupes within the row and
@@ -1297,7 +1305,9 @@ The `/fragments/control` row and every `POST` row live in the `control`
 blueprint, the three `/api/*` rows in `api`, and the rest in `fragments`.
 `require_control_token` compares `DashboardConfig.control_token` with the
 `X-Avai-Token` header (constant-time); no token → 403 (fails closed). The
-desktop app skips it with `control_open` (`AVAI_CONTROL_OPEN=1`).
+desktop app skips it with `control_open`: `desktop._start_dashboard` passes
+`from_env` an overlay that defaults `AVAI_CONTROL_OPEN` and `AVAI_APP_MODE`
+to 1 without writing them into the process environment.
 
 ### 6.2 Query layer (`queries/`)
 
@@ -1573,7 +1583,7 @@ signatures omit `self` / `cls`.
 _avai: macOS / Linux host security telemetry collector with an LLM_
 
 
-#### `avai.cli` · `avai/cli.py` · 186 lines
+#### `avai.cli` · `avai/cli.py` · 212 lines
 
 _avai CLI: subcommand dispatcher._
 
@@ -1582,7 +1592,13 @@ Constants: `_USAGE`
 - `_print_usage(stream) -> None` (L44)
 - `_cmd_rules(rules_dir, do_list) -> int` (L48) : Compile the file-scanner ruleset and report what loaded: the
 - `_cmd_install_hosts(hostname, remove) -> int` (L68) : Add/remove the ``hostname -> 127.0.0.1`` mapping in the OS hosts file.
-- `main(argv) -> int` (L95)
+- `_run_monitor(rest) -> int` (L95)
+- `_run_dashboard(rest) -> int` (L102)
+- `_run_app(_rest) -> int` (L109)
+- `_run_rules(rest) -> int` (L115)
+- `_run_install_hosts(rest) -> int` (L136)
+- `_run_migrate(rest) -> int` (L156)
+- `main(argv) -> int` (L188)
 
 #### `avai.desktop` · `avai/desktop.py` · 107 lines
 
@@ -3094,13 +3110,13 @@ Constants: `LOG`
 _Concrete enrichers. Each module owns one external source._
 
 
-#### `avai.enrichers.sources.abuseipdb` · `avai/enrichers/sources/abuseipdb.py` · 68 lines
+#### `avai.enrichers.sources.abuseipdb` · `avai/enrichers/sources/abuseipdb.py` · 67 lines
 
 _AbuseIPDB: IP reputation + abuse-confidence score._
 
 Constants: `_URL`
 
-- **class `AbuseIpDbEnricher(Enricher)`** (L23)
+- **class `AbuseIpDbEnricher(Enricher)`** (L22)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
@@ -3162,24 +3178,24 @@ Constants: `_URL`
   - `_ensure_feed() -> None`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.github_advisory` · `avai/enrichers/sources/github_advisory.py` · 69 lines
+#### `avai.enrichers.sources.github_advisory` · `avai/enrichers/sources/github_advisory.py` · 68 lines
 
 _GitHub Advisory Database: curated advisories with CVSS + fix versions._
 
 Constants: `_URL`
 
-- **class `GitHubAdvisoryEnricher(Enricher)`** (L23)
+- **class `GitHubAdvisoryEnricher(Enricher)`** (L22)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.greynoise` · `avai/enrichers/sources/greynoise.py` · 72 lines
+#### `avai.enrichers.sources.greynoise` · `avai/enrichers/sources/greynoise.py` · 71 lines
 
 _GreyNoise Community API: "is this IP internet background noise?"_
 
 Constants: `_BASE`
 
-- **class `GreyNoiseEnricher(Enricher)`** (L24)
+- **class `GreyNoiseEnricher(Enricher)`** (L23)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
@@ -3205,18 +3221,18 @@ _Offline known-bad hash deny-list: an instant malicious verdict_
   - `_load(path) -> frozenset[str]` `@staticmethod`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.malware_bazaar` · `avai/enrichers/sources/malware_bazaar.py` · 73 lines
+#### `avai.enrichers.sources.malware_bazaar` · `avai/enrichers/sources/malware_bazaar.py` · 72 lines
 
 _abuse.ch MalwareBazaar: SHA256 → known-malware family._
 
 Constants: `_URL`
 
-- **class `MalwareBazaarEnricher(Enricher)`** (L24)
+- **class `MalwareBazaarEnricher(Enricher)`** (L23)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.nvd` · `avai/enrichers/sources/nvd.py` · 81 lines
+#### `avai.enrichers.sources.nvd` · `avai/enrichers/sources/nvd.py` · 80 lines
 
 _NIST NVD: CVE detail lookup (description + CVSS)._
 
@@ -3242,24 +3258,24 @@ Constants: `_QUERY`, `_VULN`, `_MAX_LISTED_VULNS`
 - `_ecosystem_for(name) -> str` (L30)
 - `_advisory_ids(vulns) -> list[str]` (L94) : Each vuln's primary id AND its aliases, deduplicated. OSV's primary
 
-#### `avai.enrichers.sources.phishtank` · `avai/enrichers/sources/phishtank.py` · 64 lines
+#### `avai.enrichers.sources.phishtank` · `avai/enrichers/sources/phishtank.py` · 63 lines
 
 _PhishTank: community-maintained phishing URL DB._
 
 Constants: `_URL`
 
-- **class `PhishTankEnricher(Enricher)`** (L24)
+- **class `PhishTankEnricher(Enricher)`** (L23)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.safe_browsing` · `avai/enrichers/sources/safe_browsing.py` · 73 lines
+#### `avai.enrichers.sources.safe_browsing` · `avai/enrichers/sources/safe_browsing.py` · 72 lines
 
 _Google Safe Browsing v4: phishing / malware URL classifier._
 
 Constants: `_URL`, `_CLIENT_INFO`, `_THREAT_TYPES`
 
-- **class `SafeBrowsingEnricher(Enricher)`** (L37)
+- **class `SafeBrowsingEnricher(Enricher)`** (L36)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
@@ -3275,39 +3291,39 @@ Constants: `_BASE`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.threatfox` · `avai/enrichers/sources/threatfox.py` · 65 lines
+#### `avai.enrichers.sources.threatfox` · `avai/enrichers/sources/threatfox.py` · 64 lines
 
 _abuse.ch ThreatFox: mixed IOC search (IP / domain / URL / hash)._
 
 Constants: `_URL`
 
-- **class `ThreatFoxEnricher(Enricher)`** (L24)
+- **class `ThreatFoxEnricher(Enricher)`** (L23)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.urlhaus` · `avai/enrichers/sources/urlhaus.py` · 91 lines
+#### `avai.enrichers.sources.urlhaus` · `avai/enrichers/sources/urlhaus.py` · 90 lines
 
 _abuse.ch URLhaus: malware-distribution URLs and domains._
 
 Constants: `_URL_LOOKUP`, `_HOST_LOOKUP`
 
-- **class `URLhausEnricher(Enricher)`** (L25)
+- **class `URLhausEnricher(Enricher)`** (L24)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
 
-#### `avai.enrichers.sources.virustotal` · `avai/enrichers/sources/virustotal.py` · 98 lines
+#### `avai.enrichers.sources.virustotal` · `avai/enrichers/sources/virustotal.py` · 97 lines
 
 _VirusTotal v3: multi-engine reputation for files, URLs, domains, IPs._
 
 Constants: `_BASE`
 
-- **class `VirusTotalEnricher(Enricher)`** (L39)
+- **class `VirusTotalEnricher(Enricher)`** (L38)
   - fields: `name`, `supports_types`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours`
   - `__init__(http)`
   - `_fetch(indicator) -> Optional[Evidence]`
-- `_path_for(indicator) -> Optional[str]` (L23)
+- `_path_for(indicator) -> Optional[str]` (L22)
 
 ### A.4 dashboard (Flask + HTMX)
 

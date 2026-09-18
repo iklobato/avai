@@ -539,6 +539,57 @@ Coverage of `avai.enrichers` on the full suite is 94% (`chain.py` 96%,
 Acceptance: `os.environ` is read only in `desktop.py`, `main.py`,
 `serve.py` and `create_app`.
 
+Done on `refactor/p9-entrypoints` in four commits. Acceptance is not met
+as written; what is left and why is below.
+
+- `cli.main` looks the subcommand up in a `_COMMANDS` table of `_run_*`
+  functions, one per command, aliases as extra keys. Plain functions, not
+  a `Command` class: each has one method and no state.
+- `HostFactory.create` keeps its three `if` branches. A `{system: class}`
+  table needs the classes imported by name (`importlib` plus `getattr`) to
+  stay lazy, which loses the static import and type check for no gain:
+  adding a platform is one edit either way. It gained a Windows test.
+- `build_runner` was already the composition root. `MonitorSettings` was
+  not built: the argparse namespace is already parsed once, and a
+  dataclass copy of its 20 fields would have no second source to justify
+  it.
+- Nine keyed enricher sources read their key through `env_token()`
+  instead of their own `os.environ.get`, so each env var name lives only
+  in `requires_token`. Full injection of the keys (registry passes them
+  in) was not done: the sources have four construction shapes (keyless,
+  keyed, optional key, and the path-based local deny-list) that the
+  registry bridges with signature inspection, and a common constructor
+  contract would be more code than the reads it removes.
+- `desktop._start_dashboard` passes `DashboardConfig.from_env` an overlay
+  instead of writing `AVAI_CONTROL_OPEN` and `AVAI_APP_MODE` into the
+  process environment. `ANTHROPIC_API_KEY` stays a `setdefault`, because
+  litellm reads the key from the process environment itself.
+
+`os.environ` is still read outside the entry points in: `Enricher.env_token`
+and `NvdEnricher.__init__` (source keys, above); `constants.py`
+(`HOST_PREFIX`, `AVAI_YARA_RULES_DIR`, `AVAI_HASH_DENYLIST`, read at
+import and used across the collectors, so moving them means threading
+three values through every host and collector); `hostsfile.py`
+(`SystemRoot`, a Windows fact, not configuration); `llm.py` (a
+`setdefault` of `LITELLM_LOG`, which has to happen before litellm is
+imported); and `DashboardConfig.from_env`'s default argument.
+
+Behaviour change: the desktop app no longer sets the two dashboard
+variables in its own environment; before, they also leaked into every
+test that ran after `test_dashboard_serves_in_process`.
+
+New tests: the `app` aliases, `install-hosts` (install, remove,
+unchanged, the permission hint, other errors), `migrate`, the dashboard
+argv passthrough, HostFactory on Windows, the desktop overlay (fails on
+the old code), NVD's optional key header and rate lane, and a test that
+every keyed source sends the key from its env var. That last one closes
+a real gap: blanking any of the nine keys left the suite green before
+it. 19 deliberate breaks (8 in `cli`, 9 source keys, 2 in NVD) turned a
+test red.
+
+`cli.py` coverage went from 62% to 98%. 1122 tests pass; line coverage
+of the whole `avai` package on the full suite is 92%.
+
 ## Phase 10: trim the facades
 
 - Point tests at the real modules and shrink `host_monitor/__init__.py` (334
