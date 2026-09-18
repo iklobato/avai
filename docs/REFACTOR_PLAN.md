@@ -234,6 +234,46 @@ Acceptance: no class in `runner.py` or its new modules exceeds 15 methods or
 300 lines, the characterization tests stay green, and each stage has its own
 unit test with a fake collaborator.
 
+Done on `refactor/p4-runner` in three commits: 23 characterization tests
+through the public `Runner` API only (`tests/test_runner_cycle.py`), then
+`SupervisionPolicy`, then the split. `runner.py` went from 1058 lines to 331;
+the largest class is now `CollectionCycle` (8 methods, 167 lines). Changes
+from the design above:
+
+- No `Finding` dataclass. The entries stay dicts, but each key is now written
+  by exactly one stage, and `FindingBatch` carries the rest (collector, rows,
+  run id, `HostBaseline`, judgments). A typed `Finding` would have touched
+  every judge prompt for no behaviour gain.
+- The stage and step lists are built in `runner.py` (`_snapshot_stages`,
+  `_streaming_stages`, `_cycle_steps`), not in `main.py`: `RunnerConfig`
+  already holds everything they need, and `main.py` stays unchanged.
+  A disabled verifier or investigator means the stage is left out, not a
+  None check inside it.
+- `MaintenanceCommand.apply(sink, max_db_bytes)`, since there are no
+  repositories (Phase 5 was dropped).
+- Extra small types: `ControlSettings` (the control row read once per cycle,
+  with the startup defaults), `ProgressHeartbeat`, `HostBaseline`,
+  `ProcessBehavior` (the pid maps shared by correlation and investigation)
+  and `_InvestigationBundle`.
+- The sleeper stays a separate `StreamingWorker` argument, since its default
+  needs the worker's own stop event.
+- `runner.config` is public (the desktop test reads the collector lists).
+
+Behaviour changes: two log or prompt strings lost their em dash (the
+shutdown log line and the feedback hint text), and a failure in the
+streaming baseline step is now caught with the rest of that collector's
+judging instead of escaping the cycle.
+
+Coverage on the full suite: `runner.py` 96%, `control_loop.py` 97%,
+`finding_stages.py` 91%, `streaming.py` 92%, `cycle_steps.py` 77% (the
+narrator and coverage error branches). Timing on a synthetic 200-row cycle,
+old and new run alternately: median 25 to 27 ms before, 25 to 29 ms after,
+inside the spread. Three deliberate breaks (verify cap, investigate cap,
+feedback from another collector) each turned a test red. 940 tests pass.
+`test_runtime.py::test_exit_code_returns_code` can time out when the suite
+runs under coverage (a child Python takes over 10 s to start there); it is
+not touched by this phase.
+
 ## Phase 5: dropped
 
 The `Sink` split into repositories was dropped on 2026-09-17. `Sink` keeps

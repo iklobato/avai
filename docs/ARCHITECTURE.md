@@ -5,10 +5,10 @@ runtime flows that connect them, and how the pieces are deployed. Diagrams are
 [Mermaid](https://mermaid.js.org/) and render on GitHub, in VS Code preview and
 in any Mermaid viewer.
 
-Snapshot: `avai-monitor` 0.7.3, branch `refactor/p3-llm-stages` at commit `fea1db3` (2026-09-17).
+Snapshot: `avai-monitor` 0.7.3, branch `refactor/p4-runner` at commit `ecbad97` (2026-09-18).
 The inventory in Appendix A was generated from the AST of `src/avai`, so it is
-exhaustive: 89 modules, 290 classes, 227 module-level functions, 550 methods,
-about 21.0k lines. Tests: 40 modules, 838 test functions.
+exhaustive: 92 modules, 316 classes, 235 module-level functions, 591 methods,
+about 21.3k lines. Tests: 41 modules, 862 test functions.
 
 > **One-line model.** `avai` is a host-security telemetry engine. A platform
 > object assembles OS-specific **collectors**; the **Runner** drives them each
@@ -106,7 +106,10 @@ src/avai/
 ├── host_monitor/               THE ENGINE
 │   ├── __init__.py             facade: re-exports the public API
 │   ├── main.py                 `avai monitor` argparse + LlmStages + build_runner() + main()
-│   ├── runner.py               Runner: control loop, collection cycle, LLM pipeline orchestration
+│   ├── runner.py               RunnerConfig, CollectionCycle (one scan), Runner (thin coordinator)
+│   ├── finding_stages.py       FindingBatch, HostBaseline, the 7 finding stages, FindingPipeline
+│   ├── cycle_steps.py          end-of-cycle reports: narrative, risk score, YARA status, coverage
+│   ├── control_loop.py         ControlSettings, ProgressHeartbeat, MaintenanceCommand, ControlLoop
 │   ├── sink.py                 Sink: the single DB gateway (schema, runs, writes, lookups, rotation)
 │   ├── models.py               SQLAlchemy ORM: Base, _RowBase, 52 mapped tables
 │   ├── collectors.py           Collector bases + 41 snapshot/streaming collectors + parsers + YARA compile
@@ -117,7 +120,7 @@ src/avai/
 │   ├── runtime/                injectable collaborators: clock, commands, digest, paths, probes, sources
 │   ├── security_controls.py    ServiceSpec + NetworkServiceControl (posture + behaviour per service)
 │   ├── slices.py               Slice catalog: each telemetry table's name, model and streaming flag, once
-│   ├── streaming.py            StreamingWorker (one thread per StreamingCollector)
+│   ├── streaming.py            SupervisionPolicy, StreamingSupervisor, StreamingWorker (one thread per StreamingCollector)
 │   ├── supervision.py          restart policy: outcomes, backoff, sleeper, listener
 │   ├── llm.py                  LlmCredentials, CompletionRequest, CompletionClient strategies, StructuredCall
 │   ├── judge.py                Judge / LlmJudge / NullJudge, cost estimate
@@ -176,8 +179,12 @@ graph TD
     hmmain --> llm["host_monitor.llm"]
     runner --> sink["host_monitor.sink"]
     runner --> streaming["host_monitor.streaming"]
-    runner --> risk["host_monitor.risk"]
-    runner --> ind["enrichers.indicators"]
+    runner --> fstages["host_monitor.finding_stages"]
+    runner --> csteps["host_monitor.cycle_steps"]
+    runner --> cloop["host_monitor.control_loop"]
+    fstages --> cloop
+    fstages --> ind["enrichers.indicators"]
+    csteps --> risk["host_monitor.risk"]
     streaming --> supervision["host_monitor.supervision"]
     hosts --> collectors["collectors · net_collectors<br/>exposure_collectors · persistence_collectors"]
     collectors --> runtime["host_monitor.runtime/*"]
@@ -206,7 +213,7 @@ graph TD
 **Layering rules (by convention, no cycles):**
 
 - `host_monitor` layering, one way only:
-  `enums → constants → runtime → prompts / models → risk / llm → judge → verifier / investigator / narrator / coverage → sink → security_controls / collectors → net / exposure / persistence collectors → hosts → supervision → streaming → runner → main`.
+  `enums → constants → runtime → prompts / models → risk / llm → judge → verifier / investigator / narrator / coverage → sink → security_controls / collectors → net / exposure / persistence collectors → hosts → supervision → streaming → control_loop → finding_stages / cycle_steps → runner → main`.
 - `hosts/factory.py` is the **only** place that reads `platform.system()`.
 - `runtime/command_runner.py` is the **only** subprocess seam; collectors never call `subprocess` directly.
 - `sink.py` is the **only** telemetry writer. The dashboard's `control.py` writes two tables and nothing else.
@@ -286,7 +293,7 @@ sequenceDiagram
     B->>H: HostFactory.create() → MacOSHost / LinuxHost / WindowsHost
     H-->>B: host.snapshot_collectors(prompts), host.streaming_collectors(prompts)
     B->>B: build_default_chain(engine, Base, enable=--enrich-only) unless --no-enrich
-    B->>R: Runner(sink, snapshot, streaming, llm.judge, lookback, max_db_bytes, chain, baseline_runs, llm.narrator, llm.coverage, llm.verifier, llm.investigator)
+    B->>R: Runner(RunnerConfig(sink, snapshot, streaming, llm.judge, lookback, max_db_bytes, chain, baseline_runs, llm.narrator, llm.coverage, llm.verifier, llm.investigator))
     B->>S: runner.setup() → Sink.setup()
     Note over S: register_schema(Base) → create_all → _migrate_add_columns → upgrade_to_head → _relax_db_permissions
     B->>S: ensure_control_row(interval, judge_enabled, enrich_enabled)
@@ -310,88 +317,106 @@ Monitor flags (all in `_build_parser`): `--db`, `--interval`, `--lookback-min`,
 
 ### 4.2 `Runner`: the loop and the cycle
 
-`Runner` (runner.py, 1057 lines) is the supervisor. It owns the control cache,
-the snapshot loop, the streaming workers and the whole per-finding LLM
-pipeline. Every method:
+`Runner` (runner.py) is a thin coordinator. It takes one `RunnerConfig`,
+wires the parts below in its constructor, and keeps the public methods
+`main.py` and `desktop.py` call: `setup`, `start_streaming`,
+`stop_streaming`, `run_once`, `run_forever`, `request_shutdown`.
 
-| Group | Method | Responsibility |
+| Part | Module | Responsibility |
 |---|---|---|
-| Lifecycle | `setup` | `sink.setup()` |
-| | `start_streaming` / `stop_streaming` | spawn / join one `StreamingWorker` per streaming collector |
-| | `request_shutdown` | idempotent, signal-safe stop flag |
-| | `run_forever(interval)` | control-poll loop (below) |
-| | `run_once` | one full cycle (below) |
-| Control plane | `_refresh_control` | read the `control_state` row into `self._control` |
-| | `_disabled_collectors`, `_judge_on`, `_enrich_on` | effective settings (row value or CLI default) |
-| | `_heartbeat(status, interval)` | full heartbeat: pid, status, interval, `last_seen_at` |
-| | `_progress_heartbeat` | throttled `last_seen_at` touch inside long cycles (every 30 s) |
-| | `_run_pending_command` / `_dispatch_command` | one-shot maintenance: `prune`, `clear`, `rejudge`, `renarrate`, `reset_baseline`, then `ack_command` |
-| Per collector | `_run_collector(c, run_id, started, baseline)` | collect → stamp → write → judge pipeline → touch |
-| | `_enrich_entries` | `extract_indicators` per row → `chain.enrich` → `entry["evidence"]` |
-| | `_annotate_baseline` | `entry["baseline"]`: first_seen, times_seen, novel, intermittent |
-| | `_attach_correlation` | `entry["related"]`: ports, flows, conns, DNS, exec lineage by PID (processes and launch_items only) |
-| | `_behavior_pid_map` → `_process_pid_map` / `_launch_item_pid_map` | content_hash → PIDs and names |
-| | `_related_from_ctx` | assemble the bounded `related` object from a correlation context |
-| | `_attach_yara_context` | `entry["rule_meta"]`, `entry["matched_strings"]` for `file_scan` |
-| | `_judge_hints` | static hints + this host's operator feedback examples |
-| | `_verify_judgments` | skeptic pass on `malicious` (≤ 10 per collector); refuted → `suspicious` |
-| | `_investigate_unknowns` | deep pass on `unknown` (≤ 10 per collector) with full-history context |
-| | `_full_history_context`, `_host_context` | inputs for the investigator |
-| | `_judgment_context`, `_loads_or_none` | bundle `baseline` + `related` for `write_judgments` |
-| Cycle end | `_judge_streaming_collectors` | judge new hashes from streaming tables (`unjudged_all`) |
-| | `_apply_feedback` | pin operator corrections before judging |
-| | `_generate_narrative` | narrator over active findings, only when the finding set changed |
-| | `_generate_risk_score` + `_risk_explanation` | deterministic score, delta text vs previous |
-| | `_write_yara_status` | persist `FileScanCollector.compile_stats` (+ rule inventory) |
-| | `_generate_coverage` + `_ruleset_fingerprint` | coverage assessment, only when the ruleset changed |
-| Baseline | `_host_baseline` | `established` after `baseline_min_runs`, `cutoff_at` |
+| `RunnerConfig` | runner.py | frozen parameter object: sink, collectors, judge, lookback, size cap, enrichment chain, baseline runs, and the optional narrator, coverage, verifier and investigator |
+| `CollectionCycle` | runner.py | `run()`: one scan (below): `_collect_all`, `_collect`, `_judge_snapshot`, `_judge_streaming`, `_apply_feedback`, `_rotate` |
+| `FindingPipeline` and its stages | finding_stages.py | the per-collector finding pipeline (below) |
+| `CycleStep`: `NarrativeStep`, `RiskScoreStep`, `YaraStatusStep`, `CoverageStep` | cycle_steps.py | end-of-cycle reports; narrative and coverage run only when their set (findings, ruleset) changed |
+| `ControlLoop` | control_loop.py | `run_forever`: control poll, pending maintenance command, heartbeat, scan-now |
+| `ControlSettings` | control_loop.py | the control row cached once per cycle: `disabled_collectors`, `judge_on`, `enrich_on` (row value, or the startup default when unset) |
+| `ProgressHeartbeat` | control_loop.py | throttled `last_seen_at` touch inside long cycles (every 30 s) |
+| `MaintenanceCommand` | control_loop.py | `prune`, `clear`, `rejudge`, `renarrate`, `reset_baseline`; `apply(sink, max_db_bytes)` through a dispatch table |
+| `StreamingSupervisor` | streaming.py | start / stop one `StreamingWorker` per streaming collector |
 
-#### `run_forever`: the control-poll loop
+The optional LLM stages are wired only when configured: a disabled verifier
+means no `VerifyStage` in the pipeline, not a None check inside it.
+
+```mermaid
+classDiagram
+    class Runner { +setup() +start_streaming() +stop_streaming() +run_once() +run_forever(interval) +request_shutdown() }
+    class RunnerConfig { <<frozen dataclass>> }
+    class CollectionCycle { +run() tuple }
+    class ControlLoop { +run_forever(interval) }
+    class ControlSettings { +refresh() +disabled_collectors() +judge_on() +enrich_on() }
+    class ProgressHeartbeat { +reset() +beat() }
+    class StreamingSupervisor { +start() +stop() }
+    class FindingPipeline { +run(batch) }
+    class FindingStage { <<Protocol>> +apply(batch) }
+    class CycleStep { <<Protocol>> +run(run_id, started) }
+    class MaintenanceCommand { <<StrEnum>> +apply(sink, max_db_bytes) str }
+    Runner --> RunnerConfig
+    Runner *-- CollectionCycle
+    Runner *-- ControlLoop
+    Runner *-- StreamingSupervisor
+    CollectionCycle o-- ControlSettings
+    CollectionCycle o-- ProgressHeartbeat
+    CollectionCycle o-- "2" FindingPipeline : snapshot, streaming
+    CollectionCycle o-- "*" CycleStep
+    ControlLoop o-- ControlSettings
+    ControlLoop ..> MaintenanceCommand
+    FindingPipeline o-- "*" FindingStage
+```
+
+#### `ControlLoop.run_forever`: the control-poll loop
 
 ```mermaid
 flowchart TD
     A[start: next_scan = now] --> B{shutdown_event set?}
     B -->|yes| Z([return])
-    B -->|no| C[_refresh_control]
-    C --> D[_run_pending_command<br/>prune / clear / rejudge / renarrate / reset_baseline]
+    B -->|no| C[settings.refresh]
+    C --> D[_run_pending_command<br/>MaintenanceCommand.apply, then ack_command]
     D --> E["effective = interval_override or interval<br/>paused? scan_now nonce pending?"]
     E --> F{scan_now or<br/>due and not paused?}
-    F -->|yes| G[ack_scan_now if requested] --> H["_heartbeat('scanning')"] --> I[run_once] --> J[next_scan = t0 + effective]
+    F -->|yes| G[ack_scan_now if requested] --> H["_heartbeat('scanning')"] --> I[Runner.run_once] --> J[next_scan = t0 + effective]
     F -->|no| K["_heartbeat('paused' or 'running')"]
     J --> L[shutdown_event.wait 3 s]
     K --> L
     L --> B
 ```
 
-#### `run_once`: one collection cycle
+#### `CollectionCycle.run`: one collection cycle
 
 ```mermaid
 flowchart TD
-    A[_refresh_control] --> B[_apply_feedback<br/>pin operator corrections]
+    A[settings.refresh] --> B[_apply_feedback<br/>pin operator corrections]
     B --> C[sink.start_run → run_id, started]
-    C --> D[_host_baseline<br/>established? cutoff_at?]
+    C --> D[HostBaseline.measure<br/>established? cutoff_at?]
     D --> E{for each snapshot collector<br/>not disabled, not shutting down}
-    E --> F[_progress_heartbeat]
-    F --> G[_run_collector]
+    E --> F[heartbeat.beat]
+    F --> G[_collect]
     G -->|exception| H[sink.write_error] --> E
     G --> E
-    E -->|done, not shutting down| I[_judge_streaming_collectors]
-    I --> J{narrator?}
-    J -->|yes| K[_generate_narrative]
-    J -->|no| L
-    K --> L[_generate_risk_score]
-    L --> M[_write_yara_status]
-    M --> N{coverage?}
-    N -->|yes| O[_generate_coverage]
-    N -->|no| P
-    O --> P[sink.end_run ok, failed]
+    E -->|done, not shutting down| I[_judge_streaming<br/>streaming pipeline per collector]
+    I --> K["steps: NarrativeStep (if narrator), RiskScoreStep,<br/>YaraStatusStep, CoverageStep (if coverage)"]
+    K --> P[sink.end_run ok, failed]
+    E -->|shutting down| P
     P --> Q{max_db_bytes?}
-    Q -->|yes| R[sink.prune_to_size]
+    Q -->|yes| R[_rotate: sink.prune_to_size]
     Q -->|no| S([return run_id, ok, failed])
     R --> S
 ```
 
-#### `_run_collector`: the per-finding pipeline
+#### `_collect`: the per-finding pipeline
+
+Each stage adds exactly one kind of signal to the entries of a
+`FindingBatch` (collector, unjudged entries, raw rows, run id,
+`HostBaseline`), or revises `batch.judgments`.
+
+| Stage | Adds or changes | Runs for |
+|---|---|---|
+| `EvidenceStage` | `entry["evidence"]`: `extract_indicators` per row, then `chain.enrich`, when enrichment is on | snapshot, when a chain is configured |
+| `BaselineStage` | `entry["baseline"]`: first_seen, times_seen, novel, intermittent | snapshot and streaming |
+| `CorrelationStage` | `entry["related"]`: ports, flows, conns, DNS, exec lineage by PID, through `ProcessBehavior` | processes and launch_items |
+| `YaraContextStage` | `entry["rule_meta"]`, `entry["matched_strings"]` | file_scan |
+| `JudgeStage` | `batch.judgments`; hints are the static hints plus this host's operator feedback | snapshot and streaming |
+| `VerifyStage` | refuted `malicious` → `suspicious` (at most 10 per collector) | snapshot and streaming, when a verifier is configured |
+| `InvestigateStage` | `unknown` → a committed verdict, with full-history behaviour and the host's other findings (at most 10 per collector) | snapshot, when an investigator is configured |
 
 ```mermaid
 flowchart TD
@@ -400,31 +425,32 @@ flowchart TD
     C --> D{judge_enabled and judge_fields?}
     D -->|no| Z([log line])
     D -->|yes| E[unjudged = sink.unjudged c<br/>new content_hashes this run]
-    E --> F{unjudged and _judge_on?}
+    E --> F{unjudged and judge_on?}
     F -->|no| T
-    F -->|yes| G[_enrich_entries<br/>evidence from threat intel]
-    G --> H[_annotate_baseline<br/>novel / intermittent]
-    H --> I[_attach_correlation<br/>processes, launch_items]
-    I --> J[_attach_yara_context<br/>file_scan]
-    J --> K[hints = _judge_hints<br/>static + feedback examples]
-    K --> L[judge.judge → Judgments]
-    L --> M[_verify_judgments<br/>malicious → suspicious if refuted]
-    M --> N[_investigate_unknowns<br/>unknown → committed verdict]
-    N --> O[sink.write_judgments + context]
+    F -->|yes| G[EvidenceStage<br/>evidence from threat intel]
+    G --> H[BaselineStage<br/>novel / intermittent]
+    H --> I[CorrelationStage<br/>processes, launch_items]
+    I --> J[YaraContextStage<br/>file_scan]
+    J --> L[JudgeStage<br/>static hints + feedback examples → Judgments]
+    L --> M[VerifyStage<br/>malicious → suspicious if refuted]
+    M --> N[InvestigateStage<br/>unknown → committed verdict]
+    N --> O[sink.write_judgments + batch.context]
     O --> T[sink.touch_judgments<br/>last_seen_at for every hash observed]
     T --> Z
 
     classDef enrich fill:#fc8,stroke:#a50,color:#000
     classDef judge fill:#8cf,stroke:#05a,color:#000
     class G,H,I,J enrich
-    class K,L,M,N,O judge
+    class L,M,N,O judge
 ```
 
-Why the order matters: the baseline is computed once per cycle so every
+Why the order matters: the baseline is measured once per cycle so every
 collector shares a cutoff; enrichment happens before judging so the LLM sees
 evidence; correlation turns "novel binary" plus "beacons to a flagged IP" into
 one strong signal; only unjudged hashes reach the LLM so steady-state cycles
 are cheap; `touch_judgments` lets the dashboard derive active vs resolved.
+The order lives in `runner._snapshot_stages` and `_streaming_stages`, so a new
+stage never edits the cycle.
 
 ### 4.3 Platform layer: `hosts/`
 
@@ -743,13 +769,19 @@ This is what fixed the "enabled but idle" false negative in 0.7.3.
 
 ### 4.7 Streaming workers and supervision
 
-One `StreamingWorker` per streaming collector. The worker owns a thread, a
-write buffer (flushed at `batch_size` = 50 rows or `flush_interval_s` = 5 s),
-and a `StreamingSession` row per session. Restart policy is delegated to
-injected collaborators so tests can drive it deterministically.
+`StreamingSupervisor` starts one `StreamingWorker` per streaming collector at
+boot and joins them on shutdown. The worker owns a thread, a write buffer
+(flushed at `batch_size` = 50 rows or `flush_interval_s` = 5 s), and a
+`StreamingSession` row per session. The tuning and the restart collaborators
+travel together in a frozen `SupervisionPolicy` (batch size, flush interval,
+join timeout, healthy reset, backoff, listener); the sleeper is passed on its
+own because its default wakes on the worker's stop event. Tests drive it all
+deterministically.
 
 ```mermaid
 classDiagram
+    class StreamingSupervisor { +start() +stop() }
+    class SupervisionPolicy { <<frozen dataclass>> batch_size flush_interval_s join_timeout_s healthy_reset_s }
     class StreamingWorker {
         +start() +stop()
         -_run() -_stream_once() StreamOutcome -_flush(buffer)
@@ -773,9 +805,11 @@ classDiagram
     BackoffPolicy <|.. ExponentialBackoff
     Sleeper <|.. InterruptibleSleep
     SupervisionListener <|.. LoggingSupervisionListener
-    StreamingWorker o-- BackoffPolicy
+    StreamingSupervisor *-- "*" StreamingWorker
+    StreamingWorker o-- SupervisionPolicy
+    SupervisionPolicy o-- BackoffPolicy
+    SupervisionPolicy o-- SupervisionListener
     StreamingWorker o-- Sleeper
-    StreamingWorker o-- SupervisionListener
     StreamingWorker --> StreamingCollector : drives
     StreamingWorker --> Sink : write, start/end_streaming_session
     StreamOutcome ..> OutcomeHandler : double dispatch
@@ -879,7 +913,7 @@ stored per judgment (`cost_usd`) and summed by the dashboard.
 
 **Risk score (`risk.py`, no LLM):** `compute_risk_score(integrity, malicious,
 suspicious, nopasswd_sudoers, extra_uid0)` applies `RISK_WEIGHTS` penalties
-and maps the result through `RISK_GRADES` (`_risk_grade`). The Runner stores
+and maps the result through `RISK_GRADES` (`_risk_grade`). `RiskScoreStep` stores
 one `risk_scores` row per run with `prev_score` and a deterministic
 explanation of what changed.
 
@@ -1268,7 +1302,7 @@ sequenceDiagram
     participant B as Browser
     participant D as dashboard (control.py)
     participant DB as control_state / feedback
-    participant R as Runner.run_forever
+    participant R as ControlLoop.run_forever
     participant S as Sink
 
     B->>D: POST /control/scan-now (X-Avai-Token)
@@ -1373,13 +1407,13 @@ managed block is delimited by `_BLOCK_BEGIN` / `_BLOCK_END` markers.
 ```mermaid
 graph TD
     subgraph monitor["avai monitor process"]
-        main["main thread<br/>Runner.run_forever → run_once"]
+        main["main thread<br/>ControlLoop.run_forever → CollectionCycle.run"]
         s1["stream-auth_events thread<br/>StreamingWorker"]
         s2["stream-process_exec_events thread<br/>StreamingWorker"]
         p1["subprocess: log stream / journalctl -f / Get-WinEvent"]
         p2["subprocess: eslogger exec / journalctl auditd / 4688 events"]
-        main -->|start_streaming| s1
-        main -->|start_streaming| s2
+        main -->|StreamingSupervisor.start| s1
+        main -->|StreamingSupervisor.start| s2
         s1 --> p1
         s2 --> p2
         main -->|"collect(): tcpdump, arp, scutil, ..."| p3["short-lived subprocesses via CommandRunner"]
@@ -1418,8 +1452,9 @@ graph TD
 | Test module | Covers |
 |---|---|
 | `test_cli.py`, `test_desktop.py`, `test_serve.py` | `cli.main`, `desktop`, `dashboard.serve` |
-| `test_runner.py`, `test_integration.py`, `test_host_monitor.py` | `Runner` cycle, correlation, feedback, verify / investigate, end-to-end cycle against a temp DB |
-| `test_streaming_worker.py`, `test_stream_parsers.py` | `StreamingWorker` + supervision, `LineParser` strategies |
+| `test_runner_cycle.py` | whole cycles through the public `Runner` API only: snapshot and streaming judging, reports, pruning, every maintenance command, streaming workers |
+| `test_runner.py`, `test_integration.py`, `test_host_monitor.py` | each finding stage, cycle step, `ControlSettings` and `ControlLoop` with fakes; end-to-end cycle against a temp DB |
+| `test_streaming_worker.py`, `test_stream_parsers.py` | `StreamingWorker` + `SupervisionPolicy`, `LineParser` strategies |
 | `test_collectors.py`, `test_new_collectors.py`, `test_listening_ports.py`, `test_network_flows.py`, `test_resources.py`, `test_disk_container.py`, `test_browser_readers.py`, `test_file_scan.py`, `test_security_controls.py` | snapshot collectors, tcpdump parsing, resource and disk metrics, YARA scanning, service controls |
 | `test_net_collectors.py`, `test_exposure_collectors.py`, `test_persistence_collectors.py`, `test_hosts.py`, `test_windows.py` | source-injected collectors and every OS parser, host composition roots |
 | `test_runtime.py`, `test_row_source.py`, `test_misc_helpers.py` | `runtime/*`, `CommandSnapshot` / `FileSnapshot`, coercion and digest helpers |
@@ -1443,11 +1478,11 @@ plugin crash on this machine).
 | Add a telemetry slice | ORM row in `models.py` (+ migration), collector in `collectors.py` (or a `_SourceSnapshotCollector` + `RowParser` in `net_/exposure_/persistence_collectors.py`), wire it in each `hosts/*Host.snapshot_collectors`, add a hint in `prompts.toml [collector_hints]`, declare it in `host_monitor/slices.py` (`tests/test_slices.py` fails until every step is done), optionally an `IndicatorExtractor` |
 | Support a new OS quirk | the `FilesystemLayout` / `PrivilegedAccounts` adapter in `hosts/<os>.py`; never branch on `platform.system()` elsewhere |
 | Add a threat-intel source | new file in `enrichers/sources/` subclassing `Enricher` with `_fetch`; auto-discovered |
-| Change what the LLM is told | `prompts.toml`; the context bundle is built in `Runner._run_collector` (`evidence`, `baseline`, `related`, `rule_meta`) |
-| Change verdict post-processing | `Runner._verify_judgments`, `_investigate_unknowns`, `_apply_feedback` |
+| Change what the LLM is told | `prompts.toml`; the context bundle is built by the stages in `finding_stages.py` (`evidence`, `baseline`, `related`, `rule_meta`) |
+| Change verdict post-processing | `VerifyStage`, `InvestigateStage` in `finding_stages.py`; `CollectionCycle._apply_feedback`; add a stage in `runner._snapshot_stages` |
 | Change the posture score | `risk.compute_risk_score` + `RISK_WEIGHTS` / `RISK_GRADES` |
 | Add a dashboard panel | query fn in `dashboard/queries.py`, route in `dashboard/app.py`, partial in `templates/partials/`, `hx-get` in `dashboard.html` |
-| Add a control action | `dashboard/control.py` + route with `@require_control_token`, then handle it in `Runner._dispatch_command` |
+| Add a control action | `dashboard/control.py` + route with `@require_control_token`, then add a `MaintenanceCommand` member and its entry in `_COMMAND_ACTIONS` (`control_loop.py`) |
 | Tune DB size, intervals, LLM caps | `constants.py`, `--max-db-mb`, `Sink.prune_to_size` |
 | Debug a streaming collector that keeps dying | `supervision.py` constants and `LoggingSupervisionListener` output; `streaming_sessions` table |
 | Ship a release | `pyproject.toml` version, `CHANGELOG.md`, tag `vX.Y.Z` → `release.yml`; `scripts/update_rules.py` refreshes the YARA pack before building the wheel |
@@ -1774,6 +1809,37 @@ _Defaults, tunables, pricing tables, and static data tables._
 Constants: `LOG`, `_PKG_DIR`, `DEFAULT_DB_PATH`, `DEFAULT_INTERVAL`, `DEFAULT_LOOKBACK_MIN`, `DEFAULT_JUDGE_MODEL`, `DEFAULT_JUDGE_BATCH`, `DEFAULT_JUDGE_MAX_PER_COLLECTOR`, `DEFAULT_JUDGE_TIMEOUT_S`, `DEFAULT_BASELINE_MIN_RUNS`, `MONITOR_LIVENESS_WINDOW_S`, `MONITOR_PROGRESS_HEARTBEAT_S`, `STREAM_RESTART_BASE_BACKOFF_S`, `STREAM_RESTART_MAX_BACKOFF_S`, `STREAM_RESTART_BACKOFF_FACTOR`, `STREAM_CRASH_ESCALATE_THRESHOLD`, `STREAM_HEALTHY_RESET_S`, `_CORRELATED_COLLECTOR`, `_FILE_SCAN_COLLECTOR`, `_LAUNCH_ITEM_COLLECTOR`, `DEFAULT_NARRATIVE_MODEL`, `RISK_WEIGHTS`, `RISK_GRADES`, `MODEL_PRICING`, `DEFAULT_PRICING`, `DEFAULT_PROMPTS_PATH`, `WATCHED_FILES`, `WATCHED_FILES_LINUX`, `AUTH_LOG_PREDICATE`, `APP_INFO_KEYS`, `HOST_PREFIX`, `YARA_RULES_DIR`, `YARA_MAX_FILE_BYTES`, `YARA_MATCH_TIMEOUT_S`, `YARA_MAX_FILES_PER_CYCLE`, `YARA_DOWNLOADS_RECENT_DAYS`, `YARA_MAX_MATCH_STRINGS`, `YARA_MATCH_STRING_MAX_BYTES`, `HASH_DENYLIST_PATH`
 
 
+#### `avai.host_monitor.control_loop` · `avai/host_monitor/control_loop.py` · 198 lines
+
+_The cooperative control plane: the dashboard writes intent to the control_
+
+- **class `ControlSettings`** (L17) : The control row cached once per cycle, read as effective settings.
+  - `__init__(sink, judge_default, enrich_default)`
+  - `refresh() -> dict`
+  - `disabled_collectors() -> set[str]`
+  - `judge_on() -> bool`
+  - `enrich_on() -> bool`
+- **class `ProgressHeartbeat`** (L45) : Refreshes last_seen_at mid-scan so a long cycle doesn't read as
+  - `__init__(sink)`
+  - `reset() -> None`
+  - `beat() -> None`
+- **class `MaintenanceCommand(StrEnum)`** (L72)
+  - fields: `PRUNE`, `CLEAR`, `REJUDGE`, `RENARRATE`, `RESET_BASELINE`
+  - `apply(sink, max_db_bytes) -> str`
+- **class `ControlLoop`** (L114) : The daemon loop: polls the control row, runs one-shot maintenance
+  - fields: `POLL_SECONDS`
+  - `__init__(sink, settings, run_cycle, max_db_bytes, shutdown_event)`
+  - `run_forever(interval) -> None`
+  - `_cycle_or_log() -> None`
+  - `_run_pending_command(ctrl) -> None`
+  - `_execute(raw) -> str`
+  - `_heartbeat(status, current_interval) -> None`
+- `_prune(sink, max_db_bytes) -> str` (L84)
+- `_clear(sink, _max_db_bytes) -> str` (L89)
+- `_rejudge(sink, _max_db_bytes) -> str` (L93)
+- `_renarrate(sink, _max_db_bytes) -> str` (L97)
+- `_reset_baseline(sink, _max_db_bytes) -> str` (L101)
+
 #### `avai.host_monitor.coverage` · `avai/host_monitor/coverage.py` · 118 lines
 
 _Second-stage LLM that assesses YARA ruleset coverage for the host._
@@ -1784,6 +1850,31 @@ _Second-stage LLM that assesses YARA ruleset coverage for the host._
   - `__init__(prompts, client, model)`
   - `assess(ruleset, host) -> Optional[dict]`
   - `_clean_items(raw, label_key) -> list[dict]` `@staticmethod`
+
+#### `avai.host_monitor.cycle_steps` · `avai/host_monitor/cycle_steps.py` · 248 lines
+
+_End-of-cycle reports, run once the cycle's verdicts are in. Every step is_
+
+Constants: `_MAX_DRIVERS_NAMED`
+
+- **class `CycleStep(Protocol)`** (L25)
+  - `run(run_id, started) -> None`
+- **class `NarrativeStep`** (L29) : Synthesise the active non-benign findings into one incident digest,
+  - `__init__(sink, narrator)`
+  - `run(run_id, started) -> None`
+  - `_unchanged(digest) -> bool`
+- **class `RiskScoreStep`** (L85) : Compute and store the deterministic host posture score, with a delta
+  - `__init__(sink)`
+  - `run(run_id, started) -> None`
+  - `explain(result, prev) -> str` `@staticmethod`
+- **class `YaraStatusStep`** (L151) : Persist the file scanner's last compile summary (rules loaded, skipped,
+  - `__init__(sink, collectors)`
+  - `run(run_id, started) -> None`
+- **class `CoverageStep`** (L177) : Assess whether the loaded YARA ruleset covers this host's threat
+  - `__init__(sink, assessor)`
+  - `run(run_id, started) -> None`
+  - `_unchanged(fingerprint) -> bool`
+  - `_fingerprint(ruleset) -> str` `@staticmethod`
 
 #### `avai.host_monitor.enums` · `avai/host_monitor/enums.py` · 55 lines
 
@@ -1845,6 +1936,64 @@ Constants: `_NET_FS`
 - **class `WindowsCertParser`** (L383) : ``Get-ChildItem Cert:\LocalMachine\Root \| ConvertTo-Json``.
   - `parse(text) -> list[dict]`
 
+
+#### `avai.host_monitor.finding_stages` · `avai/host_monitor/finding_stages.py` · 594 lines
+
+_The per-collector finding pipeline: context stages add signals to each_
+
+Constants: `_MIN_DRIFT_WINDOW`, `_MAX_VERIFY_PER_COLLECTOR`, `_MAX_INVESTIGATE_PER_COLLECTOR`, `_HOST_CONTEXT_LIMIT`, `_MAX_RELATED`, `_MAX_RELATED_DNS`, `_FEEDBACK_PHRASE`, `_EMPTY_CORRELATION`
+
+- **class `HostBaseline`** `@dataclass(frozen=True)` (L57) : How 'learned' this host is, measured once per cycle.
+  - fields: `total_runs: int`, `established: bool`, `cutoff_at: Optional[str]`
+  - `measure(sink, min_runs) -> HostBaseline` `@classmethod`
+  - `is_novel(first_seen) -> bool`
+- **class `FindingBatch`** `@dataclass` (L85) : One collector's unjudged entries on their way to a verdict. ``rows``
+  - fields: `collector: Collector`, `entries: list[dict]`, `rows: list[dict]`, `run_id: Optional[str]`, `baseline: HostBaseline`, `judgments: list[Judgment]`, `indicators_looked_up: int`
+  - `rows_by_hash() -> dict[str, dict]`
+  - `entries_by_hash() -> dict[str, dict]`
+  - `context() -> dict[str, dict]`
+- **class `FindingStage(Protocol)`** (L124)
+  - `apply(batch) -> None`
+- **class `FindingPipeline`** (L128) : Runs its stages in order. The order is decided where the pipeline is
+  - `__init__(stages)`
+  - `run(batch) -> None`
+- **class `EvidenceStage`** (L140) : Attach external threat-intel evidence to each entry as ``evidence``.
+  - `__init__(chain, settings, heartbeat)`
+  - `apply(batch) -> None`
+  - `_evidence(batch, row) -> list[dict]`
+- **class `BaselineStage`** (L191) : Attach a ``baseline`` object so the judge weighs novelty against this
+  - `__init__(sink)`
+  - `apply(batch) -> None`
+  - `_timeline() -> list[str]`
+  - `_describe(host, timeline, first_seen, times_seen) -> dict` `@staticmethod`
+- **class `ProcessBehavior`** (L250) : Resolves the PIDs and process names an artifact ran as, and reads what
+  - `__init__(sink)`
+  - `pids_and_names(collector_name, rows, since) -> tuple[dict, dict]`
+  - `related(ctx, pids, names) -> dict` `@staticmethod`
+  - `_from_processes(rows) -> tuple[dict, dict]` `@staticmethod`
+  - `_from_launch_items(rows, since) -> tuple[dict, dict]`
+- **class `CorrelationStage`** (L333) : Attach a ``related`` object: the artifact's behaviour since the
+  - `__init__(sink, behavior)`
+  - `apply(batch) -> None`
+- **class `YaraContextStage`** (L378) : Attach the matched rule's metadata (``rule_meta``) and a redacted
+  - `apply(batch) -> None`
+  - `_loads_or_none(raw)` `@staticmethod`
+- **class `JudgeStage`** (L411) : Classify the entries, with this host's operator feedback for the
+  - `__init__(judge, sink)`
+  - `apply(batch) -> None`
+  - `_hints(collector_name, base_hints) -> str`
+- **class `VerifyStage`** (L444) : Re-check each ``malicious`` verdict with an independent skeptic; a
+  - `__init__(verifier)`
+  - `apply(batch) -> None`
+  - `_verify(collector, j, entries) -> Judgment`
+- **class `InvestigateStage`** (L493) : Re-judge each ``unknown`` verdict with a deliberately gathered bundle:
+  - `__init__(investigator, sink, behavior)`
+  - `apply(batch) -> None`
+  - `_investigate(collector, j, bundle) -> Judgment`
+- **class `_InvestigationBundle`** `@dataclass(frozen=True)` (L548) : The context shared by every investigation in one batch, gathered once.
+  - fields: `entries: dict[str, dict]`, `pids_by_hash: dict`, `names_by_hash: dict`, `history: dict`, `host_findings: list`
+  - `gather(sink, behavior, batch) -> _InvestigationBundle` `@classmethod`
+  - `finding_for(j) -> dict`
 
 #### `avai.host_monitor.hosts` · `avai/host_monitor/hosts/__init__.py` · 30 lines
 
@@ -2052,7 +2201,7 @@ _LLM plumbing shared by every stage: credentials, completion clients, and_
   - `ask() -> dict`
   - `ask_or_none() -> Optional[dict]`
 
-#### `avai.host_monitor.main` · `avai/host_monitor/main.py` · 388 lines
+#### `avai.host_monitor.main` · `avai/host_monitor/main.py` · 390 lines
 
 _CLI entrypoint and argument parser for `avai monitor`._
 
@@ -2063,7 +2212,7 @@ _CLI entrypoint and argument parser for `avai monitor`._
 - `_has_prompt(system, stage) -> bool` (L44)
 - `_build_parser() -> argparse.ArgumentParser` (L119)
 - `build_runner(args) -> 'tuple[Runner, object]'` (L249) : Wire a fully-configured Runner (collectors, judge, sink, seeded control
-- `main() -> int` (L339)
+- `main() -> int` (L341)
 
 #### `avai.host_monitor.models` · `avai/host_monitor/models.py` · 830 lines
 
@@ -2277,54 +2426,35 @@ _Deterministic 0-100 host posture score (no LLM)._
 - `_risk_grade(score) -> str` (L9)
 - `compute_risk_score(integrity, malicious, suspicious, nopasswd_sudoers, extra_uid0) -> dict` (L16) : Deterministic host posture score in [0, 100] with a letter grade and
 
-#### `avai.host_monitor.runner` · `avai/host_monitor/runner.py` · 1058 lines
+#### `avai.host_monitor.runner` · `avai/host_monitor/runner.py` · 331 lines
 
 _Orchestrator: drives collectors against the sink each cycle._
 
-Constants: `_MIN_DRIFT_WINDOW`, `_MAX_VERIFY_PER_COLLECTOR`, `_MAX_INVESTIGATE_PER_COLLECTOR`, `_HOST_CONTEXT_LIMIT`, `_FEEDBACK_PHRASE`
+Constants: `_BYTES_PER_MB`
 
-- **class `Runner`** (L55) : Drives snapshot collectors (per-cycle) and streaming collectors
-  - fields: `_CONTROL_POLL_SECONDS`
-  - `__init__(sink, snapshot_collectors, streaming_collectors, judge, lookback_min, max_db_bytes, enrichment_chain, baseline_min_runs, narrator, coverage, verifier, investigator)`
+- **class `RunnerConfig`** `@dataclass(frozen=True)` (L50) : Everything the monitor runs with. The optional LLM stages are None
+  - fields: `sink: Sink`, `snapshot_collectors: list[SnapshotCollector]`, `streaming_collectors: list[StreamingCollector]`, `judge: Judge`, `lookback_min: int`, `max_db_bytes: int`, `enrichment_chain: Optional[EnrichmentChain]`, `baseline_min_runs: int`, `narrator: Optional[IncidentNarrator]`, `coverage: Optional[YaraCoverageAssessor]`, `verifier: Optional[MaliciousVerdictVerifier]`, `investigator: Optional[UnknownFindingInvestigator]`
+- **class `CollectionCycle`** `@dataclass` (L69) : One scan: collect every snapshot collector, judge what's new
+  - fields: `config: RunnerConfig`, `settings: ControlSettings`, `heartbeat: ProgressHeartbeat`, `snapshot_pipeline: FindingPipeline`, `streaming_pipeline: FindingPipeline`, `steps: list[CycleStep]`, `shutdown_event: threading.Event`
+  - `run() -> tuple[str, int, int]`
+  - `_collect_all(run_id, started, baseline) -> tuple[int, int]`
+  - `_collect(c, run_id, started, baseline) -> None`
+  - `_judge_snapshot(c, rows, run_id, baseline) -> tuple[int, int]`
+  - `_judge_streaming(baseline) -> None`
+  - `_judge_stream(batch) -> None`
+  - `_apply_feedback() -> None`
+  - `_rotate() -> None`
+- **class `Runner`** (L238) : Coordinates the collection cycle, the control loop and the streaming
+  - `__init__(config)`
   - `request_shutdown() -> None`
-  - `_refresh_control() -> dict`
-  - `_disabled_collectors() -> set[str]`
-  - `_judge_on() -> bool`
-  - `_enrich_on() -> bool`
-  - `_heartbeat(status, current_interval) -> None`
-  - `_progress_heartbeat() -> None`
-  - `_run_pending_command(ctrl) -> None`
-  - `_dispatch_command(cmd) -> str`
   - `setup() -> None`
   - `start_streaming() -> None`
   - `stop_streaming() -> None`
   - `run_once() -> tuple[str, int, int]`
-  - `_host_baseline() -> dict`
-  - `_annotate_baseline(c, unjudged, host_baseline) -> None`
-  - `_attach_correlation(c, unjudged, rows, run_id) -> None`
-  - `_behavior_pid_map(c, rows, since) -> tuple[dict, dict]`
-  - `_related_from_ctx(ctx, pids, names) -> dict` `@staticmethod`
-  - `_process_pid_map(rows) -> tuple[dict, dict]` `@staticmethod`
-  - `_launch_item_pid_map(rows, since) -> tuple[dict, dict]`
-  - `_attach_yara_context(c, unjudged, rows) -> None`
-  - `_loads_or_none(raw)` `@staticmethod`
-  - `_judgment_context(unjudged) -> dict` `@staticmethod`
-  - `_verify_judgments(collector, judgments, unjudged) -> list`
-  - `_apply_feedback() -> None`
-  - `_judge_hints(collector_name, base_hints) -> str`
-  - `_investigate_unknowns(c, judgments, unjudged, rows) -> list`
-  - `_full_history_context(pids, names) -> dict`
-  - `_host_context() -> list`
-  - `_run_collector(c, run_id, started, host_baseline) -> None`
-  - `_enrich_entries(c, unjudged, rows) -> int`
-  - `_judge_streaming_collectors(host_baseline) -> None`
-  - `_generate_narrative(run_id, started) -> None`
-  - `_generate_risk_score(run_id, started) -> None`
-  - `_write_yara_status() -> None`
-  - `_generate_coverage(run_id, started) -> None`
-  - `_ruleset_fingerprint(ruleset) -> str` `@staticmethod`
-  - `_risk_explanation(result, prev) -> str` `@staticmethod`
   - `run_forever(interval) -> None`
+- `_snapshot_stages(config, settings, heartbeat) -> list[FindingStage]` (L291)
+- `_streaming_stages(config) -> list[FindingStage]` (L312)
+- `_cycle_steps(config) -> list[CycleStep]` (L322)
 
 #### `avai.host_monitor.runtime` · `avai/host_monitor/runtime/__init__.py` · 65 lines
 
@@ -2548,12 +2678,18 @@ Constants: `PROCESSES`, `NETWORK_CONNECTIONS`, `NETWORK_FLOWS`, `DNS_QUERIES`, `
 - **class `Slice`** `@dataclass(frozen=True)` (L60)
   - fields: `name: str`, `model: type[_RowBase]`, `streaming: bool`
 
-#### `avai.host_monitor.streaming` · `avai/host_monitor/streaming.py` · 192 lines
+#### `avai.host_monitor.streaming` · `avai/host_monitor/streaming.py` · 231 lines
 
 _Background worker that drives one StreamingCollector in a thread._
 
-- **class `StreamingWorker`** (L27) : Long-lived, self-healing execution policy for a
-  - `__init__(collector, sink, hostname, batch_size, flush_interval_s, join_timeout_s, backoff, sleeper, listener, healthy_reset_s)`
+- **class `SupervisionPolicy`** `@dataclass(frozen=True)` (L30) : How a streaming worker buffers, restarts and reports. The defaults are
+  - fields: `batch_size: int`, `flush_interval_s: float`, `join_timeout_s: float`, `healthy_reset_s: float`, `backoff: BackoffPolicy`, `listener: SupervisionListener`
+- **class `StreamingSupervisor`** (L42) : Starts one worker per streaming collector at boot and joins them all on
+  - `__init__(sink, collectors, policy)`
+  - `start() -> None`
+  - `stop() -> None`
+- **class `StreamingWorker`** (L75) : Long-lived, self-healing execution policy for a
+  - `__init__(collector, sink, hostname, policy, sleeper)`
   - `start() -> None`
   - `stop() -> None`
   - `_flush(buffer) -> None`
