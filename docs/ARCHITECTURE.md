@@ -1085,7 +1085,7 @@ auto-discovered, cached in the DB with a per-source TTL, rate-limited per host.
 classDiagram
     class IndicatorType { <<StrEnum>> SHA256 SHA1 MD5 IPV4 IPV6 DOMAIN URL CVE PACKAGE OS_VERSION }
     class VerdictHint { <<StrEnum>> MALICIOUS SUSPICIOUS BENIGN UNKNOWN }
-    class Indicator { <<frozen>> type value context +__post_init__ canonicalise }
+    class Indicator { <<frozen>> type value +__post_init__ canonicalise }
     class Evidence { <<frozen>> source indicator verdict_hint confidence summary details fetched_at }
     class Enricher {
         <<ABC>>
@@ -1099,8 +1099,7 @@ classDiagram
     class _TokenBucket { +take() }
     HttpClient o-- _TokenBucket : per host
     class EvidenceCache { +get(enricher, indicator) +put(evidence) }
-    class EnrichmentChain { +sources +enrich(indicator) list~Evidence~ +stats() -_lookup() -_fetch() -_forward_chain() }
-    class SourceStats { <<dataclass>> hit miss rate_limited error none cached }
+    class EnrichmentChain { +sources +enrich(indicator) list~Evidence~ -_lookup() -_fetch() -_forward_chain() }
     class IndicatorExtractor { <<ABC>> +extract(row) Iterable~Indicator~ }
 
     Indicator --> IndicatorType
@@ -1110,7 +1109,6 @@ classDiagram
     Enricher o-- HttpClient
     EnrichmentChain o-- Enricher : 0..19
     EnrichmentChain o-- EvidenceCache
-    EnrichmentChain *-- SourceStats : per source
     EvidenceCache ..> EnrichmentRow : enrichment_evidence
     IndicatorExtractor ..> Indicator : produces
     class Extractors["18 extractors + _NoOp"]
@@ -1169,11 +1167,10 @@ flowchart TD
     B --> C{supports type?}
     C -->|no| B
     C -->|yes| D{cache.get fresh<br/>within ttl_hours?}
-    D -->|hit| E[append cached, tally cached] --> B
+    D -->|hit| E[append cached] --> B
     D -->|miss| F[_fetch: enricher._fetch via HttpClient<br/>token bucket, retries on 429/5xx]
-    F -->|RateLimitedError| G[tally rate_limited] --> B
-    F -->|EnricherError or Exception| H[log + tally error] --> B
-    F -->|None| I[tally none] --> B
+    F -->|RateLimitedError, EnricherError<br/>or any Exception| H[log, skip source] --> B
+    F -->|None| B
     F -->|Evidence| J[cache.put + append] --> B
     B -->|done| K{indicator is CVE?}
     K -->|yes| Z([return evidence list])
@@ -1181,9 +1178,8 @@ flowchart TD
     L --> M[recurse enrich CVE indicator] --> Z
 ```
 
-`_lookup` is the cache-then-fetch step for one source; each outcome bumps
-that source's `SourceStats`, and `stats()` returns them as plain dicts.
-Nothing in production reads `stats()` today (only tests do).
+`_lookup` is the cache-then-fetch step for one source; `_fetch` logs and
+swallows the source's failure so one broken source never stops the others.
 
 The chain never aggregates: the judge sees every `Evidence` entry as
 `{src, type, value, hint, confidence, note}`. `worst_hint()` exists for callers
@@ -2972,7 +2968,7 @@ _Second-opinion LLM that adversarially checks ``malicious`` verdicts._
 _Threat-intel enrichment layer._
 
 
-#### `avai.enrichers.base` · `avai/enrichers/base.py` · 188 lines
+#### `avai.enrichers.base` · `avai/enrichers/base.py` · 186 lines
 
 _Core abstractions for the enrichment layer._
 
@@ -2983,20 +2979,20 @@ Constants: `LOG`, `CVSS_CRITICAL`, `CVSS_HIGH`, `_HINT_PRIORITY`
 - **class `VerdictHint(StrEnum)`** `@unique` (L48) : Coarse signal an enricher contributes toward the LLM verdict.
   - fields: `MALICIOUS`, `SUSPICIOUS`, `BENIGN`, `UNKNOWN`
 - **class `Indicator`** `@dataclass(frozen=True)` (L58) : An artifact extracted from a collector row.
-  - fields: `type: IndicatorType`, `value: str`, `context: Mapping[str, str]`
+  - fields: `type: IndicatorType`, `value: str`
   - `__post_init__()`
-- **class `Evidence`** `@dataclass(frozen=True)` (L89) : Result of an enricher lookup.
+- **class `Evidence`** `@dataclass(frozen=True)` (L87) : Result of an enricher lookup.
   - fields: `source: str`, `indicator: Indicator`, `verdict_hint: VerdictHint`, `confidence: float`, `summary: str`, `details: Mapping[str, Any]`, `fetched_at: datetime`
-- **class `EnricherError(Exception)`** (L107) : Base of all enricher-side problems. Chain catches and logs.
-- **class `RateLimitedError(EnricherError)`** (L111) : Source replied with 429 or equivalent. Caller should back off.
-- **class `Enricher(ABC)`** (L115) : One source of threat intel.
+- **class `EnricherError(Exception)`** (L105) : Base of all enricher-side problems. Chain catches and logs.
+- **class `RateLimitedError(EnricherError)`** (L109) : Source replied with 429 or equivalent. Caller should back off.
+- **class `Enricher(ABC)`** (L113) : One source of threat intel.
   - fields: `name: ClassVar[str]`, `supports_types: ClassVar[frozenset[IndicatorType]]`, `requires_token: ClassVar[Optional[str]]`, `ttl_hours: ClassVar[int]`
   - `env_token() -> Optional[str]` `@classmethod`
   - `from_env() -> Optional['Enricher']` `@classmethod`
   - `supports(indicator) -> bool`
   - `_fetch(indicator) -> Optional[Evidence]` `@abstractmethod`
   - `freshness_cutoff() -> datetime`
-- `worst_hint(hints) -> VerdictHint` (L184) : Aggregate multiple evidence hints to the worst-case verdict.
+- `worst_hint(hints) -> VerdictHint` (L182) : Aggregate multiple evidence hints to the worst-case verdict.
 
 #### `avai.enrichers.cache` · `avai/enrichers/cache.py` · 180 lines
 
@@ -3015,24 +3011,21 @@ Constants: `LOG`
 - `get_model(base_cls)` (L74) : Return the ORM class registered against ``base_cls`` (preferred),
 - `_evidence_from_row(row, indicator) -> Evidence` (L146)
 
-#### `avai.enrichers.chain` · `avai/enrichers/chain.py` · 150 lines
+#### `avai.enrichers.chain` · `avai/enrichers/chain.py` · 120 lines
 
 _Chain-of-responsibility dispatcher._
 
 Constants: `LOG`
 
-- **class `SourceStats`** `@dataclass` (L35) : How one source answered this chain's lookups. A fresh fetch counts
-  - fields: `hit: int`, `miss: int`, `rate_limited: int`, `error: int`, `none: int`, `cached: int`
-- **class `EnrichmentChain`** (L47)
+- **class `EnrichmentChain`** (L33)
   - fields: `_MAX_FORWARD_CVES`
   - `__init__(enrichers, cache)`
   - `sources() -> list[str]` `@property`
-  - `stats() -> dict[str, dict[str, int]]`
   - `enrich(indicator) -> list[Evidence]`
   - `_lookup(enricher, indicator) -> Optional[Evidence]`
-  - `_fetch(enricher, indicator, tally) -> Optional[Evidence]` `@staticmethod`
+  - `_fetch(enricher, indicator) -> Optional[Evidence]` `@staticmethod`
   - `_forward_chain(evidence) -> list[Evidence]`
-- `_advisory_ids(evidence) -> Iterable[str]` (L141) : The distinct CVE/GHSA ids reported across ``evidence``, upper-cased,
+- `_advisory_ids(evidence) -> Iterable[str]` (L111) : The distinct CVE/GHSA ids reported across ``evidence``, upper-cased,
 
 #### `avai.enrichers.http` · `avai/enrichers/http.py` · 155 lines
 
@@ -3051,51 +3044,51 @@ Constants: `LOG`, `_USER_AGENT`, `_DEFAULT_TIMEOUT`, `_RETRY_STATUS`, `_RETRY_BA
   - `_host_of(url) -> str`
   - `_request(method, url) -> requests.Response`
 
-#### `avai.enrichers.indicators` · `avai/enrichers/indicators.py` · 427 lines
+#### `avai.enrichers.indicators` · `avai/enrichers/indicators.py` · 416 lines
 
 _Per-collector indicator extraction (Strategy pattern)._
 
 Constants: `LOG`, `_SHA256_HEX_LEN`, `_ANY_HOST`, `_DOMAIN_RE`, `_NOOP`
 
-- **class `IndicatorExtractor(ABC)`** (L146)
+- **class `IndicatorExtractor(ABC)`** (L144)
   - `extract(row) -> Iterable[Indicator]` `@abstractmethod`
-- **class `ProcessExtractor(IndicatorExtractor)`** (L151)
+- **class `ProcessExtractor(IndicatorExtractor)`** (L149)
   - `extract(row)`
-- **class `NetworkConnectionExtractor(IndicatorExtractor)`** (L158)
+- **class `NetworkConnectionExtractor(IndicatorExtractor)`** (L156)
   - `extract(row)`
-- **class `NetworkFlowExtractor(IndicatorExtractor)`** (L174) : tcpdump-aggregator flows: enrich the public destination IP
+- **class `NetworkFlowExtractor(IndicatorExtractor)`** (L170) : tcpdump-aggregator flows: enrich the public destination IP
   - `extract(row)`
-- **class `DnsQueryExtractor(IndicatorExtractor)`** (L188) : DNS questions: enrich the queried domain so the judge sees
+- **class `DnsQueryExtractor(IndicatorExtractor)`** (L183) : DNS questions: enrich the queried domain so the judge sees
   - `extract(row)`
-- **class `HostsFileExtractor(IndicatorExtractor)`** (L203) : /etc/hosts mappings: enrich the target IP (if public) and each
+- **class `HostsFileExtractor(IndicatorExtractor)`** (L197) : /etc/hosts mappings: enrich the target IP (if public) and each
   - `extract(row)`
-- **class `ListeningPortExtractor(IndicatorExtractor)`** (L218)
+- **class `ListeningPortExtractor(IndicatorExtractor)`** (L212)
   - `extract(row)`
-- **class `LaunchItemExtractor(IndicatorExtractor)`** (L228)
+- **class `LaunchItemExtractor(IndicatorExtractor)`** (L220)
   - `extract(row)`
-- **class `SetuidFileExtractor(IndicatorExtractor)`** (L236)
+- **class `SetuidFileExtractor(IndicatorExtractor)`** (L228)
   - `extract(row)`
-- **class `QuarantineExtractor(IndicatorExtractor)`** (L243) : macOS quarantine_events: `origin_url` is what the LLM judge
+- **class `QuarantineExtractor(IndicatorExtractor)`** (L235) : macOS quarantine_events: `origin_url` is what the LLM judge
   - `extract(row)`
-- **class `BrowserExtensionExtractor(IndicatorExtractor)`** (L256) : Pull host_permissions out of extension manifests and emit them
+- **class `BrowserExtensionExtractor(IndicatorExtractor)`** (L248) : Pull host_permissions out of extension manifests and emit them
   - `extract(row)`
-- **class `InstalledAppExtractor(IndicatorExtractor)`** (L275)
+- **class `InstalledAppExtractor(IndicatorExtractor)`** (L267)
   - `extract(row)`
-- **class `SystemIntegrityExtractor(IndicatorExtractor)`** (L289)
+- **class `SystemIntegrityExtractor(IndicatorExtractor)`** (L280)
   - `extract(row)`
-- **class `ProcessExecEventExtractor(IndicatorExtractor)`** (L301)
+- **class `ProcessExecEventExtractor(IndicatorExtractor)`** (L291)
   - `extract(row)`
-- **class `RecordedDigestExtractor(IndicatorExtractor)`** (L308) : Rows that already carry the file's sha256 (file_integrity, and the
+- **class `RecordedDigestExtractor(IndicatorExtractor)`** (L298) : Rows that already carry the file's sha256 (file_integrity, and the
   - `extract(row)`
-- **class `ProxyConfigExtractor(IndicatorExtractor)`** (L339) : Enrich a configured proxy host (public IP/domain) and PAC URL.
+- **class `ProxyConfigExtractor(IndicatorExtractor)`** (L328) : Enrich a configured proxy host (public IP/domain) and PAC URL.
   - `extract(row)`
-- **class `NetworkShareExtractor(IndicatorExtractor)`** (L349) : Enrich the server of a mounted network share.
+- **class `NetworkShareExtractor(IndicatorExtractor)`** (L338) : Enrich the server of a mounted network share.
   - `extract(row)`
-- **class `LoginSessionExtractor(IndicatorExtractor)`** (L360) : Enrich a remote login source when it's a public IP/domain.
+- **class `LoginSessionExtractor(IndicatorExtractor)`** (L349) : Enrich a remote login source when it's a public IP/domain.
   - `extract(row)`
-- **class `DnsResolverExtractor(IndicatorExtractor)`** (L368) : Enrich the configured nameserver when it's a *public* IP: a
+- **class `DnsResolverExtractor(IndicatorExtractor)`** (L357) : Enrich the configured nameserver when it's a *public* IP: a
   - `extract(row)`
-- **class `_NoOp(IndicatorExtractor)`** (L380) : Sink for collectors we deliberately don't enrich yet.
+- **class `_NoOp(IndicatorExtractor)`** (L369) : Sink for collectors we deliberately don't enrich yet.
   - `extract(row)`
 - `_is_ipv4(s) -> bool` (L48)
 - `_is_ipv6(s) -> bool` (L55)
@@ -3103,11 +3096,11 @@ Constants: `LOG`, `_SHA256_HEX_LEN`, `_ANY_HOST`, `_DOMAIN_RE`, `_NOOP`
 - `_is_domain(s) -> bool` (L77)
 - `_public_host_type(host) -> Optional[IndicatorType]` (L83) : IPV4, IPV6 or DOMAIN for a host worth sending to threat-intel. None
 - `_host_indicators(host) -> Iterable[Indicator]` (L98) : The host as an indicator when it's public and one of ``kinds``.
-- `_file_hash_indicators(path, context) -> Iterable[Indicator]` (L109)
-- `_safe_loads(s) -> object` (L115)
-- `_sha256_of_file(path) -> str | None` (L124)
-- `_share_server(remote) -> str | None` (L324) : Pull the server host out of a share path: ``//server/share``,
-- `extract_indicators(collector, row) -> list[Indicator]` (L416) : One row in, list of indicators out. Deduped within the row.
+- `_file_hash_indicators(path) -> Iterable[Indicator]` (L107)
+- `_safe_loads(s) -> object` (L113)
+- `_sha256_of_file(path) -> str | None` (L122)
+- `_share_server(remote) -> str | None` (L313) : Pull the server host out of a share path: ``//server/share``,
+- `extract_indicators(collector, row) -> list[Indicator]` (L405) : One row in, list of indicators out. Deduped within the row.
 
 #### `avai.enrichers.registry` · `avai/enrichers/registry.py` · 102 lines
 

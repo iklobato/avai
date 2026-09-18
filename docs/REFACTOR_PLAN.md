@@ -651,6 +651,23 @@ The layering test is green. 1127 tests pass; line coverage of the whole
 on `src`, `tests` and `tools`. The appendix of `docs/ARCHITECTURE.md` is
 regenerated from the code (122 modules, 0 mismatches).
 
+## Follow-up: dead enrichment data
+
+Phase 8 found two things nothing in production read, and both are gone on
+`refactor/p11-dead-code`:
+
+- `EnrichmentChain.stats()` and its `SourceStats` counters. Only tests
+  called it (four files). The tests that also checked a failing source is
+  skipped keep that check through the evidence list; the enrichment-off
+  test now checks the source got no call (dropping the `enrich_on` gate
+  turns it red); and a new test covers a plain `EnricherError`, which no
+  test raised before (making that branch re-raise turns it red).
+- `Indicator.context`. Nine extractor sites filled it and nothing read it.
+  Dedup in `extract_indicators` keys on `(type, value)`, not on the
+  dataclass equality that `context` took part in, so no output changes.
+
+1124 tests pass; line coverage of the whole package is still 92%.
+
 ## Order and why
 
 `0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10`
