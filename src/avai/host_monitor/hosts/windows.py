@@ -78,6 +78,8 @@ from ..runtime import CommandRunner, CommandSnapshot, JsonLineStreamSource
 # Windows doesn't have (e.g. sudoers) so their shared parser yields nothing
 # without needing a platform branch.
 _NONEXISTENT = Path("C:/Windows/Temp/__avai_no_such_file__")
+# Enough verbose-CSV columns to reach Task To Run (index 8).
+_SCHTASKS_MIN_COLUMNS = 9
 
 
 class WindowsFilesystemLayout:
@@ -308,7 +310,7 @@ class WindowsLaunchItemsCollector(SnapshotCollector):
         rows = []
         reader = csv.reader(io.StringIO(text))
         for cols in reader:
-            if len(cols) < 9:
+            if len(cols) < _SCHTASKS_MIN_COLUMNS:
                 continue
             taskname = cols[1].strip()
             # Skip repeated header rows that /v sometimes interleaves.

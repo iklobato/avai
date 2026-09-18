@@ -161,7 +161,7 @@ class MacOSPrivilegedAccounts:
         out = self._runner.text(["dscl", ".", "-list", "/Users", "UniqueID"])
         for line in out.splitlines():
             cols = line.split()
-            if len(cols) >= 2 and cols[-1] == "0":
+            if len(cols) > 1 and cols[-1] == "0":
                 yield {
                     "kind": "account",
                     "subject": cols[0],

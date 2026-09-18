@@ -40,6 +40,9 @@ from .runner import Runner, RunnerConfig
 from .sink import Sink
 from .verifier import MaliciousVerdictVerifier
 
+# The first SIGINT/SIGTERM stops gracefully; this many force-quits.
+_FORCE_QUIT_SIGNALS = 2
+
 
 def _has_prompt(system: str, stage: str) -> bool:
     if not system:
@@ -363,7 +366,7 @@ def main() -> int:
 
         def _handle_signal(signum, _frame):
             _signal_count["n"] += 1
-            if _signal_count["n"] >= 2:
+            if _signal_count["n"] >= _FORCE_QUIT_SIGNALS:
                 LOG.warning("second signal, forcing immediate exit")
                 os._exit(130)
             LOG.warning(

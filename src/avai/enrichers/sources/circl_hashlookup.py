@@ -9,6 +9,7 @@ https://hashlookup.circl.lu/
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -49,9 +50,9 @@ class CirclHashlookupEnricher(Enricher):
             f"{_BASE}/{kind}/{indicator.value}",
             headers={"Accept": "application/json"},
         )
-        if resp.status_code == 404:
+        if resp.status_code == HTTPStatus.NOT_FOUND:
             return None
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         body = resp.json()
         # Real CIRCL fields (verified against the live API): FileName,

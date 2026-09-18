@@ -54,6 +54,7 @@ _BLOCK_NOTE = "# managed by `avai install-hosts` — do not edit between the mar
 # the API edge so the transform below can assume a clean value.
 _LABEL = r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
 _HOSTNAME_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})*$")
+_MAX_HOSTNAME_LEN = 253  # RFC 1035, as text without the trailing dot
 
 
 class HostsError(RuntimeError):
@@ -221,7 +222,7 @@ class Outcome(Enum):
 
 
 def _validate_hostname(hostname: str) -> None:
-    if not _HOSTNAME_RE.match(hostname) or len(hostname) > 253:
+    if not _HOSTNAME_RE.match(hostname) or len(hostname) > _MAX_HOSTNAME_LEN:
         raise HostsError(f"invalid hostname: {hostname!r}")
 
 

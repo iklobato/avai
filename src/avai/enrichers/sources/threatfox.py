@@ -6,6 +6,7 @@ https://threatfox-api.abuse.ch/
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -40,7 +41,7 @@ class ThreatFoxEnricher(Enricher):
             json={"query": "search_ioc", "search_term": indicator.value},
             headers={"Auth-Key": self._key},
         )
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         body = resp.json()
         if body.get("query_status") != "ok":

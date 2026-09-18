@@ -243,6 +243,10 @@ def _unescape_mount_field(field: str) -> str:
     return "".join(out)
 
 
+# device mountpoint fstype options (dump and pass are optional)
+_MOUNTS_FIELDS = 4
+
+
 def _parse_mounts(text: str) -> list:
     """Parse /proc/mounts content into ``_HostPart`` rows, dropping pseudo
     filesystems and de-duplicating by mountpoint (keeping the first, i.e.
@@ -251,7 +255,7 @@ def _parse_mounts(text: str) -> list:
     parts: list = []
     for line in text.splitlines():
         fields = line.split()
-        if len(fields) < 4:
+        if len(fields) < _MOUNTS_FIELDS:
             continue
         device, mountpoint, fstype, opts = (
             _unescape_mount_field(fields[0]),

@@ -10,6 +10,7 @@ https://crt.sh/
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -41,7 +42,7 @@ class CrtShEnricher(Enricher):
             params={"q": indicator.value, "output": "json"},
             timeout=12.0,
         )
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         try:
             entries = resp.json() or []

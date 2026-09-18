@@ -5,6 +5,7 @@ https://docs.greynoise.io/reference/get_v3-community-ip
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -39,9 +40,9 @@ class GreyNoiseEnricher(Enricher):
         # 404 = IP not observed -> genuine no-opinion. Other non-200s
         # (400 bad request, 401/403 bad key) are real errors; raise so the
         # chain logs them instead of silently masking a misconfiguration.
-        if resp.status_code == 404:
+        if resp.status_code == HTTPStatus.NOT_FOUND:
             return None
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             raise EnricherError(f"greynoise returned {resp.status_code}")
         body = resp.json()
         classification = body.get("classification") or "unknown"

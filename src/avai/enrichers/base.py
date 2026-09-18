@@ -18,6 +18,10 @@ from typing import Any, ClassVar, Mapping, Optional
 
 LOG = logging.getLogger("avai.enrichers")
 
+# CVSS v3 severity bands: critical from 9.0, high from 7.0.
+CVSS_CRITICAL = 9.0
+CVSS_HIGH = 7.0
+
 
 @unique
 class IndicatorType(StrEnum):

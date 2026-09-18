@@ -5,9 +5,12 @@ https://docs.github.com/en/rest/security-advisories/global-advisories
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
+    CVSS_CRITICAL,
+    CVSS_HIGH,
     Enricher,
     Evidence,
     Indicator,
@@ -40,7 +43,7 @@ class GitHubAdvisoryEnricher(Enricher):
                 "X-GitHub-Api-Version":  "2022-11-28",
             },
         )
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         items = resp.json() or []
         if not items:
@@ -48,9 +51,9 @@ class GitHubAdvisoryEnricher(Enricher):
         first = items[0]
         severity = (first.get("severity") or "").lower()
         score = (first.get("cvss") or {}).get("score")
-        if severity in {"critical"} or (score and score >= 9):
+        if severity in {"critical"} or (score and score >= CVSS_CRITICAL):
             hint, conf = VerdictHint.MALICIOUS, 0.9
-        elif severity in {"high"} or (score and score >= 7):
+        elif severity in {"high"} or (score and score >= CVSS_HIGH):
             hint, conf = VerdictHint.SUSPICIOUS, 0.7
         else:
             hint, conf = VerdictHint.UNKNOWN, 0.4

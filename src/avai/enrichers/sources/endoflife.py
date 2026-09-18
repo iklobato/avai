@@ -5,6 +5,7 @@ https://endoflife.date/api
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 from datetime import datetime
 from typing import ClassVar, Optional
 
@@ -36,7 +37,7 @@ class EndOfLifeEnricher(Enricher):
         if not (product and cycle):
             return None
         resp = self._http.get(f"{_BASE}/{product}/{cycle}.json")
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         body = resp.json()
         eol = body.get("eol")

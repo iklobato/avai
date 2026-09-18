@@ -5,6 +5,7 @@ https://docs.abuseipdb.com/
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -17,6 +18,10 @@ from avai.enrichers.base import (
 from avai.enrichers.http import HttpClient
 
 _URL = "https://api.abuseipdb.com/api/v2/check"
+# abuseConfidenceScore (0-100) and report-count cut-offs for the hint.
+_MALICIOUS_SCORE = 75
+_SUSPICIOUS_SCORE = 25
+_SUSPICIOUS_REPORTS = 5
 
 
 class AbuseIpDbEnricher(Enricher):
@@ -37,15 +42,15 @@ class AbuseIpDbEnricher(Enricher):
             params={"ipAddress": indicator.value, "maxAgeInDays": 90,
                     "verbose": "false"},
         )
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         data = resp.json().get("data", {})
         score = int(data.get("abuseConfidenceScore", 0))
         reports = int(data.get("totalReports", 0))
-        if score >= 75:
+        if score >= _MALICIOUS_SCORE:
             hint = VerdictHint.MALICIOUS
             conf = 0.9
-        elif score >= 25 or reports >= 5:
+        elif score >= _SUSPICIOUS_SCORE or reports >= _SUSPICIOUS_REPORTS:
             hint = VerdictHint.SUSPICIOUS
             conf = 0.7
         else:

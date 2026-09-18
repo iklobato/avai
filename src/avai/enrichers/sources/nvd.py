@@ -6,10 +6,13 @@ https://nvd.nist.gov/developers/vulnerabilities
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 import os
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
+    CVSS_CRITICAL,
+    CVSS_HIGH,
     Enricher,
     Evidence,
     Indicator,
@@ -48,9 +51,9 @@ class NvdEnricher(Enricher):
         # NVD returns 403 when the (keyless) rate window is exceeded; treat
         # it as a rate-limit so the chain backs off rather than recording a
         # silent "no opinion" on every CVE under load.
-        if resp.status_code == 403:
+        if resp.status_code == HTTPStatus.FORBIDDEN:
             raise RateLimitedError("nvd returned 403 (rate limited / over quota)")
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         vulns = (resp.json().get("vulnerabilities") or [])
         if not vulns:
@@ -65,8 +68,8 @@ class NvdEnricher(Enricher):
              if d.get("lang") == "en"),
             "",
         )[:200]
-        hint = (VerdictHint.MALICIOUS if score and score >= 9
-                else VerdictHint.SUSPICIOUS if score and score >= 7
+        hint = (VerdictHint.MALICIOUS if score and score >= CVSS_CRITICAL
+                else VerdictHint.SUSPICIOUS if score and score >= CVSS_HIGH
                 else VerdictHint.UNKNOWN)
         return Evidence(
             source       = self.name,

@@ -71,6 +71,11 @@ from ..persistence_collectors import (
 from ..prompts import Prompts
 from ..runtime import CommandRunner, CommandSnapshot, FileSnapshot, HostPaths
 
+# name:password:gid:members
+_GROUP_FIELDS = 4
+# name:password:uid:gid:gecos:home:shell
+_PASSWD_FIELDS = 7
+
 
 class LinuxFilesystemLayout:
     """Linux filesystem facts. Absolute paths pass through ``host_path``
@@ -150,7 +155,7 @@ class LinuxPrivilegedAccounts:
         rows = []
         for line in content.splitlines():
             parts = line.strip().split(":")
-            if len(parts) < 4:
+            if len(parts) < _GROUP_FIELDS:
                 continue
             gname, members = parts[0], parts[3]
             if gname in priv_groups and members:
@@ -170,7 +175,7 @@ class LinuxPrivilegedAccounts:
         rows = []
         for line in content.splitlines():
             parts = line.strip().split(":")
-            if len(parts) < 7:
+            if len(parts) < _PASSWD_FIELDS:
                 continue
             user, uid, shell = parts[0], parts[2], parts[6]
             if uid == "0":
