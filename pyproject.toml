@@ -179,5 +179,4 @@ max-args = 5
 "src/avai/host_monitor/runtime/probes.py" = ["PLR2004"]
 "src/avai/host_monitor/runtime/stream_source.py" = ["C901"]
 "src/avai/host_monitor/sink.py" = ["C901"]
-"src/avai/host_monitor/streaming.py" = ["PLR0913"]
 "src/avai/hostsfile.py" = ["PLR2004"]
