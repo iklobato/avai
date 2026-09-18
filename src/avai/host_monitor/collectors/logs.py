@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
 from .. import constants, slices
 from ..runtime import (
+    CommandRunner,
     HostPaths,
 )
 from .base import SnapshotCollector
@@ -87,8 +86,14 @@ class LogTailCollector(SnapshotCollector):
         "/var/log/falcon-libbpf.log",
     )
 
-    def __init__(self, judge_hints: str = "", files: Optional[list[str]] = None):
+    def __init__(
+        self,
+        judge_hints: str = "",
+        files: Optional[list[str]] = None,
+        runner: Optional[CommandRunner] = None,
+    ):
         super().__init__(judge_hints)
+        self._runner = runner or CommandRunner()
         self._files = list(self._DEFAULT_FILES if files is None else files)
 
     def collect(self):
@@ -97,7 +102,7 @@ class LogTailCollector(SnapshotCollector):
             yield from self._tail_file(path_str)
 
     def _journald(self):
-        if shutil.which("journalctl") is None:
+        if not self._runner.exists("journalctl"):
             return
         cmd = [
             "journalctl",
@@ -111,13 +116,16 @@ class LogTailCollector(SnapshotCollector):
         if constants.HOST_PREFIX and host_journal.is_dir():
             cmd.extend(["--directory", str(host_journal)])
         try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self._JOURNAL_TIMEOUT_S
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
+            result = self._runner.capture(cmd, timeout=self._JOURNAL_TIMEOUT_S)
+        except OSError as exc:
             constants.LOG.warning("journalctl read failed: %s", exc)
             return
-        for line in (result.stdout or "").splitlines():
+        if result.timed_out:
+            constants.LOG.warning(
+                "journalctl read failed: timed out after %ss", self._JOURNAL_TIMEOUT_S
+            )
+            return
+        for line in result.stdout.splitlines():
             row = self._parse_journal(line)
             if row is not None:
                 yield row

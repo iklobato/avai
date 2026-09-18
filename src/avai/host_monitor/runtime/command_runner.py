@@ -12,7 +12,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, NamedTuple, Optional
+
+
+class CommandOutput(NamedTuple):
+    stdout: str
+    stderr: str
+    timed_out: bool
 
 
 class CommandRunner:
@@ -80,3 +86,24 @@ class CommandRunner:
             return (r.stdout or "") if r.returncode == 0 else ""
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return ""
+
+    def capture(self, cmd: list[str], timeout: int) -> CommandOutput:
+        """Run *cmd* and return its stdout and stderr as text, whatever the
+        exit code. On timeout the output produced so far is kept and
+        ``timed_out`` is set: a capture tool such as tcpdump stops at the
+        time cap on a quiet link and its partial output is still the
+        answer. A missing binary raises ``FileNotFoundError``."""
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, check=False
+            )
+        except subprocess.TimeoutExpired as e:
+            return CommandOutput(_as_text(e.stdout), _as_text(e.stderr), True)
+        return CommandOutput(r.stdout or "", r.stderr or "", False)
+
+
+def _as_text(partial) -> str:
+    # TimeoutExpired carries bytes even when the run asked for text.
+    if isinstance(partial, bytes):
+        return partial.decode("utf-8", "replace")
+    return partial or ""

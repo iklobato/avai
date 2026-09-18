@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import configparser
 import json
-import shutil
-import subprocess
+from typing import Optional
 
 from .. import slices
 from ..runtime import (
@@ -20,8 +19,14 @@ class UsbDevicesCollector(SnapshotCollector):
     slice = slices.USB_DEVICES
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
+    def __init__(
+        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
+    ) -> None:
+        super().__init__(judge_hints)
+        self._runner = runner or CommandRunner()
+
     def collect(self):
-        data = CommandRunner().json(
+        data = self._runner.json(
             ["system_profiler", "-json", "SPUSBDataType"], timeout=30
         )
         root = data.get("SPUSBDataType", []) if isinstance(data, dict) else (data or [])
@@ -56,8 +61,14 @@ class BluetoothCollector(SnapshotCollector):
     )
     _PAIRED_GROUPS = {"device_connected", "device_not_connected", "device_paired"}
 
+    def __init__(
+        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
+    ) -> None:
+        super().__init__(judge_hints)
+        self._runner = runner or CommandRunner()
+
     def collect(self):
-        data = CommandRunner().json(
+        data = self._runner.json(
             ["system_profiler", "-json", "SPBluetoothDataType"], timeout=30
         )
         sections = (
@@ -87,8 +98,14 @@ class WifiCollector(SnapshotCollector):
     slice = slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
+    def __init__(
+        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
+    ) -> None:
+        super().__init__(judge_hints)
+        self._runner = runner or CommandRunner()
+
     def collect(self):
-        data = CommandRunner().json(
+        data = self._runner.json(
             ["system_profiler", "-json", "SPAirPortDataType"], timeout=30
         )
         sections = (
@@ -251,6 +268,12 @@ class LinuxWifiCollector(SnapshotCollector):
     slice = slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
+    def __init__(
+        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
+    ) -> None:
+        super().__init__(judge_hints)
+        self._runner = runner or CommandRunner()
+
     def collect(self):
         # sysfs discovery via HOST_PREFIX; iw queries via netlink which
         # the host-network namespace (network_mode: host) already
@@ -262,7 +285,7 @@ class LinuxWifiCollector(SnapshotCollector):
             ifaces = list(net.iterdir())
         except OSError:
             return
-        iw_available = shutil.which("iw") is not None
+        iw_available = self._runner.exists("iw")
         for iface_dir in ifaces:
             if not (iface_dir / "wireless").is_dir():
                 continue
@@ -277,22 +300,10 @@ class LinuxWifiCollector(SnapshotCollector):
                 "raw_json": json.dumps(link),
             }
 
-    @staticmethod
-    def _iw_link(iface: str) -> dict:
-        try:
-            r = subprocess.run(
-                ["iw", "dev", iface, "link"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return {}
-        if r.returncode != 0 or not r.stdout:
-            return {}
+    def _iw_link(self, iface: str) -> dict:
+        link = self._runner.text(["iw", "dev", iface, "link"], timeout=5)
         out: dict = {}
-        for raw in r.stdout.splitlines():
+        for raw in link.splitlines():
             line = raw.strip()
             if not line:
                 continue

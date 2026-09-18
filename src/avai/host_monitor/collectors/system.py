@@ -4,15 +4,8 @@ disks and mounts."""
 from __future__ import annotations
 
 import json
-import sys
 from datetime import datetime
 from typing import Optional
-
-try:
-    import psutil
-except ImportError:
-    sys.stderr.write("Required: pip install psutil\n")
-    sys.exit(2)
 
 from .. import slices
 from ..runtime import (
@@ -42,9 +35,14 @@ class ProcessCollector(SnapshotCollector):
         "num_threads",
     ]
 
+    def __init__(
+        self, judge_hints: str = "", metrics: Optional[SystemMetrics] = None
+    ) -> None:
+        super().__init__(judge_hints)
+        self._metrics = metrics or SystemMetrics()
+
     def collect(self):
-        for p in psutil.process_iter(self._ATTRS, ad_value=None):
-            info = p.info
+        for info in self._metrics.process_table(self._ATTRS):
             mem, uids = info.get("memory_info"), info.get("uids")
             yield {
                 "pid": info.get("pid"),
@@ -234,12 +232,12 @@ class MountsCollector(SnapshotCollector):
     slice = slices.MOUNTS
     judge_fields = ("device", "mountpoint", "fstype", "opts")
 
+    def __init__(self, judge_hints: str = "", disks: Optional[DiskMetrics] = None):
+        super().__init__(judge_hints)
+        self._disks = disks or DiskMetrics()
+
     def collect(self):
-        try:
-            partitions = psutil.disk_partitions(all=True)
-        except (psutil.AccessDenied, PermissionError):
-            return
-        for p in partitions:
+        for p in self._disks.mount_table():
             yield {
                 "device": p.device,
                 "mountpoint": p.mountpoint,

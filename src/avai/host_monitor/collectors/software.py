@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import configparser
 import json
-import shutil
-import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Iterable, Optional
@@ -209,12 +207,18 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
 
     _DPKG_FIELDS = ("Status", "Package", "Version", "Architecture", "Description")
 
+    def __init__(
+        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
+    ) -> None:
+        super().__init__(judge_hints)
+        self._runner = runner or CommandRunner()
+
     def collect(self):
         yield from self._dpkg_rows()
         yield from self._desktop_rows()
 
     def _dpkg_rows(self):
-        if not shutil.which("dpkg-query"):
+        if not self._runner.exists("dpkg-query"):
             return
         # Tab-separated fixed-field output: no parsing of dpkg -l's
         # column-aligned text. dpkg-query -W -f gives us structured
@@ -229,19 +233,7 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
         host_admindir = HostPaths.translate("/var/lib/dpkg")
         if constants.HOST_PREFIX and host_admindir.is_dir():
             cmd[1:1] = ["--admindir", str(host_admindir)]
-        try:
-            r = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return
-        if r.returncode != 0:
-            return
-        for line in r.stdout.splitlines():
+        for line in self._runner.text(cmd, timeout=30).splitlines():
             parts = line.split("\t")
             if len(parts) < 5:
                 continue
@@ -334,9 +326,15 @@ class MdmProfilesCollector(SnapshotCollector):
     slice = slices.MDM_PROFILES
     judge_fields = ("identifier", "display_name", "organization", "profile_scope")
 
+    def __init__(
+        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
+    ) -> None:
+        super().__init__(judge_hints)
+        self._runner = runner or CommandRunner()
+
     def collect(self):
         try:
-            data = CommandRunner().json(
+            data = self._runner.json(
                 ["system_profiler", "-json", "SPConfigurationProfileDataType"],
                 timeout=30,
             )
@@ -389,9 +387,15 @@ class KernelExtensionsCollector(SnapshotCollector):
     slice = slices.KERNEL_EXTENSIONS
     judge_fields = ("bundle_id", "name", "team_id")
 
+    def __init__(
+        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
+    ) -> None:
+        super().__init__(judge_hints)
+        self._runner = runner or CommandRunner()
+
     def collect(self):
         try:
-            data = CommandRunner().json(
+            data = self._runner.json(
                 ["system_profiler", "-json", "SPExtensionsDataType"],
                 timeout=60,
             )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections import namedtuple
-from typing import Optional, Protocol
+from typing import Iterable, Optional, Protocol
 
 try:
     import psutil
@@ -66,6 +66,19 @@ class PsutilConnections:
                 "psutil.net_connections requires root for full visibility"
             ) from e
 
+    @classmethod
+    def listening(cls) -> list:
+        """The INET sockets in LISTEN state."""
+        return [c for c in cls.inet() if c.status == psutil.CONN_LISTEN]
+
+    @staticmethod
+    def process_name(pid: int) -> Optional[str]:
+        """Name of the process *pid*, or None when it is gone or hidden."""
+        try:
+            return psutil.Process(pid).name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None
+
 
 class SystemMetrics:
     """Thin seam over psutil's system-wide resource readings (memory, swap,
@@ -123,6 +136,22 @@ class SystemMetrics:
             threads += info.get("num_threads") or 0
         return {"total": total, "running": running, "threads": threads}
 
+    def process_table(self, attrs: list[str]) -> Iterable[dict]:
+        """One ``attrs`` dict per process; a field psutil may not read
+        comes back as None instead of dropping the process."""
+        for p in psutil.process_iter(attrs, ad_value=None):
+            yield p.info
+
+    def net_if_addrs(self) -> dict:
+        return psutil.net_if_addrs()
+
+    def net_if_stats(self) -> dict:
+        return psutil.net_if_stats()
+
+    def net_io_counters(self) -> dict:
+        """Per-interface I/O counters."""
+        return psutil.net_io_counters(pernic=True)
+
 
 class DiskMetrics:
     """Thin seam over psutil's filesystem + disk-I/O readings (the ``df``
@@ -170,6 +199,14 @@ class DiskMetrics:
             except OSError:
                 return []
         return _host_partitions(rootfs)
+
+    def mount_table(self) -> list:
+        """Every mount, pseudo-filesystems included (``proc``, ``tmpfs``,
+        ``cgroup``...), or [] when the table can't be read."""
+        try:
+            return psutil.disk_partitions(all=True)
+        except (psutil.AccessDenied, PermissionError):
+            return []
 
     def usage(self, mountpoint: str):
         """Usage for one mountpoint. Raises (``PermissionError``/``OSError``)

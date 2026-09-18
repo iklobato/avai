@@ -61,6 +61,21 @@ class TestCommandRunner:
         assert runner.exists(sys.executable) or runner.exists("python3")
         assert runner.exists("this-binary-does-not-exist-xyz") is False
 
+    def test_capture_returns_both_streams_whatever_the_exit_code(self):
+        script = "import sys; print('out'); sys.stderr.write('err'); sys.exit(4)"
+        out = CommandRunner().capture([sys.executable, "-c", script], timeout=10)
+        assert out == ("out\n", "err", False)
+
+    def test_capture_keeps_partial_output_on_timeout(self):
+        script = "import time; print('early', flush=True); time.sleep(30)"
+        out = CommandRunner().capture([sys.executable, "-c", script], timeout=1)
+        assert out.stdout == "early\n"
+        assert out.timed_out is True
+
+    def test_capture_missing_binary_raises(self):
+        with pytest.raises(FileNotFoundError):
+            CommandRunner().capture(["this-binary-does-not-exist-xyz"], timeout=1)
+
 
 class TestClock:
     def test_now_iso_is_utc_second_resolution(self):

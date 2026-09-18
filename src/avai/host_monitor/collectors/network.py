@@ -3,22 +3,15 @@
 from __future__ import annotations
 
 import json
-import shutil
 import socket
-import subprocess
-import sys
 from typing import Optional
-
-try:
-    import psutil
-except ImportError:
-    sys.stderr.write("Required: pip install psutil\n")
-    sys.exit(2)
 
 from .. import slices
 from ..runtime import (
     Clock,
+    CommandRunner,
     PsutilConnections,
+    SystemMetrics,
 )
 from .base import SnapshotCollector
 
@@ -51,16 +44,19 @@ class ListeningPortsCollector(SnapshotCollector):
     slice = slices.LISTENING_PORTS
     judge_fields = ("process_name", "family", "type", "laddr_ip", "laddr_port")
 
+    def __init__(
+        self,
+        judge_hints: str = "",
+        connections: Optional[PsutilConnections] = None,
+    ) -> None:
+        super().__init__(judge_hints)
+        self._connections = connections or PsutilConnections()
+
     def collect(self):
         names: dict[int, Optional[str]] = {}
-        for c in PsutilConnections.inet():
-            if c.status != psutil.CONN_LISTEN:
-                continue
+        for c in self._connections.listening():
             if c.pid is not None and c.pid not in names:
-                try:
-                    names[c.pid] = psutil.Process(c.pid).name()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    names[c.pid] = None
+                names[c.pid] = self._connections.process_name(c.pid)
             yield {
                 "pid": c.pid,
                 "process_name": names.get(c.pid) if c.pid else None,
@@ -87,6 +83,21 @@ def _payload_bytes(parts: list[str]) -> int:
     return int(tail) if tail.isdigit() else 0
 
 
+def _run_tcpdump(
+    runner: CommandRunner, cmd: list[str], timeout: int
+) -> tuple[str, Optional[str]]:
+    """Return (stdout, default_iface) of one bounded tcpdump capture.
+    default_iface is the interface tcpdump reported listening on (used
+    when a line carries no per-packet interface, i.e. not the Linux
+    '-i any' path). Hitting the time cap before the packet cap is normal
+    on a slow link, so the partial output is kept."""
+    if not runner.exists("tcpdump"):
+        raise RuntimeError("tcpdump not found on PATH")
+    out = runner.capture(cmd, timeout)
+    iface = NetworkFlowsCollector._iface_from_banner(out.stderr)
+    return out.stdout, NetworkFlowsCollector._normalize_default_iface(iface)
+
+
 class ProcessConnectionResolver:
     """Resolves which local process owns a socket to a remote endpoint by
     snapshotting the kernel connection table (psutil).
@@ -99,13 +110,16 @@ class ProcessConnectionResolver:
     time, in which case the flow simply carries no process.
     """
 
+    def __init__(self, connections: Optional[PsutilConnections] = None) -> None:
+        self._connections = connections or PsutilConnections()
+
     def snapshot(self) -> dict[tuple[str, int], tuple[str, int]]:
         """Map remote ``(ip, port)`` → ``(process_name, pid)`` for every
         inet socket that has a remote peer and a resolvable owner."""
         out: dict[tuple[str, int], tuple[str, int]] = {}
         try:
-            conns = psutil.net_connections(kind="inet")
-        except (psutil.AccessDenied, PermissionError, OSError):
+            conns = self._connections.inet()
+        except OSError:
             return out
         for c in conns:
             raddr = c.raddr
@@ -117,12 +131,9 @@ class ProcessConnectionResolver:
             out[key] = (self._proc_name(c.pid), c.pid)
         return out
 
-    @staticmethod
-    def _proc_name(pid: int) -> str:
-        try:
-            return psutil.Process(pid).name()
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            return f"pid {pid}"
+    def _proc_name(self, pid: int) -> str:
+        name = self._connections.process_name(pid)
+        return f"pid {pid}" if name is None else name
 
 
 class NetworkFlowsCollector(SnapshotCollector):
@@ -158,9 +169,11 @@ class NetworkFlowsCollector(SnapshotCollector):
         judge_hints: str = "",
         resolver: Optional["ProcessConnectionResolver"] = None,
         iface_args: Optional[list[str]] = None,
+        runner: Optional[CommandRunner] = None,
     ):
         super().__init__(judge_hints)
         self._resolver = resolver or ProcessConnectionResolver()
+        self._runner = runner or CommandRunner()
         # tcpdump flags that make each line carry its interface name;
         # supplied by the host (Linux '-i any' vs macOS '-k I').
         self._iface_args = list(iface_args or [])
@@ -180,11 +193,6 @@ class NetworkFlowsCollector(SnapshotCollector):
             yield f
 
     def _capture(self) -> tuple[str, Optional[str]]:
-        """Return (stdout, default_iface). default_iface is the interface
-        tcpdump reported listening on (used when a line carries no
-        per-packet interface, i.e. not the Linux '-i any' path)."""
-        if shutil.which("tcpdump") is None:
-            raise RuntimeError("tcpdump not found on PATH")
         # -t drops timestamps (we stamp our own); TCP/UDP (v4 + v6) only.
         cmd = ["tcpdump", "-n", "-q", "-l", "-t", "-c", str(self.MAX_PACKETS)]
         # Interface flags supplied by the host: Linux '-i any' prefixes
@@ -194,20 +202,7 @@ class NetworkFlowsCollector(SnapshotCollector):
         # leading-interface-token shape that _parse_line expects.
         cmd += self._iface_args
         cmd += ["tcp", "or", "udp"]
-        try:
-            r = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.CAPTURE_SECONDS
-            )
-            stdout, stderr = r.stdout or "", r.stderr or ""
-        except subprocess.TimeoutExpired as e:
-            # Slow link: hit the time cap before MAX_PACKETS — keep partial.
-            def _txt(b):
-                return (
-                    b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or "")
-                )
-
-            stdout, stderr = _txt(e.stdout), _txt(e.stderr)
-        return stdout, self._normalize_default_iface(self._iface_from_banner(stderr))
+        return _run_tcpdump(self._runner, cmd, self.CAPTURE_SECONDS)
 
     @staticmethod
     def _iface_from_banner(stderr: str) -> Optional[str]:
@@ -354,9 +349,11 @@ class DnsQueriesCollector(SnapshotCollector):
         judge_hints: str = "",
         resolver: Optional["ProcessConnectionResolver"] = None,
         iface_args: Optional[list[str]] = None,
+        runner: Optional[CommandRunner] = None,
     ):
         super().__init__(judge_hints)
         self._resolver = resolver or ProcessConnectionResolver()
+        self._runner = runner or CommandRunner()
         self._iface_args = list(iface_args or [])
 
     def collect(self):
@@ -387,29 +384,11 @@ class DnsQueriesCollector(SnapshotCollector):
 
     def _capture(self) -> tuple[str, Optional[str]]:
         """Capture port-53 traffic *without* ``-q`` so tcpdump decodes the
-        DNS question. Reuses the flow collector's interface helpers."""
-        if shutil.which("tcpdump") is None:
-            raise RuntimeError("tcpdump not found on PATH")
+        DNS question."""
         cmd = ["tcpdump", "-n", "-l", "-t", "-c", str(self.MAX_PACKETS)]
         cmd += self._iface_args
         cmd += ["udp", "port", "53", "or", "tcp", "port", "53"]
-        try:
-            r = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.CAPTURE_SECONDS
-            )
-            stdout, stderr = r.stdout or "", r.stderr or ""
-        except subprocess.TimeoutExpired as e:
-
-            def _txt(b):
-                return (
-                    b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or "")
-                )
-
-            stdout, stderr = _txt(e.stdout), _txt(e.stderr)
-        iface = NetworkFlowsCollector._normalize_default_iface(
-            NetworkFlowsCollector._iface_from_banner(stderr)
-        )
-        return stdout, iface
+        return _run_tcpdump(self._runner, cmd, self.CAPTURE_SECONDS)
 
     def _aggregate(self, output: str, default_iface: Optional[str], proc_map: dict):
         now = Clock().now_iso()
@@ -485,10 +464,16 @@ class NetworkInterfacesCollector(SnapshotCollector):
     slice = slices.NETWORK_INTERFACES
     judge_enabled = False  # counters need behavioural analysis
 
+    def __init__(
+        self, judge_hints: str = "", metrics: Optional[SystemMetrics] = None
+    ) -> None:
+        super().__init__(judge_hints)
+        self._metrics = metrics or SystemMetrics()
+
     def collect(self):
-        addrs = psutil.net_if_addrs()
-        stats = psutil.net_if_stats()
-        counters = psutil.net_io_counters(pernic=True)
+        addrs = self._metrics.net_if_addrs()
+        stats = self._metrics.net_if_stats()
+        counters = self._metrics.net_io_counters()
         for name, addr_list in addrs.items():
             s, c = stats.get(name), counters.get(name)
             yield {

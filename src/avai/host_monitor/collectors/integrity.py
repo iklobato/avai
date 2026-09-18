@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional
 
@@ -64,8 +62,10 @@ class SystemIntegrityCollector(SnapshotCollector):
         services: Optional[ServiceManager] = None,
         ports: Optional[PortInspector] = None,
         processes: Optional[ProcessInspector] = None,
+        runner: Optional[CommandRunner] = None,
     ) -> None:
         super().__init__(judge_hints=judge_hints)
+        self._runner = runner or CommandRunner()
         svc = services or LaunchdServiceManager()
         ports = ports or PsutilPortInspector()
         processes = processes or PsutilProcessInspector()
@@ -75,28 +75,11 @@ class SystemIntegrityCollector(SnapshotCollector):
         }
 
     def collect(self):
-        fv = CommandRunner().exit_code(["fdesetup", "isactive"])
+        fv = self._runner.exit_code(["fdesetup", "isactive"])
         alf = (
             HostPaths.read_plist(Path("/Library/Preferences/com.apple.alf.plist")) or {}
         )
-        # spctl --status always exits 0; the state is in its stdout text.
-        try:
-            _gk = subprocess.run(
-                ["spctl", "--status"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            _gk_out = (_gk.stdout + _gk.stderr).lower()
-            if "assessments enabled" in _gk_out:
-                gk: Optional[int] = 1
-            elif "assessments disabled" in _gk_out:
-                gk = 0
-            else:
-                gk = None
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            gk = None
+        gk = self._gatekeeper_state()
         # Posture (enabled) + behaviour (active) for the network services,
         # via the injected controls. Persisting enabled into the existing
         # columns; the live-session signal is kept in raw_json for the judge.
@@ -120,6 +103,19 @@ class SystemIntegrityCollector(SnapshotCollector):
                 }
             ),
         }
+
+    def _gatekeeper_state(self) -> Optional[int]:
+        # spctl --status always exits 0; the state is in its text output.
+        try:
+            out = self._runner.capture(["spctl", "--status"], timeout=10)
+        except FileNotFoundError:
+            return None
+        status = (out.stdout + out.stderr).lower()
+        if "assessments enabled" in status:
+            return 1
+        if "assessments disabled" in status:
+            return 0
+        return None
 
 
 class FileIntegrityCollector(SnapshotCollector):
@@ -211,8 +207,10 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
         services: Optional[ServiceManager] = None,
         ports: Optional[PortInspector] = None,
         processes: Optional[ProcessInspector] = None,
+        runner: Optional[CommandRunner] = None,
     ) -> None:
         super().__init__(judge_hints=judge_hints)
+        self._runner = runner or CommandRunner()
         self._ports = ports or PsutilPortInspector()
         self._ssh = NetworkServiceControl(
             self._SSH,
@@ -300,37 +298,17 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
                     return value.strip().strip('"').lower() == "yes"
         return False
 
-    @staticmethod
-    def _service_active(unit: str) -> bool:
-        try:
-            r = subprocess.run(
-                ["systemctl", "is-active", unit],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
-        return r.stdout.strip() == "active"
+    def _service_active(self, unit: str) -> bool:
+        state = self._runner.text(["systemctl", "is-active", unit], timeout=5)
+        return state.strip() == "active"
 
-    @staticmethod
-    def _luks_count() -> int:
-        if not shutil.which("dmsetup"):
+    def _luks_count(self) -> int:
+        if not self._runner.exists("dmsetup"):
             return 0
-        try:
-            r = subprocess.run(
-                ["dmsetup", "ls", "--target", "crypt"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
+        mappings = self._runner.text(["dmsetup", "ls", "--target", "crypt"], timeout=5)
+        if "No devices found" in mappings:
             return 0
-        if r.returncode != 0 or "No devices found" in r.stdout:
-            return 0
-        return sum(1 for line in r.stdout.splitlines() if line.strip())
+        return sum(1 for line in mappings.splitlines() if line.strip())
 
 
 class SetuidFilesCollector(SnapshotCollector):
