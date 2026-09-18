@@ -10,6 +10,8 @@ The dashboard has two surfaces we lock down:
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -193,11 +195,62 @@ class TestDashboardEndpoints:
             "/fragments/resources",
             "/fragments/logs",
             "/fragments/log-summary",
+            "/fragments/auth-events",
         ],
     )
     def test_each_htmx_fragment_returns_200_on_empty_db(self, client, path):
         r = client.get(path)
         assert r.status_code == 200, f"{path} → {r.status_code}"
+
+    def test_auth_events_collapse_repeated_lines_into_one_judged_pattern(self, client):
+        from datetime import datetime, timedelta, timezone
+
+        from avai.host_monitor import AuthEventRow, CollectionRun, Judgement
+
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(
+            timespec="seconds"
+        )
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            s.add(
+                CollectionRun(
+                    run_id="stream1", started_at=recent, hostname="h", lookback_min=5
+                )
+            )
+            for pid in (101, 102):
+                s.add(
+                    AuthEventRow(
+                        run_id="stream1",
+                        collected_at=recent,
+                        content_hash="auth1",
+                        event_timestamp=recent,
+                        process="sshd",
+                        subsystem="com.openssh.sshd",
+                        event_message="Failed password for root from 203.0.113.9",
+                        pid=pid,
+                    )
+                )
+            s.add(
+                Judgement(
+                    content_hash="auth1",
+                    collector="auth_events",
+                    verdict="suspicious",
+                    category="credential_access",
+                    confidence=0.8,
+                    reasoning="repeated root password failures",
+                    model="m",
+                    created_at=recent,
+                    last_seen_at=recent,
+                )
+            )
+            s.commit()
+
+        body = client.get("/fragments/auth-events").data.decode()
+
+        assert "Failed password for root from 203.0.113.9" in body
+        stat = r">\s*{}\s*</div>\s*<div[^>]*>\s*{}"
+        assert re.search(stat.format(2, "total events"), body)
+        assert re.search(stat.format(1, "unique patterns"), body)
+        assert "suspicious" in body
 
     def test_posture_merges_risk_and_integrity(self, client):
         body = client.get("/fragments/posture").data.decode()
