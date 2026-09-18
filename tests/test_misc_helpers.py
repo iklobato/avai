@@ -1,6 +1,6 @@
 """Targeted tests for small helpers that are easy to break but rarely
 get attention: ``_sha256_of_file`` (used by every binary-hashing
-extractor), the dashboard's ``_engine`` URL construction, and the
+extractor), the dashboard's read-only engine URL construction, and the
 chain stats counters.
 """
 
@@ -12,7 +12,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase
 
-from avai.dashboard import _engine, _ensure_db_exists, app
+from avai.dashboard import _ensure_db_exists
+from avai.dashboard.db import read_only_engine
 from avai.enrichers import EnrichmentChain, EvidenceCache, Indicator, IndicatorType
 from avai.enrichers.indicators import _safe_loads, _sha256_of_file
 
@@ -83,7 +84,7 @@ class TestSafeLoads:
 
 
 # ---------------------------------------------------------------------------
-# Dashboard _engine — read-only URL construction
+# Dashboard read-only engine: URL construction
 # ---------------------------------------------------------------------------
 
 
@@ -91,9 +92,7 @@ class TestDashboardEngine:
     def test_url_is_read_only_but_not_immutable(self, tmp_path):
         db = tmp_path / "x.db"
         _ensure_db_exists(str(db))
-        app.config["DB_PATH"] = str(db)
-        with app.app_context():
-            url = str(_engine().url)
+        url = str(read_only_engine(str(db)).url)
         # mode=ro = read-only; uri=true enables the file: URI form.
         assert "mode=ro" in url
         assert "uri=true" in url
@@ -104,12 +103,9 @@ class TestDashboardEngine:
     def test_engine_can_open_existing_db(self, tmp_path):
         db = tmp_path / "exists.db"
         _ensure_db_exists(str(db))
-        app.config["DB_PATH"] = str(db)
-        with app.app_context():
-            e = _engine()
-            with e.connect() as conn:
-                # Anything that proves the connection works.
-                conn.exec_driver_sql("select 1")
+        with read_only_engine(str(db)).connect() as conn:
+            # Anything that proves the connection works.
+            conn.exec_driver_sql("select 1")
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,13 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import app, dns_queries, network_flows, persistence_tampering
+from avai.dashboard import (
+    DashboardConfig,
+    create_app,
+    dns_queries,
+    network_flows,
+    persistence_tampering,
+)
 from avai.enrichers import IndicatorType, extract_indicators
 from avai.host_monitor.runtime import Digest
 from avai.host_monitor import (
@@ -371,10 +377,8 @@ class TestDashboardDns:
             ts,
             run_id,
         )
-        app.config.update(
-            TESTING=True, DB_PATH=str(engine.url).replace("sqlite:///", "")
-        )
-        with app.test_client() as c:
+        config = DashboardConfig(db_path=engine.url.database)
+        with create_app(config).test_client() as c:
             html = c.get("/fragments/dns-queries").data.decode()
         assert "tracker.bad" in html and "DNS queries" in html
 
@@ -452,10 +456,8 @@ class TestDashboardPersistence:
             ts,
             run_id,
         )
-        app.config.update(
-            TESTING=True, DB_PATH=str(engine.url).replace("sqlite:///", "")
-        )
-        with app.test_client() as c:
+        config = DashboardConfig(db_path=engine.url.database)
+        with create_app(config).test_client() as c:
             html = c.get("/fragments/persistence").data.decode()
         assert "my-bank.com" in html and "persistence" in html.lower()
 

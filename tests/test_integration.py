@@ -179,7 +179,7 @@ class TestContentHashStability:
 def seeded_dashboard(tmp_path):
     """A dashboard bound to a DB containing one active malicious finding
     and one benign one, with a latest run so active/resolved resolves."""
-    from avai.dashboard import _ensure_db_exists, app
+    from avai.dashboard import DashboardConfig, _ensure_db_exists, create_app
 
     db = tmp_path / "seeded.db"
     _ensure_db_exists(str(db))
@@ -222,13 +222,12 @@ def seeded_dashboard(tmp_path):
     # rows would be invisible. In production the long-running monitor
     # checkpoints continuously; here we force one so the read-only
     # dashboard sees the seeded rows. (This mirrors the real WAL
-    # interaction documented in dashboard._engine.)
+    # interaction documented in dashboard.db.read_only_engine.)
     with engine.connect() as conn:
         conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
     engine.dispose()
 
-    app.config.update(TESTING=True, DB_PATH=str(db))
-    with app.test_client() as c:
+    with create_app(DashboardConfig(db_path=str(db))).test_client() as c:
         yield c
 
 

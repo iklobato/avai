@@ -15,7 +15,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from avai.dashboard import _addr_scope, app, listening_ports
+from avai.dashboard import DashboardConfig, _addr_scope, create_app, listening_ports
 from avai.host_monitor.runtime import Digest
 from avai.host_monitor import (
     Judgment,
@@ -232,8 +232,7 @@ class TestFragmentRender:
     def test_renders_port_process_and_verdict(self, seeded):
         engine, run_id = seeded
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/listening-ports").data.decode()
         assert ":22" in html
         assert "sshd" in html
@@ -268,8 +267,7 @@ class TestMissingTableGraceful:
     def test_fragment_200_on_db_without_table(self, tmp_path):
         engine, db = self._db_without_ports(tmp_path)
         engine.dispose()
-        app.config.update(TESTING=True, DB_PATH=str(db))
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=str(db))).test_client() as c:
             r = c.get("/fragments/listening-ports")
         # missing table degrades to the empty-state card, not a 500
         assert r.status_code == 200

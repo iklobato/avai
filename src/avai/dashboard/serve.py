@@ -9,10 +9,11 @@ import threading
 import webbrowser
 from pathlib import Path
 
+from flask import Flask
 from sqlalchemy import create_engine
 
-from .app import app
-from .queries import DEFAULT_DB_PATH
+from .app import create_app
+from .config import DEFAULT_DB_PATH, DashboardConfig
 
 # Below this, binding a TCP port needs root/Administrator. Reaching the
 # dashboard at http://avai.local (no port) means serving on 80, which is
@@ -48,9 +49,9 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _build_parser().parse_args()
 
-    app.config["DB_PATH"] = args.db
     _ensure_db_exists(args.db)
-    _serve(args.host, args.port, args.debug, args.open)
+    app = create_app(DashboardConfig.from_env(args.db))
+    _serve(app, args.host, args.port, args.debug, args.open)
     return 0
 
 
@@ -87,7 +88,9 @@ def _hosts_notice(port: int) -> list[str]:
     return [f" * also reachable at {url}"]
 
 
-def _serve(host: str, port: int, debug: bool, open_browser: bool = False) -> None:
+def _serve(
+    app: Flask, host: str, port: int, debug: bool, open_browser: bool = False
+) -> None:
     """Serve the dashboard. In normal use we run on waitress, a real
     (pure-Python, cross-platform) WSGI server, so there's no "this is a
     development server" warning. ``--debug`` falls back to Werkzeug's
@@ -98,12 +101,12 @@ def _serve(host: str, port: int, debug: bool, open_browser: bool = False) -> Non
     for line in _hosts_notice(port):
         print(line, flush=True)
     try:
-        _run_server(host, port, debug)
+        _run_server(app, host, port, debug)
     except OSError as e:
         raise SystemExit(_bind_error_message(host, port, e)) from e
 
 
-def _run_server(host: str, port: int, debug: bool) -> None:
+def _run_server(app: Flask, host: str, port: int, debug: bool) -> None:
     if not debug:
         try:
             from waitress import serve

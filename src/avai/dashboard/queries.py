@@ -1,22 +1,20 @@
-"""Read-only DB query layer — no Flask app, uses current_app for config."""
+"""Read-only DB query layer. Every function takes a Session; none touches
+Flask."""
 
 from __future__ import annotations
 
 import ipaddress
 import json
-import os
 import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import current_app, request
 from sqlalchemy import (
     and_,
     asc,
     case,
-    create_engine,
     desc,
     func,
     literal,
@@ -106,90 +104,7 @@ PER_PAGE_OPTIONS = (10, 25, 50, 100)
 DEFAULT_PER_PAGE = 10
 
 
-DEFAULT_DB_PATH = Path.home() / ".avai" / "avai.db"
-
-
 _HIDDEN_SOURCE_FIELDS = {"id", "run_id"}
-
-
-_engine_cache: dict[str, object] = {}
-
-
-_engine_cache_lock = threading.Lock()
-
-
-def _engine():
-    """Return a process-wide, thread-safe read-only engine for the
-    configured DB, built once per path and reused thereafter.
-
-    This used to build a *new* engine (and connection pool) on every
-    request and never dispose it. Under the dashboard's ~dozen HTMX
-    fragments — which all poll concurrently — that leaked SQLite
-    connections/file handles and saturated the WSGI worker threads
-    (waitress "task queue depth" warnings). Caching one engine per path
-    reuses a pooled set of connections instead, so requests return fast
-    and threads free up promptly.
-
-    We open read-only (``mode=ro``) and deliberately do NOT pass
-    ``immutable=1``: ``immutable=1`` tells SQLite to ignore the ``-wal``
-    file, so on a live DB the monitor is writing (especially before the
-    first WAL checkpoint) the reader would see an empty/incomplete
-    database and every query would 500 with "no such table". ``mode=ro``
-    reads the WAL correctly, so the dashboard sees live data immediately;
-    a fresh read transaction per query still picks up newly committed
-    rows. ``check_same_thread=False`` is required because waitress hands
-    pooled connections to different worker threads.
-    """
-    db_path = current_app.config["DB_PATH"]
-    eng = _engine_cache.get(db_path)
-    if eng is None:
-        with _engine_cache_lock:
-            eng = _engine_cache.get(db_path)
-            if eng is None:
-                eng = create_engine(
-                    f"sqlite:///file:{db_path}?mode=ro&uri=true",
-                    connect_args={"check_same_thread": False},
-                )
-                if _QUERY_LOG_PATH:
-                    from sqlalchemy import event
-
-                    event.listen(eng, "before_cursor_execute", _log_query)
-                _engine_cache[db_path] = eng
-    return eng
-
-
-_QUERY_LOG_PATH = os.environ.get("AVAI_QUERY_LOG")
-
-
-_query_log_lock = threading.Lock()
-
-
-def _log_query(conn, cursor, statement, parameters, context, executemany):
-    """SQLAlchemy before_cursor_execute hook → append one line per query."""
-    try:
-        from flask import has_request_context
-
-        route = request.path if has_request_context() else "-"
-    except Exception:
-        route = "-"
-    sql = " ".join(str(statement).split())
-    params = str(parameters)
-    if len(params) > 300:
-        params = params[:300] + "…"
-    line = (
-        f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}\t"
-        f"{route}\t{sql}\t{params}\n"
-    )
-    with _query_log_lock:
-        try:
-            with open(_QUERY_LOG_PATH, "a") as fh:
-                fh.write(line)
-        except OSError:
-            pass
-
-
-def _session() -> Session:
-    return Session(_engine())
 
 
 _SCHEMA_TTL = 30.0

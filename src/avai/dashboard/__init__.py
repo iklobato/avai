@@ -1,7 +1,7 @@
-"""avai.dashboard — package facade.
+"""avai.dashboard: package facade.
 
-Re-exports the public surface (app, query functions, CLI) unchanged
-after the package split so callers and tests need no edits.
+Re-exports the public surface (the app factory, query functions, CLI) so
+callers and tests import from one place.
 """
 
 from __future__ import annotations
@@ -9,31 +9,37 @@ from __future__ import annotations
 from avai.host_monitor import Base  # re-export for callers
 
 from .app import (
+    _PKG_DIR,
+    create_app,
+)
+from .config import (
+    DEFAULT_DB_PATH,
+    DashboardConfig,
+)
+from .control import (
+    ControlStore,
+    monitor_alive,
+    read_control_state,
+)
+from .filters import (
     _LIST_ITEM_RE,
     _MD_TAGS,
-    _PKG_DIR,
     _datetime_fmt,
     _ensure_list_blank_lines,
     _flag_emoji,
     _human_bytes,
-    _int_arg,
     _pretty_json,
-    _prior_run,
     _relative_time,
-    _sparkline_points,
-    app,
     render_markdown,
 )
-from .control import (
-    bump_scan_now,
-    monitor_alive,
-    queue_command,
-    read_control_state,
-    set_collector,
-    set_paused,
-    set_settings,
-)
 from .queries import (
+    AUTH_SUBSYSTEM_OPTIONS,
+    COLLECTOR_MODELS,
+    DEFAULT_PER_PAGE,
+    DISPLAY_FIELDS,
+    PER_PAGE_OPTIONS,
+    SEVERITY_ORDER,
+    VERDICTS,
     _AUTH_AGG_WINDOW_HOURS,
     _AUTH_SUBSYSTEM_LABELS,
     _AUTH_VERDICT_SEV,
@@ -41,21 +47,12 @@ from .queries import (
     _FLOW_SEV,
     _HIDDEN_SOURCE_FIELDS,
     _PROTO_BY_SOCK,
-    _QUERY_LOG_PATH,
     _SCHEMA_TTL,
     _SCOPE_SEV,
     _SEVERITY_CASE,
     _SORT_FIELDS,
     _STREAMING_COLLECTORS,
     _VULN_SOURCES,
-    AUTH_SUBSYSTEM_OPTIONS,
-    COLLECTOR_MODELS,
-    DEFAULT_DB_PATH,
-    DEFAULT_PER_PAGE,
-    DISPLAY_FIELDS,
-    PER_PAGE_OPTIONS,
-    SEVERITY_ORDER,
-    VERDICTS,
     _addr_scope,
     _attach_ip_enrichment,
     _cache_key,
@@ -63,22 +60,16 @@ from .queries import (
     _collector_rows_with_verdict,
     _columns_cache,
     _dns_resolution_level,
-    _engine,
-    _engine_cache,
-    _engine_cache_lock,
     _existing_columns,
     _existing_tables,
     _geo_from_details,
     _geo_richness,
     _host_from_details,
-    _log_query,
     _paginate,
     _parse_json_list,
     _parse_json_obj,
     _port_sort_key,
-    _query_log_lock,
     _row_and_artifact,
-    _session,
     _tables_cache,
     auth_events_aggregated,
     category_options,
@@ -107,15 +98,28 @@ from .queries import (
     verdict_timeseries,
     vulnerabilities,
 )
-from .serve import _build_parser, _ensure_db_exists, _open_browser, _serve, main
+from .routes.fragments import (
+    _int_arg,
+    _prior_run,
+    _sparkline_points,
+)
+from .serve import (
+    _build_parser,
+    _ensure_db_exists,
+    _open_browser,
+    _serve,
+    main,
+)
 
 __all__ = [
     "AUTH_SUBSYSTEM_OPTIONS",
     "Base",
     "COLLECTOR_MODELS",
+    "ControlStore",
     "DEFAULT_DB_PATH",
     "DEFAULT_PER_PAGE",
     "DISPLAY_FIELDS",
+    "DashboardConfig",
     "PER_PAGE_OPTIONS",
     "SEVERITY_ORDER",
     "VERDICTS",
@@ -129,7 +133,6 @@ __all__ = [
     "_MD_TAGS",
     "_PKG_DIR",
     "_PROTO_BY_SOCK",
-    "_QUERY_LOG_PATH",
     "_SCHEMA_TTL",
     "_SCOPE_SEV",
     "_SEVERITY_CASE",
@@ -145,9 +148,6 @@ __all__ = [
     "_columns_cache",
     "_datetime_fmt",
     "_dns_resolution_level",
-    "_engine",
-    "_engine_cache",
-    "_engine_cache_lock",
     "_ensure_db_exists",
     "_ensure_list_blank_lines",
     "_existing_columns",
@@ -158,7 +158,6 @@ __all__ = [
     "_host_from_details",
     "_human_bytes",
     "_int_arg",
-    "_log_query",
     "_open_browser",
     "_paginate",
     "_parse_json_list",
@@ -166,26 +165,17 @@ __all__ = [
     "_port_sort_key",
     "_pretty_json",
     "_prior_run",
-    "_query_log_lock",
     "_relative_time",
     "_row_and_artifact",
     "_serve",
-    "_session",
     "_sparkline_points",
     "_tables_cache",
-    "app",
     "auth_events_aggregated",
-    "bump_scan_now",
-    "monitor_alive",
-    "queue_command",
-    "read_control_state",
-    "set_collector",
-    "set_paused",
-    "set_settings",
     "category_options",
     "collector_errors",
     "collector_options",
     "cost_since",
+    "create_app",
     "disk_usage",
     "dns_queries",
     "findings",
@@ -196,9 +186,11 @@ __all__ = [
     "latest_run",
     "listening_ports",
     "main",
+    "monitor_alive",
     "network_flows",
     "new_alerts",
     "persistence_tampering",
+    "read_control_state",
     "recent_runs",
     "render_markdown",
     "resource_trend",

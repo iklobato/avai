@@ -16,7 +16,14 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import _engine, _ensure_db_exists, app, latest_run, system_integrity
+from avai.dashboard import (
+    DashboardConfig,
+    _ensure_db_exists,
+    create_app,
+    latest_run,
+    system_integrity,
+)
+from avai.dashboard.db import read_only_engine
 from avai.host_monitor import Sink, SystemIntegrityRow
 
 # ---------------------------------------------------------------------------
@@ -114,14 +121,53 @@ class TestEnsureDbExists:
 
 
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    """Bind the Flask app to a fresh empty DB and return its test
-    client. Avoids the real app.run() loop entirely."""
+def db_path(tmp_path):
     db = tmp_path / "test.db"
     _ensure_db_exists(str(db))
-    app.config.update(TESTING=True, DB_PATH=str(db))
-    with app.test_client() as c:
-        yield c
+    return str(db)
+
+
+@pytest.fixture
+def make_client(db_path):
+    """A test client for an app on the fresh empty DB, built with the given
+    DashboardConfig fields. Avoids the real app.run() loop entirely."""
+
+    def build(**config):
+        app = create_app(DashboardConfig(db_path=db_path, **config))
+        app.config["TESTING"] = True
+        return app.test_client()
+
+    return build
+
+
+@pytest.fixture
+def client(make_client):
+    return make_client()
+
+
+class TestDashboardConfigFromEnv:
+    def test_env_vars_map_to_fields(self):
+        config = DashboardConfig.from_env(
+            "/x.db",
+            {
+                "AVAI_CONTROL_TOKEN": "secret",
+                "AVAI_CONTROL_OPEN": "1",
+                "AVAI_APP_MODE": "1",
+                "AVAI_QUERY_LOG": "/tmp/q.log",
+            },
+        )
+        assert config == DashboardConfig(
+            db_path="/x.db",
+            control_token="secret",
+            control_open=True,
+            app_mode=True,
+            query_log_path="/tmp/q.log",
+        )
+
+    def test_empty_env_fails_closed(self):
+        config = DashboardConfig.from_env("/x.db", {"AVAI_CONTROL_TOKEN": ""})
+        assert config.control_token is None
+        assert not config.control_enabled
 
 
 class TestDashboardEndpoints:
@@ -202,7 +248,9 @@ class TestDashboardEndpoints:
         r = client.get(path)
         assert r.status_code == 200, f"{path} → {r.status_code}"
 
-    def test_auth_events_collapse_repeated_lines_into_one_judged_pattern(self, client):
+    def test_auth_events_collapse_repeated_lines_into_one_judged_pattern(
+        self, client, db_path
+    ):
         from datetime import datetime, timedelta, timezone
 
         from avai.host_monitor import AuthEventRow, CollectionRun, Judgement
@@ -210,7 +258,7 @@ class TestDashboardEndpoints:
         recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(
             timespec="seconds"
         )
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="stream1", started_at=recent, hostname="h", lookback_min=5
@@ -283,7 +331,7 @@ class TestDashboardEndpoints:
         assert "exposure" in body
         assert "js-net-tab" in body
 
-    def test_network_exposure_renders_rows_with_verdicts(self, client):
+    def test_network_exposure_renders_rows_with_verdicts(self, client, db_path):
         # A configured proxy and an active remote login session (with a
         # verdict joined on content_hash/collector) must surface in the
         # exposure panel.
@@ -294,7 +342,7 @@ class TestDashboardEndpoints:
             ProxyConfigRow,
         )
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="run1",
@@ -351,13 +399,13 @@ class TestDashboardEndpoints:
         assert "10.0.0.9" in filtered
         assert "203.0.113.7" not in filtered
 
-    def test_file_scan_finding_renders_rule_and_path(self, client):
+    def test_file_scan_finding_renders_rule_and_path(self, client, db_path):
         # A YARA match (file_scan collector) must render its rule + path in
         # the findings table — regression for file_scan missing from the
         # dashboard's COLLECTOR_MODELS / DISPLAY_FIELDS maps.
         from avai.host_monitor import CollectionRun, FileScanRow, Judgement
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="run1",
@@ -402,12 +450,12 @@ class TestDashboardEndpoints:
         assert "/usr/local/bin/dropper" in body  # the scanned path
         assert "malicious" in body
 
-    def test_file_scan_panel_renders_ruleset_summary_and_matches(self, client):
+    def test_file_scan_panel_renders_ruleset_summary_and_matches(self, client, db_path):
         # The File Scan panel shows the persisted ruleset summary (counts,
         # sources, categories) AND this run's matches with rule/path/author.
         from avai.host_monitor import CollectionRun, FileScanRow, Judgement, Sink
 
-        Sink(_engine_rw(app.config["DB_PATH"])).write_yara_status(
+        Sink(_engine_rw(db_path)).write_yara_status(
             {
                 "rules_loaded": 5292,
                 "files_loaded": 656,
@@ -418,7 +466,7 @@ class TestDashboardEndpoints:
                 "by_category": {"apt": 260, "gen": 156},
             }
         )
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="run1",
@@ -491,13 +539,13 @@ class TestDashboardEndpoints:
         assert body.count('aria-selected="true"') == 1
         assert 'aria-selected="false"' in body
 
-    def test_filter_controls_have_accessible_labels(self, client):
+    def test_filter_controls_have_accessible_labels(self, client, db_path):
         # WCAG 1.3.1/3.3.2 — placeholder is not a label. Every search box and
         # select in the data panels must carry an aria-label. The panels only
         # render their filter bar once a run exists, so seed one first.
         from avai.host_monitor import CollectionRun
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="run1",
@@ -519,13 +567,15 @@ class TestDashboardEndpoints:
             body = client.get(path).data.decode()
             assert "aria-label=" in body, f"{path} has an unlabelled control"
 
-    def test_dns_pill_routes_through_shared_macro_with_confidence(self, client):
+    def test_dns_pill_routes_through_shared_macro_with_confidence(
+        self, client, db_path
+    ):
         # Regression for centralising the verdict palette: the per-partial
         # colour maps were removed in favour of the shared verdict_pill macro,
         # which must still render the verdict text AND the confidence suffix.
         from avai.host_monitor import CollectionRun, DnsQueryRow, Judgement
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="run1",
@@ -568,7 +618,7 @@ class TestDashboardEndpoints:
         assert "malicious" in body  # pill verdict text
         assert "91%" in body  # confidence suffix from the shared macro
 
-    def test_network_topology_renders_rows_with_verdicts(self, client):
+    def test_network_topology_renders_rows_with_verdicts(self, client, db_path):
         # A configured resolver and an ARP entry (with a verdict joined on
         # content_hash/collector) must surface in the topology panel.
         from avai.host_monitor import (
@@ -578,7 +628,7 @@ class TestDashboardEndpoints:
             Judgement,
         )
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="run1",
@@ -637,14 +687,14 @@ class TestDashboardEndpoints:
         assert "9.9.9.9" in filtered
         assert "de:ad:be:ef:00:01" not in filtered
 
-    def test_vulnerabilities_panel_renders_cves_and_kev(self, client):
+    def test_vulnerabilities_panel_renders_cves_and_kev(self, client, db_path):
         import json as _json
 
         from avai.dashboard import Base
         from avai.enrichers.cache import register_schema
 
         model = register_schema(Base)
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 model(
                     source="osv",
@@ -719,7 +769,9 @@ class TestDashboardEndpoints:
         # the KEV/critical package must rank before the EOL OS
         assert body.index("openssl@3.0.2") < body.index("macos@12")
 
-    def test_vulnerabilities_sorted_by_severity_then_flags_reachable(self, client):
+    def test_vulnerabilities_sorted_by_severity_then_flags_reachable(
+        self, client, db_path
+    ):
         import json as _json
 
         from avai.dashboard import Base
@@ -727,7 +779,7 @@ class TestDashboardEndpoints:
         from avai.host_monitor import CollectionRun, ListeningPortRow
 
         model = register_schema(Base)
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             # A completed run where nginx is listening (exposed on the host).
             s.add(
                 CollectionRun(
@@ -789,10 +841,10 @@ class TestDashboardEndpoints:
         assert r.status_code == 200
         assert b"no incident digest yet" in r.data
 
-    def test_incident_fragment_renders_latest_narrative(self, client):
+    def test_incident_fragment_renders_latest_narrative(self, client, db_path):
         from avai.host_monitor import IncidentNarrativeRow
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 IncidentNarrativeRow(
                     created_at="2026-05-30T12:00:00Z",
@@ -829,13 +881,13 @@ class TestDashboardEndpoints:
         assert "kill 123" in body
         assert '"title":' not in body  # raw JSON must not leak through
 
-    def test_incident_legacy_narrative_still_renders(self, client):
+    def test_incident_legacy_narrative_still_renders(self, client, db_path):
         # A digest written before the structured format (only the old
         # `narrative` field) must still render via the markdown fallback,
         # with any injected <script> stripped.
         from avai.host_monitor import IncidentNarrativeRow
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 IncidentNarrativeRow(
                     created_at="2026-05-30T13:00:00Z",
@@ -854,12 +906,12 @@ class TestDashboardEndpoints:
         assert b"<script" not in r.data  # sanitised
         assert b"<strong>done</strong>" in r.data  # markdown fallback rendered
 
-    def test_findings_surface_novel_badge_and_context(self, client):
+    def test_findings_surface_novel_badge_and_context(self, client, db_path):
         # A finding carrying the baseline novelty + correlated process story
         # must render the 'novel' badge and the behavioural-context block.
         from avai.host_monitor import CollectionRun, Judgement
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="run1",
@@ -899,10 +951,10 @@ class TestDashboardEndpoints:
         assert "0.0.0.0:4444" in body  # correlated listening port
         assert "9.9.9.9:443" in body  # correlated outbound flow
 
-    def test_risk_fragment_renders_score_and_drivers(self, client):
+    def test_risk_fragment_renders_score_and_drivers(self, client, db_path):
         from avai.host_monitor import RiskScoreRow
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 RiskScoreRow(
                     created_at="2026-05-30T12:00:00Z",
@@ -930,10 +982,10 @@ class TestDashboardEndpoints:
         assert r.status_code == 200
         assert b"no posture score yet" in r.data
 
-    def test_overview_shows_total_llm_cost(self, client):
+    def test_overview_shows_total_llm_cost(self, client, db_path):
         from avai.host_monitor import CollectionRun, Judgement
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="run1",
@@ -966,10 +1018,10 @@ class TestDashboardEndpoints:
         assert "est. LLM cost" in body
         assert "$0.0015" in body  # 0.001 + 0.0005, summed since the run
 
-    def test_row_counts_shows_total_and_delta(self, client):
+    def test_row_counts_shows_total_and_delta(self, client, db_path):
         from avai.host_monitor import CollectionRun, ProcessRow
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             for rid, ts in (
                 ("r0", "2026-05-30T11:00:00Z"),
                 ("r1", "2026-05-30T12:00:00Z"),
@@ -1009,10 +1061,10 @@ class TestDashboardEndpoints:
         assert "▲ +2" in body  # processes grew 3 → 5
         assert "empty" in body  # other collectors have 0 rows
 
-    def test_finding_detail_shows_per_judgement_cost(self, client):
+    def test_finding_detail_shows_per_judgement_cost(self, client, db_path):
         from avai.host_monitor import CollectionRun, Judgement
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             s.add(
                 CollectionRun(
                     run_id="run1",
@@ -1258,11 +1310,10 @@ class TestSystemIntegrityPlatform:
 
 class TestWalVisibility:
     def test_engine_url_is_not_immutable(self):
-        # immutable=1 ignores the WAL — must not be used.
-        app.config["DB_PATH"] = "/tmp/whatever.db"
-        with app.app_context():
-            assert "immutable" not in str(_engine().url)
-            assert "mode=ro" in str(_engine().url)
+        # immutable=1 ignores the WAL, so it must not be used.
+        url = str(read_only_engine("/tmp/whatever.db").url)
+        assert "immutable" not in url
+        assert "mode=ro" in url
 
     def test_reads_rows_sitting_in_uncheckpointed_wal(self, tmp_path):
         import sqlite3
@@ -1279,10 +1330,8 @@ class TestWalVisibility:
         w.execute("INSERT INTO collection_runs VALUES ('x')")
         w.commit()
         try:
-            app.config["DB_PATH"] = str(db)
-            with app.app_context():
-                with _engine().connect() as c:
-                    n = c.execute(text("SELECT count(*) FROM collection_runs")).scalar()
+            with read_only_engine(str(db)).connect() as c:
+                n = c.execute(text("SELECT count(*) FROM collection_runs")).scalar()
             # Pre-fix (immutable=1) this raised "no such table".
             assert n == 1
         finally:
@@ -1334,104 +1383,105 @@ class TestLatestRunFallback:
 
 
 class TestControlPlane:
-    def _state(self):
+    @staticmethod
+    def _state(db_path):
         from avai.dashboard.control import read_control_state
 
-        with app.app_context():
-            return read_control_state()
+        with Session(read_only_engine(db_path)) as s:
+            return read_control_state(s)
 
     def test_fragment_control_renders(self, client):
         r = client.get("/fragments/control")
         assert r.status_code == 200
         assert b"monitor control" in r.data
 
-    def test_panel_survives_missing_control_table(self, client):
+    def test_panel_survives_missing_control_table(self, client, db_path):
         """Belt-and-suspenders: even if control_state is somehow absent, the
         panel degrades to 'offline' (200) instead of 500ing."""
         import sqlite3
 
-        con = sqlite3.connect(app.config["DB_PATH"])
+        con = sqlite3.connect(db_path)
         con.execute("DROP TABLE IF EXISTS control_state")
         con.commit()
         con.close()
         from avai.dashboard.control import read_control_state
 
-        with app.app_context():
-            assert read_control_state() is None  # degraded, did not raise
+        with Session(read_only_engine(db_path)) as s:
+            assert read_control_state(s) is None  # degraded, did not raise
         assert client.get("/fragments/control").status_code == 200
 
-    def test_post_without_token_is_forbidden(self, client, monkeypatch):
-        monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
+    def test_post_without_token_is_forbidden(self, client):
         # Even supplying a header: fail closed when the server has no token.
         r = client.post("/control/pause", headers={"X-Avai-Token": "x"})
         assert r.status_code == 403
 
-    def test_post_with_wrong_token_is_forbidden(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_post_with_wrong_token_is_forbidden(self, make_client):
+        client = make_client(control_token="secret")
         r = client.post("/control/pause", headers={"X-Avai-Token": "nope"})
         assert r.status_code == 403
 
-    def test_open_mode_allows_control_without_token(self, client, monkeypatch):
+    def test_open_mode_allows_control_without_token(self, make_client, db_path):
+        client = make_client(control_open=True)
         # Desktop app: loopback webview, no token needed.
-        monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
-        monkeypatch.setenv("AVAI_CONTROL_OPEN", "1")
         assert client.post("/control/pause").status_code == 200  # no header
-        assert self._state()["paused"] == 1
+        assert self._state(db_path)["paused"] == 1
         body = client.get("/fragments/control").get_data(as_text=True)
         assert "control token" not in body  # token prompt hidden in open mode
 
-    def test_pause_resume_writes_row(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_pause_resume_writes_row(self, make_client, db_path):
+        client = make_client(control_token="secret")
         h = {"X-Avai-Token": "secret"}
         assert client.post("/control/pause", headers=h).status_code == 200
-        assert self._state()["paused"] == 1
+        assert self._state(db_path)["paused"] == 1
         assert client.post("/control/resume", headers=h).status_code == 200
-        assert self._state()["paused"] == 0
+        assert self._state(db_path)["paused"] == 0
 
-    def test_scan_now_bumps_nonce(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_scan_now_bumps_nonce(self, make_client, db_path):
+        client = make_client(control_token="secret")
         h = {"X-Avai-Token": "secret"}
-        before = self._state()
+        before = self._state(db_path)
         before_nonce = before["scan_now_nonce"] if before else 0
         client.post("/control/scan-now", headers=h)
-        assert self._state()["scan_now_nonce"] == before_nonce + 1
+        assert self._state(db_path)["scan_now_nonce"] == before_nonce + 1
 
-    def test_collector_toggle(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_collector_toggle(self, make_client, db_path):
+        client = make_client(control_token="secret")
         h = {"X-Avai-Token": "secret"}
         client.post("/control/collector/network_flows/off", headers=h)
-        assert "network_flows" in (self._state()["disabled_collectors"] or "")
+        assert "network_flows" in (self._state(db_path)["disabled_collectors"] or "")
         client.post("/control/collector/network_flows/on", headers=h)
-        assert "network_flows" not in (self._state()["disabled_collectors"] or "")
+        assert "network_flows" not in (
+            self._state(db_path)["disabled_collectors"] or ""
+        )
 
-    def test_unknown_collector_is_rejected(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_unknown_collector_is_rejected(self, make_client):
+        client = make_client(control_token="secret")
         r = client.post(
             "/control/collector/bogus/off", headers={"X-Avai-Token": "secret"}
         )
         assert r.status_code == 400
 
-    def test_settings_update(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_settings_update(self, make_client, db_path):
+        client = make_client(control_token="secret")
         h = {"X-Avai-Token": "secret"}
         client.post(
             "/control/settings",
             headers=h,
             data={"interval": "45", "judge": "0", "enrich": "1"},
         )
-        st = self._state()
+        st = self._state(db_path)
         assert st["interval_override"] == 45
         assert st["judge_enabled"] == 0 and st["enrich_enabled"] == 1
 
-    def test_maintenance_queues_command(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_maintenance_queues_command(self, make_client, db_path):
+        client = make_client(control_token="secret")
         h = {"X-Avai-Token": "secret"}
         client.post("/control/maintenance/prune", headers=h)
-        st = self._state()
+        st = self._state(db_path)
         assert st["command"] == "prune" and st["command_nonce"] == 1
 
-    def test_unknown_maintenance_action_is_rejected(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_unknown_maintenance_action_is_rejected(self, make_client):
+        client = make_client(control_token="secret")
         r = client.post(
             "/control/maintenance/bogus", headers={"X-Avai-Token": "secret"}
         )
@@ -1441,8 +1491,8 @@ class TestControlPlane:
 class TestFeedbackEndpoint:
     _HASH = "a" * 64
 
-    def test_records_feedback_with_token(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_records_feedback_with_token(self, make_client, db_path):
+        client = make_client(control_token="secret")
         r = client.post(
             f"/feedback/processes/{self._HASH}/false_positive",
             data={"artifact": "curl", "note": "dev tool"},
@@ -1452,7 +1502,7 @@ class TestFeedbackEndpoint:
         assert b"recorded" in r.data
         from avai.host_monitor import FeedbackRow
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             row = s.get(FeedbackRow, (self._HASH, "processes"))
         assert row is not None
         assert row.label == "false_positive"
@@ -1467,9 +1517,9 @@ class TestFeedbackEndpoint:
         ["trusted_roots", "injection_env", "kernel_modules", "ssh_known_hosts"],
     )
     def test_records_feedback_for_slices_added_after_the_map(
-        self, client, monkeypatch, collector
+        self, client, collector, make_client, db_path
     ):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        client = make_client(control_token="secret")
         r = client.post(
             f"/feedback/{collector}/{self._HASH}/confirmed",
             headers={"X-Avai-Token": "secret"},
@@ -1477,25 +1527,24 @@ class TestFeedbackEndpoint:
         assert r.status_code == 200
         from avai.host_monitor import FeedbackRow
 
-        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+        with Session(_engine_rw(db_path)) as s:
             row = s.get(FeedbackRow, (self._HASH, collector))
         assert row is not None and row.label == "confirmed"
 
-    def test_rejected_without_token(self, client, monkeypatch):
-        monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
+    def test_rejected_without_token(self, client):
         r = client.post(f"/feedback/processes/{self._HASH}/false_positive")
         assert r.status_code == 403
 
-    def test_bad_label_is_400(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_bad_label_is_400(self, make_client):
+        client = make_client(control_token="secret")
         r = client.post(
             f"/feedback/processes/{self._HASH}/bogus",
             headers={"X-Avai-Token": "secret"},
         )
         assert r.status_code == 400
 
-    def test_unknown_collector_is_400(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+    def test_unknown_collector_is_400(self, make_client):
+        client = make_client(control_token="secret")
         r = client.post(
             f"/feedback/not_a_collector/{self._HASH}/confirmed",
             headers={"X-Avai-Token": "secret"},
@@ -1970,8 +2019,8 @@ class TestAppModeHero:
     """In app mode (AVAI_APP_MODE) the triage section renders the antivirus
     protection home; the web dashboard keeps the slim operator strip."""
 
-    def test_app_mode_shows_protection_hero(self, client, monkeypatch):
-        monkeypatch.setenv("AVAI_APP_MODE", "1")
+    def test_app_mode_shows_protection_hero(self, make_client):
+        client = make_client(app_mode=True)
         b = client.get("/fragments/triage").data.decode()
         assert "protection status" in b
         assert "/control/scan-now" in b  # scan button wired to the real route
@@ -1979,8 +2028,7 @@ class TestAppModeHero:
         # empty DB -> monitor not alive -> At risk state
         assert "At risk" in b
 
-    def test_web_mode_keeps_operator_strip(self, client, monkeypatch):
-        monkeypatch.delenv("AVAI_APP_MODE", raising=False)
+    def test_web_mode_keeps_operator_strip(self, client):
         b = client.get("/fragments/triage").data.decode()
         assert "protection status" not in b  # no hero
         assert "posture" in b

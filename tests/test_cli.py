@@ -7,7 +7,7 @@ help short-circuits — without touching ``host_monitor`` or
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -137,15 +137,18 @@ class TestDashboardServer:
     def test_default_serves_via_waitress(self):
         import avai.dashboard as d
 
-        with patch("waitress.serve") as wserve, patch.object(d.app, "run") as arun:
-            d._serve("127.0.0.1", 8765, debug=False)
+        app = MagicMock()
+        with patch("waitress.serve") as wserve:
+            d._serve(app, "127.0.0.1", 8765, debug=False)
         wserve.assert_called_once()
-        arun.assert_not_called()
+        assert wserve.call_args.args[0] is app
+        app.run.assert_not_called()
 
     def test_debug_uses_dev_server(self):
         import avai.dashboard as d
 
-        with patch("waitress.serve") as wserve, patch.object(d.app, "run") as arun:
-            d._serve("127.0.0.1", 8765, debug=True)
-        arun.assert_called_once()
+        app = MagicMock()
+        with patch("waitress.serve") as wserve:
+            d._serve(app, "127.0.0.1", 8765, debug=True)
+        app.run.assert_called_once()
         wserve.assert_not_called()

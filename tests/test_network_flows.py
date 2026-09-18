@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import app, network_flows
+from avai.dashboard import DashboardConfig, create_app, network_flows
 from avai.enrichers import IndicatorType, extract_indicators
 from avai.host_monitor import NetworkFlowRow, NetworkFlowsCollector, Sink
 
@@ -271,8 +271,7 @@ class TestNetworkFlowsAggregation:
     def test_fragment_renders_interface_and_verdict(self, seeded):
         engine, run_id = seeded
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "203.0.113.9" in html
         assert "en0" in html  # interface column
@@ -324,8 +323,7 @@ class TestTrafficVolume:
     def test_fragment_shows_human_volume(self, tmp_path):
         engine, run_id = self._seed_flow(tmp_path, 1_200_000)
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "1.1 MB" in html  # volume headline
         assert "8 pkts" in html  # packets demoted to detail line
@@ -333,8 +331,7 @@ class TestTrafficVolume:
     def test_zero_bytes_falls_back_to_packets(self, tmp_path):
         engine, run_id = self._seed_flow(tmp_path, 0)
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "8 " in html and "pkts" in html  # packet count as headline
 
@@ -512,13 +509,12 @@ class TestGeolocationColumn:
             ],
         )
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "203.0.113.9" in html  # the IP anchor
         assert "Ashburn" in html  # city, now in the destination cell
         assert "AS14618" in html  # ASN, now in the destination cell
-        assert "\U0001F1FA\U0001F1F8" in html  # 🇺🇸 flag from country_code
+        assert "\U0001f1fa\U0001f1f8" in html  # 🇺🇸 flag from country_code
         assert "threat intel" not in html  # threat-intel column removed
         # the separate location column header is gone
         assert ">location</th>" not in html
@@ -562,8 +558,8 @@ class TestFlagEmoji:
     def test_two_letter_code_to_flag(self):
         from avai.dashboard import _flag_emoji
 
-        assert _flag_emoji("US") == "\U0001F1FA\U0001F1F8"
-        assert _flag_emoji("de") == "\U0001F1E9\U0001F1EA"  # case-insensitive
+        assert _flag_emoji("US") == "\U0001f1fa\U0001f1f8"
+        assert _flag_emoji("de") == "\U0001f1e9\U0001f1ea"  # case-insensitive
 
     def test_non_code_returns_empty(self):
         from avai.dashboard import _flag_emoji
@@ -660,8 +656,7 @@ class TestDestinationHostname:
             ],
         )
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "host.evil.example" in html
 
@@ -696,8 +691,7 @@ class TestMissingTableGraceful:
     def test_fragment_200_on_db_without_table(self, tmp_path):
         engine, db = self._db_without_flows(tmp_path)
         engine.dispose()
-        app.config.update(TESTING=True, DB_PATH=str(db))
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=str(db))).test_client() as c:
             r = c.get("/fragments/network-flows")
         assert r.status_code == 200
         assert "no network flows match the current filters" in r.data.decode()

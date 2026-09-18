@@ -77,6 +77,11 @@ RULES: tuple[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...] = (
         (_HM, "avai.dashboard"),
         (f"{_HM}.constants",),
     ),
+    (
+        ("avai.dashboard.queries", "avai.dashboard.control"),
+        ("flask", "avai.dashboard.app", "avai.dashboard.routes"),
+        (),
+    ),
 )
 
 
