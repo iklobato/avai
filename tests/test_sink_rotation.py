@@ -15,6 +15,11 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from avai.host_monitor import CollectionRun, LaunchItemRow, Sink
+from avai.host_monitor.models import (
+    AuthEventRow,
+    CollectorErrorRow,
+    StreamingSession,
+)
 from avai.host_monitor.runtime import Clock
 from avai.host_monitor.sink import _BUSY_TIMEOUT_MS
 
@@ -190,6 +195,133 @@ class TestPruneToSize:
         assert newer in remaining
         # The oldest is gone first.
         assert old not in remaining
+
+
+def _iso(moment: datetime) -> str:
+    return moment.isoformat(timespec="seconds")
+
+
+def _count(sink, model, *where) -> int:
+    with Session(sink.engine) as s:
+        return len(s.execute(select(model).where(*where)).scalars().all())
+
+
+def _three_runs(sink):
+    """Three completed runs, one hour apart, oldest first."""
+    now = datetime.now(timezone.utc)
+    return now, [
+        _make_run(sink, now - timedelta(hours=h), now - timedelta(hours=h - 1), rows=50)
+        for h in (3, 2, 1)
+    ]
+
+
+def _auth_events(sink, collected_at: str, count: int) -> None:
+    sink.write(
+        AuthEventRow,
+        [
+            {
+                "run_id": "stream",
+                "collected_at": collected_at,
+                "content_hash": f"a{collected_at}{i}",
+                "process": "sshd",
+            }
+            for i in range(count)
+        ],
+    )
+
+
+def _streaming_session(sink, finished_at: str) -> str:
+    run_id = sink.start_streaming_session("auth_events", "h")
+    sink.end_streaming_session(run_id, 0)
+    with Session(sink.engine) as s:
+        s.query(StreamingSession).filter(StreamingSession.run_id == run_id).update(
+            {"started_at": finished_at, "finished_at": finished_at}
+        )
+        s.commit()
+    return run_id
+
+
+class TestPruneToSizeBehaviour:
+    def test_zero_cap_means_unlimited(self, file_sink):
+        _three_runs(file_sink)
+
+        stats = file_sink.prune_to_size(max_bytes=0)
+
+        assert stats == {
+            "runs_pruned": 0,
+            "events_pruned": 0,
+            "bytes_before": 0,
+            "bytes_after": 0,
+        }
+        assert _count(file_sink, CollectionRun) == 3
+
+    def test_under_the_cap_reports_the_current_size(self, file_sink):
+        size = file_sink.database_size_bytes()
+
+        stats = file_sink.prune_to_size(max_bytes=size + 10_000_000)
+
+        assert stats["bytes_before"] == stats["bytes_after"] == size
+
+    def test_always_keeps_the_newest_completed_run(self, file_sink):
+        _, (_old, _mid, newest) = _three_runs(file_sink)
+
+        stats = file_sink.prune_to_size(max_bytes=1)
+
+        assert stats["runs_pruned"] == 2
+        assert _count(file_sink, CollectionRun) == 1
+        assert _count(file_sink, LaunchItemRow, LaunchItemRow.run_id == newest) == 50
+
+    def test_child_rows_and_errors_of_a_pruned_run_go_with_it(self, file_sink):
+        _, (old, _mid, _newest) = _three_runs(file_sink)
+        with Session(file_sink.engine) as s:
+            s.add(CollectorErrorRow(run_id=old, collector="x", occurred_at="t"))
+            s.commit()
+
+        file_sink.prune_to_size(max_bytes=1)
+
+        assert _count(file_sink, LaunchItemRow, LaunchItemRow.run_id == old) == 0
+        assert _count(file_sink, CollectorErrorRow) == 0
+
+    def test_an_unfinished_run_is_never_pruned(self, file_sink):
+        _three_runs(file_sink)
+        in_progress, _ = file_sink.start_run("h", 5)
+
+        file_sink.prune_to_size(max_bytes=1)
+
+        assert (
+            _count(file_sink, CollectionRun, CollectionRun.run_id == in_progress) == 1
+        )
+
+    def test_auth_events_older_than_the_oldest_kept_run_are_pruned(self, file_sink):
+        now, _ = _three_runs(file_sink)
+        _auth_events(file_sink, _iso(now - timedelta(hours=5)), 30)
+        _auth_events(file_sink, _iso(now), 4)
+
+        stats = file_sink.prune_to_size(max_bytes=1)
+
+        assert stats["events_pruned"] == 30
+        assert _count(file_sink, AuthEventRow) == 4
+
+    def test_streaming_sessions_that_ended_before_the_kept_runs_are_pruned(
+        self, file_sink
+    ):
+        now, _ = _three_runs(file_sink)
+        stale = _streaming_session(file_sink, _iso(now - timedelta(hours=5)))
+        live = _streaming_session(file_sink, _iso(now))
+
+        file_sink.prune_to_size(max_bytes=1)
+
+        assert (
+            _count(file_sink, StreamingSession, StreamingSession.run_id == stale) == 0
+        )
+        assert _count(file_sink, StreamingSession, StreamingSession.run_id == live) == 1
+
+    def test_the_file_shrinks_after_pruning(self, file_sink):
+        _three_runs(file_sink)
+
+        stats = file_sink.prune_to_size(max_bytes=1)
+
+        assert stats["bytes_after"] < stats["bytes_before"]
 
 
 # ---------------------------------------------------------------------------
