@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import plistlib
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 from typing import Optional
 
 from .. import constants
@@ -78,6 +79,6 @@ class HostPaths:
         try:
             with open(path, "rb") as f:
                 data = plistlib.load(f)
-        except (OSError, plistlib.InvalidFileException, ValueError):
+        except (OSError, plistlib.InvalidFileException, ValueError, ExpatError):
             return None
         return data if isinstance(data, dict) else None

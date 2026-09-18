@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import plistlib
 import sqlite3
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from avai.host_monitor.runtime import (
     Digest,
     ExternalSqliteReader,
     FrozenClock,
+    HostPaths,
 )
 
 
@@ -144,3 +146,17 @@ class TestExternalSqliteReader:
 
         rows = list(ExternalSqliteReader().rows(db, "items", ["id", "name"]))
         assert rows == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+
+
+class TestHostPaths:
+    def test_read_plist_skips_malformed_xml(self, tmp_path):
+        # plistlib raises expat's ExpatError here, which is not a ValueError.
+        # A GitHub macOS runner ships a system LaunchAgent like this.
+        bad = tmp_path / "bad.plist"
+        bad.write_bytes(b"<?xml version=1.0?>\n<plist/>")
+        assert HostPaths.read_plist(bad) is None
+
+    def test_read_plist_reads_a_dict(self, tmp_path):
+        good = tmp_path / "good.plist"
+        good.write_bytes(plistlib.dumps({"Label": "com.example"}))
+        assert HostPaths.read_plist(good) == {"Label": "com.example"}
