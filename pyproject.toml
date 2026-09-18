@@ -122,3 +122,64 @@ include = [
     "pyproject.toml",
 ]
 exclude = ["src/avai/rules/vendor/**"]
+
+
+# -----------------------------------------------------------------------------
+# Ruff: refactor ratchet (docs/REFACTOR_PLAN.md, Phase 0).
+# Complexity, argument count and magic values are enforced everywhere in src/.
+# The per-file list below freezes today's offenders; each refactor phase
+# deletes its entries and nothing new may be added. Tests and tools compare
+# against literal expected values by design, so these rules skip them.
+# -----------------------------------------------------------------------------
+[tool.ruff.lint]
+extend-select = ["C901", "PLR0913", "PLR2004"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["C901", "PLR0913", "PLR2004"]
+"tools/**" = ["C901", "PLR0913", "PLR2004"]
+"scripts/**" = ["C901", "PLR0913", "PLR2004"]
+"packaging/**" = ["C901", "PLR0913", "PLR2004"]
+"src/avai/dashboard/app.py" = ["PLR2004"]
+"src/avai/dashboard/queries.py" = ["C901", "PLR0913", "PLR2004"]
+"src/avai/enrichers/chain.py" = ["C901"]
+"src/avai/enrichers/http.py" = ["PLR2004"]
+"src/avai/enrichers/indicators.py" = ["PLR2004"]
+"src/avai/enrichers/sources/abuseipdb.py" = ["PLR2004"]
+"src/avai/enrichers/sources/circl_hashlookup.py" = ["PLR2004"]
+"src/avai/enrichers/sources/crtsh.py" = ["PLR2004"]
+"src/avai/enrichers/sources/endoflife.py" = ["PLR2004"]
+"src/avai/enrichers/sources/github_advisory.py" = ["PLR2004"]
+"src/avai/enrichers/sources/greynoise.py" = ["PLR2004"]
+"src/avai/enrichers/sources/ipwhois_geo.py" = ["PLR2004"]
+"src/avai/enrichers/sources/malware_bazaar.py" = ["PLR2004"]
+"src/avai/enrichers/sources/nvd.py" = ["PLR2004"]
+"src/avai/enrichers/sources/osv.py" = ["C901", "PLR2004"]
+"src/avai/enrichers/sources/phishtank.py" = ["PLR2004"]
+"src/avai/enrichers/sources/safe_browsing.py" = ["PLR2004"]
+"src/avai/enrichers/sources/shodan_internetdb.py" = ["PLR2004"]
+"src/avai/enrichers/sources/threatfox.py" = ["PLR2004"]
+"src/avai/enrichers/sources/urlhaus.py" = ["PLR2004"]
+"src/avai/enrichers/sources/virustotal.py" = ["PLR2004"]
+"src/avai/host_monitor/collectors.py" = ["C901", "PLR2004"]
+"src/avai/host_monitor/exposure_collectors.py" = ["PLR2004"]
+"src/avai/host_monitor/file_scanner/roots.py" = ["PLR2004"]
+"src/avai/host_monitor/hosts/linux.py" = ["PLR2004"]
+"src/avai/host_monitor/hosts/macos.py" = ["PLR2004"]
+"src/avai/host_monitor/hosts/windows.py" = ["PLR2004"]
+"src/avai/host_monitor/judge.py" = ["PLR0913"]
+"src/avai/host_monitor/main.py" = ["PLR2004"]
+"src/avai/host_monitor/net_collectors.py" = ["PLR2004"]
+"src/avai/host_monitor/persistence_collectors.py" = ["PLR2004"]
+"src/avai/host_monitor/risk.py" = ["C901"]
+"src/avai/host_monitor/runner.py" = ["PLR0913"]
+"src/avai/host_monitor/runtime/probes.py" = ["PLR2004"]
+"src/avai/host_monitor/runtime/stream_source.py" = ["C901"]
+"src/avai/host_monitor/sink.py" = ["C901"]
+"src/avai/host_monitor/streaming.py" = ["PLR0913"]
+"src/avai/hostsfile.py" = ["PLR2004"]
