@@ -5,10 +5,10 @@ runtime flows that connect them, and how the pieces are deployed. Diagrams are
 [Mermaid](https://mermaid.js.org/) and render on GitHub, in VS Code preview and
 in any Mermaid viewer.
 
-Snapshot: `avai-monitor` 0.7.3, branch `dev` at commit `7af815d` (2026-09-17).
+Snapshot: `avai-monitor` 0.7.3, branch `refactor/p1-yagni` at commit `5455166` (2026-09-17).
 The inventory in Appendix A was generated from the AST of `src/avai`, so it is
-exhaustive: 89 modules, 299 classes, 232 module-level functions, 578 methods,
-about 21.4k lines. Tests: 39 modules, 838 test functions.
+exhaustive: 87 modules, 285 classes, 232 module-level functions, 546 methods,
+about 21.1k lines. Tests: 39 modules, 829 test functions.
 
 > **One-line model.** `avai` is a host-security telemetry engine. A platform
 > object assembles OS-specific **collectors**; the **Runner** drives them each
@@ -30,7 +30,7 @@ Contents
    4.3 [Platform layer: `hosts/`](#43-platform-layer-hosts) ·
    4.4 [Collectors](#44-collectors) ·
    4.5 [Runtime collaborators: `runtime/`](#45-runtime-collaborators-runtime) ·
-   4.6 [Security controls and scan roots](#46-security-controls-and-scan-roots) ·
+   4.6 [Security controls](#46-security-controls) ·
    4.7 [Streaming workers and supervision](#47-streaming-workers-and-supervision) ·
    4.8 [LLM stages, prompts and risk](#48-llm-stages-prompts-and-risk) ·
    4.9 [`Sink`: the DB gateway](#49-sink-the-db-gateway) ·
@@ -116,7 +116,6 @@ src/avai/
 │   ├── hosts/                  platform layer: capabilities (Protocols), factory, macos, linux, windows
 │   ├── runtime/                injectable collaborators: clock, commands, digest, paths, probes, sources
 │   ├── security_controls.py    ServiceSpec + NetworkServiceControl (posture + behaviour per service)
-│   ├── file_scanner/roots.py   ScanRoot / providers / ScanRootCatalog (object model for scan planning)
 │   ├── streaming.py            StreamingWorker (one thread per StreamingCollector)
 │   ├── supervision.py          restart policy: outcomes, backoff, sleeper, listener
 │   ├── judge.py                CompletionClient strategies, Judge / LlmJudge / NullJudge, cost estimate
@@ -127,7 +126,7 @@ src/avai/
 │   ├── risk.py                 compute_risk_score (deterministic 0-100 + grade)
 │   ├── prompts.py              Prompts dataclass (loads prompts.toml)
 │   ├── constants.py            defaults, tunables, pricing, static tables
-│   └── enums.py                Verdict, ThreatCategory, FeedbackLabel, LaunchScope, ScanTier, Browser
+│   └── enums.py                Verdict, ThreatCategory, FeedbackLabel, LaunchScope, Browser
 ├── enrichers/                  threat-intel layer
 │   ├── base.py                 IndicatorType, VerdictHint, Indicator, Evidence, Enricher(ABC)
 │   ├── http.py                 HttpClient + _TokenBucket
@@ -674,13 +673,11 @@ classDiagram
     class PsutilConnections { +inet()$ }
     class SystemMetrics { +virtual_memory() +swap_memory() +cpu_sample() +load_average() +cpu_count() +boot_time() +task_counts() }
     class DiskMetrics { +partitions() +usage(mountpoint) +io_counters() }
-    class ServiceProbe { +loaded(label) +running(name) }
     class ServiceManager { <<Protocol>> +enabled(unit) }
     class PortInspector { <<Protocol>> +listening(port) +established(port) }
     class ProcessInspector { <<Protocol>> +running(name) }
     ServiceManager <|.. LaunchdServiceManager
     ServiceManager <|.. SystemdServiceManager
-    ServiceManager <|.. WindowsScmServiceManager
     PortInspector <|.. PsutilPortInspector
     ProcessInspector <|.. PsutilProcessInspector
     class RowSource { <<Protocol>> +rows() }
@@ -691,10 +688,8 @@ classDiagram
     class JsonLineStreamSource { +stream(stop_event) }
     JsonLineStreamSource o-- LineParser
     CommandSnapshot o-- CommandRunner
-    ServiceProbe o-- CommandRunner
     LaunchdServiceManager o-- CommandRunner
     SystemdServiceManager o-- CommandRunner
-    WindowsScmServiceManager o-- CommandRunner
 ```
 
 `HostPaths.translate` prepends `HOST_PREFIX` (default empty; `/host` in
@@ -704,7 +699,7 @@ mount table under the rootfs mount (`_parse_mounts`, `_host_partitions`,
 reports real host filesystems inside the container. `tri_or` folds 1/0/None
 signals for the integrity checks.
 
-### 4.6 Security controls and scan roots
+### 4.6 Security controls
 
 **`security_controls.py`** gives the system-integrity collectors a per-topic
 object that combines posture (is the service enabled) with behaviour (is it
@@ -728,32 +723,6 @@ classDiagram
 `ServiceSpec` for `remote_login` (sshd :22), screen sharing and remote
 management; `LinuxSystemIntegrityCollector` does the same for `ssh.service`.
 This is what fixed the "enabled but idle" false negative in 0.7.3.
-
-**`file_scanner/roots.py`** is the object model for planning a YARA walk:
-
-```mermaid
-classDiagram
-    class ScanTier { <<IntEnum>> CRITICAL HIGH MEDIUM BASELINE }
-    class ScanRoot { +path +tier +origin +contains(other) +is_scannable() }
-    class ScanRootProvider { <<Protocol>> +roots() Iterable~ScanRoot~ }
-    class ExclusionPolicy { <<Protocol>> +permits(path) bool }
-    class ScanRootCatalog { +plan() list~ScanRoot~ -_discover() -_dedupe_to_highest_tier()$ }
-    ScanRootProvider <|.. StaticRootProvider
-    ScanRootProvider <|.. PrivilegedBinRootProvider
-    ScanRootProvider <|.. HomeRootProvider
-    ScanRootProvider <|.. DownloadsRootProvider
-    ScanRootProvider <|.. ApplicationRootProvider
-    ExclusionPolicy <|.. PseudoFsExclusion
-    ExclusionPolicy <|.. CompositeExclusion
-    ScanRootCatalog o-- ScanRootProvider
-    ScanRootCatalog o-- ExclusionPolicy
-    ScanRoot --> ScanTier
-```
-
-> **Not wired yet.** `ScanRootCatalog` is only referenced by
-> `tests/test_scan_roots.py`. `FileScanCollector._targets()` still walks its
-> own inline list (bin dirs, app executables, recent Downloads). The catalog is
-> the intended replacement for that walk.
 
 ### 4.7 Streaming workers and supervision
 
@@ -1005,7 +974,7 @@ Collector tables and the columns that form a finding's identity:
 
 Enums (`enums.py`): `Verdict` (benign / suspicious / malicious / unknown),
 `ThreatCategory` (`none` plus 13 MITRE-style tactics), `FeedbackLabel` (false_positive /
-confirmed), `LaunchScope`, `ScanTier`, `Browser`.
+confirmed), `LaunchScope`, `Browser`.
 
 ---
 
@@ -1031,8 +1000,8 @@ classDiagram
     class HttpClient { +get(url) +post(url) +set_rate(host, rps) -_request() -_host_of() }
     class _TokenBucket { +take() }
     HttpClient o-- _TokenBucket : per host
-    class EvidenceCache { +get(enricher, indicator) +put(evidence) +for_indicator(indicator) }
-    class EnrichmentChain { +sources +enrich(indicator) list~Evidence~ +enrich_many() +stats() +reset_stats() }
+    class EvidenceCache { +get(enricher, indicator) +put(evidence) }
+    class EnrichmentChain { +sources +enrich(indicator) list~Evidence~ +stats() }
     class IndicatorExtractor { <<ABC>> +extract(row) Iterable~Indicator~ }
 
     Indicator --> IndicatorType
@@ -1345,7 +1314,7 @@ classDiagram
     class _WindowsPlatform
     Platform <|.. _PosixPlatform
     Platform <|.. _WindowsPlatform
-    class HostsTable { <<frozen>> text +resolves(hostname) +is_managed(hostname) +with_mapping(hostname, ips) +without(hostname) }
+    class HostsTable { <<frozen>> text +resolves(hostname) +with_mapping(hostname, ips) +without(hostname) }
     class Outcome { <<Enum>> CREATED REMOVED UNCHANGED NEEDS_PRIVILEGE }
     class HostsRegistrar { +for_current_platform()$ +hosts_path +resolves() +install(hostname, ips) +remove(hostname) +ensure_reachable() -_read() -_write() }
     class HostsError
@@ -1418,7 +1387,7 @@ graph TD
 | `test_cli.py`, `test_desktop.py`, `test_serve.py` | `cli.main`, `desktop`, `dashboard.serve` |
 | `test_runner.py`, `test_integration.py`, `test_host_monitor.py` | `Runner` cycle, correlation, feedback, verify / investigate, end-to-end cycle against a temp DB |
 | `test_streaming_worker.py`, `test_stream_parsers.py` | `StreamingWorker` + supervision, `LineParser` strategies |
-| `test_collectors.py`, `test_new_collectors.py`, `test_listening_ports.py`, `test_network_flows.py`, `test_resources.py`, `test_disk_container.py`, `test_browser_readers.py`, `test_file_scan.py`, `test_scan_roots.py`, `test_security_controls.py` | snapshot collectors, tcpdump parsing, resource and disk metrics, YARA scanning, scan-root catalog, service controls |
+| `test_collectors.py`, `test_new_collectors.py`, `test_listening_ports.py`, `test_network_flows.py`, `test_resources.py`, `test_disk_container.py`, `test_browser_readers.py`, `test_file_scan.py`, `test_security_controls.py` | snapshot collectors, tcpdump parsing, resource and disk metrics, YARA scanning, service controls |
 | `test_net_collectors.py`, `test_exposure_collectors.py`, `test_persistence_collectors.py`, `test_hosts.py`, `test_windows.py` | source-injected collectors and every OS parser, host composition roots |
 | `test_runtime.py`, `test_row_source.py`, `test_misc_helpers.py` | `runtime/*`, `CommandSnapshot` / `FileSnapshot`, coercion and digest helpers |
 | `test_llm_judge.py`, `test_judge_auth.py` | `LlmJudge` parsing and batching, client selection, cost |
@@ -1426,6 +1395,7 @@ graph TD
 | `test_enrichers.py`, `test_enricher_sources.py`, `test_more_sources.py`, `test_indicators_edge.py`, `test_http.py`, `test_registry.py` | chain, cache, every source, extractors, `HttpClient`, discovery |
 | `test_dashboard.py` | routes, query layer, control plane, feedback |
 | `test_hostsfile.py` | `HostsTable`, `HostsRegistrar`, platforms |
+| `test_layering.py` | import rules between packages (a lower layer never imports a higher one) |
 
 Run with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q` (avoids a thinc / numpy
 plugin crash on this machine).
@@ -1498,7 +1468,7 @@ Constants: `_HERE`, `_SCRIPT_LOCATION`, `_BASELINE`
 - `_config(db_url)` (L19)
 - `upgrade_to_head(db_url) -> None` (L28) : Apply all pending migrations to ``db_url``.
 
-#### `avai.hostsfile` · `avai/hostsfile.py` · 335 lines
+#### `avai.hostsfile` · `avai/hostsfile.py` · 331 lines
 
 _Map ``avai.local`` (or any name) onto loopback in the OS hosts file so the_
 
@@ -1521,16 +1491,15 @@ Constants: `DASHBOARD_HOSTNAME`, `LOOPBACK_IPV4`, `LOOPBACK_IPV6`, `LOOPBACK_ADD
 - **class `HostsTable`** `@dataclass(frozen=True)` (L139) : An I/O-free view of a hosts file's text.
   - fields: `text: str`
   - `resolves(hostname) -> bool`
-  - `is_managed(hostname) -> bool`
   - `with_mapping(hostname, ips) -> 'HostsTable'`
   - `without(hostname) -> 'HostsTable'`
   - `_newline() -> str`
   - `_split_block() -> tuple[list[str], list[str], list[str]]`
   - `_block_entries() -> dict[str, list[str]]`
   - `_rewrite(entries) -> str`
-- **class `Outcome(Enum)`** (L220)
+- **class `Outcome(Enum)`** (L216)
   - fields: `CREATED`, `REMOVED`, `UNCHANGED`, `NEEDS_PRIVILEGE`
-- **class `HostsRegistrar`** (L271) : Read → transform → atomic-write the hosts file through a ``Platform``.
+- **class `HostsRegistrar`** (L267) : Read → transform → atomic-write the hosts file through a ``Platform``.
   - `__init__(platform_) -> None`
   - `for_current_platform() -> 'HostsRegistrar'` `@classmethod`
   - `hosts_path() -> Path` `@property`
@@ -1542,13 +1511,13 @@ Constants: `DASHBOARD_HOSTNAME`, `LOOPBACK_IPV4`, `LOOPBACK_IPV6`, `LOOPBACK_ADD
   - `_write(text) -> None`
 - `resolve_platform(system) -> Platform` (L115) : Select the hosts-file strategy for the current (or a named) OS.
 - `_entry_hostnames(line) -> list[str]` (L129) : Hostnames declared by an active (non-comment) hosts line; ``[]`` for
-- `_validate_hostname(hostname) -> None` (L227)
-- `_atomic_write(path, text) -> None` (L232) : Write ``text`` to ``path`` via a same-directory temp file + ``os.replace``
+- `_validate_hostname(hostname) -> None` (L223)
+- `_atomic_write(path, text) -> None` (L228) : Write ``text`` to ``path`` via a same-directory temp file + ``os.replace``
 
 ### A.2 host_monitor (engine)
 
 
-#### `avai.host_monitor` · `avai/host_monitor/__init__.py` · 334 lines
+#### `avai.host_monitor` · `avai/host_monitor/__init__.py` · 332 lines
 
 _avai.host_monitor: package facade._
 
@@ -1781,7 +1750,7 @@ _Second-stage LLM that assesses YARA ruleset coverage for the host._
   - `_clean_items(raw, label_key) -> list[dict]` `@staticmethod`
 - `build_coverage_assessor(args, prompts) -> 'Optional[YaraCoverageAssessor]'` (L135) : Build the coverage assessor when enabled and credentials exist.
 
-#### `avai.host_monitor.enums` · `avai/host_monitor/enums.py` · 67 lines
+#### `avai.host_monitor.enums` · `avai/host_monitor/enums.py` · 55 lines
 
 _Typed categorical enums shared across the monitor._
 
@@ -1793,9 +1762,7 @@ _Typed categorical enums shared across the monitor._
   - fields: `FALSE_POSITIVE`, `CONFIRMED`
 - **class `LaunchScope(StrEnum)`** (L39)
   - fields: `USER_AGENT`, `SYSTEM_AGENT`, `SYSTEM_DAEMON`, `APPLE_AGENT`, `APPLE_DAEMON`
-- **class `ScanTier(IntEnum)`** (L47) : Security priority of a directory the YARA scanner walks: lower is
-  - fields: `CRITICAL`, `HIGH`, `MEDIUM`, `BASELINE`
-- **class `Browser(StrEnum)`** (L59)
+- **class `Browser(StrEnum)`** (L47)
   - fields: `CHROME`, `CHROME_BETA`, `CHROMIUM`, `BRAVE`, `EDGE`, `ARC`, `VIVALDI`, `FIREFOX`
 
 #### `avai.host_monitor.exposure_collectors` · `avai/host_monitor/exposure_collectors.py` · 410 lines
@@ -1842,53 +1809,6 @@ Constants: `_NET_FS`
   - `parse(text) -> list[dict]`
 - **class `WindowsCertParser`** (L394) : ``Get-ChildItem Cert:\LocalMachine\Root \| ConvertTo-Json``.
   - `parse(text) -> list[dict]`
-
-#### `avai.host_monitor.file_scanner` · `avai/host_monitor/file_scanner/__init__.py` · 37 lines
-
-_Full-disk YARA scanning, decomposed into single-responsibility objects._
-
-
-#### `avai.host_monitor.file_scanner.roots` · `avai/host_monitor/file_scanner/roots.py` · 217 lines
-
-_Object model for discovering and ordering the directories a YARA scan_
-
-- **class `ScanRoot`** `@dataclass(frozen=True)` (L26) : A directory to scan, with its security priority and provenance.
-  - fields: `path: Path`, `tier: ScanTier`, `origin: str`
-  - `_order_key() -> tuple[int, int, str]` `@property`
-  - `__lt__(other) -> bool`
-  - `contains(other) -> bool`
-  - `is_scannable() -> bool`
-- **class `ScanRootProvider(Protocol)`** `@runtime_checkable` (L64) : One source of scan roots (a privileged-bin set, the home dirs, the
-  - `roots() -> Iterable[ScanRoot]`
-- **class `StaticRootProvider`** (L72) : Fixed, known locations at one tier (launch-agent dirs, temp dirs,
-  - `__init__(paths, tier, origin) -> None`
-  - `roots() -> Iterable[ScanRoot]`
-- **class `PrivilegedBinRootProvider`** (L87) : The setuid/privileged binary directories: top priority: a planted
-  - `__init__(fs) -> None`
-  - `roots() -> Iterable[ScanRoot]`
-- **class `HomeRootProvider`** (L102) : Per-user home directories: high signal (user-writable, where
-  - `__init__(fs) -> None`
-  - `roots() -> Iterable[ScanRoot]`
-- **class `DownloadsRootProvider`** (L113) : ``~/Downloads`` for each home: the freshest delivery vector. The
-  - fields: `_SUBDIR`
-  - `__init__(fs) -> None`
-  - `roots() -> Iterable[ScanRoot]`
-- **class `ApplicationRootProvider`** (L129) : Directories holding installed application executables: medium
-  - `__init__(fs) -> None`
-  - `roots() -> Iterable[ScanRoot]`
-- **class `ExclusionPolicy(Protocol)`** `@runtime_checkable` (L148) : Decides whether a path is allowed into the scan plan at all.
-  - `permits(path) -> bool`
-- **class `PseudoFsExclusion`** (L154) : Reject kernel/virtual filesystems that hold no real files to scan
-  - fields: `_DENY`
-  - `permits(path) -> bool`
-- **class `CompositeExclusion`** (L171) : Specification AND: a path is permitted only when every rule permits
-  - `__init__(rules) -> None`
-  - `permits(path) -> bool`
-- **class `ScanRootCatalog`** (L183) : Aggregates every provider's roots into one ordered, deduped,
-  - `__init__(providers, exclusions) -> None`
-  - `plan() -> list[ScanRoot]`
-  - `_discover() -> Iterable[ScanRoot]`
-  - `_dedupe_to_highest_tier(roots) -> Iterable[ScanRoot]` `@staticmethod`
 
 #### `avai.host_monitor.hosts` · `avai/host_monitor/hosts/__init__.py` · 30 lines
 
@@ -2084,13 +2004,13 @@ _LLM judging: completion clients, the judge, and cost estimation._
 - `build_completion_client() -> CompletionClient` (L206) : Pick the right strategy from the environment.
 - `build_judge(args, prompts) -> Judge` (L394)
 
-#### `avai.host_monitor.main` · `avai/host_monitor/main.py` · 316 lines
+#### `avai.host_monitor.main` · `avai/host_monitor/main.py` · 314 lines
 
 _CLI entrypoint and argument parser for `avai monitor`._
 
-- `_build_parser() -> argparse.ArgumentParser` (L39)
-- `build_runner(args) -> 'tuple[Runner, object]'` (L169) : Wire a fully-configured Runner (collectors, judge, sink, seeded control
-- `main() -> int` (L267)
+- `_build_parser() -> argparse.ArgumentParser` (L41)
+- `build_runner(args) -> 'tuple[Runner, object]'` (L171) : Wire a fully-configured Runner (collectors, judge, sink, seeded control
+- `main() -> int` (L265)
 
 #### `avai.host_monitor.models` · `avai/host_monitor/models.py` · 830 lines
 
@@ -2304,13 +2224,13 @@ _Deterministic 0-100 host posture score (no LLM)._
 - `_risk_grade(score) -> str` (L9)
 - `compute_risk_score(integrity, malicious, suspicious, nopasswd_sudoers, extra_uid0) -> dict` (L16) : Deterministic host posture score in [0, 100] with a letter grade and
 
-#### `avai.host_monitor.runner` · `avai/host_monitor/runner.py` · 1057 lines
+#### `avai.host_monitor.runner` · `avai/host_monitor/runner.py` · 1058 lines
 
 _Orchestrator: drives collectors against the sink each cycle._
 
 Constants: `_MIN_DRIFT_WINDOW`, `_MAX_VERIFY_PER_COLLECTOR`, `_MAX_INVESTIGATE_PER_COLLECTOR`, `_HOST_CONTEXT_LIMIT`, `_FEEDBACK_PHRASE`
 
-- **class `Runner`** (L53) : Drives snapshot collectors (per-cycle) and streaming collectors
+- **class `Runner`** (L55) : Drives snapshot collectors (per-cycle) and streaming collectors
   - fields: `_CONTROL_POLL_SECONDS`
   - `__init__(sink, snapshot_collectors, streaming_collectors, judge, lookback_min, max_db_bytes, enrichment_chain, baseline_min_runs, narrator, coverage, verifier, investigator)`
   - `request_shutdown() -> None`
@@ -2353,7 +2273,7 @@ Constants: `_MIN_DRIFT_WINDOW`, `_MAX_VERIFY_PER_COLLECTOR`, `_MAX_INVESTIGATE_P
   - `_risk_explanation(result, prev) -> str` `@staticmethod`
   - `run_forever(interval) -> None`
 
-#### `avai.host_monitor.runtime` · `avai/host_monitor/runtime/__init__.py` · 69 lines
+#### `avai.host_monitor.runtime` · `avai/host_monitor/runtime/__init__.py` · 65 lines
 
 _Injectable runtime collaborators._
 
@@ -2407,7 +2327,7 @@ _Host filesystem access, with container-path translation._
   - `read_sysfs(path, encoding) -> Optional[str]` `@staticmethod`
   - `read_plist(path) -> Optional[dict]` `@staticmethod`
 
-#### `avai.host_monitor.runtime.probes` · `avai/host_monitor/runtime/probes.py` · 413 lines
+#### `avai.host_monitor.runtime.probes` · `avai/host_monitor/runtime/probes.py` · 372 lines
 
 _Host-state probes: network connections and service liveness._
 
@@ -2429,39 +2349,32 @@ Constants: `_PSEUDO_FSTYPES`
   - `partitions() -> list`
   - `usage(mountpoint)`
   - `io_counters() -> dict`
-- **class `ServiceProbe`** (L272) : POSIX service-liveness checks via the injected CommandRunner.
-  - `__init__(runner) -> None`
-  - `loaded(label) -> Optional[int]`
-  - `running(name) -> Optional[int]`
-- **class `ServiceManager(Protocol)`** (L312) : Whether a managed service is *enabled* (configured to be reachable),
+- **class `ServiceManager(Protocol)`** (L290) : Whether a managed service is *enabled* (configured to be reachable),
   - `enabled(unit) -> Optional[int]`
-- **class `PortInspector(Protocol)`** (L319) : Socket-level posture/behaviour: is something listening on a port
+- **class `PortInspector(Protocol)`** (L297) : Socket-level posture/behaviour: is something listening on a port
   - `listening(port) -> Optional[int]`
   - `established(port) -> Optional[int]`
-- **class `ProcessInspector(Protocol)`** (L327) : Whether a process with an exact name is running (behaviour signal).
+- **class `ProcessInspector(Protocol)`** (L305) : Whether a process with an exact name is running (behaviour signal).
   - `running(name) -> Optional[int]`
-- **class `LaunchdServiceManager`** (L333) : macOS: a system-domain launchd job is enabled when it's bootstrapped
+- **class `LaunchdServiceManager`** (L311) : macOS: a system-domain launchd job is enabled when it's bootstrapped
   - `__init__(runner) -> None`
   - `enabled(unit) -> Optional[int]`
-- **class `SystemdServiceManager`** (L346) : Linux: ``systemctl is-enabled <unit>`` exits 0 for enabled/static.
+- **class `SystemdServiceManager`** (L324) : Linux: ``systemctl is-enabled <unit>`` exits 0 for enabled/static.
   - `__init__(runner) -> None`
   - `enabled(unit) -> Optional[int]`
-- **class `WindowsScmServiceManager`** (L357) : Windows: a service is enabled when its SCM start type isn't DISABLED
-  - `__init__(runner) -> None`
-  - `enabled(unit) -> Optional[int]`
-- **class `PsutilPortInspector`** (L376) : Cross-platform port posture/behaviour from the psutil connection table
+- **class `PsutilPortInspector`** (L335) : Cross-platform port posture/behaviour from the psutil connection table
   - `__init__(connections) -> None`
   - `_count(port, status) -> Optional[int]`
   - `listening(port) -> Optional[int]`
   - `established(port) -> Optional[int]`
-- **class `PsutilProcessInspector`** (L402) : Cross-platform exact-name process check (one implementation for every
+- **class `PsutilProcessInspector`** (L361) : Cross-platform exact-name process check (one implementation for every
   - `running(name) -> Optional[int]`
 - `_unescape_mount_field(field) -> str` (L193) : Decode the octal escapes (\040 space, \011 tab, \012 nl, \134 \\)
 - `_parse_mounts(text) -> list` (L209) : Parse /proc/mounts content into ``_HostPart`` rows, dropping pseudo
 - `_host_partitions(rootfs) -> list` (L232) : Read the host's mount table. With ``pid: host`` the container's
 - `_join_rootfs(rootfs, mountpoint) -> str` (L246) : Resolve a host mountpoint to its path under the rootfs mount.
 - `_statvfs_usage(path) -> '_HostUsage'` (L257) : ``statvfs``-based usage matching psutil.disk_usage semantics: ``free``
-- `tri_or() -> Optional[int]` (L294) : Tri-state OR over 1/0/None signals: 1 if any signal is on, else 0 if
+- `tri_or() -> Optional[int]` (L272) : Tri-state OR over 1/0/None signals: 1 if any signal is on, else 0 if
 
 #### `avai.host_monitor.runtime.row_source` · `avai/host_monitor/runtime/row_source.py` · 81 lines
 
@@ -2672,7 +2585,7 @@ Constants: `LOG`, `_HINT_PRIORITY`
   - `freshness_cutoff() -> datetime`
 - `worst_hint(hints) -> VerdictHint` (L180) : Aggregate multiple evidence hints to the worst-case verdict.
 
-#### `avai.enrichers.cache` · `avai/enrichers/cache.py` · 191 lines
+#### `avai.enrichers.cache` · `avai/enrichers/cache.py` · 180 lines
 
 _SQLite-backed TTL cache for enrichment evidence._
 
@@ -2682,28 +2595,25 @@ Constants: `LOG`
   - `__init__(engine, base_cls)`
   - `get(enricher, indicator) -> Optional[Evidence]`
   - `put(evidence) -> None`
-  - `for_indicator(indicator) -> list[Evidence]`
-- **class `_LazyModel`** (L176) : Placeholder so ``from .cache import EnrichmentRow`` doesn't fail
+- **class `_LazyModel`** (L165) : Placeholder so ``from .cache import EnrichmentRow`` doesn't fail
   - `__getattr__(name)`
 - `_register_model(base_cls)` (L29) : Defer the ORM class definition so this module can import without
 - `register_schema(base_cls) -> type` (L63) : Idempotently register the enrichment ORM model against
 - `get_model(base_cls)` (L74) : Return the ORM class registered against ``base_cls`` (preferred),
-- `_evidence_from_row(row, indicator) -> Evidence` (L157)
+- `_evidence_from_row(row, indicator) -> Evidence` (L146)
 
-#### `avai.enrichers.chain` · `avai/enrichers/chain.py` · 136 lines
+#### `avai.enrichers.chain` · `avai/enrichers/chain.py` · 121 lines
 
 _Chain-of-responsibility dispatcher._
 
 Constants: `LOG`
 
-- **class `EnrichmentChain`** (L32)
+- **class `EnrichmentChain`** (L31)
   - fields: `_MAX_FORWARD_CVES`
   - `__init__(enrichers, cache)`
   - `sources() -> list[str]` `@property`
-  - `reset_stats() -> None`
   - `stats() -> dict[str, dict[str, int]]`
   - `enrich(indicator) -> list[Evidence]`
-  - `enrich_many(indicators) -> dict[Indicator, list[Evidence]]`
 
 #### `avai.enrichers.http` · `avai/enrichers/http.py` · 151 lines
 
@@ -3008,7 +2918,7 @@ Constants: `_BASE`
 ### A.4 dashboard (Flask + HTMX)
 
 
-#### `avai.dashboard` · `avai/dashboard/__init__.py` · 260 lines
+#### `avai.dashboard` · `avai/dashboard/__init__.py` · 212 lines
 
 _avai.dashboard: package facade._
 

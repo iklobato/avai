@@ -101,6 +101,13 @@ Each item below was checked with a word-level reference count over `src/`,
 Acceptance: the listed symbols are gone, their test-only callers are removed or
 rewritten against public behaviour, and the suite is green.
 
+Done on `refactor/p1-yagni` in five commits, one per row group: `src/` is 392 lines
+smaller and `tests/` 186 lines smaller. 889 tests pass (the drop from 901 is the 11 deleted
+scan-root tests plus `test_reset_stats_clears`). The `is_managed` assertions now
+check public behaviour: a removed mapping no longer resolves, and removing the
+mapping leaves a hand-added entry alone. `docs/ARCHITECTURE.md` was updated to
+match, and all 22 of its Mermaid diagrams still parse.
+
 ## Phase 2: one source of truth per telemetry slice (DRY, OCP, and a bug fix)
 
 Problem: the string name of a slice, its ORM model and its `judge_fields` are
