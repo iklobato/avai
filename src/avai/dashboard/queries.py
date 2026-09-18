@@ -30,92 +30,37 @@ from avai.host_monitor import (
     ArpEntryRow,
     AuthEventRow,
     Base,
-    BluetoothDeviceRow,
-    BrowserExtensionRow,
     CollectionRun,
     CollectorErrorRow,
     DiskUsageRow,
     DnsQueryRow,
     DnsResolverRow,
-    FileIntegrityRow,
     FileScanRow,
     HostResourceRow,
     HostsFileRow,
     IncidentNarrativeRow,
-    InstalledAppRow,
     Judgement,
-    KernelExtensionRow,
-    LaunchItemRow,
     ListeningPortRow,
     LogEntryRow,
     LoginSessionRow,
-    MdmProfileRow,
-    MountRow,
     NdpNeighborRow,
     NetworkConnectionRow,
     NetworkFlowRow,
-    NetworkInterfaceRow,
     NetworkShareRow,
     PrivilegeConfigRow,
-    ProcessExecRow,
     ProcessRow,
     PromiscuousInterfaceRow,
     ProxyConfigRow,
-    QuarantineEventRow,
     RiskScoreRow,
     RouteRow,
-    SetuidFileRow,
     SshAuthorizedKeyRow,
-    SystemExtensionRow,
     SystemIntegrityRow,
-    UsbDeviceRow,
-    WifiStateRow,
     YaraCoverageRow,
     YaraStatusRow,
+    slices,
 )
 
-COLLECTOR_MODELS = {
-    "processes": ProcessRow,
-    "network_connections": NetworkConnectionRow,
-    "network_flows": NetworkFlowRow,
-    "dns_queries": DnsQueryRow,
-    "ssh_authorized_keys": SshAuthorizedKeyRow,
-    "hosts_file": HostsFileRow,
-    "privilege_config": PrivilegeConfigRow,
-    "listening_ports": ListeningPortRow,
-    "network_interfaces": NetworkInterfaceRow,
-    "usb_devices": UsbDeviceRow,
-    "bluetooth_devices": BluetoothDeviceRow,
-    "wifi_state": WifiStateRow,
-    "launch_items": LaunchItemRow,
-    "quarantine_events": QuarantineEventRow,
-    "browser_extensions": BrowserExtensionRow,
-    "system_integrity": SystemIntegrityRow,
-    "auth_events": AuthEventRow,
-    "file_integrity": FileIntegrityRow,
-    "file_scan": FileScanRow,
-    "installed_apps": InstalledAppRow,
-    # Phase 4
-    "process_exec_events": ProcessExecRow,
-    "mounts": MountRow,
-    "setuid_files": SetuidFileRow,
-    "mdm_profiles": MdmProfileRow,
-    "kernel_extensions": KernelExtensionRow,
-    "system_extensions": SystemExtensionRow,
-    "host_resources": HostResourceRow,
-    "disk_usage": DiskUsageRow,
-    "log_entries": LogEntryRow,
-    # Network neighborhood & topology
-    "dns_resolvers": DnsResolverRow,
-    "arp_table": ArpEntryRow,
-    "ndp_neighbors": NdpNeighborRow,
-    "routes": RouteRow,
-    # Network exposure & MITM surface
-    "proxy_config": ProxyConfigRow,
-    "network_shares": NetworkShareRow,
-    "login_sessions": LoginSessionRow,
-    "promiscuous_ifaces": PromiscuousInterfaceRow,
-}
+COLLECTOR_MODELS = {s.name: s.model for s in slices.ALL}
 
 
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {
@@ -864,7 +809,7 @@ def findings(
     }
 
 
-_STREAMING_COLLECTORS = {"auth_events", "process_exec_events"}
+_STREAMING_COLLECTORS = {s.name for s in slices.ALL if s.streaming}
 
 
 def row_counts(

@@ -1460,6 +1460,27 @@ class TestFeedbackEndpoint:
         assert row.note == "dev tool"
         assert row.applied == 0  # monitor applies it next cycle
 
+    # These four were missing from the dashboard's hand-kept collector map,
+    # so feedback on their findings was rejected with a 400.
+    @pytest.mark.parametrize(
+        "collector",
+        ["trusted_roots", "injection_env", "kernel_modules", "ssh_known_hosts"],
+    )
+    def test_records_feedback_for_slices_added_after_the_map(
+        self, client, monkeypatch, collector
+    ):
+        monkeypatch.setenv("AVAI_CONTROL_TOKEN", "secret")
+        r = client.post(
+            f"/feedback/{collector}/{self._HASH}/confirmed",
+            headers={"X-Avai-Token": "secret"},
+        )
+        assert r.status_code == 200
+        from avai.host_monitor import FeedbackRow
+
+        with Session(_engine_rw(app.config["DB_PATH"])) as s:
+            row = s.get(FeedbackRow, (self._HASH, collector))
+        assert row is not None and row.label == "confirmed"
+
     def test_rejected_without_token(self, client, monkeypatch):
         monkeypatch.delenv("AVAI_CONTROL_TOKEN", raising=False)
         r = client.post(f"/feedback/processes/{self._HASH}/false_positive")
