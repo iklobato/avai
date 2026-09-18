@@ -18,6 +18,7 @@ from avai.host_monitor import CollectionRun, LaunchItemRow, Sink
 from avai.host_monitor.models import (
     AuthEventRow,
     CollectorErrorRow,
+    ProcessExecRow,
     StreamingSession,
 )
 from avai.host_monitor.runtime import Clock
@@ -301,6 +302,30 @@ class TestPruneToSizeBehaviour:
 
         assert stats["events_pruned"] == 30
         assert _count(file_sink, AuthEventRow) == 4
+
+    def test_process_exec_events_are_pruned_like_auth_events(self, file_sink):
+        # Regression: exec events carry a streaming session's run_id, never a
+        # CollectionRun's, so pruning by run_id never reached them and they
+        # outlived their deleted session.
+        now, _ = _three_runs(file_sink)
+        session = file_sink.start_streaming_session("process_exec_events", "h")
+        file_sink.write(
+            ProcessExecRow,
+            [
+                {
+                    "run_id": session,
+                    "collected_at": _iso(now - timedelta(hours=5 if i < 20 else 0)),
+                    "content_hash": f"x{i}",
+                    "pid": i,
+                }
+                for i in range(23)
+            ],
+        )
+
+        stats = file_sink.prune_to_size(max_bytes=1)
+
+        assert stats["events_pruned"] == 20
+        assert _count(file_sink, ProcessExecRow) == 3
 
     def test_streaming_sessions_that_ended_before_the_kept_runs_are_pruned(
         self, file_sink

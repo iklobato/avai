@@ -225,7 +225,7 @@ class CollectionCycle:
         stats = self.config.sink.prune_to_size(cap)
         if stats["runs_pruned"] or stats["events_pruned"]:
             LOG.info(
-                "db_rotation: pruned runs=%d auth_events=%d  "
+                "db_rotation: pruned runs=%d streaming_events=%d  "
                 "%.1fMB → %.1fMB (cap %.0fMB)",
                 stats["runs_pruned"],
                 stats["events_pruned"],

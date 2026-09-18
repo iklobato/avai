@@ -24,11 +24,11 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from . import slices
 from .constants import LOG
 from .enums import FeedbackLabel, Verdict
 from .judge import Judgment
 from .models import (
-    AuthEventRow,
     Base,
     BrowserExtensionRow,
     CollectionRun,
@@ -77,6 +77,8 @@ _DB_FILE_MODE = 0o664  # rw-rw-r--
 
 # Operator feedback label → the verdict the monitor pins on the corrected
 # finding. Keyed by the raw string so lookup on a stored label is exact.
+_STREAMING_MODELS = tuple(s.model for s in slices.ALL if s.streaming)
+
 _FEEDBACK_VERDICT = {
     FeedbackLabel.FALSE_POSITIVE.value: str(Verdict.BENIGN),
     FeedbackLabel.CONFIRMED.value: str(Verdict.MALICIOUS),
@@ -815,7 +817,7 @@ class Sink:
 
     def prune_to_size(self, max_bytes: int) -> dict:
         """Delete oldest completed runs (and their child rows) plus the
-        ``auth_events`` rows older than the oldest remaining run, until
+        streaming events older than the oldest remaining run, until
         the database fits under ``max_bytes``. Always preserves at
         least one completed run so the dashboard stays useful.
 
@@ -838,11 +840,10 @@ class Sink:
                 "bytes_after": bytes_before,
             }
 
-        # All collector-row tables EXCEPT auth_events. Streaming events
-        # aren't tied to a CollectionRun.run_id, so we trim them by
-        # collected_at instead of by run_id.
+        # Streaming events carry a StreamingSession run_id, never a
+        # CollectionRun's, so they are trimmed by collected_at instead.
         snapshot_models = [
-            m for m in _RowBase.__subclasses__() if m is not AuthEventRow
+            m for m in _RowBase.__subclasses__() if m not in _STREAMING_MODELS
         ]
 
         runs_pruned = 0
@@ -901,12 +902,11 @@ class Sink:
                     .limit(1)
                 ).scalar()
                 if new_earliest:
-                    result = session.execute(
-                        delete(AuthEventRow).where(
-                            AuthEventRow.collected_at < new_earliest
+                    for model in _STREAMING_MODELS:
+                        result = session.execute(
+                            delete(model).where(model.collected_at < new_earliest)
                         )
-                    )
-                    events_pruned += result.rowcount or 0
+                        events_pruned += result.rowcount or 0
                     session.execute(
                         delete(StreamingSession).where(
                             StreamingSession.finished_at < new_earliest
