@@ -7,7 +7,7 @@ import configparser
 import json
 import shlex
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Iterable, NamedTuple, Optional
 
 if TYPE_CHECKING:
     from ..hosts.capabilities import FilesystemLayout, PrivilegedAccounts
@@ -119,6 +119,16 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
         "keep_alive",
     )
 
+    def collect(self):
+        yield from SystemdUnitReader().rows()
+        yield from CrontabReader().rows()
+
+
+class SystemdUnitReader:
+    """Launch-item rows for the systemd ``.service`` and ``.timer`` units.
+    Path translation honours HOST_PREFIX so the container reads the host's
+    /etc/systemd/system rather than its own (empty) one."""
+
     # (scope, directory, glob). Directories searched in this order;
     # later occurrences of the same unit filename are ignored (systemd
     # itself layers these dirs with /etc winning over /lib).
@@ -134,15 +144,6 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
         ("user_timer", "~/.config/systemd/user", "*.timer"),
     ]
 
-    _CRON_FILE = ("system_crontab", Path("/etc/crontab"))
-    _CRON_DROP_INS = [
-        ("system_crontab_d", Path("/etc/cron.d")),
-    ]
-    _USER_CRONS = [
-        ("user_crontab", Path("/var/spool/cron")),
-        ("user_crontab", Path("/var/spool/cron/crontabs")),
-    ]
-
     _ALWAYS_RESTART = {
         "always",
         "on-failure",
@@ -152,74 +153,37 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
         "on-watchdog",
     }
 
-    def collect(self):
-        # systemd units. Path translation honours HOST_PREFIX so the
-        # container reads the host's /etc/systemd/system rather than
-        # its own (empty) one.
+    def rows(self) -> Iterable[dict]:
         seen_units: set[str] = set()
         for scope, dir_str, pattern in self._UNIT_DIRS:
-            # host_paths_for_home expands a ~/... template into 0..N real
-            # dirs (one per user home in container mode), or exactly one
-            # for an absolute path. It can return [] — e.g. container
-            # mode with no /host/home and no /host/root mounted — so we
-            # iterate rather than index [0] (which raised IndexError and
-            # killed the whole collector).
-            for d in HostPaths.for_home(dir_str):
-                if not d.is_dir():
+            for path in self._unit_files(dir_str, pattern):
+                # Dedup by name preserves systemd's first-wins
+                # precedence across the system unit dirs.
+                if path.name in seen_units:
                     continue
-                try:
-                    paths = list(d.glob(pattern))
-                except PermissionError:
-                    continue
-                for path in paths:
-                    # Dedup by name preserves systemd's first-wins
-                    # precedence across the system unit dirs.
-                    if path.name in seen_units:
-                        continue
-                    seen_units.add(path.name)
-                    row = self._unit_row(scope, path)
-                    if row is not None:
-                        yield row
-
-        # /etc/crontab — single file, has-user-column form
-        scope, p = self._CRON_FILE
-        p = HostPaths.translate(p)
-        if p.is_file():
-            yield from self._cron_rows(scope, p, has_user_col=True)
-
-        # /etc/cron.d/* — drop-in files, has-user-column form
-        for scope, d in self._CRON_DROP_INS:
-            d = HostPaths.translate(d)
-            if not d.is_dir():
-                continue
-            try:
-                files = list(d.iterdir())
-            except PermissionError:
-                continue
-            for f in files:
-                if not f.is_file() or f.name.startswith("."):
-                    continue
-                yield from self._cron_rows(scope, f, has_user_col=True)
-
-        # /var/spool/cron* — per-user crontabs (no user column inside).
-        # The filename IS the username.
-        for scope, d in self._USER_CRONS:
-            d = HostPaths.translate(d)
-            if not d.is_dir():
-                continue
-            try:
-                files = list(d.iterdir())
-            except PermissionError:
-                continue
-            for f in files:
-                if not f.is_file() or f.name.startswith("."):
-                    continue
-                yield from self._cron_rows(
-                    scope, f, has_user_col=False, default_user=f.name
-                )
+                seen_units.add(path.name)
+                row = self.unit_row(scope, path)
+                if row is not None:
+                    yield row
 
     @staticmethod
-    def _unit_row(scope: str, path: Path):
+    def _unit_files(dir_str: str, pattern: str) -> Iterable[Path]:
+        # HostPaths.for_home expands a ~/... template into 0..N real dirs
+        # (one per user home in container mode), or exactly one for an
+        # absolute path. It can return [] (container mode with no
+        # /host/home and no /host/root mounted), so iterate rather than
+        # index [0], which raised IndexError and killed the collector.
+        for d in HostPaths.for_home(dir_str):
+            if not d.is_dir():
+                continue
+            try:
+                paths = list(d.glob(pattern))
+            except PermissionError:
+                continue
+            yield from paths
+
+    @staticmethod
+    def unit_row(scope: str, path: Path):
         cp = configparser.ConfigParser(
             interpolation=None,
             strict=False,
@@ -264,7 +228,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
             "run_at_load": int(bool(install_sec.get("WantedBy"))),
             "keep_alive": int(
                 service_sec.get("Restart", "no").strip()
-                in LinuxLaunchItemsCollector._ALWAYS_RESTART
+                in SystemdUnitReader._ALWAYS_RESTART
             ),
             "start_interval": None,
             "start_calendar_interval_json": (
@@ -284,21 +248,38 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
             ),
         }
 
-    @staticmethod
-    def _cron_rows(
-        scope: str, path: Path, has_user_col: bool, default_user: Optional[str] = None
-    ):
-        """Yield one row per executable crontab line.
 
-        crontab(5) format:
-          - 5 schedule fields + [user] + command  (system: /etc/crontab,
-            /etc/cron.d)
-          - 5 schedule fields + command           (user crontabs)
-          - or a @keyword (e.g. ``@reboot``) replacing the schedule.
-        Lines starting with ``#`` and blank lines are skipped.
-        Environment-assignment lines (``KEY=value``) are also skipped —
-        they're not jobs.
-        """
+class CrontabReader:
+    """Launch-item rows for cron: ``/etc/crontab``, the drop-ins in
+    ``/etc/cron.d`` and the per-user crontabs in ``/var/spool/cron*``."""
+
+    _CRON_FILE = ("system_crontab", Path("/etc/crontab"))
+    _CRON_DROP_INS = [
+        ("system_crontab_d", Path("/etc/cron.d")),
+    ]
+    _USER_CRONS = [
+        ("user_crontab", Path("/var/spool/cron")),
+        ("user_crontab", Path("/var/spool/cron/crontabs")),
+    ]
+
+    def rows(self) -> Iterable[dict]:
+        scope, crontab = self._CRON_FILE
+        crontab = HostPaths.translate(crontab)
+        if crontab.is_file():
+            yield from self.file_rows(scope, crontab)
+        for scope, d in self._CRON_DROP_INS:
+            for f in _visible_files(HostPaths.translate(d)):
+                yield from self.file_rows(scope, f)
+        # Per-user crontabs: the filename IS the username.
+        for scope, d in self._USER_CRONS:
+            for f in _visible_files(HostPaths.translate(d)):
+                yield from self.file_rows(scope, f, owner=f.name)
+
+    @staticmethod
+    def file_rows(scope: str, path: Path, owner: Optional[str] = None):
+        """Yield one row per job line of the crontab at ``path``. A file
+        with an ``owner`` is a per-user crontab, whose lines carry no user
+        column; without one each line names its user (system crontabs)."""
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except (OSError, UnicodeError):
@@ -308,63 +289,87 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
         except OSError:
             mtime = None
         digest = Digest.sha256_file(path)
-
         for lineno, raw in enumerate(text.splitlines(), 1):
-            line = raw.strip()
-            if not line or line.startswith("#"):
+            job = CronJob.parse(raw, owner)
+            if job is None:
                 continue
-            # KEY=VALUE assignments aren't jobs.
-            if "=" in line.split(None, 1)[0]:
-                continue
-
-            if line.startswith("@"):
-                tokens = line.split(None, 2 if has_user_col else 1)
-                need = 3 if has_user_col else 2
-                if len(tokens) < need:
-                    continue
-                schedule = tokens[0]
-                user = tokens[1] if has_user_col else default_user
-                command = tokens[-1]
-            else:
-                # 5 schedule fields + optional user + command (which may
-                # contain whitespace — preserve via maxsplit).
-                need = 7 if has_user_col else 6
-                tokens = line.split(None, need - 1)
-                if len(tokens) < need:
-                    continue
-                schedule = " ".join(tokens[:5])
-                user = tokens[5] if has_user_col else default_user
-                command = tokens[-1]
-
-            try:
-                args = shlex.split(command)
-            except ValueError:
-                args = [command]
-
             yield {
                 "scope": scope,
                 "path": f"{path}:{lineno}",
                 "label": f"cron:{path.name}:{lineno}",
-                "program": command,
-                "program_arguments_json": json.dumps(args),
-                "run_at_load": int(schedule == "@reboot"),
-                "keep_alive": 0,
-                "start_interval": None,
-                "start_calendar_interval_json": json.dumps({"schedule": schedule}),
-                "user_name": user,
-                "group_name": None,
+                **job.fields(lineno),
                 "sha256": digest,
                 "mtime": mtime,
-                "raw_json": json.dumps(
-                    {
-                        "source": "cron",
-                        "schedule": schedule,
-                        "user": user,
-                        "command": command,
-                        "line": lineno,
-                    }
-                ),
             }
+
+
+class CronJob(NamedTuple):
+    schedule: str
+    user: Optional[str]
+    command: str
+
+    _SCHEDULE_FIELDS = 5  # minute hour day-of-month month day-of-week
+
+    @classmethod
+    def parse(cls, line: str, owner: Optional[str]) -> Optional["CronJob"]:
+        """Parse one crontab(5) line: 5 schedule fields, or a ``@keyword``
+        such as ``@reboot`` in their place, then the user (only when the
+        file has no ``owner``), then the command, which may contain
+        whitespace. Blank lines, ``#`` comments, ``KEY=value`` environment
+        assignments and truncated lines are not jobs and give None."""
+        line = line.strip()
+        if not line or line.startswith("#"):
+            return None
+        if "=" in line.split(None, 1)[0]:
+            return None
+        schedule_fields = 1 if line.startswith("@") else cls._SCHEDULE_FIELDS
+        has_user_col = owner is None
+        need = schedule_fields + int(has_user_col) + 1
+        tokens = line.split(None, need - 1)
+        if len(tokens) < need:
+            return None
+        return cls(
+            schedule=" ".join(tokens[:schedule_fields]),
+            user=tokens[schedule_fields] if has_user_col else owner,
+            command=tokens[-1],
+        )
+
+    def fields(self, lineno: int) -> dict:
+        try:
+            args = shlex.split(self.command)
+        except ValueError:
+            args = [self.command]
+        return {
+            "program": self.command,
+            "program_arguments_json": json.dumps(args),
+            "run_at_load": int(self.schedule == "@reboot"),
+            "keep_alive": 0,
+            "start_interval": None,
+            "start_calendar_interval_json": json.dumps({"schedule": self.schedule}),
+            "user_name": self.user,
+            "group_name": None,
+            "raw_json": json.dumps(
+                {
+                    "source": "cron",
+                    "schedule": self.schedule,
+                    "user": self.user,
+                    "command": self.command,
+                    "line": lineno,
+                }
+            ),
+        }
+
+
+def _visible_files(d: Path) -> list[Path]:
+    """The regular, non-dot files directly in ``d``; [] when it is missing
+    or unreadable."""
+    if not d.is_dir():
+        return []
+    try:
+        entries = list(d.iterdir())
+    except PermissionError:
+        return []
+    return [f for f in entries if f.is_file() and not f.name.startswith(".")]
 
 
 class SshAuthorizedKeysCollector(SnapshotCollector):
