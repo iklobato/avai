@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 from flask import Blueprint, render_template, request
-from sqlalchemy import desc, select
-from sqlalchemy.orm import Session
-
-from avai.host_monitor import CollectionRun
 
 from ..control import monitor_alive, read_control_state
 from ..queries import (
@@ -40,6 +36,7 @@ from ..queries import (
     network_topology,
     persistence_tampering,
     primary_filesystems,
+    prior_run,
     recent_runs,
     risk_trend,
     row_counts,
@@ -184,7 +181,7 @@ def fragment_collection():
     """Merged collection-health panel: row counts + recent runs + errors."""
     with read_session() as s:
         latest = latest_run(s)
-        prid, pst = _prior_run(s, latest.started_at) if latest else (None, None)
+        prid, pst = prior_run(s, latest.started_at) if latest else (None, None)
         return render_template(
             "partials/_collection.html",
             recent_runs=recent_runs(s),
@@ -531,23 +528,11 @@ def fragment_row_counts():
         latest = latest_run(s)
         if latest is None:
             return render_template("partials/_row_counts.html", row_counts=[])
-        prid, pst = _prior_run(s, latest.started_at)
+        prid, pst = prior_run(s, latest.started_at)
         return render_template(
             "partials/_row_counts.html",
             row_counts=row_counts(s, latest.run_id, latest.started_at, prid, pst),
         )
-
-
-def _prior_run(session: Session, before_started: str) -> tuple[str | None, str | None]:
-    """``(run_id, started_at)`` of the run immediately before
-    ``before_started``, or ``(None, None)`` if it's the first run."""
-    row = session.execute(
-        select(CollectionRun.run_id, CollectionRun.started_at)
-        .where(CollectionRun.started_at < before_started)
-        .order_by(desc(CollectionRun.started_at))
-        .limit(1)
-    ).first()
-    return (row[0], row[1]) if row else (None, None)
 
 
 @bp.route("/fragments/runs")

@@ -114,7 +114,6 @@ from .queries.vulnerabilities import (
 )
 from .routes.fragments import (
     _int_arg,
-    _prior_run,
     _sparkline_points,
 )
 from .serve import (
@@ -176,7 +175,6 @@ __all__ = [
     "_parse_json_obj",
     "_port_sort_key",
     "_pretty_json",
-    "_prior_run",
     "_relative_time",
     "_row_and_artifact",
     "_serve",

@@ -87,6 +87,18 @@ def risk_trend(session: Session, limit: int = 30) -> list[int]:
     return list(reversed(rows))
 
 
+def prior_run(session: Session, before_started: str) -> tuple[str | None, str | None]:
+    """``(run_id, started_at)`` of the run immediately before
+    ``before_started``, or ``(None, None)`` if it's the first run."""
+    row = session.execute(
+        select(CollectionRun.run_id, CollectionRun.started_at)
+        .where(CollectionRun.started_at < before_started)
+        .order_by(desc(CollectionRun.started_at))
+        .limit(1)
+    ).first()
+    return (row[0], row[1]) if row else (None, None)
+
+
 def recent_runs(session: Session, limit: int = 10) -> list[CollectionRun]:
     return list(
         session.execute(

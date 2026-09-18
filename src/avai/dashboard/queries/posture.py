@@ -22,6 +22,7 @@ from .common import (
     RowFilter,
     VerdictTable,
     _existing_tables,
+    _parse_json_obj,
     _tally,
 )
 
@@ -155,6 +156,68 @@ def persistence_tampering(
     }
 
 
+# Keys only the Linux collector writes into raw_json.
+_LINUX_KEYS = frozenset(
+    {
+        "selinux",
+        "apparmor",
+        "ufw_active",
+        "firewalld_active",
+        "sshd_active",
+        "vnc_active",
+        "luks_mappings",
+    }
+)
+
+
+def _service_activity(raw: dict):
+    """``topic -> active now`` from the network-service controls, or None for
+    topics with no live-session concept (FileVault, Gatekeeper, …)."""
+    svc = raw.get("services") or {}
+
+    def active(topic: str):
+        entry = svc.get(topic)
+        return entry.get("active") if isinstance(entry, dict) else None
+
+    return active
+
+
+def _linux_posture(raw: dict, active) -> dict:
+    apparmor = raw.get("apparmor")
+    apparmor_on = apparmor.get("enabled") if isinstance(apparmor, dict) else apparmor
+    return {
+        "platform": "Linux",
+        "rows": [
+            ("SELinux", raw.get("selinux"), None),
+            ("AppArmor", apparmor_on, None),
+            ("Firewall (ufw)", raw.get("ufw_active"), None),
+            ("Firewall (firewalld)", raw.get("firewalld_active"), None),
+            ("SSH (sshd)", raw.get("sshd_active"), active("remote_login")),
+            ("VNC", raw.get("vnc_active"), active("screen_sharing")),
+            ("Disk encryption (LUKS)", bool(raw.get("luks_mappings")), None),
+        ],
+    }
+
+
+def _macos_posture(row: SystemIntegrityRow, active) -> dict:
+    return {
+        "platform": "macOS",
+        "rows": [
+            ("FileVault", row.filevault_active, None),
+            ("Firewall", row.firewall_global_state, None),
+            ("Firewall stealth", row.firewall_stealth, None),
+            ("Gatekeeper", row.gatekeeper_assessments_enabled, None),
+            ("SSH (sshd)", row.remote_login_enabled, active("remote_login")),
+            ("Screen Sharing", row.screen_sharing_enabled, active("screen_sharing")),
+            (
+                "Remote Mgmt (ARD)",
+                row.remote_management_enabled,
+                active("remote_management"),
+            ),
+        ],
+    }
+
+
 def system_integrity(session: Session, run_id: str):
     """Return the latest system-integrity posture as a platform-tagged
     dict the template can render directly.
@@ -166,67 +229,15 @@ def system_integrity(session: Session, run_id: str):
     the matching labels — otherwise a Linux row (or vice-versa) renders
     under the wrong OS's labels and an unset column reads as a scary,
     false "OFF" (e.g. "FileVault OFF" for data collected in a Linux VM).
+    Each row is ``(label, enabled, active)``.
     """
     row = session.execute(
         select(SystemIntegrityRow).where(SystemIntegrityRow.run_id == run_id).limit(1)
     ).scalar_one_or_none()
     if row is None:
         return None
-
-    try:
-        raw = json.loads(row.raw_json) if row.raw_json else {}
-    except (json.JSONDecodeError, TypeError):
-        raw = {}
-
-    linux_keys = {
-        "selinux",
-        "apparmor",
-        "ufw_active",
-        "firewalld_active",
-        "sshd_active",
-        "vnc_active",
-        "luks_mappings",
-    }
-    # Behaviour ("active now") signals, written by the network-service
-    # controls alongside the posture columns. Each row is
-    # ``(label, enabled, active)``; active is None for topics that have no
-    # live-session concept (FileVault, Gatekeeper, …).
-    svc = raw.get("services") or {}
-
-    def _active(topic: str):
-        entry = svc.get(topic)
-        return entry.get("active") if isinstance(entry, dict) else None
-
-    if linux_keys & set(raw):
-        apparmor = raw.get("apparmor")
-        apparmor_on = (
-            apparmor.get("enabled") if isinstance(apparmor, dict) else apparmor
-        )
-        return {
-            "platform": "Linux",
-            "rows": [
-                ("SELinux", raw.get("selinux"), None),
-                ("AppArmor", apparmor_on, None),
-                ("Firewall (ufw)", raw.get("ufw_active"), None),
-                ("Firewall (firewalld)", raw.get("firewalld_active"), None),
-                ("SSH (sshd)", raw.get("sshd_active"), _active("remote_login")),
-                ("VNC", raw.get("vnc_active"), _active("screen_sharing")),
-                ("Disk encryption (LUKS)", bool(raw.get("luks_mappings")), None),
-            ],
-        }
-    return {
-        "platform": "macOS",
-        "rows": [
-            ("FileVault", row.filevault_active, None),
-            ("Firewall", row.firewall_global_state, None),
-            ("Firewall stealth", row.firewall_stealth, None),
-            ("Gatekeeper", row.gatekeeper_assessments_enabled, None),
-            ("SSH (sshd)", row.remote_login_enabled, _active("remote_login")),
-            ("Screen Sharing", row.screen_sharing_enabled, _active("screen_sharing")),
-            (
-                "Remote Mgmt (ARD)",
-                row.remote_management_enabled,
-                _active("remote_management"),
-            ),
-        ],
-    }
+    raw = _parse_json_obj(row.raw_json)
+    active = _service_activity(raw)
+    if _LINUX_KEYS & set(raw):
+        return _linux_posture(raw, active)
+    return _macos_posture(row, active)
