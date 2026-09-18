@@ -61,18 +61,25 @@ Baseline measured on `dev` at `7af815d`, 2026-09-17:
 
 - Enable the ruff ratchet above in `pyproject.toml`.
 - Add a layering test (plain pytest plus `ast`, no new dependency) that fails
-  when a lower layer imports a higher one: `runtime` must not import
-  `collectors`, `collectors` must not import `runner`, and `dashboard` must not
-  import `runner`, `sink` or `collectors`.
-- Add a golden test for the dashboard. Seed a temp DB with
-  `tools/seed_demo_db.py`, render all 38 routes, and store status code plus
-  normalized HTML. Phase 6 must reproduce that output byte for byte.
-- Add a golden test for one cycle. Run `Runner.run_once` with stub collectors
-  and a fake judge against a temp DB, then snapshot the row count per table and
-  the `judgements` rows.
+  when a lower layer imports a higher one: `runtime` imports only `constants`
+  and `enums`; collectors never import `hosts`, `sink`, the LLM stages or
+  orchestration; `sink` never imports collectors or `hosts` at runtime;
+  `host_monitor` never imports the dashboard, desktop or CLI; the dashboard
+  never imports collectors, `hosts`, the LLM stages or orchestration (it may
+  use `Sink.setup()`); enrichers import nothing from `host_monitor` except
+  `constants`.
+- Cover the one dashboard route no test hit (`/fragments/auth-events`).
+  The other 37 routes and `Runner.run_once` (96 runner tests) are already
+  covered, so no stored HTML or DB snapshot is committed. A snapshot of the
+  code's own output would only restate it.
 
-Acceptance: the suite is green with the three new tests, and ruff passes with
-the ignore list in place.
+Acceptance: the suite is green with the new tests, and ruff passes with the
+ignore list in place.
+
+Done on `refactor/p0-guardrails`: ruff ratchet (38 files frozen, a new magic
+value in `src/` is rejected), `tests/test_layering.py` (6 rules, proven to
+catch an injected dashboard-to-runner import and a function-level
+runtime-to-sink import), and the auth-events tests.
 
 ## Phase 1: YAGNI, delete what nothing uses
 
@@ -88,6 +95,7 @@ Each item below was checked with a word-level reference count over `src/`,
 | `runtime.ServiceProbe` | only re-exported, never called |
 | `runtime.WindowsScmServiceManager` | only re-exported, never wired into `WindowsHost` |
 | `dashboard/__init__.py` re-exports of 20 route functions | Flask dispatches routes by URL, and nothing imports the handlers |
+| Function-level `avai.enrichers` imports in `main.build_runner` and `Runner._enrich_entries` | meant to keep `requests` out of `--no-enrich` runs, but `Sink.setup()` already loads it on every boot (checked: `'requests' in sys.modules` is true after `setup()`). They become normal top-level imports |
 | `file_scanner/` package (`ScanRootCatalog` and 9 related types) | added in `36e1a70`, never wired into `FileScanCollector`, used only by `tests/test_scan_roots.py`. Recoverable from git if scan planning is picked up again |
 
 Acceptance: the listed symbols are gone, their test-only callers are removed or
@@ -115,8 +123,7 @@ them.
 
 Acceptance: slice identity is declared once per slice, the four missing
 slices appear in the dashboard, a regression test proves feedback is accepted
-for `trusted_roots`, and the dashboard golden output changes only on those
-four slices.
+for `trusted_roots`, and the existing dashboard tests stay green.
 
 ## Phase 3: LLM stages (SRP, DRY, DIP)
 
@@ -161,13 +168,16 @@ workers. It passes loose dicts whose keys (`evidence`, `baseline`, `related`,
 | `RunnerConfig` (dataclass) | the 12-argument `Runner.__init__` |
 | `SupervisionPolicy` (dataclass) | the 10-argument `StreamingWorker.__init__` (backoff, sleeper, listener, batch size, flush interval, healthy reset) |
 
+Before any move, add characterization tests for the Runner branches the
+suite does not reach today (coverage 76%).
+
 `Runner` stays as the thin coordinator of `CollectionCycle`, `ControlLoop` and
 `StreamingSupervisor`, so `desktop.py` and `main.py` keep calling the same
 three methods.
 
 Acceptance: no class in `runner.py` or its new modules exceeds 15 methods or
-300 lines, the cycle golden test is identical, and each stage has its own unit
-test with a fake collaborator.
+300 lines, the characterization tests stay green, and each stage has its own
+unit test with a fake collaborator.
 
 ## Phase 5: dropped
 
@@ -175,7 +185,8 @@ The `Sink` split into repositories was dropped on 2026-09-17. `Sink` keeps
 its 49 methods. Its two worst methods are still simplified where they are:
 `correlation_context` (mccabe 15) gets one private method per signal, and
 `prune_to_size` (122 lines) gets one private method per table group. Both
-are covered by the Phase 0 cycle golden test.
+get characterization tests first (`tests/test_sink_rotation.py` already
+covers pruning; correlation needs its own).
 
 ## Phase 6: dashboard (SRP, DIP, parameter objects)
 
@@ -192,7 +203,11 @@ are covered by the Phase 0 cycle golden test.
   status, collector, category, q, sort)` in place of the 6 to 10 argument
   signatures.
 
-Acceptance: the dashboard golden output is identical, no function in
+Before the first move, render every route against a DB seeded by
+`tools/seed_demo_db.py` and keep that HTML locally (not committed). After the
+phase, render again and diff, with timestamps normalized first.
+
+Acceptance: the before/after HTML diff is empty, no function in
 `dashboard/` is over mccabe 10 or 60 lines, and query classes are tested
 without a Flask app.
 
