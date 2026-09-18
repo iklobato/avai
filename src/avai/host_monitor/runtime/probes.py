@@ -269,28 +269,6 @@ def _statvfs_usage(path: str) -> "_HostUsage":
     return _HostUsage(total=total, used=used, free=avail_user, percent=percent)
 
 
-class ServiceProbe:
-    """POSIX service-liveness checks via the injected CommandRunner."""
-
-    def __init__(self, runner: Optional[CommandRunner] = None) -> None:
-        self._runner = runner or CommandRunner()
-
-    def loaded(self, label: str) -> Optional[int]:
-        """1 if a launchd service *label* is loaded, 0 if not, None on
-        error (``launchctl list <label>`` exit code)."""
-        code = self._runner.exit_code(["launchctl", "list", label])
-        return None if code is None else int(code == 0)
-
-    def running(self, name: str) -> Optional[int]:
-        """1 if a process named *name* is running, 0 if not, None on error.
-
-        Uses ``pgrep -x`` (exact match) so it catches system-domain
-        services (sshd, screensharingd, ARDAgent) that ``launchctl list``
-        misses from the user session."""
-        code = self._runner.exit_code(["pgrep", "-x", name])
-        return None if code is None else int(code == 0)
-
-
 def tri_or(*values: Optional[int]) -> Optional[int]:
     """Tri-state OR over 1/0/None signals: 1 if any signal is on, else 0 if
     any signal is known-off, else None (all unknown). Lets a control combine
@@ -352,25 +330,6 @@ class SystemdServiceManager:
     def enabled(self, unit: str) -> Optional[int]:
         code = self._runner.exit_code(["systemctl", "is-enabled", unit])
         return None if code is None else int(code == 0)
-
-
-class WindowsScmServiceManager:
-    """Windows: a service is enabled when its SCM start type isn't DISABLED
-    (``sc qc <name>``)."""
-
-    def __init__(self, runner: Optional[CommandRunner] = None) -> None:
-        self._runner = runner or CommandRunner()
-
-    def enabled(self, unit: str) -> Optional[int]:
-        out = self._runner.text(["sc", "qc", unit])
-        if not out:
-            return None
-        upper = out.upper()
-        if "DISABLED" in upper:
-            return 0
-        if "AUTO_START" in upper or "DEMAND_START" in upper:
-            return 1
-        return None
 
 
 class PsutilPortInspector:

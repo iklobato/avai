@@ -162,7 +162,6 @@ from .runtime import (
     JsonLineStreamSource,
     LineParser,
     PsutilConnections,
-    ServiceProbe,
     SystemMetrics,
 )
 from .sink import Sink, _migrate_add_columns, _set_sqlite_pragmas
@@ -181,7 +180,6 @@ __all__ = [
     "PsutilConnections",
     "SystemMetrics",
     "DiskMetrics",
-    "ServiceProbe",
     "DiskUsageCollector",
     "DiskUsageRow",
     "HostResourcesCollector",
