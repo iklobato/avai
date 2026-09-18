@@ -168,7 +168,6 @@ max-args = 5
 "src/avai/enrichers/sources/virustotal.py" = ["PLR2004"]
 "src/avai/host_monitor/collectors.py" = ["C901", "PLR2004"]
 "src/avai/host_monitor/exposure_collectors.py" = ["PLR2004"]
-"src/avai/host_monitor/file_scanner/roots.py" = ["PLR2004"]
 "src/avai/host_monitor/hosts/linux.py" = ["PLR2004"]
 "src/avai/host_monitor/hosts/macos.py" = ["PLR2004"]
 "src/avai/host_monitor/hosts/windows.py" = ["PLR2004"]
