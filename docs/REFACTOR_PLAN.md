@@ -132,6 +132,24 @@ Acceptance: slice identity is declared once per slice, the four missing
 slices appear in the dashboard, a regression test proves feedback is accepted
 for `trusted_roots`, and the existing dashboard tests stay green.
 
+Done on `refactor/p2-slice-catalog`, with two changes from the design above:
+
+- `judge_fields` (and `judge_enabled`) stay on the collector class. They
+  really differ by OS: Windows `process_exec_events` judges `username` where
+  macOS and Linux judge `uid`, and only macOS `system_integrity` judges
+  `firewall_stealth`. A `Slice` is `(name, model, streaming)`.
+- The catalog is a module (`host_monitor/slices.py`: one constant per slice
+  plus `ALL`), not a `SliceCatalog` class. Nothing needed an instance.
+
+The dashboard's `COLLECTOR_MODELS` and `_STREAMING_COLLECTORS` are built from
+it, which adds the four missing slices. The feedback regression test covers
+all four, and it fails on the old map. `tests/test_slices.py` checks the catalog
+against the row models, collector classes, prompt hints and extractor keys,
+and each check was seen to fail when its rule was broken. 898 tests pass.
+
+Left open: `DISPLAY_FIELDS` is still hand-kept and lacks 15 slices, and the
+slice names repeated in `constants.py` were not touched.
+
 ## Phase 3: LLM stages (SRP, DRY, DIP)
 
 Problem: `build_judge`, `build_verifier`, `build_investigator`,
