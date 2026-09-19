@@ -3,6 +3,11 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.9.1] - 2026-09-18
+
+### Fixed
+- **The desktop installers never built.** `packaging/avai.spec` was missing from the repository, so every tagged release failed at the PyInstaller step with "Spec file not found". The spec is now tracked, and the script path inside it was pointing one directory too deep. A macOS build from a clean environment now produces `avai.app` with the templates and the YARA pack inside.
+
 ## [0.9.0] - 2026-09-18
 
 ### Internal
