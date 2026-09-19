@@ -3,6 +3,11 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.9.2] - 2026-09-18
+
+### Internal
+- **Releases publish themselves to PyPI.** A tagged release now builds and uploads the wheel and the sdist over PyPI trusted publishing, so no upload token lives on anyone's machine. The build fetches the YARA pack first, which a manual build on a developer machine happened to have on disk and a clean CI checkout does not.
+
 ## [0.9.1] - 2026-09-18
 
 ### Fixed

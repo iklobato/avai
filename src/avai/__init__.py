@@ -14,4 +14,4 @@ Or programmatically:
     dashboard_app = create_app(DashboardConfig(db_path=...))
 """
 
-__version__ = "0.9.1"
+__version__ = "0.9.2"
