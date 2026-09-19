@@ -186,6 +186,10 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    from .observability import init_sentry
+
+    init_sentry()
+
     if argv is None:
         argv = sys.argv[1:]
 

@@ -39,3 +39,8 @@ venv/
 # in the wheel/sdist (mixed-license, needs a crypto-enabled yara). Users
 # fetch it post-install for their own environment.
 src/avai/rules/vendor/
+
+# The PyInstaller spec is a tracked source file: the release workflow builds
+# the installers from it. A global ignore of *.spec kept it out of the repo
+# and every installer build failed with "Spec file not found".
+!packaging/avai.spec
