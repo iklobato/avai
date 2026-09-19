@@ -49,5 +49,5 @@ class TestServeSurfacesBindFailure:
         monkeypatch.setattr(serve, "_hosts_notice", lambda _port: [])
 
         with pytest.raises(SystemExit) as excinfo:
-            serve._serve("127.0.0.1", 80, debug=False)
+            serve._serve(object(), "127.0.0.1", 80, debug=False)
         assert "needs elevated privileges" in str(excinfo.value)

@@ -4,6 +4,7 @@ each collector's stream() method."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import threading
 
@@ -144,3 +145,66 @@ class TestJsonLineStreamSource:
         # Should terminate promptly rather than hang for 5s.
         rows = list(source.stream(stop))
         assert rows == [] or rows == [{"n": 1}]
+
+
+class _FakeProc:
+    """A Popen stand-in that records how the source shuts it down."""
+
+    def __init__(self, lines, *, exited=False, wait_times_out=False, gone=False):
+        self.stdout = iter(lines)
+        self.calls: list = []
+        self._exited = exited
+        self._wait_times_out = wait_times_out
+        self._gone = gone
+
+    def poll(self):
+        return 0 if self._exited else None
+
+    def terminate(self):
+        self.calls.append("terminate")
+        if self._gone:
+            raise ProcessLookupError
+
+    def wait(self, timeout):
+        self.calls.append(("wait", timeout))
+        if self._wait_times_out:
+            raise subprocess.TimeoutExpired("tool", timeout)
+
+    def kill(self):
+        self.calls.append("kill")
+
+
+class TestJsonLineStreamSourceShutdown:
+    def _stream(self, monkeypatch, proc, stop):
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: proc)
+        return JsonLineStreamSource(["tool"], _IdentityParser()).stream(stop)
+
+    def test_stop_mid_stream_ends_it_and_terminates_the_child(self, monkeypatch):
+        stop = threading.Event()
+        proc = _FakeProc(['{"n": 1}\n', '{"n": 2}\n'])
+        rows = self._stream(monkeypatch, proc, stop)
+        assert next(rows) == {"n": 1}
+        stop.set()
+        assert list(rows) == []
+        assert "terminate" in proc.calls
+
+    def test_child_that_ignores_terminate_is_killed(self, monkeypatch):
+        stop = threading.Event()
+        proc = _FakeProc([], wait_times_out=True)
+        assert list(self._stream(monkeypatch, proc, stop)) == []
+        assert proc.calls == ["terminate", ("wait", 2), "kill"]
+        stop.set()
+
+    def test_child_that_already_exited_is_left_alone(self, monkeypatch):
+        stop = threading.Event()
+        proc = _FakeProc(['{"n": 1}\n'], exited=True)
+        assert list(self._stream(monkeypatch, proc, stop)) == [{"n": 1}]
+        assert proc.calls == []
+        stop.set()
+
+    def test_child_gone_before_terminate_is_not_an_error(self, monkeypatch):
+        stop = threading.Event()
+        proc = _FakeProc([], gone=True)
+        assert list(self._stream(monkeypatch, proc, stop)) == []
+        assert proc.calls == ["terminate"]
+        stop.set()

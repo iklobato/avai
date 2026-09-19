@@ -14,7 +14,8 @@ need a single summary.
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from itertools import islice
+from typing import Iterable, Optional
 
 from avai.enrichers.base import (
     Enricher,
@@ -37,100 +38,83 @@ class EnrichmentChain:
     def __init__(self, enrichers: list[Enricher], cache: EvidenceCache):
         self._enrichers = enrichers
         self._cache = cache
-        # Tally per-source outcomes for the per-cycle summary log.
-        self._stats: dict[str, dict[str, int]] = {}
 
     @property
     def sources(self) -> list[str]:
         return [e.name for e in self._enrichers]
-
-    def reset_stats(self) -> None:
-        self._stats.clear()
-
-    def stats(self) -> dict[str, dict[str, int]]:
-        return dict(self._stats)
 
     def enrich(self, indicator: Indicator) -> list[Evidence]:
         out: list[Evidence] = []
         for enricher in self._enrichers:
             if not enricher.supports(indicator):
                 continue
-            tally = self._stats.setdefault(
-                enricher.name,
-                {
-                    "hit": 0,
-                    "miss": 0,
-                    "rate_limited": 0,
-                    "error": 0,
-                    "none": 0,
-                    "cached": 0,
-                },
-            )
-            cached = self._cache.get(enricher, indicator)
-            if cached is not None:
-                out.append(cached)
-                tally["cached"] += 1
-                continue
-            try:
-                evidence = enricher._fetch(indicator)
-            except RateLimitedError:
-                LOG.warning(
-                    "enricher=%s rate-limited for %s", enricher.name, indicator.value
-                )
-                tally["rate_limited"] += 1
-                continue
-            except EnricherError as exc:
-                LOG.warning(
-                    "enricher=%s error for %s: %s", enricher.name, indicator.value, exc
-                )
-                tally["error"] += 1
-                continue
-            except Exception as exc:  # noqa: BLE001
-                # Last-resort net: a broken source must not bring the
-                # cycle down. Log once per cycle would be nice but the
-                # surface area here is tiny.
-                LOG.warning(
-                    "enricher=%s unexpected error for %s: %s: %s",
-                    enricher.name,
-                    indicator.value,
-                    type(exc).__name__,
-                    exc,
-                )
-                tally["error"] += 1
-                continue
-            if evidence is None:
-                tally["none"] += 1
-                continue
-            self._cache.put(evidence)
-            out.append(evidence)
-            tally["miss"] += 1
-            tally["hit"] += 1
-
-        # Forward-chain: a package/OS lookup may report CVE IDs (OSV's
-        # ``vuln_ids``). Re-run each discovered CVE through the chain so the
-        # CVE-typed sources (NVD CVSS, CISA KEV exploited-status, GitHub
-        # Advisory) enrich it. Skip when the indicator is itself a CVE so we
-        # never recurse on the same id.
+            evidence = self._lookup(enricher, indicator)
+            if evidence is not None:
+                out.append(evidence)
+        # A CVE indicator never forward-chains, so a CVE source reporting
+        # its own id can't recurse.
         if indicator.type is not IndicatorType.CVE:
-            seen: set[str] = set()
-            for ev in list(out):
-                for raw in (ev.details or {}).get("vuln_ids", []) or []:
-                    cid = str(raw).upper()
-                    if not cid.startswith(("CVE-", "GHSA-")) or cid in seen:
-                        continue
-                    seen.add(cid)
-                    if len(seen) > self._MAX_FORWARD_CVES:
-                        break
-                    out.extend(self.enrich(Indicator(IndicatorType.CVE, cid)))
+            out.extend(self._forward_chain(out))
         return out
 
-    def enrich_many(
-        self, indicators: Iterable[Indicator]
-    ) -> dict[Indicator, list[Evidence]]:
-        """Convenience for the monitor cycle — one call per batch."""
-        result: dict[Indicator, list[Evidence]] = {}
-        for ind in indicators:
-            if ind in result:
-                continue
-            result[ind] = self.enrich(ind)
-        return result
+    def _lookup(self, enricher: Enricher, indicator: Indicator) -> Optional[Evidence]:
+        cached = self._cache.get(enricher, indicator)
+        if cached is not None:
+            return cached
+        evidence = self._fetch(enricher, indicator)
+        if evidence is not None:
+            self._cache.put(evidence)
+        return evidence
+
+    @staticmethod
+    def _fetch(enricher: Enricher, indicator: Indicator) -> Optional[Evidence]:
+        """Ask the source, swallowing its failures so one broken source
+        doesn't break the cycle. None when it failed or had nothing."""
+        try:
+            evidence = enricher._fetch(indicator)
+        except RateLimitedError:
+            LOG.warning(
+                "enricher=%s rate-limited for %s", enricher.name, indicator.value
+            )
+            return None
+        except EnricherError as exc:
+            LOG.warning(
+                "enricher=%s error for %s: %s", enricher.name, indicator.value, exc
+            )
+            return None
+        except Exception as exc:  # noqa: BLE001
+            # Last-resort net: a broken source must not bring the
+            # cycle down. Log once per cycle would be nice but the
+            # surface area here is tiny.
+            LOG.warning(
+                "enricher=%s unexpected error for %s: %s: %s",
+                enricher.name,
+                indicator.value,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        return evidence
+
+    def _forward_chain(self, evidence: list[Evidence]) -> list[Evidence]:
+        """A package/OS lookup may report CVE IDs (OSV's ``vuln_ids``).
+        Re-run each discovered id through the chain so the CVE-typed sources
+        (NVD CVSS, CISA KEV exploited-status, GitHub Advisory) enrich it."""
+        ids = islice(_advisory_ids(evidence), self._MAX_FORWARD_CVES)
+        return [
+            found
+            for advisory in ids
+            for found in self.enrich(Indicator(IndicatorType.CVE, advisory))
+        ]
+
+
+def _advisory_ids(evidence: list[Evidence]) -> Iterable[str]:
+    """The distinct CVE/GHSA ids reported across ``evidence``, upper-cased,
+    in the order they appear."""
+    seen: set[str] = set()
+    for ev in evidence:
+        for raw in (ev.details or {}).get("vuln_ids", []) or []:
+            advisory = str(raw).upper()
+            if advisory.startswith(("CVE-", "GHSA-")) and advisory not in seen:
+                seen.add(advisory)
+                yield advisory

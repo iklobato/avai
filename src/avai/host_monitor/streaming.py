@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from .collectors import StreamingCollector
@@ -22,6 +24,52 @@ from .supervision import (
     SupervisionListener,
     default_backoff,
 )
+
+
+@dataclass(frozen=True)
+class SupervisionPolicy:
+    """How a streaming worker buffers, restarts and reports. The defaults are
+    production's; tests pass deterministic fakes for backoff and listener."""
+
+    batch_size: int = 50
+    flush_interval_s: float = 5.0
+    join_timeout_s: float = 5.0
+    healthy_reset_s: float = STREAM_HEALTHY_RESET_S
+    backoff: BackoffPolicy = field(default_factory=default_backoff)
+    listener: SupervisionListener = field(default_factory=LoggingSupervisionListener)
+
+
+class StreamingSupervisor:
+    """Starts one worker per streaming collector at boot and joins them all on
+    shutdown."""
+
+    def __init__(
+        self,
+        sink: Sink,
+        collectors: list[StreamingCollector],
+        policy: Optional[SupervisionPolicy] = None,
+    ):
+        self._sink = sink
+        self._collectors = collectors
+        self._policy = policy or SupervisionPolicy()
+        self._workers: list[StreamingWorker] = []
+
+    def start(self) -> None:
+        if not self._collectors:
+            return
+        hostname = socket.gethostname()
+        for collector in self._collectors:
+            worker = StreamingWorker(collector, self._sink, hostname, self._policy)
+            worker.start()
+            self._workers.append(worker)
+        LOG.info("started %d streaming worker(s)", len(self._workers))
+
+    def stop(self) -> None:
+        for worker in self._workers:
+            worker.stop()
+        if self._workers:
+            LOG.info("stopped %d streaming worker(s)", len(self._workers))
+        self._workers.clear()
 
 
 class StreamingWorker:
@@ -47,28 +95,17 @@ class StreamingWorker:
         collector: StreamingCollector,
         sink: Sink,
         hostname: str,
-        batch_size: int = 50,
-        flush_interval_s: float = 5.0,
-        join_timeout_s: float = 5.0,
-        backoff: Optional[BackoffPolicy] = None,
+        policy: Optional[SupervisionPolicy] = None,
         sleeper: Optional[Sleeper] = None,
-        listener: Optional[SupervisionListener] = None,
-        healthy_reset_s: float = STREAM_HEALTHY_RESET_S,
     ):
         self.collector = collector
         self.sink = sink
         self.hostname = hostname
-        self.batch_size = batch_size
-        self.flush_interval_s = flush_interval_s
-        self.join_timeout_s = join_timeout_s
-        self.healthy_reset_s = healthy_reset_s
+        self.policy = policy or SupervisionPolicy()
         self.stop_event = threading.Event()
-        # Production defaults wired here so callers get supervision for free;
-        # tests inject deterministic fakes (immediate sleeper, recording
-        # listener/backoff) through the same parameters.
-        self.backoff = backoff or default_backoff()
+        # The default sleeper wakes on this worker's own stop event, so it
+        # can't live in the shared policy; tests inject an immediate one.
         self.sleeper = sleeper or InterruptibleSleep(self.stop_event)
-        self.listener = listener or LoggingSupervisionListener()
         self.thread: Optional[threading.Thread] = None
         self.run_id: Optional[str] = None
         self._rows_written = 0
@@ -88,7 +125,7 @@ class StreamingWorker:
     def stop(self) -> None:
         self.stop_event.set()
         if self.thread is not None:
-            self.thread.join(timeout=self.join_timeout_s)
+            self.thread.join(timeout=self.policy.join_timeout_s)
 
     def _flush(self, buffer: list[dict]) -> None:
         if not buffer:
@@ -108,9 +145,9 @@ class StreamingWorker:
         while not self.stop_event.is_set():
             started = time.monotonic()
             outcome = self._stream_once()
-            if time.monotonic() - started >= self.healthy_reset_s:
+            if time.monotonic() - started >= self.policy.healthy_reset_s:
                 if self._restart_attempt:
-                    self.listener.report_healthy(self.collector.name)
+                    self.policy.listener.report_healthy(self.collector.name)
                 self._restart_attempt = 0
             if not outcome.accept(self):
                 break
@@ -128,8 +165,10 @@ class StreamingWorker:
         if self.stop_event.is_set():
             return False
         self._restart_attempt += 1
-        self.listener.report_crash(self.collector.name, self._restart_attempt, exc)
-        self.sleeper.sleep(self.backoff.delay_for(self._restart_attempt))
+        self.policy.listener.report_crash(
+            self.collector.name, self._restart_attempt, exc
+        )
+        self.sleeper.sleep(self.policy.backoff.delay_for(self._restart_attempt))
         return not self.stop_event.is_set()
 
     def _stream_once(self) -> StreamOutcome:
@@ -158,8 +197,8 @@ class StreamingWorker:
                 row["content_hash"] = Digest.of_row(row, self.collector.judge_fields)
                 buffer.append(row)
                 now = time.monotonic()
-                if len(buffer) >= self.batch_size or (
-                    buffer and now - last_flush >= self.flush_interval_s
+                if len(buffer) >= self.policy.batch_size or (
+                    buffer and now - last_flush >= self.policy.flush_interval_s
                 ):
                     try:
                         self._flush(buffer)
@@ -184,7 +223,7 @@ class StreamingWorker:
                 LOG.exception(
                     "end_streaming_session failed collector=%s", self.collector.name
                 )
-            self.listener.report_session_end(self.collector.name, session_rows)
+            self.policy.listener.report_session_end(self.collector.name, session_rows)
         if crash is not None:
             return Crashed(crash)
         if self.stop_event.is_set():

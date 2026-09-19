@@ -142,17 +142,6 @@ class EvidenceCache:
             session.execute(stmt)
             session.commit()
 
-    def for_indicator(self, indicator: Indicator) -> list[Evidence]:
-        """All persisted evidence for an indicator — across every source.
-        Used by the dashboard to render the per-finding evidence panel."""
-        stmt = select(self._model).where(
-            self._model.indicator_type == str(indicator.type),
-            self._model.indicator_value == indicator.value,
-        )
-        with Session(self._engine) as session:
-            rows = session.execute(stmt).scalars().all()
-        return [_evidence_from_row(r, indicator) for r in rows]
-
 
 def _evidence_from_row(row, indicator: Indicator) -> Evidence:
     try:

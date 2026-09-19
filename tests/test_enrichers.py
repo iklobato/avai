@@ -24,7 +24,7 @@ from avai.enrichers import (
     VerdictHint,
     extract_indicators,
 )
-from avai.enrichers.base import RateLimitedError, worst_hint
+from avai.enrichers.base import EnricherError, RateLimitedError, worst_hint
 from avai.enrichers.cache import register_schema
 from avai.enrichers.registry import discover_enricher_classes
 
@@ -116,14 +116,6 @@ class TestIndicator:
         ind = Indicator(IndicatorType.URL, "https://e.test/x#hash")
         assert ind.value == "https://e.test/x"
 
-    def test_equality_drives_dedup(self):
-        a = Indicator(IndicatorType.IPV4, "1.2.3.4")
-        b = Indicator(IndicatorType.IPV4, "1.2.3.4", context={"x": "y"})
-        # Frozen dataclass equality ignores nothing — context is part of
-        # the hash. Use a set of (type, value) tuples for indicator
-        # dedup when context shouldn't matter.
-        assert a != b
-
 
 # ---------------------------------------------------------------------------
 # EvidenceCache
@@ -209,8 +201,14 @@ class TestEnrichmentChain:
         out = chain.enrich(ind)
         # One bad source must not block the good one.
         assert [ev.source for ev in out] == ["good"]
-        # And the bad source was tallied as rate_limited.
-        assert chain.stats()["bad"]["rate_limited"] == 1
+
+    def test_source_error_is_swallowed(self, cache):
+        ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
+        e_bad = _FakeEnricher(name="bad", raise_exc=EnricherError("http 500"))
+        e_good = _FakeEnricher(name="good", return_value=_make_evidence("good", ind))
+        chain = EnrichmentChain([e_bad, e_good], cache)
+        out = chain.enrich(ind)
+        assert [ev.source for ev in out] == ["good"]
 
     def test_unexpected_exception_does_not_propagate(self, cache):
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
@@ -219,7 +217,6 @@ class TestEnrichmentChain:
         chain = EnrichmentChain([e_bad, e_good], cache)
         out = chain.enrich(ind)
         assert [ev.source for ev in out] == ["good"]
-        assert chain.stats()["bad"]["error"] == 1
 
     def test_none_response_is_not_cached(self, cache):
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
@@ -451,6 +448,57 @@ class TestForwardChain:
         assert [c.lower() for c in cve.calls] == ["cve-2024-0001"]
         srcs = {e.source for e in out}
         assert "osv_like" in srcs and "nvd_like" in srcs
+
+    def test_forward_chain_dedups_filters_and_caps_ids(self, cache):
+        from avai.enrichers import (
+            Enricher,
+            EnrichmentChain,
+            Evidence,
+            Indicator,
+            IndicatorType,
+            VerdictHint,
+        )
+
+        many = [f"CVE-2024-{n:04d}" for n in range(2, 14)]
+        vuln_ids = ["cve-2024-0001", "PYSEC-2024-1", "GHSA-aaaa", "ghsa-AAAA"]
+
+        def evidence(source, ind, details):
+            return Evidence(
+                source=source,
+                indicator=ind,
+                verdict_hint=VerdictHint.SUSPICIOUS,
+                confidence=0.5,
+                summary="x",
+                details=details,
+            )
+
+        class _Pkg(Enricher):
+            name = "pkg"
+            supports_types = frozenset({IndicatorType.PACKAGE})
+            requires_token = None
+
+            def _fetch(self, ind):
+                return evidence(self.name, ind, {"vuln_ids": vuln_ids + many})
+
+        class _Cve(Enricher):
+            name = "cve"
+            supports_types = frozenset({IndicatorType.CVE})
+            requires_token = None
+
+            def __init__(self):
+                self.calls = []
+
+            def _fetch(self, ind):
+                self.calls.append(ind.value.upper())
+                return evidence(self.name, ind, {})
+
+        cve = _Cve()
+        out = EnrichmentChain([_Pkg(), cve], cache).enrich(
+            Indicator(IndicatorType.PACKAGE, "openssl@3.0.2")
+        )
+        expected = ["CVE-2024-0001", "GHSA-AAAA", *many[:8]]
+        assert cve.calls == expected
+        assert [e.source for e in out] == ["pkg"] + ["cve"] * len(expected)
 
     def test_cve_indicator_does_not_recurse(self, cache):
         from avai.enrichers import (

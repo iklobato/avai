@@ -1,19 +1,16 @@
 """Targeted tests for small helpers that are easy to break but rarely
 get attention: ``_sha256_of_file`` (used by every binary-hashing
-extractor), the dashboard's ``_engine`` URL construction, and the
-chain stats counters.
+extractor) and the dashboard's read-only engine URL construction.
 """
 
 from __future__ import annotations
 
 import hashlib
 
-import pytest
 from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase
 
-from avai.dashboard import _engine, _ensure_db_exists, app
-from avai.enrichers import EnrichmentChain, EvidenceCache, Indicator, IndicatorType
+from avai.dashboard.serve import _ensure_db_exists
+from avai.dashboard.db import read_only_engine
 from avai.enrichers.indicators import _safe_loads, _sha256_of_file
 
 # ---------------------------------------------------------------------------
@@ -83,7 +80,7 @@ class TestSafeLoads:
 
 
 # ---------------------------------------------------------------------------
-# Dashboard _engine — read-only URL construction
+# Dashboard read-only engine: URL construction
 # ---------------------------------------------------------------------------
 
 
@@ -91,9 +88,7 @@ class TestDashboardEngine:
     def test_url_is_read_only_but_not_immutable(self, tmp_path):
         db = tmp_path / "x.db"
         _ensure_db_exists(str(db))
-        app.config["DB_PATH"] = str(db)
-        with app.app_context():
-            url = str(_engine().url)
+        url = str(read_only_engine(str(db)).url)
         # mode=ro = read-only; uri=true enables the file: URI form.
         assert "mode=ro" in url
         assert "uri=true" in url
@@ -104,110 +99,9 @@ class TestDashboardEngine:
     def test_engine_can_open_existing_db(self, tmp_path):
         db = tmp_path / "exists.db"
         _ensure_db_exists(str(db))
-        app.config["DB_PATH"] = str(db)
-        with app.app_context():
-            e = _engine()
-            with e.connect() as conn:
-                # Anything that proves the connection works.
-                conn.exec_driver_sql("select 1")
-
-
-# ---------------------------------------------------------------------------
-# EnrichmentChain stats — used by the per-cycle log line
-# ---------------------------------------------------------------------------
-
-
-class _Base(DeclarativeBase):
-    pass
-
-
-@pytest.fixture
-def cache():
-    engine = create_engine("sqlite:///:memory:")
-    from avai.enrichers.cache import register_schema
-
-    register_schema(_Base)
-    _Base.metadata.create_all(engine)
-    return EvidenceCache(engine, _Base)
-
-
-class _Fake:
-    def __init__(self, name, hint, ret=None, exc=None):
-        self.name = name
-        self.supports_types = frozenset({IndicatorType.IPV4})
-        self.requires_token = None
-        self.ttl_hours = 24
-        self._ret = ret
-        self._exc = exc
-
-    def supports(self, ind):
-        return ind.type in self.supports_types
-
-    def freshness_cutoff(self):
-        from datetime import datetime, timedelta, timezone
-
-        return datetime.now(timezone.utc) - timedelta(hours=self.ttl_hours)
-
-    def _fetch(self, ind):
-        if self._exc:
-            raise self._exc
-        return self._ret
-
-
-class TestChainStats:
-    def test_records_hit_and_cached_separately(self, cache):
-        from avai.enrichers.base import Evidence, VerdictHint
-
-        ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
-        ev = Evidence(
-            source="x",
-            indicator=ind,
-            verdict_hint=VerdictHint.MALICIOUS,
-            confidence=0.9,
-            summary="s",
-        )
-        e = _Fake("x", VerdictHint.MALICIOUS, ret=ev)
-        chain = EnrichmentChain([e], cache)
-        chain.enrich(ind)  # miss → hit + miss tallied
-        chain.enrich(ind)  # cache hit → cached tallied
-        stats = chain.stats()["x"]
-        assert stats["hit"] == 1
-        assert stats["miss"] == 1
-        assert stats["cached"] == 1
-
-    def test_records_none_response(self, cache):
-        ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
-        e = _Fake("x", None, ret=None)
-        chain = EnrichmentChain([e], cache)
-        chain.enrich(ind)
-        assert chain.stats()["x"]["none"] == 1
-
-    def test_records_error(self, cache):
-        ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
-        e = _Fake("x", None, exc=RuntimeError("boom"))
-        chain = EnrichmentChain([e], cache)
-        chain.enrich(ind)
-        assert chain.stats()["x"]["error"] == 1
-
-    def test_reset_stats_clears(self, cache):
-        ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
-        from avai.enrichers.base import Evidence, VerdictHint
-
-        e = _Fake(
-            "x",
-            VerdictHint.MALICIOUS,
-            ret=Evidence(
-                source="x",
-                indicator=ind,
-                verdict_hint=VerdictHint.MALICIOUS,
-                confidence=0.9,
-                summary="s",
-            ),
-        )
-        chain = EnrichmentChain([e], cache)
-        chain.enrich(ind)
-        chain.reset_stats()
-        assert chain.stats() == {}
+        with read_only_engine(str(db)).connect() as conn:
+            # Anything that proves the connection works.
+            conn.exec_driver_sql("select 1")
 
 
 # ---------------------------------------------------------------------------
@@ -219,14 +113,11 @@ class TestSinkUnjudgedAll:
     def test_returns_distinct_hashes_across_runs(self, tmp_path):
         # The streaming variant of unjudged ignores run_id so streaming
         # rows that span runs are still classified once each.
+        from avai.host_monitor.enums import ThreatCategory, Verdict
+        from avai.host_monitor.judge import Judgment
+        from avai.host_monitor.models import AuthEventRow
+        from avai.host_monitor.sink import Sink
         from avai.host_monitor.runtime import Clock, Digest
-        from avai.host_monitor import (
-            AuthEventRow,
-            Judgment,
-            Sink,
-            ThreatCategory,
-            Verdict,
-        )
 
         class _S:
             name = "auth_events"
@@ -302,7 +193,8 @@ class TestSinkUnjudgedAll:
         assert result[0]["event_message"] == "bob"
 
     def test_returns_empty_when_collector_has_no_judge_fields(self, tmp_path):
-        from avai.host_monitor import AuthEventRow, Sink
+        from avai.host_monitor.models import AuthEventRow
+        from avai.host_monitor.sink import Sink
 
         class _S:
             name = "auth_events"

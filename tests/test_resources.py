@@ -15,15 +15,13 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from avai.dashboard import app, disk_usage, host_resources, resource_trend
-from avai.host_monitor import (
-    DiskUsageCollector,
-    DiskUsageRow,
-    FrozenClock,
-    HostResourceRow,
-    HostResourcesCollector,
-    Sink,
-)
+from avai.dashboard.app import create_app
+from avai.dashboard.config import DashboardConfig
+from avai.dashboard.queries import disk_usage, host_resources, resource_trend
+from avai.host_monitor.collectors import DiskUsageCollector, HostResourcesCollector
+from avai.host_monitor.models import DiskUsageRow, HostResourceRow
+from avai.host_monitor.runtime import FrozenClock
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.runtime import Digest
 
 # psutil-shaped fakes ---------------------------------------------------------
@@ -303,8 +301,9 @@ class TestRoutes:
         engine, _, _, _, tmp_path = db
         _seed(db)
         engine.dispose()
-        app.config.update(TESTING=True, DB_PATH=str(tmp_path / "r.db"))
-        with app.test_client() as c:
+        with create_app(
+            DashboardConfig(db_path=str(tmp_path / "r.db"))
+        ).test_client() as c:
             r = c.get("/fragments/resources")
         assert r.status_code == 200
         body = r.data.decode()
@@ -318,8 +317,9 @@ class TestRoutes:
             conn.execute(text("DROP TABLE host_resources"))
             conn.execute(text("DROP TABLE disk_usage"))
         engine.dispose()
-        app.config.update(TESTING=True, DB_PATH=str(tmp_path / "e.db"))
-        with app.test_client() as c:
+        with create_app(
+            DashboardConfig(db_path=str(tmp_path / "e.db"))
+        ).test_client() as c:
             r = c.get("/fragments/resources")
         assert r.status_code == 200
 
@@ -327,8 +327,9 @@ class TestRoutes:
         engine, _, _, _, tmp_path = db
         _seed(db)
         engine.dispose()
-        app.config.update(TESTING=True, DB_PATH=str(tmp_path / "r.db"))
-        with app.test_client() as c:
+        with create_app(
+            DashboardConfig(db_path=str(tmp_path / "r.db"))
+        ).test_client() as c:
             r = c.get("/api/chart/resources")
         assert r.status_code == 200
         data = r.get_json()

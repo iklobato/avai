@@ -71,6 +71,11 @@ from ..persistence_collectors import (
 from ..prompts import Prompts
 from ..runtime import CommandRunner, CommandSnapshot, FileSnapshot, HostPaths
 
+# name:password:gid:members
+_GROUP_FIELDS = 4
+# name:password:uid:gid:gecos:home:shell
+_PASSWD_FIELDS = 7
+
 
 class LinuxFilesystemLayout:
     """Linux filesystem facts. Absolute paths pass through ``host_path``
@@ -150,7 +155,7 @@ class LinuxPrivilegedAccounts:
         rows = []
         for line in content.splitlines():
             parts = line.strip().split(":")
-            if len(parts) < 4:
+            if len(parts) < _GROUP_FIELDS:
                 continue
             gname, members = parts[0], parts[3]
             if gname in priv_groups and members:
@@ -170,7 +175,7 @@ class LinuxPrivilegedAccounts:
         rows = []
         for line in content.splitlines():
             parts = line.strip().split(":")
-            if len(parts) < 7:
+            if len(parts) < _PASSWD_FIELDS:
                 continue
             user, uid, shell = parts[0], parts[2], parts[6]
             if uid == "0":
@@ -218,24 +223,32 @@ class LinuxHost:
             ProcessCollector(judge_hints=h("processes")),
             NetworkConnectionsCollector(judge_hints=h("network_connections")),
             ListeningPortsCollector(judge_hints=h("listening_ports")),
-            NetworkFlowsCollector(judge_hints=h("network_flows"), iface_args=iface),
-            DnsQueriesCollector(judge_hints=h("dns_queries"), iface_args=iface),
+            NetworkFlowsCollector(
+                judge_hints=h("network_flows"), iface_args=iface, runner=self._runner
+            ),
+            DnsQueriesCollector(
+                judge_hints=h("dns_queries"), iface_args=iface, runner=self._runner
+            ),
             NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
             HostResourcesCollector(judge_hints=h("host_resources")),
             DiskUsageCollector(judge_hints=h("disk_usage")),
-            LogTailCollector(judge_hints=h("log_entries")),
+            LogTailCollector(judge_hints=h("log_entries"), runner=self._runner),
             LinuxUsbDevicesCollector(judge_hints=h("usb_devices")),
             LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),
-            LinuxWifiCollector(judge_hints=h("wifi_state")),
+            LinuxWifiCollector(judge_hints=h("wifi_state"), runner=self._runner),
             LinuxLaunchItemsCollector(judge_hints=h("launch_items")),
             BrowserExtensionsCollector(
                 judge_hints=h("browser_extensions"),
                 profiles=expanded_browser_profiles,
             ),
-            LinuxSystemIntegrityCollector(judge_hints=h("system_integrity")),
+            LinuxSystemIntegrityCollector(
+                judge_hints=h("system_integrity"), runner=self._runner
+            ),
             FileIntegrityCollector(judge_hints=h("file_integrity"), watched=watched),
             FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),
-            LinuxInstalledAppsCollector(judge_hints=h("installed_apps")),
+            LinuxInstalledAppsCollector(
+                judge_hints=h("installed_apps"), runner=self._runner
+            ),
             MountsCollector(judge_hints=h("mounts")),
             SetuidFilesCollector(judge_hints=h("setuid_files"), fs=self._fs),
             SshAuthorizedKeysCollector(

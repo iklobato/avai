@@ -17,6 +17,7 @@ import random
 import threading
 import time
 from collections import defaultdict
+from http import HTTPStatus
 from typing import Any, Mapping, Optional
 
 import requests
@@ -31,6 +32,9 @@ _USER_AGENT = f"avai-monitor/{_AVAI_VERSION} (+https://github.com/iklobato/avai)
 _DEFAULT_TIMEOUT = 8.0
 _RETRY_STATUS = (500, 502, 503, 504)
 _RETRY_BACKOFFS = (0.4, 1.2, 3.0)  # seconds, jittered ±25%
+# A 429's Retry-After up to this is waited out; a longer one gives up so
+# the cycle doesn't stall.
+_MAX_RETRY_AFTER_S = 5
 
 
 class _TokenBucket:
@@ -129,7 +133,7 @@ class HttpClient:
                     "http %s %s attempt %d failed: %s", method, url, attempt + 1, exc
                 )
                 continue
-            if resp.status_code == 429:
+            if resp.status_code == HTTPStatus.TOO_MANY_REQUESTS:
                 # 429 with Retry-After: respect a small one, give up on
                 # large ones so the cycle doesn't stall.
                 retry_after = resp.headers.get("Retry-After")
@@ -137,7 +141,7 @@ class HttpClient:
                     wait_s = float(retry_after) if retry_after else 0
                 except ValueError:
                     wait_s = 0
-                if 0 < wait_s <= 5 and attempt < len(_RETRY_BACKOFFS):
+                if 0 < wait_s <= _MAX_RETRY_AFTER_S and attempt < len(_RETRY_BACKOFFS):
                     time.sleep(wait_s)
                     continue
                 raise RateLimitedError(f"{host} returned 429")

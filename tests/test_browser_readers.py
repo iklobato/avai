@@ -10,11 +10,11 @@ import json
 from pathlib import Path
 
 
-from avai.host_monitor import (
-    Browser,
+from avai.host_monitor.collectors import (
     ChromiumExtensionReader,
     FirefoxExtensionReader,
 )
+from avai.host_monitor.enums import Browser
 
 
 # ---------------------------------------------------------------------------

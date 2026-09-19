@@ -66,6 +66,12 @@ class TestMacosNdpParser:
         assert rows[0]["state"] == "R"
         assert rows[1]["mac"] is None
 
+    def test_state_falls_back_to_expire_then_none(self):
+        rows = MacosNdpParser().parse(
+            "fe80::1 aa:bb:cc:dd:ee:ff en0 permanent\nfe80::2 (incomplete) en0\n"
+        )
+        assert [r["state"] for r in rows] == ["permanent", None]
+
 
 _ROUTES = """\
 Routing tables

@@ -10,6 +10,7 @@ https://ipwho.is/
 
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -36,7 +37,7 @@ class IpwhoisGeoEnricher(Enricher):
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         resp = self._http.get(f"{_BASE}/{indicator.value}")
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         body = resp.json() or {}
         # ipwho.is answers {"success": false, "message": ...} for bogon /

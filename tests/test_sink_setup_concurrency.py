@@ -17,7 +17,7 @@ import pytest
 from sqlalchemy import Column, Integer, String, create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 
-from avai.host_monitor import Sink
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.models import Base
 from avai.host_monitor.sink import (
     _is_benign_concurrent_ddl,

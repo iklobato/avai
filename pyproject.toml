@@ -122,3 +122,25 @@ include = [
     "pyproject.toml",
 ]
 exclude = ["src/avai/rules/vendor/**"]
+
+
+# -----------------------------------------------------------------------------
+# Ruff: complexity, argument count and magic values are enforced everywhere
+# in src/, with no per-file exceptions (docs/REFACTOR_PLAN.md emptied the
+# list phase by phase). Tests and tools compare against literal expected
+# values by design, so these rules skip them.
+# -----------------------------------------------------------------------------
+[tool.ruff.lint]
+extend-select = ["C901", "PLR0913", "PLR2004"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["C901", "PLR0913", "PLR2004"]
+"tools/**" = ["C901", "PLR0913", "PLR2004"]
+"scripts/**" = ["C901", "PLR0913", "PLR2004"]
+"packaging/**" = ["C901", "PLR0913", "PLR2004"]

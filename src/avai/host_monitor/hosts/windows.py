@@ -30,6 +30,7 @@ import threading
 from pathlib import Path
 from typing import Iterable, Optional
 
+from .. import slices
 from ..collectors import (
     DiskUsageCollector,
     HostResourcesCollector,
@@ -54,16 +55,6 @@ from ..exposure_collectors import (
     WindowsSessionParser,
     WindowsSharesParser,
 )
-from ..models import (
-    AuthEventRow,
-    BluetoothDeviceRow,
-    InstalledAppRow,
-    LaunchItemRow,
-    ProcessExecRow,
-    SystemIntegrityRow,
-    UsbDeviceRow,
-    WifiStateRow,
-)
 from ..net_collectors import (
     ArpTableCollector,
     DnsResolversCollector,
@@ -87,6 +78,8 @@ from ..runtime import CommandRunner, CommandSnapshot, JsonLineStreamSource
 # Windows doesn't have (e.g. sudoers) so their shared parser yields nothing
 # without needing a platform branch.
 _NONEXISTENT = Path("C:/Windows/Temp/__avai_no_such_file__")
+# Enough verbose-CSV columns to reach Task To Run (index 8).
+_SCHTASKS_MIN_COLUMNS = 9
 
 
 class WindowsFilesystemLayout:
@@ -180,8 +173,7 @@ class WindowsInstalledAppsCollector(SnapshotCollector):
     """Installed programs from the registry Uninstall keys, read as JSON
     via PowerShell."""
 
-    name = "installed_apps"
-    model = InstalledAppRow
+    slice = slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
     _PS = (
@@ -235,8 +227,7 @@ class WindowsLaunchItemsCollector(SnapshotCollector):
     """Autostart persistence: registry Run keys (HKLM + HKCU) plus
     scheduled tasks."""
 
-    name = "launch_items"
-    model = LaunchItemRow
+    slice = slices.LAUNCH_ITEMS
     judge_fields = (
         "scope",
         "label",
@@ -319,7 +310,7 @@ class WindowsLaunchItemsCollector(SnapshotCollector):
         rows = []
         reader = csv.reader(io.StringIO(text))
         for cols in reader:
-            if len(cols) < 9:
+            if len(cols) < _SCHTASKS_MIN_COLUMNS:
                 continue
             taskname = cols[1].strip()
             # Skip repeated header rows that /v sometimes interleaves.
@@ -361,8 +352,7 @@ class WindowsSystemIntegrityCollector(SnapshotCollector):
     WinRM) is preserved in ``raw_json`` for the judge.
     """
 
-    name = "system_integrity"
-    model = SystemIntegrityRow
+    slice = slices.SYSTEM_INTEGRITY
     judge_fields = (
         "filevault_active",
         "firewall_global_state",
@@ -450,8 +440,7 @@ class WindowsUsbDevicesCollector(SnapshotCollector):
     filling the same columns :class:`LinuxUsbDevicesCollector` reads from
     sysfs."""
 
-    name = "usb_devices"
-    model = UsbDeviceRow
+    slice = slices.USB_DEVICES
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
     _PS = (
@@ -514,8 +503,7 @@ class WindowsBluetoothCollector(SnapshotCollector):
     Presence implies paired; ``Status == 'OK'`` implies connected. The MAC
     is parsed from the ``DEV_<mac>`` segment of the ``InstanceId``."""
 
-    name = "bluetooth_devices"
-    model = BluetoothDeviceRow
+    slice = slices.BLUETOOTH_DEVICES
     judge_fields = ("name", "address", "minor_type")
 
     _PS = (
@@ -573,8 +561,7 @@ class WindowsWifiCollector(SnapshotCollector):
     not JSON — netsh has no JSON mode). One row per interface block,
     mirroring :class:`LinuxWifiCollector`'s columns."""
 
-    name = "wifi_state"
-    model = WifiStateRow
+    slice = slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
     def __init__(self, runner: CommandRunner, judge_hints: str = ""):
@@ -690,8 +677,7 @@ class WindowsAuthEventsCollector(StreamingCollector):
     (interactive-logon auditing is on by default).
     """
 
-    name = "auth_events"
-    model = AuthEventRow
+    slice = slices.AUTH_EVENTS
     judge_enabled = True
     judge_fields = ("process", "subsystem", "event_message")
 
@@ -740,8 +726,7 @@ class WindowsProcessExecCollector(StreamingCollector):
     flattened to a name→value object so the parser is a pure dict transform.
     """
 
-    name = "process_exec_events"
-    model = ProcessExecRow
+    slice = slices.PROCESS_EXEC_EVENTS
     judge_enabled = True
     judge_fields = ("exe_path", "exe_args_json", "parent_path", "username")
 

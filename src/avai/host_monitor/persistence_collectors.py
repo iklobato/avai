@@ -14,8 +14,8 @@ import io
 import json
 from typing import TYPE_CHECKING
 
+from . import slices
 from .collectors import SnapshotCollector
-from .models import InjectionEnvRow, KernelModuleRow, SshKnownHostRow
 from .net_collectors import _load_ps_json, _SourceSnapshotCollector
 from .runtime import Digest
 
@@ -42,14 +42,12 @@ _KNOWN_HOST_KEY_TYPES = frozenset(
 
 
 class InjectionEnvCollector(_SourceSnapshotCollector):
-    name = "injection_env"
-    model = InjectionEnvRow
+    slice = slices.INJECTION_ENV
     judge_fields = ("scope", "variable", "value")
 
 
 class KernelModulesCollector(_SourceSnapshotCollector):
-    name = "kernel_modules"
-    model = KernelModuleRow
+    slice = slices.KERNEL_MODULES
     judge_fields = ("name", "size", "used_by")
 
 
@@ -58,9 +56,10 @@ class SshKnownHostsCollector(SnapshotCollector):
     per-user homes the FilesystemLayout reports (same shape as
     ssh_authorized_keys)."""
 
-    name = "ssh_known_hosts"
-    model = SshKnownHostRow
+    slice = slices.SSH_KNOWN_HOSTS
     judge_fields = ("host", "key_type", "fingerprint")
+
+    _MIN_COLUMNS = 3  # host keytype key
 
     def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
         super().__init__(judge_hints=judge_hints)
@@ -88,7 +87,7 @@ class SshKnownHostsCollector(SnapshotCollector):
             parts = s.split()
             if parts[0].startswith("@"):
                 parts = parts[1:]
-            if len(parts) < 3 or parts[1] not in _KNOWN_HOST_KEY_TYPES:
+            if len(parts) < cls._MIN_COLUMNS or parts[1] not in _KNOWN_HOST_KEY_TYPES:
                 continue
             rows.append(
                 {
@@ -174,11 +173,13 @@ class WindowsAppInitParser:
 class ProcModulesParser:
     """``/proc/modules`` — ``name size refcount used_by state addr``."""
 
+    _MIN_COLUMNS = 4  # name size refcount used_by
+
     def parse(self, text: str) -> list[dict]:
         rows = []
         for line in text.splitlines():
             cols = line.split()
-            if len(cols) < 4:
+            if len(cols) < self._MIN_COLUMNS:
                 continue
             rows.append(
                 {
@@ -194,10 +195,15 @@ class ProcModulesParser:
 class WindowsDriverParser:
     """``driverquery /fo csv`` — Module Name, Display Name, Driver Type."""
 
+    _MIN_COLUMNS = 2  # module name, display name
+
     def parse(self, text: str) -> list[dict]:
         rows = []
         for cols in csv.reader(io.StringIO(text)):
-            if len(cols) < 2 or cols[0].strip().lower() == "module name":
+            if (
+                len(cols) < self._MIN_COLUMNS
+                or cols[0].strip().lower() == "module name"
+            ):
                 continue
             rows.append(
                 {

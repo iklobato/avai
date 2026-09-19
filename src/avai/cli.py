@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 _USAGE = """avai — host security telemetry collector + dashboard
 
@@ -48,9 +48,9 @@ def _print_usage(stream=None) -> None:
 def _cmd_rules(rules_dir: Path, do_list: bool) -> int:
     """Compile the file-scanner ruleset and report what loaded — the
     user-facing answer to 'which rules are available?'. Read-only; no DB."""
-    from .host_monitor.collectors import _compile_yara_rules
+    from .host_monitor.collectors import YaraRulesetCompiler
 
-    rules, _stats = _compile_yara_rules(rules_dir)
+    rules, _stats = YaraRulesetCompiler(rules_dir).compile()
     if rules is None:
         print(f"avai: no compilable YARA rules under {rules_dir}", file=sys.stderr)
         return 1
@@ -92,6 +92,99 @@ def _cmd_install_hosts(hostname: str, remove: bool) -> int:
     return 0
 
 
+def _run_monitor(rest: list[str]) -> int:
+    from .host_monitor import main as monitor_main
+
+    sys.argv = ["avai monitor", *rest]
+    return monitor_main()
+
+
+def _run_dashboard(rest: list[str]) -> int:
+    from .dashboard import main as dashboard_main
+
+    sys.argv = ["avai dashboard", *rest]
+    return dashboard_main()
+
+
+def _run_app(_rest: list[str]) -> int:
+    from .desktop import main as desktop_main
+
+    return desktop_main()
+
+
+def _run_rules(rest: list[str]) -> int:
+    import argparse
+
+    from .host_monitor import constants
+
+    p = argparse.ArgumentParser(
+        prog="avai rules",
+        description="Inspect the YARA ruleset the file scanner loads.",
+    )
+    p.add_argument(
+        "--rules-dir",
+        default=str(constants.YARA_RULES_DIR),
+        help="rules directory to compile (default: bundled + vendor packs)",
+    )
+    p.add_argument(
+        "--list", action="store_true", help="print every loaded rule identifier"
+    )
+    a = p.parse_args(rest)
+    return _cmd_rules(Path(a.rules_dir), a.list)
+
+
+def _run_install_hosts(rest: list[str]) -> int:
+    import argparse
+
+    from .hostsfile import DASHBOARD_HOSTNAME
+
+    p = argparse.ArgumentParser(
+        prog="avai install-hosts",
+        description="Map a hostname (default avai.local) to 127.0.0.1 in the "
+        "OS hosts file so the dashboard is reachable by name.",
+    )
+    p.add_argument("--hostname", default=DASHBOARD_HOSTNAME)
+    p.add_argument(
+        "--remove",
+        action="store_true",
+        help="remove the mapping instead of adding it",
+    )
+    a = p.parse_args(rest)
+    return _cmd_install_hosts(a.hostname, a.remove)
+
+
+def _run_migrate(rest: list[str]) -> int:
+    import argparse
+
+    from .db_migrate import upgrade_to_head
+    from .host_monitor import DEFAULT_DB_PATH
+
+    p = argparse.ArgumentParser(prog="avai migrate")
+    p.add_argument("--db", default=str(DEFAULT_DB_PATH))
+    a = p.parse_args(rest)
+    upgrade_to_head(f"sqlite:///{a.db}")
+    print(f"avai: migrations applied to {a.db}")
+    return 0
+
+
+# Each subcommand gets the argv after its own name. Imports stay inside the
+# handlers so `avai --version` doesn't load the monitor or the dashboard.
+_COMMANDS: dict[str, Callable[[list[str]], int]] = {
+    "monitor": _run_monitor,
+    "start": _run_monitor,
+    "scan": _run_monitor,
+    "dashboard": _run_dashboard,
+    "ui": _run_dashboard,
+    "serve": _run_dashboard,
+    "app": _run_app,
+    "gui": _run_app,
+    "desktop": _run_app,
+    "rules": _run_rules,
+    "install-hosts": _run_install_hosts,
+    "migrate": _run_migrate,
+}
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -107,79 +200,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     cmd, rest = argv[0], argv[1:]
-
-    if cmd in ("monitor", "start", "scan"):
-        from .host_monitor import main as monitor_main
-
-        sys.argv = ["avai monitor", *rest]
-        return monitor_main()
-
-    if cmd in ("dashboard", "ui", "serve"):
-        from .dashboard import main as dashboard_main
-
-        sys.argv = ["avai dashboard", *rest]
-        return dashboard_main()
-
-    if cmd in ("app", "gui", "desktop"):
-        from .desktop import main as desktop_main
-
-        return desktop_main()
-
-    if cmd == "rules":
-        import argparse
-
-        from .host_monitor import constants
-
-        p = argparse.ArgumentParser(
-            prog="avai rules",
-            description="Inspect the YARA ruleset the file scanner loads.",
-        )
-        p.add_argument(
-            "--rules-dir",
-            default=str(constants.YARA_RULES_DIR),
-            help="rules directory to compile (default: bundled + vendor packs)",
-        )
-        p.add_argument(
-            "--list", action="store_true", help="print every loaded rule identifier"
-        )
-        a = p.parse_args(rest)
-        return _cmd_rules(Path(a.rules_dir), a.list)
-
-    if cmd == "install-hosts":
-        import argparse
-
-        from .hostsfile import DASHBOARD_HOSTNAME
-
-        p = argparse.ArgumentParser(
-            prog="avai install-hosts",
-            description="Map a hostname (default avai.local) to 127.0.0.1 in the "
-            "OS hosts file so the dashboard is reachable by name.",
-        )
-        p.add_argument("--hostname", default=DASHBOARD_HOSTNAME)
-        p.add_argument(
-            "--remove",
-            action="store_true",
-            help="remove the mapping instead of adding it",
-        )
-        a = p.parse_args(rest)
-        return _cmd_install_hosts(a.hostname, a.remove)
-
-    if cmd == "migrate":
-        import argparse
-
-        from .db_migrate import upgrade_to_head
-        from .host_monitor import DEFAULT_DB_PATH
-
-        p = argparse.ArgumentParser(prog="avai migrate")
-        p.add_argument("--db", default=str(DEFAULT_DB_PATH))
-        a = p.parse_args(rest)
-        upgrade_to_head(f"sqlite:///{a.db}")
-        print(f"avai: migrations applied to {a.db}")
-        return 0
-
-    print(f"avai: unknown command '{cmd}'\n", file=sys.stderr)
-    _print_usage(sys.stderr)
-    return 2
+    command = _COMMANDS.get(cmd)
+    if command is None:
+        print(f"avai: unknown command '{cmd}'\n", file=sys.stderr)
+        _print_usage(sys.stderr)
+        return 2
+    return command(rest)
 
 
 if __name__ == "__main__":

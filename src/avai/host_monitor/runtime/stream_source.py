@@ -56,39 +56,54 @@ class JsonLineStreamSource:
             text=True,
             bufsize=1,
         )
-
         # Watchdog: when stop_event fires, terminate the subprocess,
         # which closes stdout and ends the read loop below.
-        def _terminator() -> None:
-            stop_event.wait()
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except ProcessLookupError:
-                    pass
-
         threading.Thread(
-            target=_terminator, daemon=True, name=self._killer_name
+            target=_terminate_on,
+            args=(stop_event, proc),
+            daemon=True,
+            name=self._killer_name,
         ).start()
-
         try:
-            for line in proc.stdout:
-                if stop_event.is_set():
-                    break
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+            for event in _json_events(proc.stdout, stop_event):
                 yield self._parser.parse(event)
         finally:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+            _shut_down(proc)
+
+
+# How long a terminated child gets to exit before it is killed.
+_TERMINATE_GRACE_S = 2
+
+
+def _terminate_on(stop_event: threading.Event, proc: subprocess.Popen) -> None:
+    stop_event.wait()
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+
+
+def _json_events(lines: Iterable[str], stop_event: threading.Event) -> Iterable[dict]:
+    """Each line decoded as JSON, until ``stop_event`` is set. Lines that
+    aren't JSON (blank ones included) are skipped."""
+    for line in lines:
+        if stop_event.is_set():
+            return
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        yield event
+
+
+def _shut_down(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=_TERMINATE_GRACE_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+    except ProcessLookupError:
+        pass

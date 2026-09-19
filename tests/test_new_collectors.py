@@ -16,27 +16,32 @@ from __future__ import annotations
 import base64
 from types import SimpleNamespace
 
+import psutil
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import app, dns_queries, network_flows, persistence_tampering
+from avai.dashboard.app import create_app
+from avai.dashboard.config import DashboardConfig
+from avai.dashboard.queries import dns_queries, network_flows, persistence_tampering
 from avai.enrichers import IndicatorType, extract_indicators
 from avai.host_monitor.runtime import Digest
-from avai.host_monitor import (
+from avai.host_monitor.collectors import (
     DnsQueriesCollector,
-    DnsQueryRow,
     HostsFileCollector,
-    HostsFileRow,
-    NetworkFlowRow,
     NetworkFlowsCollector,
     PrivilegeConfigCollector,
-    PrivilegeConfigRow,
     ProcessConnectionResolver,
-    Sink,
-    SshAuthorizedKeyRow,
     SshAuthorizedKeysCollector,
 )
+from avai.host_monitor.models import (
+    DnsQueryRow,
+    HostsFileRow,
+    NetworkFlowRow,
+    PrivilegeConfigRow,
+    SshAuthorizedKeyRow,
+)
+from avai.host_monitor.sink import Sink
 from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 
 # ---------------------------------------------------------------------------
@@ -59,13 +64,9 @@ class TestProcessAttribution:
             SimpleNamespace(raddr=None, pid=999),  # listening — no remote, skipped
             SimpleNamespace(raddr=SimpleNamespace(ip="1.2.3.4", port=53), pid=None),
         ]
+        monkeypatch.setattr(psutil, "net_connections", lambda kind="inet": conns)
         monkeypatch.setattr(
-            "avai.host_monitor.collectors.psutil.net_connections",
-            lambda kind="inet": conns,
-        )
-        monkeypatch.setattr(
-            "avai.host_monitor.collectors.psutil.Process",
-            lambda pid: SimpleNamespace(name=lambda: "curl"),
+            psutil, "Process", lambda pid: SimpleNamespace(name=lambda: "curl")
         )
         snap = ProcessConnectionResolver().snapshot()
         assert snap[("8.8.8.8", 443)] == ("curl", 4321)
@@ -341,7 +342,7 @@ class TestDashboardDns:
         assert by_name["Cloudflare"] == "DoH (encrypted)"
 
     def test_resolution_level_classification(self):
-        from avai.dashboard import _dns_resolution_level
+        from avai.dashboard.queries.dns import _dns_resolution_level
 
         assert _dns_resolution_level("192.168.1.1", "A") == "local resolver"
         assert _dns_resolution_level("127.0.0.1", "A") == "local resolver"
@@ -371,10 +372,8 @@ class TestDashboardDns:
             ts,
             run_id,
         )
-        app.config.update(
-            TESTING=True, DB_PATH=str(engine.url).replace("sqlite:///", "")
-        )
-        with app.test_client() as c:
+        config = DashboardConfig(db_path=engine.url.database)
+        with create_app(config).test_client() as c:
             html = c.get("/fragments/dns-queries").data.decode()
         assert "tracker.bad" in html and "DNS queries" in html
 
@@ -452,10 +451,8 @@ class TestDashboardPersistence:
             ts,
             run_id,
         )
-        app.config.update(
-            TESTING=True, DB_PATH=str(engine.url).replace("sqlite:///", "")
-        )
-        with app.test_client() as c:
+        config = DashboardConfig(db_path=engine.url.database)
+        with create_app(config).test_client() as c:
             html = c.get("/fragments/persistence").data.decode()
         assert "my-bank.com" in html and "persistence" in html.lower()
 

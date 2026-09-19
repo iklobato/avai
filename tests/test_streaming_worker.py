@@ -14,7 +14,10 @@ import time
 import pytest
 from sqlalchemy import create_engine
 
-from avai.host_monitor import AuthEventRow, Sink, StreamingWorker
+from avai.host_monitor.models import AuthEventRow
+from avai.host_monitor.sink import Sink
+from avai.host_monitor.streaming import StreamingWorker
+from avai.host_monitor.streaming import SupervisionPolicy
 from avai.host_monitor.supervision import ExponentialBackoff, LoggingSupervisionListener
 
 
@@ -123,7 +126,9 @@ class TestFlushing:
     def test_flushes_full_batch(self, sink):
         rows = [_make_row(user=f"u{i}") for i in range(5)]
         c = _PausableStreamCollector(rows, pause_after=5)
-        w = StreamingWorker(c, sink, "h", batch_size=5, flush_interval_s=99)
+        w = StreamingWorker(
+            c, sink, "h", SupervisionPolicy(batch_size=5, flush_interval_s=99)
+        )
         w.start()
         # Wait for the worker to consume + flush.
         time.sleep(0.2)
@@ -141,7 +146,9 @@ class TestFlushing:
         rows = [_make_row(user=f"u{i}") for i in range(2)]
         c = _PausableStreamCollector(rows, pause_after=2)
         # Big batch, fast interval → should flush by interval.
-        w = StreamingWorker(c, sink, "h", batch_size=999, flush_interval_s=0.1)
+        w = StreamingWorker(
+            c, sink, "h", SupervisionPolicy(batch_size=999, flush_interval_s=0.1)
+        )
         w.start()
         time.sleep(0.4)
         w.stop()
@@ -158,7 +165,9 @@ class TestFlushing:
         # flush in the worker's `finally` should write them.
         rows = [_make_row(user=f"u{i}") for i in range(3)]
         c = _PausableStreamCollector(rows, pause_after=3)
-        w = StreamingWorker(c, sink, "h", batch_size=100, flush_interval_s=99)
+        w = StreamingWorker(
+            c, sink, "h", SupervisionPolicy(batch_size=100, flush_interval_s=99)
+        )
         w.start()
         time.sleep(0.2)
         w.stop()
@@ -282,11 +291,13 @@ class TestSupervision:
             c,
             sink,
             "h",
-            batch_size=10,
-            flush_interval_s=99,
+            SupervisionPolicy(
+                batch_size=10,
+                flush_interval_s=99,
+                backoff=_RecordingBackoff(),
+                listener=listener,
+            ),
             sleeper=_ImmediateSleep(),
-            backoff=_RecordingBackoff(),
-            listener=listener,
         )
         w.start()
         time.sleep(0.2)
@@ -304,10 +315,8 @@ class TestSupervision:
             c,
             sink,
             "h",
-            batch_size=1,
-            flush_interval_s=99,
+            SupervisionPolicy(batch_size=1, flush_interval_s=99, listener=listener),
             sleeper=_ImmediateSleep(),
-            listener=listener,
         )
         w.start()
         time.sleep(0.2)
@@ -327,11 +336,10 @@ class TestSupervision:
             _AlwaysCrash(),
             sink,
             "h",
-            batch_size=10,
-            flush_interval_s=99,
+            SupervisionPolicy(
+                batch_size=10, flush_interval_s=99, backoff=backoff, listener=listener
+            ),
             sleeper=_ImmediateSleep(),
-            backoff=backoff,
-            listener=listener,
         )
         listener.stop_event = w.stop_event
         w.start()
@@ -349,10 +357,12 @@ class TestSupervision:
             _AlwaysCrash(),
             sink,
             "h",
-            batch_size=10,
-            flush_interval_s=99,
-            backoff=ExponentialBackoff(30.0, 30.0, 1.0),
-            join_timeout_s=2.0,
+            SupervisionPolicy(
+                batch_size=10,
+                flush_interval_s=99,
+                backoff=ExponentialBackoff(30.0, 30.0, 1.0),
+                join_timeout_s=2.0,
+            ),
         )
         w.start()
         time.sleep(0.1)  # let it crash once and enter the 30s backoff wait

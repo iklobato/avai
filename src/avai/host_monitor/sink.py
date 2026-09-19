@@ -24,11 +24,11 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from . import slices
 from .constants import LOG
 from .enums import FeedbackLabel, Verdict
 from .judge import Judgment
 from .models import (
-    AuthEventRow,
     Base,
     BrowserExtensionRow,
     CollectionRun,
@@ -77,6 +77,15 @@ _DB_FILE_MODE = 0o664  # rw-rw-r--
 
 # Operator feedback label → the verdict the monitor pins on the corrected
 # finding. Keyed by the raw string so lookup on a stored label is exact.
+# Streaming events carry a StreamingSession run_id, never a CollectionRun's,
+# so pruning trims them by collected_at instead of by run.
+_STREAMING_MODELS = tuple(s.model for s in slices.ALL if s.streaming)
+_SNAPSHOT_MODELS = tuple(
+    m for m in _RowBase.__subclasses__() if m not in _STREAMING_MODELS
+)
+# DNS is keyed by process name, which groups every PID sharing it.
+_EXTRA_DNS_PER_NAME = 5
+
 _FEEDBACK_VERDICT = {
     FeedbackLabel.FALSE_POSITIVE.value: str(Verdict.BENIGN),
     FeedbackLabel.CONFIRMED.value: str(Verdict.MALICIOUS),
@@ -350,7 +359,7 @@ class Sink:
         DNS queries (joined by process *name*, which is all DNS capture
         records), and exec lineage. ``since`` bounds every lookup to rows
         collected at/after the previous cycle. ProcessCollector runs first
-        in a cycle, so the current run's network rows don't exist yet —
+        in a cycle, so the current run's network rows don't exist yet:
         this deliberately surfaces the *previous* cycle's behaviour for a
         still-running PID."""
         out: dict[str, dict] = {
@@ -362,97 +371,21 @@ class Sink:
         }
         pids = [p for p in pids if p is not None]
         names = [n for n in proc_names if n]
-        if not pids and not names:
-            return out
-
-        def _bounded(stmt, model):
-            return stmt.where(model.collected_at >= since) if since else stmt
-
         with Session(self.engine) as session:
             if pids:
-                for pid, ip, port in session.execute(
-                    _bounded(
-                        select(
-                            ListeningPortRow.pid,
-                            ListeningPortRow.laddr_ip,
-                            ListeningPortRow.laddr_port,
-                        ).where(ListeningPortRow.pid.in_(pids)),
-                        ListeningPortRow,
-                    )
-                ).all():
-                    lst = out["ports"].setdefault(pid, [])
-                    if len(lst) < per_pid_cap:
-                        lst.append(f"{ip}:{port}")
-
-                for pid, dip, dport, svc, pkts in session.execute(
-                    _bounded(
-                        select(
-                            NetworkFlowRow.pid,
-                            NetworkFlowRow.dst_ip,
-                            NetworkFlowRow.dst_port,
-                            NetworkFlowRow.service,
-                            NetworkFlowRow.packets,
-                        ).where(NetworkFlowRow.pid.in_(pids)),
-                        NetworkFlowRow,
-                    ).order_by(NetworkFlowRow.packets.desc())
-                ).all():
-                    lst = out["flows"].setdefault(pid, [])
-                    if len(lst) < per_pid_cap:
-                        lst.append(
-                            {"dst": f"{dip}:{dport}", "service": svc, "packets": pkts}
-                        )
-
-                for pid, rip, rport, status in session.execute(
-                    _bounded(
-                        select(
-                            NetworkConnectionRow.pid,
-                            NetworkConnectionRow.raddr_ip,
-                            NetworkConnectionRow.raddr_port,
-                            NetworkConnectionRow.status,
-                        ).where(
-                            NetworkConnectionRow.pid.in_(pids),
-                            NetworkConnectionRow.raddr_ip.is_not(None),
-                        ),
-                        NetworkConnectionRow,
-                    )
-                ).all():
-                    lst = out["conns"].setdefault(pid, [])
-                    if len(lst) < per_pid_cap:
-                        lst.append(f"{rip}:{rport} {status}")
-
-                for pid, parent, signing, exe in session.execute(
-                    _bounded(
-                        select(
-                            ProcessExecRow.pid,
-                            ProcessExecRow.parent_path,
-                            ProcessExecRow.signing_id,
-                            ProcessExecRow.exe_path,
-                        ).where(ProcessExecRow.pid.in_(pids)),
-                        ProcessExecRow,
-                    ).order_by(ProcessExecRow.event_timestamp.desc())
-                ).all():
-                    # Keep the most recent exec event per PID.
-                    if pid not in out["exec"]:
-                        out["exec"][pid] = {
-                            "parent": parent,
-                            "signed": signing,
-                            "exe": exe,
-                        }
-
+                out["ports"] = _capped(
+                    _listening_ports(session, pids, since), per_pid_cap
+                )
+                out["flows"] = _capped(
+                    _outbound_flows(session, pids, since), per_pid_cap
+                )
+                out["conns"] = _capped(_remote_conns(session, pids, since), per_pid_cap)
+                out["exec"] = _latest_execs(session, pids, since)
             if names:
-                for proc, qname, qtype in session.execute(
-                    _bounded(
-                        select(
-                            DnsQueryRow.process,
-                            DnsQueryRow.qname,
-                            DnsQueryRow.qtype,
-                        ).where(DnsQueryRow.process.in_(names)),
-                        DnsQueryRow,
-                    )
-                ).all():
-                    lst = out["dns"].setdefault(proc, [])
-                    if len(lst) < per_pid_cap + 5:
-                        lst.append(f"{qname} ({qtype})")
+                out["dns"] = _capped(
+                    _dns_queries(session, names, since),
+                    per_pid_cap + _EXTRA_DNS_PER_NAME,
+                )
         return out
 
     def write_judgments(
@@ -815,111 +748,48 @@ class Sink:
 
     def prune_to_size(self, max_bytes: int) -> dict:
         """Delete oldest completed runs (and their child rows) plus the
-        ``auth_events`` rows older than the oldest remaining run, until
+        streaming events older than the oldest remaining run, until
         the database fits under ``max_bytes``. Always preserves at
         least one completed run so the dashboard stays useful.
 
         Returns ``{runs_pruned, events_pruned, bytes_before, bytes_after}``.
         """
         if max_bytes <= 0:
-            return {
-                "runs_pruned": 0,
-                "events_pruned": 0,
-                "bytes_before": 0,
-                "bytes_after": 0,
-            }
-
+            return _prune_stats(0, 0, 0, 0)
         bytes_before = self.database_size_bytes()
         if bytes_before <= max_bytes:
-            return {
-                "runs_pruned": 0,
-                "events_pruned": 0,
-                "bytes_before": bytes_before,
-                "bytes_after": bytes_before,
-            }
+            return _prune_stats(0, 0, bytes_before, bytes_before)
 
-        # All collector-row tables EXCEPT auth_events. Streaming events
-        # aren't tied to a CollectionRun.run_id, so we trim them by
-        # collected_at instead of by run_id.
-        snapshot_models = [
-            m for m in _RowBase.__subclasses__() if m is not AuthEventRow
-        ]
-
-        runs_pruned = 0
-        events_pruned = 0
-
+        runs_pruned = events_pruned = 0
         with Session(self.engine) as session:
-            # Use the post-VACUUM estimate (page_count - freelist) inside
-            # the loop. SQLite deletes only mark pages free; the actual
-            # file size doesn't shrink until VACUUM runs. database_live_bytes
-            # decreases immediately after each delete, so the loop has a
-            # meaningful stop condition.
+            # Deletes only mark pages free until VACUUM, so the file size
+            # can't be the stop condition; the live-page estimate drops
+            # right after each delete.
             while self.database_live_bytes() > max_bytes:
-                # Safety: never delete the only completed run on file.
-                completed = (
-                    session.execute(
-                        select(func.count())
-                        .select_from(CollectionRun)
-                        .where(CollectionRun.finished_at.is_not(None))
-                    ).scalar()
-                    or 0
-                )
-                if completed <= 1:
+                completed = _completed_runs_oldest_first(session)
+                if len(completed) <= 1:
                     LOG.warning(
                         "prune_to_size: only %d completed run(s) "
                         "left; cannot shrink further",
-                        completed,
+                        len(completed),
                     )
                     break
-
-                oldest = session.execute(
-                    select(CollectionRun)
-                    .where(CollectionRun.finished_at.is_not(None))
-                    .order_by(asc(CollectionRun.started_at))
-                    .limit(1)
-                ).scalar_one_or_none()
-                if oldest is None:
-                    break
-
-                for model in snapshot_models:
-                    session.execute(delete(model).where(model.run_id == oldest.run_id))
-                session.execute(
-                    delete(CollectorErrorRow).where(
-                        CollectorErrorRow.run_id == oldest.run_id
-                    )
-                )
-                session.execute(
-                    delete(CollectionRun).where(CollectionRun.run_id == oldest.run_id)
-                )
+                _delete_run(session, completed[0])
                 runs_pruned += 1
-
-                # Trim streaming events older than the new earliest run.
-                new_earliest = session.execute(
-                    select(CollectionRun.started_at)
-                    .where(CollectionRun.finished_at.is_not(None))
-                    .order_by(asc(CollectionRun.started_at))
-                    .limit(1)
-                ).scalar()
-                if new_earliest:
-                    result = session.execute(
-                        delete(AuthEventRow).where(
-                            AuthEventRow.collected_at < new_earliest
-                        )
-                    )
-                    events_pruned += result.rowcount or 0
-                    session.execute(
-                        delete(StreamingSession).where(
-                            StreamingSession.finished_at < new_earliest
-                        )
-                    )
-
+                events_pruned += _trim_streaming(
+                    session, before=completed[1].started_at
+                )
                 session.commit()
 
-        # Always VACUUM when entering this function (file size was over
-        # the cap). VACUUM cannot run inside a transaction, so use
-        # AUTOCOMMIT isolation. Checkpoint the WAL before and after so
-        # VACUUM sees committed pages and the final on-disk file
-        # accurately reflects the post-prune state.
+        self._vacuum()
+        return _prune_stats(
+            runs_pruned, events_pruned, bytes_before, self.database_size_bytes()
+        )
+
+    def _vacuum(self) -> None:
+        """Reclaim the pruned pages. VACUUM cannot run inside a transaction,
+        so use AUTOCOMMIT. Checkpoint the WAL before and after so VACUUM
+        sees committed pages and the final file reflects the prune."""
         try:
             with self.engine.connect() as conn:
                 conn = conn.execution_options(isolation_level="AUTOCOMMIT")
@@ -928,13 +798,6 @@ class Sink:
                 conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
         except Exception:
             LOG.exception("VACUUM failed; space not yet reclaimed")
-
-        return {
-            "runs_pruned": runs_pruned,
-            "events_pruned": events_pruned,
-            "bytes_before": bytes_before,
-            "bytes_after": self.database_size_bytes(),
-        }
 
     def touch_judgments(
         self, collector: str, content_hashes: list[str], at: str
@@ -1111,6 +974,105 @@ class Sink:
             n = session.execute(delete(CollectionRun)).rowcount or 0
             session.commit()
         return n
+
+
+def _since(stmt, model, since: Optional[str]):
+    return stmt.where(model.collected_at >= since) if since else stmt
+
+
+def _capped(pairs, cap: int) -> dict[object, list]:
+    """Group (key, value) pairs into per-key lists of at most ``cap``."""
+    grouped: dict[object, list] = {}
+    for key, value in pairs:
+        values = grouped.setdefault(key, [])
+        if len(values) < cap:
+            values.append(value)
+    return grouped
+
+
+def _listening_ports(session: Session, pids: list[int], since: Optional[str]):
+    m = ListeningPortRow
+    stmt = select(m.pid, m.laddr_ip, m.laddr_port).where(m.pid.in_(pids))
+    for pid, ip, port in session.execute(_since(stmt, m, since)):
+        yield pid, f"{ip}:{port}"
+
+
+def _outbound_flows(session: Session, pids: list[int], since: Optional[str]):
+    m = NetworkFlowRow
+    stmt = select(m.pid, m.dst_ip, m.dst_port, m.service, m.packets).where(
+        m.pid.in_(pids)
+    )
+    stmt = _since(stmt, m, since).order_by(m.packets.desc())
+    for pid, ip, port, service, packets in session.execute(stmt):
+        yield pid, {"dst": f"{ip}:{port}", "service": service, "packets": packets}
+
+
+def _remote_conns(session: Session, pids: list[int], since: Optional[str]):
+    m = NetworkConnectionRow
+    stmt = select(m.pid, m.raddr_ip, m.raddr_port, m.status).where(
+        m.pid.in_(pids), m.raddr_ip.is_not(None)
+    )
+    for pid, ip, port, status in session.execute(_since(stmt, m, since)):
+        yield pid, f"{ip}:{port} {status}"
+
+
+def _dns_queries(session: Session, names: list[str], since: Optional[str]):
+    m = DnsQueryRow
+    stmt = select(m.process, m.qname, m.qtype).where(m.process.in_(names))
+    for process, qname, qtype in session.execute(_since(stmt, m, since)):
+        yield process, f"{qname} ({qtype})"
+
+
+def _latest_execs(session: Session, pids: list[int], since: Optional[str]) -> dict:
+    m = ProcessExecRow
+    stmt = select(m.pid, m.parent_path, m.signing_id, m.exe_path).where(m.pid.in_(pids))
+    stmt = _since(stmt, m, since).order_by(m.event_timestamp.desc())
+    latest: dict[int, dict] = {}
+    for pid, parent, signing, exe in session.execute(stmt):
+        latest.setdefault(pid, {"parent": parent, "signed": signing, "exe": exe})
+    return latest
+
+
+def _prune_stats(runs: int, events: int, before: int, after: int) -> dict:
+    return {
+        "runs_pruned": runs,
+        "events_pruned": events,
+        "bytes_before": before,
+        "bytes_after": after,
+    }
+
+
+def _completed_runs_oldest_first(session: Session) -> list[CollectionRun]:
+    return list(
+        session.execute(
+            select(CollectionRun)
+            .where(CollectionRun.finished_at.is_not(None))
+            .order_by(asc(CollectionRun.started_at))
+            .limit(2)
+        ).scalars()
+    )
+
+
+def _delete_run(session: Session, run: CollectionRun) -> None:
+    for model in _SNAPSHOT_MODELS:
+        session.execute(delete(model).where(model.run_id == run.run_id))
+    session.execute(
+        delete(CollectorErrorRow).where(CollectorErrorRow.run_id == run.run_id)
+    )
+    session.execute(delete(CollectionRun).where(CollectionRun.run_id == run.run_id))
+
+
+def _trim_streaming(session: Session, before: str) -> int:
+    """Delete streaming events and sessions older than ``before`` (the
+    earliest kept run). Returns the events deleted."""
+    deleted = 0
+    for model in _STREAMING_MODELS:
+        result = session.execute(delete(model).where(model.collected_at < before))
+        deleted += result.rowcount or 0
+    session.execute(
+        delete(StreamingSession).where(StreamingSession.finished_at < before)
+    )
+    return deleted
 
 
 def _is_benign_concurrent_ddl(exc: OperationalError) -> bool:

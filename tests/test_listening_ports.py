@@ -15,17 +15,16 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from avai.dashboard import _addr_scope, app, listening_ports
+from avai.dashboard.app import create_app
+from avai.dashboard.config import DashboardConfig
+from avai.dashboard.queries import listening_ports
+from avai.dashboard.queries.ports import _addr_scope
+from avai.dashboard.queries import RowFilter
 from avai.host_monitor.runtime import Digest
-from avai.host_monitor import (
-    Judgment,
-    ListeningPortRow,
-    NetworkConnectionRow,
-    ProcessRow,
-    Sink,
-    ThreatCategory,
-    Verdict,
-)
+from avai.host_monitor.enums import ThreatCategory, Verdict
+from avai.host_monitor.judge import Judgment
+from avai.host_monitor.models import ListeningPortRow, NetworkConnectionRow, ProcessRow
+from avai.host_monitor.sink import Sink
 
 LP_FIELDS = ("process_name", "family", "type", "laddr_ip", "laddr_port")
 
@@ -164,6 +163,15 @@ def seeded(tmp_path):
 
 
 class TestListeningPortsRollup:
+    def test_verdict_filter_uses_the_picked_verdict(self, seeded):
+        # Regression: the row loop reused the name ``verdict``, so the filter
+        # and its echo took the last socket's verdict instead of the user's.
+        engine, run_id = seeded
+        with Session(engine) as s:
+            data = listening_ports(s, run_id, RowFilter(verdict="malicious"))
+        assert [r["port"] for r in data["rows"]] == [22]
+        assert data["verdict"] == "malicious"
+
     def test_wildcard_v4_v6_collapse_to_one_row(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
@@ -232,8 +240,7 @@ class TestFragmentRender:
     def test_renders_port_process_and_verdict(self, seeded):
         engine, run_id = seeded
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/listening-ports").data.decode()
         assert ":22" in html
         assert "sshd" in html
@@ -268,8 +275,7 @@ class TestMissingTableGraceful:
     def test_fragment_200_on_db_without_table(self, tmp_path):
         engine, db = self._db_without_ports(tmp_path)
         engine.dispose()
-        app.config.update(TESTING=True, DB_PATH=str(db))
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=str(db))).test_client() as c:
             r = c.get("/fragments/listening-ports")
         # missing table degrades to the empty-state card, not a 500
         assert r.status_code == 200

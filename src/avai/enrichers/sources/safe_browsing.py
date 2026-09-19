@@ -6,7 +6,7 @@ https://developers.google.com/safe-browsing/v4/lookup-api
 
 from __future__ import annotations
 
-import os
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -43,7 +43,7 @@ class SafeBrowsingEnricher(Enricher):
     def __init__(self, http: Optional[HttpClient] = None):
         self._http = http or HttpClient()
         self._http.set_rate("safebrowsing.googleapis.com", 4.0)
-        self._key = os.environ.get("GOOGLE_SAFE_BROWSING_API_KEY", "")
+        self._key = self.env_token() or ""
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         payload = {
@@ -56,7 +56,7 @@ class SafeBrowsingEnricher(Enricher):
             },
         }
         resp = self._http.post(f"{_URL}?key={self._key}", json=payload)
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         body = resp.json() or {}
         matches = body.get("matches") or []

@@ -5,7 +5,7 @@ https://phishtank.org/api_info.php
 """
 from __future__ import annotations
 
-import os
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -19,6 +19,8 @@ from avai.enrichers.base import (
 from avai.enrichers.http import HttpClient
 
 _URL = "https://checkurl.phishtank.com/checkurl/"
+# PhishTank's quota response; not in HTTPStatus.
+_BANDWIDTH_LIMIT_EXCEEDED = 509
 
 
 class PhishTankEnricher(Enricher):
@@ -30,7 +32,7 @@ class PhishTankEnricher(Enricher):
     def __init__(self, http: Optional[HttpClient] = None):
         self._http = http or HttpClient()
         self._http.set_rate("checkurl.phishtank.com", 2.0)
-        self._key = os.environ.get("PHISHTANK_API_KEY", "")
+        self._key = self.env_token() or ""
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         resp = self._http.post(
@@ -39,9 +41,9 @@ class PhishTankEnricher(Enricher):
         )
         # PhishTank signals throttling with HTTP 509 (not 429), so the
         # shared client won't catch it — surface it as a rate-limit.
-        if resp.status_code == 509:
+        if resp.status_code == _BANDWIDTH_LIMIT_EXCEEDED:
             raise RateLimitedError("phishtank returned 509 (rate limited)")
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         body = resp.json()
         results = (body.get("results") or {})
