@@ -1,33 +1,21 @@
-"""LLM judging: completion clients, the judge, and cost estimation."""
+"""LLM judging: the judge and cost estimation."""
 
 from __future__ import annotations
 
 import json
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from string import Template
-from typing import Optional
-
-try:
-    # Quiet litellm's per-import warnings about optional AWS deps.
-    os.environ.setdefault("LITELLM_LOG", "ERROR")
-    import litellm
-
-    HAS_LITELLM = True
-except ImportError:
-    HAS_LITELLM = False
 
 from .constants import (
     DEFAULT_JUDGE_BATCH,
     DEFAULT_JUDGE_MAX_PER_COLLECTOR,
     DEFAULT_JUDGE_MODEL,
-    DEFAULT_JUDGE_TIMEOUT_S,
     DEFAULT_PRICING,
     LOG,
     MODEL_PRICING,
 )
 from .enums import ThreatCategory, Verdict
+from .llm import CompletionClient, CompletionRequest, StructuredCall
 from .prompts import Prompts
 from .runtime import Clock, Coerce
 
@@ -74,159 +62,18 @@ class NullJudge(Judge):
         return []
 
 
-class CompletionClient(ABC):
-    """Strategy for issuing an LLM chat completion that returns
-    structured output matching a JSON schema. Returns a dict — no
-    text-level JSON parsing happens in the caller."""
-
-    @abstractmethod
-    def complete_structured(
-        self,
-        *,
-        model: str,
-        system: str,
-        user: str,
-        max_tokens: int,
-        temperature: float,
-        schema: dict,
-        schema_name: str,
-    ) -> dict: ...
-
-
-class LitellmClient(CompletionClient):
-    """Multi-provider completion via litellm. Uses ANTHROPIC_API_KEY /
-    OPENAI_API_KEY / ... from the environment per litellm conventions.
-    Forces JSON output via ``response_format``."""
-
-    def __init__(self):
-        if not HAS_LITELLM:
-            raise RuntimeError(
-                "litellm is required for LitellmClient — pip install litellm"
-            )
-        # Token usage of the most recent call ({"input","output"}); the judge
-        # reads it to attribute cost. None when unavailable.
-        self.last_usage: Optional[dict] = None
-
-    def complete_structured(
-        self, *, model, system, user, max_tokens, temperature, schema, schema_name
-    ):
-        self.last_usage = None
-        response = litellm.completion(
-            model=model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            response_format={"type": "json_object"},
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=DEFAULT_JUDGE_TIMEOUT_S,
-        )
-        try:
-            u = response.usage
-            self.last_usage = {
-                "input": int(u.prompt_tokens or 0),
-                "output": int(u.completion_tokens or 0),
-            }
-        except Exception:
-            self.last_usage = None
-        return json.loads(response.choices[0].message.content)
-
-
-class AnthropicOAuthClient(CompletionClient):
-    """Anthropic completion via the OAuth Bearer flow used by Claude Code
-    subscriptions. Reads ``CLAUDE_CODE_OAUTH_TOKEN`` from the environment
-    and sends ``Authorization: Bearer <token>`` plus the OAuth beta
-    header. Bypasses litellm because litellm sends ``x-api-key`` which
-    is incompatible with OAuth tokens.
-
-    The Claude Code OAuth scope requires the system prompt to start with
-    the Claude Code identity line. Structured output is obtained via
-    ``tool_use`` (not free-text JSON) so we never have to strip markdown
-    fences or parse arbitrary text.
-    """
-
-    OAUTH_BETA_HEADER = "oauth-2025-04-20"
-    SYSTEM_PROMPT_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
-
-    def __init__(self, oauth_token: str):
-        try:
-            from anthropic import Anthropic
-        except ImportError as e:
-            raise RuntimeError(
-                "anthropic SDK is required for OAuth auth — " "pip install anthropic"
-            ) from e
-        self._client = Anthropic(
-            auth_token=oauth_token,
-            default_headers={"anthropic-beta": self.OAUTH_BETA_HEADER},
-            timeout=DEFAULT_JUDGE_TIMEOUT_S,
-            max_retries=2,
-        )
-        self.last_usage: Optional[dict] = None
-
-    def complete_structured(
-        self, *, model, system, user, max_tokens, temperature, schema, schema_name
-    ):
-        # Strip litellm-style provider prefix if present.
-        if "/" in model:
-            model = model.split("/", 1)[1]
-        full_system = f"{self.SYSTEM_PROMPT_PREFIX}\n\n{system}"
-        tool = {
-            "name": schema_name,
-            "description": f"Submit results matching the {schema_name} schema.",
-            "input_schema": schema,
-        }
-        self.last_usage = None
-        response = self._client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=full_system,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": schema_name},
-            messages=[{"role": "user", "content": user}],
-        )
-        try:
-            u = response.usage
-            self.last_usage = {
-                "input": int(u.input_tokens or 0),
-                "output": int(u.output_tokens or 0),
-            }
-        except Exception:
-            self.last_usage = None
-        for block in response.content:
-            if block.type == "tool_use" and block.name == schema_name:
-                return dict(block.input)
-        raise RuntimeError(
-            f"OAuth response had no tool_use block (stop_reason="
-            f"{response.stop_reason})"
-        )
-
-
-def build_completion_client() -> CompletionClient:
-    """Pick the right strategy from the environment.
-
-    - ``CLAUDE_CODE_OAUTH_TOKEN`` set → ``AnthropicOAuthClient``
-    - otherwise → ``LitellmClient`` (which itself reads
-      ``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY`` / ...)
-    """
-    oauth = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if oauth:
-        return AnthropicOAuthClient(oauth)
-    return LitellmClient()
-
-
 class LlmJudge(Judge):
-    """Threat judge backed by an LLM. Auth strategy is decided by
-    ``build_completion_client()`` (OAuth → Anthropic SDK; API key →
-    litellm). Prompts are injected via the ``Prompts`` object.
+    """Threat judge backed by an LLM through the injected completion client.
+    Prompts are injected via the ``Prompts`` object.
 
     Structured output is enforced via the client's
-    ``complete_structured`` — JSON-mode for litellm, tool_use for OAuth.
+    ``complete_structured`` (JSON-mode for litellm, tool_use for OAuth).
     Either way the caller receives a dict directly.
     """
 
     SCHEMA_NAME = "submit_judgments"
+    TEMPERATURE = 0.0
+    MAX_TOKENS = 4096
 
     @classmethod
     def _judgment_schema(cls) -> dict:
@@ -272,29 +119,30 @@ class LlmJudge(Judge):
     def __init__(
         self,
         prompts: Prompts,
+        client: CompletionClient,
         model: str = DEFAULT_JUDGE_MODEL,
         batch_size: int = DEFAULT_JUDGE_BATCH,
         max_per_collector: int = DEFAULT_JUDGE_MAX_PER_COLLECTOR,
-        temperature: float = 0.0,
-        max_tokens: int = 4096,
-        client: Optional[CompletionClient] = None,
     ):
-        self.prompts = prompts
         self.model = model
         # Clamp: batch_size 0 makes range() raise inside the _batches
         # generator (escapes the per-batch try); negative silently judges
         # nothing. Either way a bad --judge-batch-size must not break the cycle.
         self.batch_size = max(1, batch_size)
         self.max_per_collector = max_per_collector
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self._user_template = Template(prompts.user_template)
-        self._client = client or build_completion_client()
-        self._schema = self._judgment_schema()
-
-    @property
-    def auth_mode(self) -> str:
-        return type(self._client).__name__
+        self._llm = StructuredCall(
+            "judge",
+            client,
+            CompletionRequest(
+                model=model,
+                system=prompts.system,
+                user=prompts.user_template,
+                schema=self._judgment_schema(),
+                schema_name=self.SCHEMA_NAME,
+                max_tokens=self.MAX_TOKENS,
+                temperature=self.TEMPERATURE,
+            ),
+        )
 
     def judge(self, collector, hints, entries):
         if not entries:
@@ -334,24 +182,15 @@ class LlmJudge(Judge):
             }
             for i, e in enumerate(batch)
         ]
-        user = self._user_template.safe_substitute(
+        parsed = self._llm.ask(
             collector=collector,
             hints=hints,
             entries=json.dumps(payload, ensure_ascii=False),
         )
-        parsed = self._client.complete_structured(
-            model=self.model,
-            system=self.prompts.system,
-            user=user,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            schema=self._schema,
-            schema_name=self.SCHEMA_NAME,
-        )
         # Attribute the call's estimated cost evenly across the batch's
         # entries — one API call judges the whole batch, so each entry bears
         # an equal share.
-        usage = getattr(self._client, "last_usage", None)
+        usage = getattr(self._llm.client, "last_usage", None)
         call_cost = (
             estimate_cost(self.model, usage.get("input", 0), usage.get("output", 0))
             if usage
@@ -389,38 +228,3 @@ class LlmJudge(Judge):
                 created_at=now,
                 cost_usd=cost_usd,
             )
-
-
-def build_judge(args, prompts: Prompts) -> Judge:
-    if args.no_judge:
-        LOG.info("judge disabled (--no-judge)")
-        return NullJudge()
-    has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
-    has_api_key = bool(
-        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    )
-    if not has_oauth and not has_api_key:
-        LOG.warning(
-            "no LLM credentials in environment "
-            "(CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY / OPENAI_API_KEY) — "
-            "threat judging disabled"
-        )
-        return NullJudge()
-    if not has_oauth and not HAS_LITELLM:
-        LOG.warning(
-            "litellm not installed and no OAuth token; threat "
-            "judging disabled. pip install litellm"
-        )
-        return NullJudge()
-    try:
-        judge = LlmJudge(
-            prompts=prompts,
-            model=args.judge_model,
-            batch_size=args.judge_batch_size,
-            max_per_collector=args.judge_max_per_collector,
-        )
-    except RuntimeError as exc:
-        LOG.warning("LlmJudge unavailable (%s); falling back to NullJudge", exc)
-        return NullJudge()
-    LOG.info("judge auth_mode=%s model=%s", judge.auth_mode, judge.model)
-    return judge

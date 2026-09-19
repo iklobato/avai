@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=avai
+Comment=Host-security telemetry + dashboard
+Exec=avai app
+Terminal=false
+Categories=System;Security;Monitor;

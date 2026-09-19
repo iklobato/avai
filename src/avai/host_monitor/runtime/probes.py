@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections import namedtuple
-from typing import Optional, Protocol
+from typing import Iterable, Optional, Protocol
 
 try:
     import psutil
@@ -66,6 +66,19 @@ class PsutilConnections:
                 "psutil.net_connections requires root for full visibility"
             ) from e
 
+    @classmethod
+    def listening(cls) -> list:
+        """The INET sockets in LISTEN state."""
+        return [c for c in cls.inet() if c.status == psutil.CONN_LISTEN]
+
+    @staticmethod
+    def process_name(pid: int) -> Optional[str]:
+        """Name of the process *pid*, or None when it is gone or hidden."""
+        try:
+            return psutil.Process(pid).name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return None
+
 
 class SystemMetrics:
     """Thin seam over psutil's system-wide resource readings (memory, swap,
@@ -123,6 +136,22 @@ class SystemMetrics:
             threads += info.get("num_threads") or 0
         return {"total": total, "running": running, "threads": threads}
 
+    def process_table(self, attrs: list[str]) -> Iterable[dict]:
+        """One ``attrs`` dict per process; a field psutil may not read
+        comes back as None instead of dropping the process."""
+        for p in psutil.process_iter(attrs, ad_value=None):
+            yield p.info
+
+    def net_if_addrs(self) -> dict:
+        return psutil.net_if_addrs()
+
+    def net_if_stats(self) -> dict:
+        return psutil.net_if_stats()
+
+    def net_io_counters(self) -> dict:
+        """Per-interface I/O counters."""
+        return psutil.net_io_counters(pernic=True)
+
 
 class DiskMetrics:
     """Thin seam over psutil's filesystem + disk-I/O readings (the ``df``
@@ -171,6 +200,14 @@ class DiskMetrics:
                 return []
         return _host_partitions(rootfs)
 
+    def mount_table(self) -> list:
+        """Every mount, pseudo-filesystems included (``proc``, ``tmpfs``,
+        ``cgroup``...), or [] when the table can't be read."""
+        try:
+            return psutil.disk_partitions(all=True)
+        except (psutil.AccessDenied, PermissionError):
+            return []
+
     def usage(self, mountpoint: str):
         """Usage for one mountpoint. Raises (``PermissionError``/``OSError``)
         for an unreadable mount — the caller skips that partition. In
@@ -206,6 +243,10 @@ def _unescape_mount_field(field: str) -> str:
     return "".join(out)
 
 
+# device mountpoint fstype options (dump and pass are optional)
+_MOUNTS_FIELDS = 4
+
+
 def _parse_mounts(text: str) -> list:
     """Parse /proc/mounts content into ``_HostPart`` rows, dropping pseudo
     filesystems and de-duplicating by mountpoint (keeping the first, i.e.
@@ -214,7 +255,7 @@ def _parse_mounts(text: str) -> list:
     parts: list = []
     for line in text.splitlines():
         fields = line.split()
-        if len(fields) < 4:
+        if len(fields) < _MOUNTS_FIELDS:
             continue
         device, mountpoint, fstype, opts = (
             _unescape_mount_field(fields[0]),
@@ -267,28 +308,6 @@ def _statvfs_usage(path: str) -> "_HostUsage":
     total_user = used + avail_user
     percent = round(used / total_user * 100, 1) if total_user > 0 else 0.0
     return _HostUsage(total=total, used=used, free=avail_user, percent=percent)
-
-
-class ServiceProbe:
-    """POSIX service-liveness checks via the injected CommandRunner."""
-
-    def __init__(self, runner: Optional[CommandRunner] = None) -> None:
-        self._runner = runner or CommandRunner()
-
-    def loaded(self, label: str) -> Optional[int]:
-        """1 if a launchd service *label* is loaded, 0 if not, None on
-        error (``launchctl list <label>`` exit code)."""
-        code = self._runner.exit_code(["launchctl", "list", label])
-        return None if code is None else int(code == 0)
-
-    def running(self, name: str) -> Optional[int]:
-        """1 if a process named *name* is running, 0 if not, None on error.
-
-        Uses ``pgrep -x`` (exact match) so it catches system-domain
-        services (sshd, screensharingd, ARDAgent) that ``launchctl list``
-        misses from the user session."""
-        code = self._runner.exit_code(["pgrep", "-x", name])
-        return None if code is None else int(code == 0)
 
 
 def tri_or(*values: Optional[int]) -> Optional[int]:
@@ -352,25 +371,6 @@ class SystemdServiceManager:
     def enabled(self, unit: str) -> Optional[int]:
         code = self._runner.exit_code(["systemctl", "is-enabled", unit])
         return None if code is None else int(code == 0)
-
-
-class WindowsScmServiceManager:
-    """Windows: a service is enabled when its SCM start type isn't DISABLED
-    (``sc qc <name>``)."""
-
-    def __init__(self, runner: Optional[CommandRunner] = None) -> None:
-        self._runner = runner or CommandRunner()
-
-    def enabled(self, unit: str) -> Optional[int]:
-        out = self._runner.text(["sc", "qc", unit])
-        if not out:
-            return None
-        upper = out.upper()
-        if "DISABLED" in upper:
-            return 0
-        if "AUTO_START" in upper or "DEMAND_START" in upper:
-            return 1
-        return None
 
 
 class PsutilPortInspector:

@@ -5,7 +5,7 @@ https://docs.virustotal.com/reference/files
 """
 from __future__ import annotations
 
-import os
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -18,6 +18,12 @@ from avai.enrichers.base import (
 from avai.enrichers.http import HttpClient
 
 _BASE = "https://www.virustotal.com/api/v3"
+# Engine-count cut-offs for the hint (see _fetch).
+_MALICIOUS_ENGINES = 5
+_MALICIOUS_RATIO = 0.2
+_SUSPICIOUS_ENGINES = 3
+# A clean result only counts as benign when enough engines looked.
+_BENIGN_MIN_ENGINES = 10
 
 
 def _path_for(indicator: Indicator) -> Optional[str]:
@@ -49,7 +55,7 @@ class VirusTotalEnricher(Enricher):
         self._http = http or HttpClient()
         # Free tier: 4 req / minute → ~0.066 rps. Pad to 0.06 for safety.
         self._http.set_rate("www.virustotal.com", 0.06)
-        self._key = os.environ.get("VT_API_KEY", "")
+        self._key = self.env_token() or ""
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         path = _path_for(indicator)
@@ -62,7 +68,7 @@ class VirusTotalEnricher(Enricher):
         )
         if resp.status_code in (404, 400):
             return None
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         body = resp.json().get("data", {}).get("attributes", {})
         stats = body.get("last_analysis_stats") or {}
@@ -70,13 +76,13 @@ class VirusTotalEnricher(Enricher):
         suspicious = stats.get("suspicious", 0)
         total      = sum(stats.values()) or 1
         ratio      = (malicious + suspicious) / total
-        if malicious >= 5 or ratio >= 0.2:
+        if malicious >= _MALICIOUS_ENGINES or ratio >= _MALICIOUS_RATIO:
             hint = VerdictHint.MALICIOUS
             conf = 0.95
-        elif malicious >= 1 or suspicious >= 3:
+        elif malicious >= 1 or suspicious >= _SUSPICIOUS_ENGINES:
             hint = VerdictHint.SUSPICIOUS
             conf = 0.7
-        elif total >= 10 and malicious == 0 and suspicious == 0:
+        elif total >= _BENIGN_MIN_ENGINES and malicious == 0 and suspicious == 0:
             hint = VerdictHint.BENIGN
             conf = 0.6
         else:

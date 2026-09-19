@@ -1,0 +1,95 @@
+# Build the desktop installers on a version tag and attach them to the Release.
+#   git tag v0.8.0 && git push origin v0.8.0
+#
+# v1 = unsigned/Releases first (per the plan): Windows .exe is UNSIGNED
+# (SmartScreen warns), Linux .deb ships on the Release, macOS .app is signed +
+# notarized (you have a Developer ID).
+#
+# UNVERIFIED until a real tag runs this. Required repo secrets for the macOS
+# job: MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD, APPLE_ID, APPLE_TEAM_ID,
+# APPLE_APP_PASSWORD. For the cask bump: HOMEBREW_TAP_TOKEN.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -e ".[app]" pyinstaller
+      - run: pyinstaller packaging/avai.spec
+      - name: Build installer (Inno Setup)
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=$v packaging\windows\avai.iss
+      - uses: softprops/action-gh-release@v2
+        with: { files: "packaging/windows/Output/avai-setup-*.exe" }
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev build-essential libgirepository1.0-dev
+          sudo gem install --no-document fpm
+      - run: pip install -e ".[app]" pyinstaller
+      - run: pyinstaller packaging/avai.spec
+      - run: bash packaging/linux/build_deb.sh "${GITHUB_REF_NAME#v}"
+      - uses: softprops/action-gh-release@v2
+        with: { files: "avai_*_amd64.deb" }
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -e ".[app]" pyinstaller
+      - run: pyinstaller packaging/avai.spec
+      - name: Import signing certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          p12-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+      - name: Codesign, notarize, staple, dmg
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"
+          codesign --deep --force --options runtime \
+            --entitlements packaging/macos/entitlements.plist \
+            --sign "Developer ID Application" dist/avai.app
+          hdiutil create -volname avai -srcfolder dist/avai.app -ov -format UDZO "avai-${v}.dmg"
+          xcrun notarytool submit "avai-${v}.dmg" --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "avai-${v}.dmg"
+          shasum -a 256 "avai-${v}.dmg" | awk '{print $1}' > "avai-${v}.dmg.sha256"
+      - uses: softprops/action-gh-release@v2
+        with: { files: "avai-*.dmg" }
+      - name: Bump Homebrew cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          v="${GITHUB_REF_NAME#v}"; sha="$(cat avai-${v}.dmg.sha256)"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/iklobato/homebrew-avai" tap
+          sed -e "s/version \".*\"/version \"${v}\"/" \
+              -e "s/sha256 \".*\"/sha256 \"${sha}\"/" \
+              packaging/macos/avai-cask.rb > tap/Casks/avai.rb
+          cd tap
+          git config user.name avai-ci; git config user.email avai-ci@users.noreply.github.com
+          git commit -am "avai ${v}" && git push

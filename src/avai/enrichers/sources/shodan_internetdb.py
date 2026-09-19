@@ -7,6 +7,7 @@ https://internetdb.shodan.io/
 """
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import ClassVar, Optional
 
 from avai.enrichers.base import (
@@ -33,9 +34,9 @@ class ShodanInternetDBEnricher(Enricher):
 
     def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
         resp = self._http.get(f"{_BASE}/{indicator.value}")
-        if resp.status_code == 404:
+        if resp.status_code == HTTPStatus.NOT_FOUND:
             return None
-        if resp.status_code != 200:
+        if resp.status_code != HTTPStatus.OK:
             return None
         body = resp.json()
         ports = body.get("ports") or []

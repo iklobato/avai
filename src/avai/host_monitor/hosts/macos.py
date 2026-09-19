@@ -161,7 +161,7 @@ class MacOSPrivilegedAccounts:
         out = self._runner.text(["dscl", ".", "-list", "/Users", "UniqueID"])
         for line in out.splitlines():
             cols = line.split()
-            if len(cols) >= 2 and cols[-1] == "0":
+            if len(cols) > 1 and cols[-1] == "0":
                 yield {
                     "kind": "account",
                     "subject": cols[0],
@@ -186,25 +186,33 @@ class MacOSHost:
             ProcessCollector(judge_hints=h("processes")),
             NetworkConnectionsCollector(judge_hints=h("network_connections")),
             ListeningPortsCollector(judge_hints=h("listening_ports")),
-            NetworkFlowsCollector(judge_hints=h("network_flows"), iface_args=iface),
-            DnsQueriesCollector(judge_hints=h("dns_queries"), iface_args=iface),
+            NetworkFlowsCollector(
+                judge_hints=h("network_flows"), iface_args=iface, runner=self._runner
+            ),
+            DnsQueriesCollector(
+                judge_hints=h("dns_queries"), iface_args=iface, runner=self._runner
+            ),
             NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
             HostResourcesCollector(judge_hints=h("host_resources")),
             DiskUsageCollector(judge_hints=h("disk_usage")),
-            UsbDevicesCollector(judge_hints=h("usb_devices")),
-            BluetoothCollector(judge_hints=h("bluetooth_devices")),
-            WifiCollector(judge_hints=h("wifi_state")),
+            UsbDevicesCollector(judge_hints=h("usb_devices"), runner=self._runner),
+            BluetoothCollector(judge_hints=h("bluetooth_devices"), runner=self._runner),
+            WifiCollector(judge_hints=h("wifi_state"), runner=self._runner),
             LaunchItemsCollector(judge_hints=h("launch_items")),
             QuarantineCollector(judge_hints=h("quarantine_events")),
             BrowserExtensionsCollector(judge_hints=h("browser_extensions")),
-            SystemIntegrityCollector(judge_hints=h("system_integrity")),
+            SystemIntegrityCollector(
+                judge_hints=h("system_integrity"), runner=self._runner
+            ),
             FileIntegrityCollector(judge_hints=h("file_integrity")),
             FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),
             InstalledAppsCollector(judge_hints=h("installed_apps")),
             MountsCollector(judge_hints=h("mounts")),
             SetuidFilesCollector(judge_hints=h("setuid_files"), fs=self._fs),
-            MdmProfilesCollector(judge_hints=h("mdm_profiles")),
-            KernelExtensionsCollector(judge_hints=h("kernel_extensions")),
+            MdmProfilesCollector(judge_hints=h("mdm_profiles"), runner=self._runner),
+            KernelExtensionsCollector(
+                judge_hints=h("kernel_extensions"), runner=self._runner
+            ),
             SystemExtensionsCollector(judge_hints=h("system_extensions")),
             SshAuthorizedKeysCollector(
                 judge_hints=h("ssh_authorized_keys"), fs=self._fs

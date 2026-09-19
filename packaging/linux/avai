@@ -1,0 +1,23 @@
+#!/bin/sh
+# /usr/bin/avai launcher for the .deb. The desktop app needs root for the full
+# collectors (tcpdump DNS, socket->process), so `avai app` self-elevates via
+# pkexec (the chosen force-elevate behaviour). pkexec strips the environment,
+# so the GUI vars are passed through explicitly.
+#
+# Caveat: running a GUI as root works on X11; on Wayland the compositor usually
+# refuses a root client. ponytail: ship the X11 path; the clean fix is an
+# unprivileged GUI + a root monitor helper (see packaging/macos/ELEVATION.md).
+set -eu
+
+APP=/opt/avai/avai
+
+if [ "${1:-}" = "app" ] && [ "$(id -u)" -ne 0 ]; then
+    exec pkexec env \
+        DISPLAY="${DISPLAY:-}" \
+        XAUTHORITY="${XAUTHORITY:-}" \
+        WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+        "$APP" "$@"
+fi
+
+exec "$APP" "$@"

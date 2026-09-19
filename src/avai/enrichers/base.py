@@ -18,6 +18,10 @@ from typing import Any, ClassVar, Mapping, Optional
 
 LOG = logging.getLogger("avai.enrichers")
 
+# CVSS v3 severity bands: critical from 9.0, high from 7.0.
+CVSS_CRITICAL = 9.0
+CVSS_HIGH = 7.0
+
 
 @unique
 class IndicatorType(StrEnum):
@@ -56,13 +60,11 @@ class Indicator:
 
     ``value`` is canonicalised at construction (hashes lowercased, URLs
     stripped of fragments, etc.) so the cache key is stable across
-    callers. ``context`` is opaque side data — kept so an enricher can
-    cross-reference the originating row without having to re-derive it.
+    callers.
     """
 
     type: IndicatorType
     value: str
-    context: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         v = self.value

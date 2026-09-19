@@ -37,7 +37,9 @@
 
   {# ===== left column: operate ===== #}
   <div class="space-y-4">
-  {# Token lives only in the browser (localStorage), never server-rendered. #}
+  {# Token lives only in the browser (localStorage), never server-rendered.
+     Open mode (desktop app) needs no token, so skip the input entirely. #}
+  {% if not control_open %}
   <div>
     <input id="control-token" type="password" autocomplete="off"
            placeholder="control token"
@@ -45,6 +47,7 @@
            oninput="localStorage.setItem('avai_control_token', this.value)"
            class="w-full bg-slate-950 border border-slate-700 rounded-md px-3 py-2 text-xs text-slate-200 font-mono focus:border-slate-500" />
   </div>
+  {% endif %}
 
   {# pause / resume + scan now. resume = success (positive), pause = secondary
      (quieter), scan now = primary (the prominent immediate action). #}

@@ -17,8 +17,8 @@ from __future__ import annotations
 import json
 import re
 
+from . import slices
 from .collectors import SnapshotCollector
-from .models import ArpEntryRow, DnsResolverRow, NdpNeighborRow, RouteRow
 from .runtime import RowSource
 
 _MAC_RE = re.compile(r"^([0-9a-fA-F]{1,2}:){5}[0-9a-fA-F]{1,2}$")
@@ -56,26 +56,22 @@ class _SourceSnapshotCollector(SnapshotCollector):
 
 
 class ArpTableCollector(_SourceSnapshotCollector):
-    name = "arp_table"
-    model = ArpEntryRow
+    slice = slices.ARP_TABLE
     judge_fields = ("ip", "mac", "interface", "flags")
 
 
 class NdpNeighborsCollector(_SourceSnapshotCollector):
-    name = "ndp_neighbors"
-    model = NdpNeighborRow
+    slice = slices.NDP_NEIGHBORS
     judge_fields = ("ip", "mac", "interface", "state")
 
 
 class RoutesCollector(_SourceSnapshotCollector):
-    name = "routes"
-    model = RouteRow
+    slice = slices.ROUTES
     judge_fields = ("destination", "gateway", "interface", "flags")
 
 
 class DnsResolversCollector(_SourceSnapshotCollector):
-    name = "dns_resolvers"
-    model = DnsResolverRow
+    slice = slices.DNS_RESOLVERS
     judge_fields = ("server", "scope", "search", "interface")
 
 
@@ -126,16 +122,21 @@ class MacosArpParser:
 class MacosNdpParser:
     """``ndp -an`` columns: Neighbor LinklayerAddr Netif Expire St ..."""
 
+    _MIN_COLUMNS = 3  # Neighbor LinklayerAddr Netif
+    _EXPIRE, _STATE = 3, 4
+
     def parse(self, text: str) -> list[dict]:
         rows = []
         for line in text.splitlines():
             if not line.strip() or line.startswith("Neighbor"):
                 continue
             cols = line.split()
-            if len(cols) < 3:
+            if len(cols) < self._MIN_COLUMNS:
                 continue
             mac = cols[1] if cols[1] != "(incomplete)" else None
-            state = cols[4] if len(cols) > 4 else (cols[3] if len(cols) > 3 else None)
+            state = next(
+                (cols[i] for i in (self._STATE, self._EXPIRE) if len(cols) > i), None
+            )
             rows.append(
                 {
                     "ip": cols[0],
@@ -152,6 +153,8 @@ class MacosRouteParser:
     """``netstat -rn`` — keep default routes and IP-next-hop routes; drop
     link# and MAC-gateway (neighbor) rows already covered by ARP."""
 
+    _MIN_COLUMNS = 4  # Destination Gateway Flags Netif
+
     def parse(self, text: str) -> list[dict]:
         rows = []
         in_table = False
@@ -166,7 +169,7 @@ class MacosRouteParser:
             if not in_table:
                 continue
             cols = s.split()
-            if len(cols) < 4:
+            if len(cols) < self._MIN_COLUMNS:
                 continue
             dest, gw, flags, netif = cols[0], cols[1], cols[2], cols[3]
             if not self._is_route(dest, gw):
@@ -242,6 +245,8 @@ class IpNeighParser:
     ``state_key`` is the model field for the trailing state token: ``flags``
     for the ARP table, ``state`` for the NDP table."""
 
+    _MIN_COLUMNS = 3  # ip, then dev/lladdr pairs
+
     def __init__(self, state_key: str):
         self._state_key = state_key
 
@@ -249,7 +254,7 @@ class IpNeighParser:
         rows = []
         for line in text.splitlines():
             cols = line.split()
-            if len(cols) < 3:
+            if len(cols) < self._MIN_COLUMNS:
                 continue
             iface = cols[cols.index("dev") + 1] if "dev" in cols else None
             mac = cols[cols.index("lladdr") + 1] if "lladdr" in cols else None
@@ -303,9 +308,9 @@ class ResolvConfParser:
             if not s or s.startswith("#"):
                 continue
             if s.startswith("nameserver"):
-                parts = s.split()
-                if len(parts) >= 2:
-                    servers.append(parts[1])
+                _keyword, *values = s.split()
+                if values:
+                    servers.append(values[0])
             elif s.startswith(("search", "domain")):
                 searches += s.split()[1:]
         return [

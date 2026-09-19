@@ -47,7 +47,6 @@ class TestHostsTableTransform:
     def test_install_maps_both_ipv4_and_ipv6_loopback(self):
         # The IPv6 line is what dodges the macOS .local mDNS AAAA delay.
         table = HostsTable("").with_mapping(DASHBOARD_HOSTNAME, LOOPBACK_ADDRESSES)
-        assert table.is_managed(DASHBOARD_HOSTNAME)
         assert table.resolves(DASHBOARD_HOSTNAME)
         assert f"{LOOPBACK_IPV4}\t{DASHBOARD_HOSTNAME}" in table.text
         assert f"{LOOPBACK_IPV6}\t{DASHBOARD_HOSTNAME}" in table.text
@@ -72,7 +71,7 @@ class TestHostsTableTransform:
             DASHBOARD_HOSTNAME, LOOPBACK_ADDRESSES
         )
         removed = added.without(DASHBOARD_HOSTNAME)
-        assert not removed.is_managed(DASHBOARD_HOSTNAME)
+        assert not removed.resolves(DASHBOARD_HOSTNAME)
         assert "127.0.0.1\tlocalhost" in removed.text
         assert "broadcasthost" in removed.text
         assert _BLOCK_marker_absent(removed.text)
@@ -87,7 +86,7 @@ class TestHostsTableTransform:
     def test_resolves_detects_a_hand_added_entry_outside_the_block(self):
         table = HostsTable("127.0.0.1 avai.local\n")
         assert table.resolves(DASHBOARD_HOSTNAME)
-        assert not table.is_managed(DASHBOARD_HOSTNAME)
+        assert table.without(DASHBOARD_HOSTNAME).text == table.text
 
     def test_comment_lines_do_not_count_as_resolving(self):
         table = HostsTable("# 127.0.0.1 avai.local\n")

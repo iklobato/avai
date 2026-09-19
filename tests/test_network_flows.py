@@ -13,9 +13,14 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard import app, network_flows
+from avai.dashboard.app import create_app
+from avai.dashboard.config import DashboardConfig
+from avai.dashboard.queries import network_flows
+from avai.dashboard.queries import RowFilter
 from avai.enrichers import IndicatorType, extract_indicators
-from avai.host_monitor import NetworkFlowRow, NetworkFlowsCollector, Sink
+from avai.host_monitor.collectors import NetworkFlowsCollector
+from avai.host_monitor.models import NetworkFlowRow
+from avai.host_monitor.sink import Sink
 
 # macOS/default form (no interface prefix), -t (no timestamp)
 SAMPLE_MACOS = """\
@@ -94,18 +99,18 @@ class TestParseLine:
 
 class TestPayloadBytes:
     def test_tcp_trailing_length(self):
-        from avai.host_monitor import _payload_bytes
+        from avai.host_monitor.collectors import _payload_bytes
 
         assert _payload_bytes("IP a > b: tcp 1380".split()) == 1380
         assert _payload_bytes("IP a > b: tcp 0".split()) == 0
 
     def test_udp_length_token(self):
-        from avai.host_monitor import _payload_bytes
+        from avai.host_monitor.collectors import _payload_bytes
 
         assert _payload_bytes("IP a > b: UDP, length 45".split()) == 45
 
     def test_absent_returns_zero(self):
-        from avai.host_monitor import _payload_bytes
+        from avai.host_monitor.collectors import _payload_bytes
 
         assert _payload_bytes("IP a > b: Flags [S]".split()) == 0
         assert _payload_bytes([]) == 0
@@ -182,7 +187,8 @@ def seeded(tmp_path):
     sink = Sink(engine)
     sink.setup()
     run_id, ts = sink.start_run("h", 5)
-    from avai.host_monitor import Judgment, ThreatCategory, Verdict
+    from avai.host_monitor.enums import ThreatCategory, Verdict
+    from avai.host_monitor.judge import Judgment
     from avai.host_monitor.runtime import Digest
 
     fields = ("iface", "proto", "dst_ip", "dst_port")
@@ -268,11 +274,19 @@ class TestNetworkFlowsAggregation:
         assert summary["packets"] == 650
         assert summary["malicious"] == 1
 
+    def test_verdict_filter_uses_the_picked_verdict(self, seeded):
+        # Regression: the row loop reused the name ``verdict``, so the filter
+        # and its echo took the last flow's verdict instead of the user's.
+        engine, run_id = seeded
+        with Session(engine) as s:
+            data = network_flows(s, run_id, RowFilter(verdict="malicious"))
+        assert [r["dst_ip"] for r in data["rows"]] == ["203.0.113.9"]
+        assert data["verdict"] == "malicious"
+
     def test_fragment_renders_interface_and_verdict(self, seeded):
         engine, run_id = seeded
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "203.0.113.9" in html
         assert "en0" in html  # interface column
@@ -324,8 +338,7 @@ class TestTrafficVolume:
     def test_fragment_shows_human_volume(self, tmp_path):
         engine, run_id = self._seed_flow(tmp_path, 1_200_000)
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "1.1 MB" in html  # volume headline
         assert "8 pkts" in html  # packets demoted to detail line
@@ -333,8 +346,7 @@ class TestTrafficVolume:
     def test_zero_bytes_falls_back_to_packets(self, tmp_path):
         engine, run_id = self._seed_flow(tmp_path, 0)
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "8 " in html and "pkts" in html  # packet count as headline
 
@@ -346,7 +358,7 @@ def _seed_geo(engine, evidence: list[dict]) -> None:
     import json
 
     from avai.enrichers.cache import register_schema
-    from avai.host_monitor import Base
+    from avai.host_monitor.models import Base
 
     model = register_schema(Base)
     with Session(engine) as s:
@@ -512,13 +524,12 @@ class TestGeolocationColumn:
             ],
         )
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "203.0.113.9" in html  # the IP anchor
         assert "Ashburn" in html  # city, now in the destination cell
         assert "AS14618" in html  # ASN, now in the destination cell
-        assert "\U0001F1FA\U0001F1F8" in html  # 🇺🇸 flag from country_code
+        assert "\U0001f1fa\U0001f1f8" in html  # 🇺🇸 flag from country_code
         assert "threat intel" not in html  # threat-intel column removed
         # the separate location column header is gone
         assert ">location</th>" not in html
@@ -560,13 +571,13 @@ class TestGeolocationColumn:
 
 class TestFlagEmoji:
     def test_two_letter_code_to_flag(self):
-        from avai.dashboard import _flag_emoji
+        from avai.dashboard.filters import _flag_emoji
 
-        assert _flag_emoji("US") == "\U0001F1FA\U0001F1F8"
-        assert _flag_emoji("de") == "\U0001F1E9\U0001F1EA"  # case-insensitive
+        assert _flag_emoji("US") == "\U0001f1fa\U0001f1f8"
+        assert _flag_emoji("de") == "\U0001f1e9\U0001f1ea"  # case-insensitive
 
     def test_non_code_returns_empty(self):
-        from avai.dashboard import _flag_emoji
+        from avai.dashboard.filters import _flag_emoji
 
         assert _flag_emoji("United States") == ""
         assert _flag_emoji(None) == ""
@@ -576,7 +587,7 @@ class TestFlagEmoji:
 
 class TestHumanBytes:
     def test_scales(self):
-        from avai.dashboard import _human_bytes
+        from avai.dashboard.filters import _human_bytes
 
         assert _human_bytes(927) == "927 B"
         assert _human_bytes(12345) == "12.1 KB"
@@ -584,7 +595,7 @@ class TestHumanBytes:
         assert _human_bytes(3_000_000_000) == "2.8 GB"
 
     def test_zero_or_none_empty(self):
-        from avai.dashboard import _human_bytes
+        from avai.dashboard.filters import _human_bytes
 
         assert _human_bytes(0) == ""
         assert _human_bytes(None) == ""
@@ -660,8 +671,7 @@ class TestDestinationHostname:
             ],
         )
         db = str(engine.url).replace("sqlite:///", "")
-        app.config.update(TESTING=True, DB_PATH=db)
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=db)).test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "host.evil.example" in html
 
@@ -696,14 +706,13 @@ class TestMissingTableGraceful:
     def test_fragment_200_on_db_without_table(self, tmp_path):
         engine, db = self._db_without_flows(tmp_path)
         engine.dispose()
-        app.config.update(TESTING=True, DB_PATH=str(db))
-        with app.test_client() as c:
+        with create_app(DashboardConfig(db_path=str(db))).test_client() as c:
             r = c.get("/fragments/network-flows")
         assert r.status_code == 200
         assert "no network flows match the current filters" in r.data.decode()
 
     def test_row_counts_skips_missing_table(self, tmp_path):
-        from avai.dashboard import row_counts
+        from avai.dashboard.queries import row_counts
 
         engine, _ = self._db_without_flows(tmp_path)
         with Session(engine) as s:

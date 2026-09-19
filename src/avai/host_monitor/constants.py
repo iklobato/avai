@@ -38,6 +38,40 @@ DEFAULT_JUDGE_TIMEOUT_S = 60
 DEFAULT_BASELINE_MIN_RUNS = 12
 
 
+# --- Monitor liveness -------------------------------------------------------
+# The dashboard calls the monitor "offline" if the control row's last_seen_at
+# is older than this window. Generous enough to absorb a normal poll tick
+# (~3s) plus jitter, short enough that a truly dead process surfaces quickly.
+MONITOR_LIVENESS_WINDOW_S = 120
+# A single scan (run_once) can run far longer than the window above: on a host
+# with many enrichable indicators the first cycle's serial threat-intel lookups
+# take minutes to hours. The monitor refreshes last_seen_at this often *during*
+# a scan so a busy-but-alive monitor never reads as offline. A quarter of the
+# window leaves a 4x margin against a slow heartbeat write.
+MONITOR_PROGRESS_HEARTBEAT_S = MONITOR_LIVENESS_WINDOW_S / 4
+
+
+# --- Streaming-worker supervision -------------------------------------------
+# A StreamingCollector that raises mid-stream is restarted rather than left
+# dead. These tune the restart cadence and the point at which a persistent
+# fault stops being "transient" and escalates to an ERROR (the line forwarded
+# to monitoring). Grounded in the worker's own flush cadence (flush_interval_s,
+# default 5.0s): the first retry costs less than one flush window, and the
+# backoff caps at one flush window so a recovered source resumes within the
+# latency the system already tolerates between writes.
+STREAM_RESTART_BASE_BACKOFF_S = 1.0  # first retry delay; below one flush window
+STREAM_RESTART_MAX_BACKOFF_S = 5.0  # cap == default flush_interval_s
+STREAM_RESTART_BACKOFF_FACTOR = 2.0  # binary exponential backoff (convention)
+# Consecutive crashes (no healthy run between) before the fault escalates from
+# WARNING to ERROR: ~1+2+4s of thrashing under the curve above. Convention;
+# validate against real collector restart rates.
+STREAM_CRASH_ESCALATE_THRESHOLD = 3
+# A session must survive at least this long for the crash counter to reset —
+# long enough to clear one flush window of real output, not an instant
+# re-crash.
+STREAM_HEALTHY_RESET_S = 5.0
+
+
 _CORRELATED_COLLECTOR = "processes"
 
 # Collector whose findings carry YARA rule context (rule meta + matched

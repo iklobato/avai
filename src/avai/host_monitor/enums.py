@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enum import IntEnum, StrEnum
+from enum import StrEnum
 
 
 class Verdict(StrEnum):
@@ -42,18 +42,6 @@ class LaunchScope(StrEnum):
     SYSTEM_DAEMON = "system_daemon"
     APPLE_AGENT = "apple_agent"
     APPLE_DAEMON = "apple_daemon"
-
-
-class ScanTier(IntEnum):
-    """Security priority of a directory the YARA scanner walks — lower is
-    scanned first. ``IntEnum`` so :class:`ScanRoot` instances sort by tier
-    directly, highest-signal corners (privileged binaries, temp, launch
-    agents) ahead of the full-disk baseline sweep."""
-
-    CRITICAL = 0
-    HIGH = 1
-    MEDIUM = 2
-    BASELINE = 3
 
 
 class Browser(StrEnum):

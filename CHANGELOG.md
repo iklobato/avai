@@ -3,6 +3,22 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.9.0] - 2026-09-18
+
+### Internal
+- **Refactor toward OO, SOLID and YAGNI (11 phases).** The monitor, the sink, the collectors, the LLM stages, the enrichment chain, the dashboard and the entry points were split into focused classes behind injected collaborators, and the package facades now export only what callers use. No behaviour change was intended; a collector-by-collector and page-by-page comparison against 0.8.0 on macOS showed the same rows and the same HTML, apart from the fixes below.
+- Dead code removed: the enrichment chain's per-source statistics and `Indicator.context`, neither of which any caller read.
+
+### Fixed
+- **Dashboard counted two collectors as missing.** `ssh_known_hosts` and `trusted_roots` now appear in the row counts and in the collection panel.
+- **The control page listed 37 of the 41 collectors.** All 41 are listed, so the four that were missing can be toggled.
+- **A property list with a malformed XML declaration aborted the host path read.** The parser error is now caught with the other unreadable-file errors and that one file is skipped.
+
+## [0.8.0] - 2026-06-19
+
+### Added
+- **Error reporting via Sentry, on by default.** avai now sends unhandled exceptions (main thread and the monitor's worker threads) plus logged warnings and errors to Sentry, so failures users hit in the wild are visible centrally and can be fixed. A bundled DSN means it works with no setup, and every event is tagged with the avai release. PII is never sent (`send_default_pii=False`), so request headers and client IP stay on the host. Opt out with `AVAI_TELEMETRY=0` (matching avai's `AVAI_*` toggle convention) or an empty `SENTRY_DSN`; redirect reports to your own project with `SENTRY_DSN`. Adds the `sentry-sdk` dependency.
+
 ## [0.7.3] — 2026-06-18
 
 ### Fixed

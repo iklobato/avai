@@ -10,13 +10,7 @@ from __future__ import annotations
 
 import json
 
-from .models import (
-    LoginSessionRow,
-    NetworkShareRow,
-    PromiscuousInterfaceRow,
-    ProxyConfigRow,
-    TrustedRootRow,
-)
+from . import slices
 from .net_collectors import _load_ps_json, _SourceSnapshotCollector
 
 _NET_FS = {"smbfs", "nfs", "nfs4", "afpfs", "webdav", "cifs", "ftp"}
@@ -28,32 +22,27 @@ _NET_FS = {"smbfs", "nfs", "nfs4", "afpfs", "webdav", "cifs", "ftp"}
 
 
 class ProxyConfigCollector(_SourceSnapshotCollector):
-    name = "proxy_config"
-    model = ProxyConfigRow
+    slice = slices.PROXY_CONFIG
     judge_fields = ("scope", "host", "port", "pac_url")
 
 
 class LoginSessionsCollector(_SourceSnapshotCollector):
-    name = "login_sessions"
-    model = LoginSessionRow
+    slice = slices.LOGIN_SESSIONS
     judge_fields = ("user", "tty", "source")
 
 
 class NetworkSharesCollector(_SourceSnapshotCollector):
-    name = "network_shares"
-    model = NetworkShareRow
+    slice = slices.NETWORK_SHARES
     judge_fields = ("remote", "mountpoint", "fstype")
 
 
 class PromiscuousInterfacesCollector(_SourceSnapshotCollector):
-    name = "promiscuous_ifaces"
-    model = PromiscuousInterfaceRow
+    slice = slices.PROMISCUOUS_IFACES
     judge_fields = ("interface", "promiscuous", "flags")
 
 
 class TrustedRootsCollector(_SourceSnapshotCollector):
-    name = "trusted_roots"
-    model = TrustedRootRow
+    slice = slices.TRUSTED_ROOTS
     judge_fields = ("subject", "fingerprint")
 
 
@@ -66,6 +55,8 @@ class WhoParser:
     """``who`` → user / tty / source / login time. A trailing ``(host)`` is
     a remote session source."""
 
+    _MIN_COLUMNS = 2  # user tty
+
     def parse(self, text: str) -> list[dict]:
         rows = []
         for line in text.splitlines():
@@ -77,7 +68,7 @@ class WhoParser:
                 source = s[s.rfind("(") + 1 : -1]
                 s = s[: s.rfind("(")].rstrip()
             cols = s.split()
-            if len(cols) < 2:
+            if len(cols) < self._MIN_COLUMNS:
                 continue
             rows.append(
                 {
@@ -247,18 +238,20 @@ class LinuxProxyEnvParser:
 class ProcMountsSharesParser:
     """``/proc/mounts`` → network mounts only."""
 
+    _MIN_COLUMNS = 3  # device mountpoint fstype, then options
+
     def parse(self, text: str) -> list[dict]:
         rows = []
         for line in text.splitlines():
             cols = line.split()
-            if len(cols) < 3 or cols[2] not in _NET_FS:
+            if len(cols) < self._MIN_COLUMNS or cols[2] not in _NET_FS:
                 continue
             rows.append(
                 {
                     "remote": cols[0],
                     "mountpoint": cols[1],
                     "fstype": cols[2],
-                    "options": cols[3] if len(cols) > 3 else None,
+                    "options": cols[3] if len(cols) > self._MIN_COLUMNS else None,
                     "raw_json": json.dumps(line.strip()),
                 }
             )
@@ -273,10 +266,10 @@ class LinuxPromiscParser:
         for line in text.splitlines():
             if "<" not in line or ">" not in line:
                 continue
-            head = line.split(":", 2)
-            if len(head) < 2 or not head[0].strip().isdigit():
+            index, sep, rest = line.partition(":")
+            if not sep or not index.strip().isdigit():
                 continue
-            iface = head[1].strip()
+            iface = rest.split(":", 1)[0].strip()
             flags = line[line.index("<") + 1 : line.index(">")]
             rows.append(
                 {
@@ -349,6 +342,9 @@ class WindowsProxyParser:
 class WindowsSessionParser:
     """``query user`` columns (best-effort; layout is whitespace-aligned)."""
 
+    _MIN_COLUMNS = 2  # user session
+    _LOGIN_AT_COLUMNS = 3  # the date, time and meridiem that end the line
+
     def parse(self, text: str) -> list[dict]:
         rows = []
         for line in text.splitlines():
@@ -356,14 +352,18 @@ class WindowsSessionParser:
             if not s.strip() or s.lstrip().upper().startswith("USERNAME"):
                 continue
             cols = s.replace(">", " ").split()
-            if len(cols) < 2:
+            if len(cols) < self._MIN_COLUMNS:
                 continue
             rows.append(
                 {
                     "user": cols[0],
                     "tty": cols[1],
                     "source": "local",
-                    "login_at": " ".join(cols[-3:]) if len(cols) >= 3 else None,
+                    "login_at": (
+                        " ".join(cols[-self._LOGIN_AT_COLUMNS :])
+                        if len(cols) >= self._LOGIN_AT_COLUMNS
+                        else None
+                    ),
                     "raw_json": json.dumps(s.strip()),
                 }
             )

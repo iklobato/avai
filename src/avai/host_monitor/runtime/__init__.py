@@ -29,10 +29,8 @@ from .probes import (
     PsutilPortInspector,
     PsutilProcessInspector,
     ServiceManager,
-    ServiceProbe,
     SystemdServiceManager,
     SystemMetrics,
-    WindowsScmServiceManager,
     tri_or,
 )
 from .row_source import CommandSnapshot, FileSnapshot, RowParser, RowSource
@@ -49,11 +47,9 @@ __all__ = [
     "PsutilConnections",
     "SystemMetrics",
     "DiskMetrics",
-    "ServiceProbe",
     "ServiceManager",
     "LaunchdServiceManager",
     "SystemdServiceManager",
-    "WindowsScmServiceManager",
     "PortInspector",
     "PsutilPortInspector",
     "ProcessInspector",

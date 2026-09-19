@@ -337,6 +337,20 @@ class TestNvd:
         with pytest.raises(RateLimitedError):
             e._fetch(Indicator(IndicatorType.CVE, "CVE-2024-1"))
 
+    @pytest.mark.parametrize(
+        "key,headers,rate", [("k-123", {"apiKey": "k-123"}, 1.5), ("", {}, 0.15)]
+    )
+    def test_optional_key_is_sent_and_buys_the_fast_lane(
+        self, monkeypatch, key, headers, rate
+    ):
+        monkeypatch.setenv("NVD_API_KEY", key)
+        http = _FakeHttp(_FakeResp(json_body={"vulnerabilities": []}))
+        rates = []
+        http.set_rate = lambda host, rps: rates.append(rps)
+        self._enricher(http)._fetch(Indicator(IndicatorType.CVE, "CVE-2024-1"))
+        assert http.calls[0][2]["headers"] == headers
+        assert rates == [rate]
+
 
 # ---------------------------------------------------------------------------
 # GitHub Advisory

@@ -15,13 +15,11 @@ codebase doesn't have yet; that's a deliberate follow-up.
 from __future__ import annotations
 
 import json
-import os
-from string import Template
 from typing import Optional
 
-from .constants import DEFAULT_JUDGE_MODEL, LOG
+from .constants import DEFAULT_JUDGE_MODEL
 from .enums import ThreatCategory, Verdict
-from .judge import HAS_LITELLM, CompletionClient, build_completion_client
+from .llm import CompletionClient, CompletionRequest, StructuredCall
 from .prompts import Prompts
 from .runtime import Coerce
 
@@ -30,6 +28,8 @@ class UnknownFindingInvestigator:
     """Re-judge a single ``unknown`` finding given a richer context bundle."""
 
     SCHEMA_NAME = "submit_investigation"
+    TEMPERATURE = 0.0
+    MAX_TOKENS = 1024
 
     @classmethod
     def _investigation_schema(cls) -> dict:
@@ -57,47 +57,33 @@ class UnknownFindingInvestigator:
     def __init__(
         self,
         prompts: Prompts,
+        client: CompletionClient,
         model: str = DEFAULT_JUDGE_MODEL,
-        temperature: float = 0.0,
-        max_tokens: int = 1024,
-        client: Optional[CompletionClient] = None,
     ):
         self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self._system = prompts.investigator_system
-        self._user_template = Template(prompts.investigator_user_template)
-        self._client = client or build_completion_client()
-        self._schema = self._investigation_schema()
-
-    @property
-    def auth_mode(self) -> str:
-        return type(self._client).__name__
+        self._llm = StructuredCall(
+            "investigator",
+            client,
+            CompletionRequest(
+                model=model,
+                system=prompts.investigator_system,
+                user=prompts.investigator_user_template,
+                schema=self._investigation_schema(),
+                schema_name=self.SCHEMA_NAME,
+                max_tokens=self.MAX_TOKENS,
+                temperature=self.TEMPERATURE,
+            ),
+        )
 
     def investigate(self, collector: str, finding: dict) -> Optional[dict]:
         """Return a fresh judgment
         ``{verdict, category, confidence, reasoning, remediation}`` (verdict and
         category as enums) or None on failure. Never raises."""
-        user = self._user_template.safe_substitute(
+        parsed = self._llm.ask_or_none(
             collector=collector,
             finding=json.dumps(finding, ensure_ascii=False, default=str),
         )
-        try:
-            parsed = self._client.complete_structured(
-                model=self.model,
-                system=self._system,
-                user=user,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                schema=self._schema,
-                schema_name=self.SCHEMA_NAME,
-            )
-        except Exception as exc:
-            LOG.warning(
-                "investigator failed error=%s msg=%s",
-                type(exc).__name__,
-                str(exc)[:200],
-            )
+        if parsed is None:
             return None
         try:
             confidence = float(parsed.get("confidence") or 0.0)
@@ -118,37 +104,3 @@ class UnknownFindingInvestigator:
             "reasoning": str(parsed.get("reasoning") or "")[:500],
             "remediation": str(parsed.get("remediation") or "")[:2000],
         }
-
-
-def build_investigator(
-    args, prompts: Prompts
-) -> "Optional[UnknownFindingInvestigator]":
-    """Build the investigator when enabled and credentials exist. Returns None
-    (investigation disabled) otherwise — the same credential rule as the
-    judge, since it needs an LLM client."""
-    if getattr(args, "no_investigate", False):
-        return None
-    if not prompts.investigator_system:
-        LOG.warning("investigator prompt missing from prompts file; disabled")
-        return None
-    has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
-    has_api_key = bool(
-        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    )
-    if not has_oauth and not has_api_key:
-        return None
-    if not has_oauth and not HAS_LITELLM:
-        return None
-    try:
-        investigator = UnknownFindingInvestigator(
-            prompts=prompts, model=args.judge_model
-        )
-    except RuntimeError as exc:
-        LOG.warning("UnknownFindingInvestigator unavailable (%s); disabled", exc)
-        return None
-    LOG.info(
-        "investigator auth_mode=%s model=%s",
-        investigator.auth_mode,
-        investigator.model,
-    )
-    return investigator

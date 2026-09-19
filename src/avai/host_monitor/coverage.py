@@ -10,12 +10,10 @@ structured-output path, exactly like :class:`IncidentNarrator`.
 from __future__ import annotations
 
 import json
-import os
-from string import Template
 from typing import Optional
 
-from .constants import DEFAULT_NARRATIVE_MODEL, LOG
-from .judge import HAS_LITELLM, CompletionClient, build_completion_client
+from .constants import DEFAULT_NARRATIVE_MODEL
+from .llm import CompletionClient, CompletionRequest, StructuredCall
 from .prompts import Prompts
 
 
@@ -25,6 +23,8 @@ class YaraCoverageAssessor:
 
     SCHEMA_NAME = "submit_coverage"
     POSTURES = ("well_covered", "partial", "thin")
+    TEMPERATURE = 0.2
+    MAX_TOKENS = 1024
 
     @classmethod
     def _coverage_schema(cls) -> dict:
@@ -51,22 +51,23 @@ class YaraCoverageAssessor:
     def __init__(
         self,
         prompts: Prompts,
+        client: CompletionClient,
         model: str = DEFAULT_NARRATIVE_MODEL,
-        temperature: float = 0.2,
-        max_tokens: int = 1024,
-        client: Optional[CompletionClient] = None,
     ):
         self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self._system = prompts.coverage_system
-        self._user_template = Template(prompts.coverage_user_template)
-        self._client = client or build_completion_client()
-        self._schema = self._coverage_schema()
-
-    @property
-    def auth_mode(self) -> str:
-        return type(self._client).__name__
+        self._llm = StructuredCall(
+            "coverage assessor",
+            client,
+            CompletionRequest(
+                model=model,
+                system=prompts.coverage_system,
+                user=prompts.coverage_user_template,
+                schema=self._coverage_schema(),
+                schema_name=self.SCHEMA_NAME,
+                max_tokens=self.MAX_TOKENS,
+                temperature=self.TEMPERATURE,
+            ),
+        )
 
     def assess(self, ruleset: dict, host: dict) -> Optional[dict]:
         """Return ``{posture, headline, summary, gaps[], recommendations[]}``
@@ -74,26 +75,11 @@ class YaraCoverageAssessor:
         failure must not abort the cycle."""
         if not ruleset or not ruleset.get("rules_loaded"):
             return None
-        user = self._user_template.safe_substitute(
+        parsed = self._llm.ask_or_none(
             ruleset=json.dumps(ruleset, ensure_ascii=False),
             host=json.dumps(host, ensure_ascii=False),
         )
-        try:
-            parsed = self._client.complete_structured(
-                model=self.model,
-                system=self._system,
-                user=user,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                schema=self._schema,
-                schema_name=self.SCHEMA_NAME,
-            )
-        except Exception as exc:
-            LOG.warning(
-                "coverage assessor failed error=%s msg=%s",
-                type(exc).__name__,
-                str(exc)[:200],
-            )
+        if parsed is None:
             return None
         posture = str(parsed.get("posture") or "").lower()
         if posture not in self.POSTURES:
@@ -130,29 +116,3 @@ class YaraCoverageAssessor:
                 }
             )
         return out[:12]
-
-
-def build_coverage_assessor(args, prompts: Prompts) -> "Optional[YaraCoverageAssessor]":
-    """Build the coverage assessor when enabled and credentials exist.
-    Returns None (assessment disabled) otherwise — the same credential rule as
-    the judge/narrator, since it needs an LLM client."""
-    if getattr(args, "no_coverage", False):
-        return None
-    if not prompts.coverage_system:
-        LOG.warning("coverage prompt missing from prompts file; assessment disabled")
-        return None
-    has_oauth = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"))
-    has_api_key = bool(
-        os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY")
-    )
-    if not has_oauth and not has_api_key:
-        return None
-    if not has_oauth and not HAS_LITELLM:
-        return None
-    try:
-        assessor = YaraCoverageAssessor(prompts=prompts, model=args.narrative_model)
-    except RuntimeError as exc:
-        LOG.warning("YaraCoverageAssessor unavailable (%s); assessment disabled", exc)
-        return None
-    LOG.info("coverage auth_mode=%s model=%s", assessor.auth_mode, assessor.model)
-    return assessor

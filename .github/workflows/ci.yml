@@ -41,7 +41,9 @@ jobs:
 
       - name: Lint (ruff)
         run: |
-          pip install ruff
+          # ruff 0.16 turned on many more default rules; 0.15 is the last one
+          # the tree is clean under. Raise the pin in its own change.
+          pip install "ruff<0.16"
           ruff check .
 
       - name: Test

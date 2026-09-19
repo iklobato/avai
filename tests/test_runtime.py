@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import plistlib
 import sqlite3
+import subprocess
 import sys
 
 import pytest
@@ -13,6 +15,7 @@ from avai.host_monitor.runtime import (
     Digest,
     ExternalSqliteReader,
     FrozenClock,
+    HostPaths,
 )
 
 
@@ -60,6 +63,24 @@ class TestCommandRunner:
         runner = CommandRunner()
         assert runner.exists(sys.executable) or runner.exists("python3")
         assert runner.exists("this-binary-does-not-exist-xyz") is False
+
+    def test_capture_returns_both_streams_whatever_the_exit_code(self):
+        script = "import sys; print('out'); sys.stderr.write('err'); sys.exit(4)"
+        out = CommandRunner().capture([sys.executable, "-c", script], timeout=10)
+        assert out == ("out\n", "err", False)
+
+    def test_capture_keeps_partial_output_on_timeout(self, monkeypatch):
+        # TimeoutExpired carries bytes even for a text-mode run.
+        def run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, 1, output=b"early\n", stderr=None)
+
+        monkeypatch.setattr(subprocess, "run", run)
+        out = CommandRunner().capture(["tcpdump"], timeout=1)
+        assert out == ("early\n", "", True)
+
+    def test_capture_missing_binary_raises(self):
+        with pytest.raises(FileNotFoundError):
+            CommandRunner().capture(["this-binary-does-not-exist-xyz"], timeout=1)
 
 
 class TestClock:
@@ -125,3 +146,17 @@ class TestExternalSqliteReader:
 
         rows = list(ExternalSqliteReader().rows(db, "items", ["id", "name"]))
         assert rows == [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]
+
+
+class TestHostPaths:
+    def test_read_plist_skips_malformed_xml(self, tmp_path):
+        # plistlib raises expat's ExpatError here, which is not a ValueError.
+        # A GitHub macOS runner ships a system LaunchAgent like this.
+        bad = tmp_path / "bad.plist"
+        bad.write_bytes(b"<?xml version=1.0?>\n<plist/>")
+        assert HostPaths.read_plist(bad) is None
+
+    def test_read_plist_reads_a_dict(self, tmp_path):
+        good = tmp_path / "good.plist"
+        good.write_bytes(plistlib.dumps({"Label": "com.example"}))
+        assert HostPaths.read_plist(good) == {"Label": "com.example"}

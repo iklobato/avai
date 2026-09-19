@@ -21,7 +21,11 @@ from pathlib import Path
 import pytest
 
 import avai.host_monitor as hm
-from avai.host_monitor import LinuxLaunchItemsCollector
+from avai.host_monitor.collectors import (
+    LinuxAuthEventsCollector,
+    LinuxLaunchItemsCollector,
+)
+from avai.host_monitor.collectors.persistence import CrontabReader, SystemdUnitReader
 from avai.host_monitor.runtime import HostPaths
 
 # HOST_PREFIX path translation, the Linux launch_items collector, and the
@@ -179,9 +183,28 @@ class TestLinuxLaunchItemsCollect:
         assert len(rows) == 1
         assert rows[0]["program"] == "/etc/version"  # /etc wins
 
+    def test_reads_every_cron_source_after_the_units(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+        _write_unit(
+            tmp_path, "/etc/systemd/system", "a.service", "[Service]\nExecStart=/a\n"
+        )
+        _write_unit(tmp_path, "/etc", "crontab", "0 1 * * * root /sys-job\n")
+        _write_unit(tmp_path, "/etc/cron.d", "drop", "@daily nobody /drop-job\n")
+        _write_unit(tmp_path, "/etc/cron.d", ".placeholder", "* * * * * root /no\n")
+        _write_unit(
+            tmp_path, "/var/spool/cron/crontabs", "alice", "*/5 * * * * /alice-job\n"
+        )
+        rows = list(LinuxLaunchItemsCollector().collect())
+        assert [(r["scope"], r["user_name"], r["program"]) for r in rows] == [
+            ("system_service", None, "/a"),
+            ("system_crontab", "root", "/sys-job"),
+            ("system_crontab_d", "nobody", "/drop-job"),
+            ("user_crontab", "alice", "/alice-job"),
+        ]
+
 
 # ---------------------------------------------------------------------------
-# _unit_row parsing
+# SystemdUnitReader.unit_row parsing
 # ---------------------------------------------------------------------------
 
 
@@ -189,19 +212,19 @@ class TestUnitRow:
     def test_parses_restart_always_as_keep_alive(self, tmp_path):
         p = tmp_path / "x.service"
         p.write_text("[Service]\nExecStart=/bin/x\nRestart=always\n")
-        row = LinuxLaunchItemsCollector._unit_row("system_service", p)
+        row = SystemdUnitReader.unit_row("system_service", p)
         assert row["keep_alive"] == 1
 
     def test_restart_no_is_not_keep_alive(self, tmp_path):
         p = tmp_path / "x.service"
         p.write_text("[Service]\nExecStart=/bin/x\nRestart=no\n")
-        row = LinuxLaunchItemsCollector._unit_row("system_service", p)
+        row = SystemdUnitReader.unit_row("system_service", p)
         assert row["keep_alive"] == 0
 
     def test_timer_unit_uses_on_calendar_as_program(self, tmp_path):
         p = tmp_path / "x.timer"
         p.write_text("[Timer]\nOnCalendar=daily\n")
-        row = LinuxLaunchItemsCollector._unit_row("system_timer", p)
+        row = SystemdUnitReader.unit_row("system_timer", p)
         assert row["program"] == "daily"
 
     def test_malformed_unit_file_returns_none(self, tmp_path):
@@ -211,14 +234,14 @@ class TestUnitRow:
         p.write_text("this is not a valid ini file at all\n%%%\n")
         # Either None or a row — but never an exception.
         try:
-            row = LinuxLaunchItemsCollector._unit_row("system_service", p)
+            row = SystemdUnitReader.unit_row("system_service", p)
         except Exception as exc:  # noqa: BLE001
-            pytest.fail(f"_unit_row raised on malformed input: {exc!r}")
+            pytest.fail(f"unit_row raised on malformed input: {exc!r}")
         assert row is None or isinstance(row, dict)
 
 
 # ---------------------------------------------------------------------------
-# _cron_rows parsing
+# CrontabReader.file_rows parsing
 # ---------------------------------------------------------------------------
 
 
@@ -226,9 +249,7 @@ class TestCronRows:
     def test_system_crontab_with_user_column(self, tmp_path):
         p = tmp_path / "crontab"
         p.write_text("0 5 * * * root /usr/bin/backup.sh\n")
-        rows = list(
-            LinuxLaunchItemsCollector._cron_rows("system_crontab", p, has_user_col=True)
-        )
+        rows = list(CrontabReader.file_rows("system_crontab", p))
         assert len(rows) == 1
         assert rows[0]["user_name"] == "root"
         assert rows[0]["program"] == "/usr/bin/backup.sh"
@@ -236,20 +257,14 @@ class TestCronRows:
     def test_user_crontab_without_user_column(self, tmp_path):
         p = tmp_path / "alice"
         p.write_text("*/5 * * * * /home/alice/poll.sh\n")
-        rows = list(
-            LinuxLaunchItemsCollector._cron_rows(
-                "user_crontab", p, has_user_col=False, default_user="alice"
-            )
-        )
+        rows = list(CrontabReader.file_rows("user_crontab", p, owner="alice"))
         assert rows[0]["user_name"] == "alice"
         assert rows[0]["program"] == "/home/alice/poll.sh"
 
     def test_reboot_keyword_sets_run_at_load(self, tmp_path):
         p = tmp_path / "crontab"
         p.write_text("@reboot root /opt/startup\n")
-        rows = list(
-            LinuxLaunchItemsCollector._cron_rows("system_crontab", p, has_user_col=True)
-        )
+        rows = list(CrontabReader.file_rows("system_crontab", p))
         assert rows[0]["run_at_load"] == 1
 
     def test_comments_blanks_and_env_lines_skipped(self, tmp_path):
@@ -261,28 +276,26 @@ class TestCronRows:
             "PATH=/usr/bin:/bin\n"
             "0 0 * * * root /real/job\n"
         )
-        rows = list(
-            LinuxLaunchItemsCollector._cron_rows("system_crontab", p, has_user_col=True)
-        )
+        rows = list(CrontabReader.file_rows("system_crontab", p))
         # Only the one real job — comment, blank, and 2 env lines dropped.
         assert len(rows) == 1
         assert rows[0]["program"] == "/real/job"
+
+    def test_env_line_long_enough_to_look_like_a_job_is_skipped(self, tmp_path):
+        # Six tokens would pass the field count of a user crontab line.
+        p = tmp_path / "alice"
+        p.write_text('MAILTO="ops team at example dot com"\n')
+        assert list(CrontabReader.file_rows("user_crontab", p, owner="alice")) == []
 
     def test_truncated_line_is_skipped_not_crashed(self, tmp_path):
         # A line with too few fields must be skipped, not IndexError.
         p = tmp_path / "crontab"
         p.write_text("0 5 *\n")  # only 3 of 5 schedule fields
-        rows = list(
-            LinuxLaunchItemsCollector._cron_rows("system_crontab", p, has_user_col=True)
-        )
+        rows = list(CrontabReader.file_rows("system_crontab", p))
         assert rows == []
 
     def test_nonexistent_file_yields_nothing(self, tmp_path):
-        rows = list(
-            LinuxLaunchItemsCollector._cron_rows(
-                "system_crontab", tmp_path / "missing", has_user_col=True
-            )
-        )
+        rows = list(CrontabReader.file_rows("system_crontab", tmp_path / "missing"))
         assert rows == []
 
 
@@ -301,7 +314,7 @@ class TestLinuxAuthEventsJournalDir:
 
     def test_no_directory_flag_without_prefix(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
-        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector()._cmd()
         assert "--directory" not in cmd
 
     def test_prefers_persistent_journal(self, monkeypatch, tmp_path):
@@ -310,7 +323,7 @@ class TestLinuxAuthEventsJournalDir:
         runtime = tmp_path / "run" / "log" / "journal"
         persistent.mkdir(parents=True)
         runtime.mkdir(parents=True)
-        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector()._cmd()
         assert self._directory_arg(cmd) == str(persistent)
 
     def test_falls_back_to_runtime_journal(self, monkeypatch, tmp_path):
@@ -318,12 +331,95 @@ class TestLinuxAuthEventsJournalDir:
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         runtime = tmp_path / "run" / "log" / "journal"
         runtime.mkdir(parents=True)
-        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector()._cmd()
         assert self._directory_arg(cmd) == str(runtime)
 
     def test_no_directory_flag_when_no_host_journal_present(
         self, monkeypatch, tmp_path
     ):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
-        cmd = hm.LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector()._cmd()
         assert "--directory" not in cmd
+
+
+class TestLogTailCollector:
+    """Generic journald + file log capture. Parsing is pure logic, unit-
+    testable without journalctl or a real /var/log."""
+
+    def test_parse_journal_maps_fields(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        row = LogTailCollector._parse_journal(
+            '{"MESSAGE":"Accepted password","PRIORITY":"6",'
+            '"_SYSTEMD_UNIT":"ssh.service","_PID":"42",'
+            '"__REALTIME_TIMESTAMP":"1700000000000000"}'
+        )
+        assert row["source"] == "journald"
+        assert row["unit"] == "ssh.service"
+        assert row["level"] == "info"
+        assert row["pid"] == 42
+        assert row["message"] == "Accepted password"
+        assert row["event_timestamp"].startswith("2023-11-14T")
+
+    def test_parse_journal_decodes_binary_message_array(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        # journald encodes a non-UTF-8 MESSAGE as an array of byte values.
+        row = LogTailCollector._parse_journal('{"MESSAGE":[104,105],"PRIORITY":"3"}')
+        assert row["message"] == "hi"
+        assert row["level"] == "err"
+
+    def test_parse_journal_bad_line_is_none(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        assert LogTailCollector._parse_journal("not json") is None
+
+    def test_parse_journal_unknown_priority_has_no_level(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        assert LogTailCollector._parse_journal('{"MESSAGE":"x"}')["level"] is None
+
+    def test_sniff_text_level(self):
+        from avai.host_monitor.collectors import _sniff_text_level
+
+        assert _sniff_text_level("dpkg: ERROR failed to configure") == "err"
+        assert _sniff_text_level("a warning was issued") == "warning"
+        assert _sniff_text_level("FATAL: disk full") == "crit"
+        assert _sniff_text_level("status installed openssl") is None
+        # Regression: "error" inside an identifier is NOT an error — a dpkg
+        # line about the libgpg-error-dev package used to be mis-tagged err,
+        # which then dominated the log-summary "most errors" ranking.
+        assert _sniff_text_level("status unpacked libgpg-error-dev:amd64") is None
+
+    def test_tail_file_yields_last_lines_in_order(self, tmp_path):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        f = tmp_path / "agent.log"
+        f.write_text("\n".join(f"line {i}" for i in range(10)) + "\n")
+        rows = list(LogTailCollector(files=[str(f)])._tail_file(str(f)))
+        assert [r["unit"] for r in rows] == ["agent.log"] * 10
+        assert rows[0]["source"] == str(f)
+        assert rows[0]["message"] == "line 0"
+        assert rows[-1]["message"] == "line 9"
+
+    def test_missing_file_is_skipped_silently(self):
+        from avai.host_monitor.collectors import LogTailCollector
+
+        assert list(LogTailCollector()._tail_file("/no/such/path.log")) == []
+
+    def test_collect_without_journalctl_reads_configured_files(
+        self, tmp_path, monkeypatch
+    ):
+        import shutil
+
+        import avai.host_monitor.collectors as col
+
+        f = tmp_path / "x.log"
+        f.write_text("boom ERROR happened\n")
+        monkeypatch.setattr(shutil, "which", lambda _b: None)  # no journalctl
+        c = col.LogTailCollector(files=[str(f)])
+        rows = list(c.collect())
+        assert len(rows) == 1
+        assert rows[0]["level"] == "err"
+        assert rows[0]["message"] == "boom ERROR happened"
+        assert c.judge_enabled is False  # bulk logs aren't LLM-judged

@@ -19,6 +19,7 @@ from avai.host_monitor.exposure_collectors import (
     WhoParser,
     WindowsCertParser,
     WindowsProxyParser,
+    WindowsSessionParser,
     WindowsSharesParser,
 )
 from avai.host_monitor.hosts.linux import LinuxHost
@@ -148,6 +149,25 @@ class TestWindowsParsers:
         text = '[{"ServerName":"nas","ShareName":"data","Dialect":"3.1.1"}]'
         rows = WindowsSharesParser().parse(text)
         assert rows[0]["remote"] == "\\\\nas\\data"
+
+
+class TestWindowsSessionParser:
+    def test_rows_carry_user_session_and_logon_time(self):
+        text = (
+            " USERNAME   SESSIONNAME  ID  STATE   IDLE TIME  LOGON TIME\n"
+            ">alice      console       1  Active  none   5/1/2026 9:00 AM\n"
+            "bob\n"
+        )
+        (row,) = WindowsSessionParser().parse(text)
+        assert (row["user"], row["tty"], row["login_at"]) == (
+            "alice",
+            "console",
+            "5/1/2026 9:00 AM",
+        )
+
+    def test_two_column_line_has_no_logon_time(self):
+        (row,) = WindowsSessionParser().parse("carol rdp-tcp#0\n")
+        assert row["login_at"] is None
 
 
 class TestEnrichment:
