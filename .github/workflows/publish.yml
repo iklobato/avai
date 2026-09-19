@@ -1,0 +1,44 @@
+# Publish the wheel and the sdist to PyPI when a version tag is pushed.
+#
+# Authentication is PyPI trusted publishing (OIDC), so no token is stored in
+# the repository. It has to be authorised once, on
+# https://pypi.org/manage/project/avai-monitor/settings/publishing/ :
+#   owner iklobato, repository avai, workflow publish.yml, no environment.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    permissions:
+      # The short-lived OIDC token the publish action trades for an upload
+      # token. Nothing else in this workflow needs write access.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      # The YARA pack is VCS-ignored, but hatch force-includes it in the wheel
+      # (see [tool.hatch.build] artifacts). Building without it would quietly
+      # publish a wheel with the one bundled rule instead of the whole pack.
+      - name: Fetch the YARA pack
+        run: python scripts/update_rules.py
+
+      - name: Build
+        run: |
+          # hatchling 1.28 writes Metadata-Version 2.5: twine refuses to
+          # validate it, and every avai wheel on PyPI so far is 2.4. Raise
+          # the pin in its own change, once 2.5 is known to be accepted.
+          echo "hatchling==1.27.0" > "${RUNNER_TEMP}/constraint.txt"
+          pip install build twine
+          PIP_CONSTRAINT="${RUNNER_TEMP}/constraint.txt" python -m build
+          twine check dist/*
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
