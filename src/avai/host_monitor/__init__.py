@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from .constants import DEFAULT_DB_PATH
 from .enums import FeedbackLabel
-from .main import main
+from .main import MonitorApp
 from .models import (
     AuthEventRow,
     Base,
@@ -99,5 +99,5 @@ __all__ = [
     "WifiStateRow",
     "YaraCoverageRow",
     "YaraStatusRow",
-    "main",
+    "MonitorApp",
 ]

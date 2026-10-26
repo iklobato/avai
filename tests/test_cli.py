@@ -37,7 +37,7 @@ class TestHelpFlag:
 class TestDispatch:
     @pytest.mark.parametrize("alias", ["monitor", "start", "scan"])
     def test_monitor_aliases_route_to_host_monitor(self, alias):
-        with patch("avai.host_monitor.main", return_value=0) as m:
+        with patch("avai.host_monitor.main.MonitorApp.main", return_value=0) as m:
             rc = main([alias, "--once"])
         assert rc == 0
         m.assert_called_once_with()
@@ -51,7 +51,10 @@ class TestDispatch:
 
     @pytest.mark.parametrize(
         "cmd,target",
-        [("monitor", "avai.host_monitor"), ("dashboard", "avai.dashboard")],
+        [
+            ("monitor", "avai.host_monitor.main.MonitorApp"),
+            ("dashboard", "avai.dashboard"),
+        ],
     )
     def test_remaining_argv_passed_through(self, cmd, target):
         """sys.argv is rewritten so the called main() sees only its
@@ -196,9 +199,9 @@ class TestDefaultArgs:
     def test_monitor_defaults(self):
         from pathlib import Path
 
-        from avai.host_monitor.main import _build_parser
+        from avai.host_monitor.main import MonitorArgs
 
-        ns = _build_parser().parse_args([])
+        ns = MonitorArgs().parser().parse_args([])
         assert ns.db == str(Path.home() / ".avai" / "avai.db")
         assert ns.interval == 300
         assert ns.judge_max_per_collector == 25

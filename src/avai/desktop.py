@@ -11,6 +11,7 @@ install it if missing. The dashboard + monitor run headless without it.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import sys
@@ -65,14 +66,15 @@ def _start_monitor(db: str, api_key: str | None):
     """Build the monitor in-process and run its loop on a daemon thread.
     Returns the Runner so the caller can ``request_shutdown()`` on window close
     (which also terminates the monitor's journalctl -f / eslogger children)."""
-    from avai.host_monitor.main import _build_parser, build_runner
+    from avai.host_monitor.constants import LOGGER_NAME
+    from avai.host_monitor.main import MonitorArgs, MonitorWiring
 
     if api_key:
         os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
     # No key yet -> viz-only (NullJudge); the settings screen enables the judge.
     argv = ["--db", db] if api_key else ["--db", db, "--no-judge"]
-    args = _build_parser().parse_args(argv)
-    runner, engine = build_runner(args)
+    args = MonitorArgs().parser().parse_args(argv)
+    runner, engine = MonitorWiring(args, logging.getLogger(LOGGER_NAME)).build()
 
     def _run() -> None:
         runner.start_streaming()

@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import os
-from collections.abc import Mapping
 from pathlib import Path
-from types import MappingProxyType
 
 from .enums import Browser, LaunchScope
 
 # The logger every host_monitor component writes to.
 LOGGER_NAME = "host_monitor"
-LOG = logging.getLogger(LOGGER_NAME)
 
 
 _PKG_DIR = Path(__file__).resolve().parent.parent
@@ -115,29 +111,27 @@ LAUNCH_DIRS: tuple[tuple[LaunchScope, str], ...] = (
 )
 
 
-BROWSER_PROFILES: Mapping[Browser, tuple[str, ...]] = MappingProxyType(
-    {
-        Browser.CHROME: ("~/Library/Application Support/Google/Chrome",),
-        Browser.CHROME_BETA: ("~/Library/Application Support/Google/Chrome Beta",),
-        Browser.CHROMIUM: ("~/Library/Application Support/Chromium",),
-        Browser.BRAVE: ("~/Library/Application Support/BraveSoftware/Brave-Browser",),
-        Browser.EDGE: ("~/Library/Application Support/Microsoft Edge",),
-        Browser.ARC: ("~/Library/Application Support/Arc/User Data",),
-        Browser.VIVALDI: ("~/Library/Application Support/Vivaldi",),
-        Browser.FIREFOX: ("~/Library/Application Support/Firefox",),
-    }
+# (browser, profile directory templates), per platform.
+BROWSER_PROFILES = (
+    (Browser.CHROME, ("~/Library/Application Support/Google/Chrome",)),
+    (Browser.CHROME_BETA, ("~/Library/Application Support/Google/Chrome Beta",)),
+    (Browser.CHROMIUM, ("~/Library/Application Support/Chromium",)),
+    (Browser.BRAVE, ("~/Library/Application Support/BraveSoftware/Brave-Browser",)),
+    (Browser.EDGE, ("~/Library/Application Support/Microsoft Edge",)),
+    (Browser.ARC, ("~/Library/Application Support/Arc/User Data",)),
+    (Browser.VIVALDI, ("~/Library/Application Support/Vivaldi",)),
+    (Browser.FIREFOX, ("~/Library/Application Support/Firefox",)),
 )
 
 
-BROWSER_PROFILES_LINUX: Mapping[Browser, tuple[str, ...]] = MappingProxyType(
-    {
-        Browser.CHROME: ("~/.config/google-chrome",),
-        Browser.CHROMIUM: ("~/.config/chromium",),
-        Browser.BRAVE: ("~/.config/BraveSoftware/Brave-Browser",),
-        Browser.EDGE: ("~/.config/microsoft-edge",),
-        Browser.VIVALDI: ("~/.config/vivaldi",),
-        Browser.FIREFOX: ("~/.mozilla/firefox",),
-    }
+# (browser, profile directory templates), per platform.
+BROWSER_PROFILES_LINUX = (
+    (Browser.CHROME, ("~/.config/google-chrome",)),
+    (Browser.CHROMIUM, ("~/.config/chromium",)),
+    (Browser.BRAVE, ("~/.config/BraveSoftware/Brave-Browser",)),
+    (Browser.EDGE, ("~/.config/microsoft-edge",)),
+    (Browser.VIVALDI, ("~/.config/vivaldi",)),
+    (Browser.FIREFOX, ("~/.mozilla/firefox",)),
 )
 
 

@@ -65,6 +65,10 @@ def _rules_dir(tmp_path: Path) -> Path:
 
 
 class TestFileScanCollector:
+    def _scan(self, fs: _FakeFs, rules_dir: Path) -> list[dict]:
+        compiler = YaraRulesetCompiler(rules_dir, logging.getLogger("test"))
+        return list(FileScanCollector.create(fs, compiler).collect())
+
     def test_match_in_bin_dir_emits_row(self, tmp_path):
         bindir = tmp_path / "bin"
         bindir.mkdir()
@@ -72,7 +76,7 @@ class TestFileScanCollector:
         hit.write_text(_MARKER)
         (bindir / "clean.txt").write_text("nothing to see")
 
-        compiler = YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
+        compiler = YaraRulesetCompiler(_rules_dir(tmp_path), logging.getLogger("test"))
         rows = list(FileScanCollector.create(_FakeFs([bindir]), compiler).collect())
 
         assert len(rows) == 1
@@ -89,11 +93,7 @@ class TestFileScanCollector:
         bindir.mkdir()
         (bindir / "clean.bin").write_text("benign content")
         fs = _FakeFs(bin_dirs=[bindir])
-        rows = list(
-            FileScanCollector.create(
-                fs, YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
-            ).collect()
-        )
+        rows = self._scan(fs, _rules_dir(tmp_path))
         assert rows == []
 
     def test_no_rules_dir_yields_nothing(self, tmp_path):
@@ -104,9 +104,7 @@ class TestFileScanCollector:
         # Point at a dir with no .yar files → compile returns None → no scan.
         empty = tmp_path / "empty"
         empty.mkdir()
-        rows = list(
-            FileScanCollector.create(fs, YaraRulesetCompiler(empty, C.LOG)).collect()
-        )
+        rows = self._scan(fs, empty)
         assert rows == []
 
     def test_oversized_file_is_skipped(self, tmp_path, monkeypatch):
@@ -115,11 +113,7 @@ class TestFileScanCollector:
         (bindir / "evil.bin").write_text(_MARKER)
         monkeypatch.setattr(C, "YARA_MAX_FILE_BYTES", 1)  # smaller than the marker
         fs = _FakeFs(bin_dirs=[bindir])
-        rows = list(
-            FileScanCollector.create(
-                fs, YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
-            ).collect()
-        )
+        rows = self._scan(fs, _rules_dir(tmp_path))
         assert rows == []
 
     def test_unreadable_file_does_not_abort_scan(self, tmp_path):
@@ -132,11 +126,7 @@ class TestFileScanCollector:
         good = bindir / "evil.bin"
         good.write_text(_MARKER)
         fs = _FakeFs(bin_dirs=[bindir])
-        rows = list(
-            FileScanCollector.create(
-                fs, YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
-            ).collect()
-        )
+        rows = self._scan(fs, _rules_dir(tmp_path))
         assert [r["path"] for r in rows] == [str(good)]
 
     def test_unreadable_target_dir_is_skipped(self, tmp_path):
@@ -156,7 +146,10 @@ class TestFileScanCollector:
             fs = _FakeFs(bin_dirs=[unreadable, good_dir])
             rows = list(
                 FileScanCollector.create(
-                    fs, YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
+                    fs,
+                    YaraRulesetCompiler(
+                        _rules_dir(tmp_path), logging.getLogger("test")
+                    ),
                 ).collect()
             )
         finally:
@@ -168,11 +161,7 @@ class TestFileScanCollector:
         exe.parent.mkdir(parents=True)
         exe.write_text(_MARKER)
         fs = _FakeFs(app_exes=[exe])
-        rows = list(
-            FileScanCollector.create(
-                fs, YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
-            ).collect()
-        )
+        rows = self._scan(fs, _rules_dir(tmp_path))
         assert len(rows) == 1
         assert rows[0]["scan_source"] == "app_bundle"
 
@@ -189,11 +178,7 @@ class TestFileScanCollector:
         os.utime(old, (old_epoch, old_epoch))
 
         fs = _FakeFs(homes=[home])
-        rows = list(
-            FileScanCollector.create(
-                fs, YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
-            ).collect()
-        )
+        rows = self._scan(fs, _rules_dir(tmp_path))
         assert [r["path"] for r in rows] == [str(recent)]
         assert rows[0]["scan_source"] == "downloads"
 
@@ -204,11 +189,7 @@ class TestFileScanCollector:
             (bindir / f"evil{i}.bin").write_text(_MARKER)
         monkeypatch.setattr(C, "YARA_MAX_FILES_PER_CYCLE", 1)
         fs = _FakeFs(bin_dirs=[bindir])
-        rows = list(
-            FileScanCollector.create(
-                fs, YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
-            ).collect()
-        )
+        rows = self._scan(fs, _rules_dir(tmp_path))
         assert len(rows) == 1  # only one file scanned before the cap
 
     def test_file_reached_by_two_sources_is_scanned_once(self, tmp_path):
@@ -217,11 +198,7 @@ class TestFileScanCollector:
         evil = bindir / "evil.bin"
         evil.write_text(_MARKER)
         fs = _FakeFs(bin_dirs=[bindir], app_exes=[evil])
-        rows = list(
-            FileScanCollector.create(
-                fs, YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
-            ).collect()
-        )
+        rows = self._scan(fs, _rules_dir(tmp_path))
         assert [r["scan_source"] for r in rows] == ["bin_dirs"]
 
     def test_per_cycle_cap_counts_across_sources(self, tmp_path, monkeypatch):
@@ -233,21 +210,19 @@ class TestFileScanCollector:
             exe.write_text(_MARKER)
         monkeypatch.setattr(C, "YARA_MAX_FILES_PER_CYCLE", 2)
         fs = _FakeFs(bin_dirs=[bindir], app_exes=exes)
-        rows = list(
-            FileScanCollector.create(
-                fs, YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
-            ).collect()
-        )
+        rows = self._scan(fs, _rules_dir(tmp_path))
         assert [Path(r["path"]).name for r in rows] == ["evil.bin", "app0"]
 
     def test_no_targets_yields_nothing(self, tmp_path: Path) -> None:
-        compiler = YaraRulesetCompiler(_rules_dir(tmp_path), C.LOG)
+        compiler = YaraRulesetCompiler(_rules_dir(tmp_path), logging.getLogger("test"))
         rows = list(FileScanCollector.create(_FakeFs(), compiler).collect())
         assert rows == []
 
     def test_bundled_eicar_rules_compile(self):
         # Guards against a broken shipped rule silently disabling scanning.
-        rules, stats = YaraRulesetCompiler(C.YARA_RULES_DIR, C.LOG).compile()
+        rules, stats = YaraRulesetCompiler(
+            C.YARA_RULES_DIR, logging.getLogger("test")
+        ).compile()
         assert rules is not None
         assert stats["rules_loaded"] >= 1
         assert "bundled" in stats["sources"]
@@ -278,7 +253,7 @@ class TestYaraRulesetCompiler:
 
     def test_summary_counts_sources_categories_and_skips(self, tmp_path):
         d = self._tree(tmp_path)
-        _rules, stats = YaraRulesetCompiler(d, C.LOG).compile()
+        _rules, stats = YaraRulesetCompiler(d, logging.getLogger("test")).compile()
         assert {k: v for k, v in stats.items() if k != "inventory"} == {
             "rules_loaded": 4,
             "files_loaded": 3,
@@ -320,7 +295,9 @@ class TestYaraRulesetCompiler:
         ]
 
     def test_same_file_stem_gets_its_own_namespace(self, tmp_path):
-        rules, _stats = YaraRulesetCompiler(self._tree(tmp_path), C.LOG).compile()
+        rules, _stats = YaraRulesetCompiler(
+            self._tree(tmp_path), logging.getLogger("test")
+        ).compile()
         hits = {(m.namespace, m.rule) for m in rules.match(data=b"")}
         assert hits == {
             ("gen_a", "a1"),
@@ -330,13 +307,17 @@ class TestYaraRulesetCompiler:
         }
 
     def test_missing_dir_gives_no_rules_and_an_empty_summary(self, tmp_path):
-        rules, stats = YaraRulesetCompiler(tmp_path / "absent", C.LOG).compile()
+        rules, stats = YaraRulesetCompiler(
+            tmp_path / "absent", logging.getLogger("test")
+        ).compile()
         assert rules is None
         assert (stats["files_loaded"], stats["inventory"]) == (0, [])
 
     def test_only_broken_files_gives_no_rules(self, tmp_path):
         (tmp_path / "bad.yar").write_text("rule { nope")
-        rules, stats = YaraRulesetCompiler(tmp_path, C.LOG).compile()
+        rules, stats = YaraRulesetCompiler(
+            tmp_path, logging.getLogger("test")
+        ).compile()
         assert rules is None
         assert stats["skip_reasons"] == {"other": 1}
 
@@ -361,7 +342,8 @@ class TestYaraExternals:
         (bindir / "innocent.txt").write_text("anything")
         rows = list(
             FileScanCollector.create(
-                _FakeFs(bin_dirs=[bindir]), YaraRulesetCompiler(rules, C.LOG)
+                _FakeFs(bin_dirs=[bindir]),
+                YaraRulesetCompiler(rules, logging.getLogger("test")),
             ).collect()
         )
         assert [Path(r["path"]).name for r in rows] == ["evil.bin"]
@@ -374,7 +356,8 @@ class TestYaraExternals:
         (bindir / "notes.txt").write_text("plain text, not an exe")
         rows = list(
             FileScanCollector.create(
-                _FakeFs(bin_dirs=[bindir]), YaraRulesetCompiler(rules, C.LOG)
+                _FakeFs(bin_dirs=[bindir]),
+                YaraRulesetCompiler(rules, logging.getLogger("test")),
             ).collect()
         )
         assert [Path(r["path"]).name for r in rows] == ["real.exe"]
@@ -390,7 +373,8 @@ class TestYaraExternals:
         (bindir / "evil.bin").write_text(_MARKER)
         rows = list(
             FileScanCollector.create(
-                _FakeFs(bin_dirs=[bindir]), YaraRulesetCompiler(rules, C.LOG)
+                _FakeFs(bin_dirs=[bindir]),
+                YaraRulesetCompiler(rules, logging.getLogger("test")),
             ).collect()
         )
         assert len(rows) == 1
@@ -413,7 +397,7 @@ class TestYaraExternals:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         (bindir / "evil.bin").write_text(_MARKER)
-        compiler = YaraRulesetCompiler(d, C.LOG)
+        compiler = YaraRulesetCompiler(d, logging.getLogger("test"))
         rows = list(FileScanCollector.create(_FakeFs([bindir]), compiler).collect())
         assert any(r["rule"] == "good" for r in rows)
 
@@ -435,7 +419,8 @@ class TestMatchedStrings:
         write(f)
         return list(
             FileScanCollector.create(
-                _FakeFs(bin_dirs=[bindir]), YaraRulesetCompiler(rules, C.LOG)
+                _FakeFs(bin_dirs=[bindir]),
+                YaraRulesetCompiler(rules, logging.getLogger("test")),
             ).collect()
         )
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -11,7 +13,7 @@ from avai.host_monitor import llm
 from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
 from avai.host_monitor.judge import LlmJudge, NullJudge
 from avai.host_monitor.llm import LlmCredentials
-from avai.host_monitor.main import LlmStages, _build_parser
+from avai.host_monitor.main import LlmStageBuilder, MonitorArgs
 from avai.host_monitor.prompts import Prompts
 
 OAUTH = {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-token"}
@@ -74,12 +76,12 @@ class _StubCredentials:
 
 
 def _args(*flags):
-    return _build_parser().parse_args(list(flags))
+    return MonitorArgs().parser().parse_args(list(flags))
 
 
 def _stages(*flags, prompts=None, credentials=None):
-    return LlmStages.build(
-        _args(*flags),
+    builder = LlmStageBuilder(_args(*flags), logging.getLogger("test"))
+    return builder.build(
         prompts or Prompts.load(DEFAULT_PROMPTS_PATH),
         credentials or _StubCredentials(),
     )

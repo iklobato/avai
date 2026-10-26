@@ -314,5 +314,5 @@ class LinuxHost:
         paths = HostPaths()
         return {
             browser: [str(path) for tmpl in templates for path in paths.for_home(tmpl)]
-            for browser, templates in BROWSER_PROFILES_LINUX.items()
+            for browser, templates in BROWSER_PROFILES_LINUX
         }

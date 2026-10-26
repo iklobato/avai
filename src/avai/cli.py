@@ -1,13 +1,14 @@
 """avai CLI — subcommand dispatcher.
 
 Installed as the ``avai`` console_script. Routes ``avai monitor ...``
-to :func:`avai.host_monitor.main` and ``avai dashboard ...`` to
+to :meth:`avai.host_monitor.main.MonitorApp.main` and ``avai dashboard ...`` to
 :func:`avai.dashboard.main`. Each subcommand passes its remaining
 argv through unchanged.
 """
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Callable, Optional
@@ -48,10 +49,11 @@ def _print_usage(stream=None) -> None:
 def _cmd_rules(rules_dir: Path, do_list: bool) -> int:
     """Compile the file-scanner ruleset and report what loaded — the
     user-facing answer to 'which rules are available?'. Read-only; no DB."""
-    from .host_monitor import constants
     from .host_monitor.collectors import YaraRulesetCompiler
+    from .host_monitor.constants import LOGGER_NAME
 
-    rules, _stats = YaraRulesetCompiler(rules_dir, constants.LOG).compile()
+    compiler = YaraRulesetCompiler(rules_dir, logging.getLogger(LOGGER_NAME))
+    rules, _stats = compiler.compile()
     if rules is None:
         print(f"avai: no compilable YARA rules under {rules_dir}", file=sys.stderr)
         return 1
@@ -94,10 +96,10 @@ def _cmd_install_hosts(hostname: str, remove: bool) -> int:
 
 
 def _run_monitor(rest: list[str]) -> int:
-    from .host_monitor import main as monitor_main
+    from .host_monitor.main import MonitorApp
 
     sys.argv = ["avai monitor", *rest]
-    return monitor_main()
+    return MonitorApp.main()
 
 
 def _run_dashboard(rest: list[str]) -> int:

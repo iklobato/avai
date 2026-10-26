@@ -239,7 +239,7 @@ class MacOSHost:
             LaunchItemsCollector(hint("launch_items")),
             QuarantineCollector(hint("quarantine_events")),
             BrowserExtensionsCollector.create(
-                BROWSER_PROFILES, hint("browser_extensions")
+                dict(BROWSER_PROFILES), hint("browser_extensions")
             ),
             InstalledAppsCollector(hint("installed_apps")),
         ]
