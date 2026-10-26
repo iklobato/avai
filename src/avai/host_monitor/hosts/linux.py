@@ -257,8 +257,8 @@ class LinuxHost:
             BrowserExtensionsCollector.create(
                 expanded_browser_profiles, judge_hints=h("browser_extensions")
             ),
-            LinuxSystemIntegrityCollector(
-                judge_hints=h("system_integrity"), runner=self._runner
+            LinuxSystemIntegrityCollector.create(
+                self._runner, judge_hints=h("system_integrity")
             ),
             FileIntegrityCollector(judge_hints=h("file_integrity"), watched=watched),
             FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),

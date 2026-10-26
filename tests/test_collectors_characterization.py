@@ -53,6 +53,7 @@ from avai.host_monitor.collectors import (
     UsbDevicesCollector,
     WifiCollector,
 )
+from avai.host_monitor.collectors.integrity import ServiceProbes
 from avai.host_monitor.collectors.logs import TAIL_BYTES, JournalReader, LogFileTail
 from avai.host_monitor.collectors.software import ExtensionReaders
 from avai.host_monitor.enums import Browser
@@ -554,9 +555,8 @@ class TestMacSystemIntegrity:
 
         _fake_run(monkeypatch, answer)
         monkeypatch.setattr(HostPaths, "read_plist", staticmethod(lambda p: None))
-        col = SystemIntegrityCollector(
-            services=FakeServices(0), ports=FakePorts(), processes=FakeProcesses()
-        )
+        probes = ServiceProbes(FakeServices(0), FakePorts(), FakeProcesses())
+        col = SystemIntegrityCollector(CommandRunner(), probes)
         (row,) = col.collect()
         assert row["gatekeeper_assessments_enabled"] == expected
         assert row["filevault_active"] == 1
@@ -569,9 +569,8 @@ class TestMacSystemIntegrity:
             "read_plist",
             staticmethod(lambda p: {"globalstate": 1, "stealthenabled": True}),
         )
-        col = SystemIntegrityCollector(
-            services=FakeServices(0), ports=FakePorts(), processes=FakeProcesses()
-        )
+        probes = ServiceProbes(FakeServices(0), FakePorts(), FakeProcesses())
+        col = SystemIntegrityCollector(CommandRunner(), probes)
         (row,) = col.collect()
         assert row["filevault_active"] is None
         assert row["gatekeeper_assessments_enabled"] is None
@@ -724,9 +723,7 @@ class TestFileIntegrityCollector:
     def test_present_and_missing_files(self, tmp_path):
         present = _write(tmp_path / "sudoers", "root ALL=(ALL) ALL\n")
         missing = tmp_path / "gone"
-        rows = list(
-            FileIntegrityCollector(watched=[str(present), str(missing)]).collect()
-        )
+        rows = list(FileIntegrityCollector([str(present), str(missing)]).collect())
         assert [(r["path"], r["exists_flag"]) for r in rows] == [
             (str(present), 1),
             (str(missing), 0),
@@ -777,7 +774,7 @@ class TestLayoutCollectors:
         suid = _write(tmp_path / "bin" / "passwd", "x")
         suid.chmod(0o4755)
         _write(tmp_path / "bin" / "ls", "x").chmod(0o755)
-        (row,) = SetuidFilesCollector(fs=_Fs(tmp_path)).collect()
+        (row,) = SetuidFilesCollector(_Fs(tmp_path)).collect()
         assert (row["path"], row["setuid"], row["setgid"]) == (str(suid), 1, 0)
         assert json.loads(row["raw_json"])["mode"] == oct(row["mode"])
 
@@ -928,11 +925,8 @@ class TestLinuxInstalledApps:
 @_posix_only
 class TestLinuxSystemIntegrity:
     def _collect(self, **kw):
-        col = LinuxSystemIntegrityCollector(
-            services=FakeServices(0),
-            ports=FakePorts(**kw),
-            processes=FakeProcesses(),
-        )
+        probes = ServiceProbes(FakeServices(0), FakePorts(**kw), FakeProcesses())
+        col = LinuxSystemIntegrityCollector(CommandRunner(), probes)
         (row,) = col.collect()
         return row, json.loads(row["raw_json"])
 

@@ -118,18 +118,19 @@ def test_topic_is_exposed():
 
 
 def test_macos_collector_maps_enabled_idle_service_to_on():
-    """The macOS collector, given an enabled-but-idle service, writes
-    ``..._enabled = 1`` (not 0) and keeps the live-session signal in
-    raw_json. Mac-only config commands degrade gracefully off-platform."""
+    """Enabled-but-idle writes ``_enabled = 1``; the session signal stays in raw_json."""
     import json
 
     from avai.host_monitor.collectors import SystemIntegrityCollector
+    from avai.host_monitor.collectors.integrity import ServiceProbes
+    from avai.host_monitor.runtime import CommandRunner
 
-    col = SystemIntegrityCollector(
-        services=FakeServiceSupervisor(1),
-        ports=FakePortInspector(listening=0, established=0),
-        processes=FakeProcessInspector(running=0),
+    probes = ServiceProbes(
+        FakeServiceSupervisor(1),
+        FakePortInspector(listening=0, established=0),
+        FakeProcessInspector(running=0),
     )
+    col = SystemIntegrityCollector(CommandRunner(), probes)
     row = list(col.collect())[0]
     assert row["remote_login_enabled"] == 1
     assert row["screen_sharing_enabled"] == 1

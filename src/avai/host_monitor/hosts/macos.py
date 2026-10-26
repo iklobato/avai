@@ -219,8 +219,8 @@ class MacOSHost:
             BrowserExtensionsCollector.create(
                 BROWSER_PROFILES, judge_hints=h("browser_extensions")
             ),
-            SystemIntegrityCollector(
-                judge_hints=h("system_integrity"), runner=self._runner
+            SystemIntegrityCollector.create(
+                self._runner, judge_hints=h("system_integrity")
             ),
             FileIntegrityCollector(judge_hints=h("file_integrity")),
             FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),
