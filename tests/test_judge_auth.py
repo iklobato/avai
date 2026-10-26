@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import logging
 
 from dataclasses import replace
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock, patch
 
+import litellm
 import pytest
 
 from avai.host_monitor import llm
@@ -123,6 +126,14 @@ class TestLlmStagesBuild:
         assert isinstance(stages.judge, NullJudge)
         assert _enabled(stages) == set()
 
+    def test_missing_litellm_module_turns_every_stage_off(self) -> None:
+        missing = ModuleNotFoundError("No module named 'litellm'")
+
+        stages = _stages(credentials=_StubCredentials(error=missing))
+
+        assert isinstance(stages.judge, NullJudge)
+        assert _enabled(stages) == set()
+
     def test_no_judge_also_drops_the_narrator_only(self):
         stages = _stages("--no-judge")
 
@@ -150,3 +161,42 @@ class TestLlmStagesBuild:
         stages = _stages(prompts=prompts)
 
         assert _enabled(stages) == ALL_OPTIONAL - {"verifier"}
+
+
+class TestLitellmClient:
+    REQUEST = llm.CompletionRequest(
+        model="anthropic/claude-haiku-4-5",
+        system="system",
+        user="user",
+        schema={},
+        schema_name="verdicts",
+        max_tokens=16,
+        temperature=0.0,
+    )
+
+    def test_provider_rate_limit_becomes_a_completion_error(self) -> None:
+        throttled = litellm.exceptions.RateLimitError(
+            "429 slow down", "anthropic", "claude-haiku-4-5"
+        )
+        completion = Mock(side_effect=throttled)
+        client = llm.LitellmClient(
+            llm.LitellmApi(completion, llm.LitellmApi.load().errors)
+        )
+
+        with pytest.raises(llm.CompletionError) as excinfo:
+            client.complete_structured(self.REQUEST)
+
+        assert str(excinfo.value).startswith("litellm call failed: ")
+        assert "429 slow down" in str(excinfo.value)
+        assert excinfo.value.__cause__ is throttled
+
+    def test_litellm_is_loaded_by_an_import_statement_the_bundler_can_see(self) -> None:
+        tree = ast.parse(Path(llm.__file__).read_text())
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+
+        assert "litellm" in imported

@@ -3,7 +3,6 @@ the structured call each stage makes."""
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 import os
@@ -53,14 +52,20 @@ class LitellmApi:
     ``LITELLM_LOG`` is set before litellm reads it at import time."""
 
     completion: Callable[..., Any]
-    error: type[Exception]
+    errors: tuple[type[Exception], ...]
 
     @classmethod
     def load(cls) -> LitellmApi:
         # Quiet litellm's per-import warnings about optional AWS deps.
         os.environ.setdefault("LITELLM_LOG", "ERROR")
-        litellm = importlib.import_module("litellm")
-        return cls(litellm.completion, litellm.exceptions.OpenAIError)
+        # A plain import statement, so PyInstaller bundles litellm.
+        import litellm
+
+        # Provider errors (RateLimitError, AuthenticationError, Timeout...)
+        # do not subclass litellm.exceptions.OpenAIError; this list has them all.
+        return cls(
+            litellm.completion, tuple(litellm.exceptions.LITELLM_EXCEPTION_TYPES)
+        )
 
 
 class LitellmClient(CompletionClient):
@@ -87,7 +92,7 @@ class LitellmClient(CompletionClient):
                 max_tokens=request.max_tokens,
                 timeout=DEFAULT_JUDGE_TIMEOUT_S,
             )
-        except self._api.error as exc:
+        except self._api.errors as exc:
             raise CompletionError(f"litellm call failed: {exc}") from exc
         self.last_usage = self._usage(response)
         return self._content(response)

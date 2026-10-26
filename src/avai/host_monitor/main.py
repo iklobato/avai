@@ -95,7 +95,7 @@ class LlmStageBuilder:
             return None
         try:
             client = credentials.client()
-        except RuntimeError as exc:
+        except (RuntimeError, ImportError) as exc:
             self._logger.warning(
                 "LLM client unavailable (%s); LLM stages disabled", exc
             )
