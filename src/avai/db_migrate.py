@@ -29,7 +29,10 @@ class AlembicMigrator:
     def config(self) -> Config:
         alembic_config = Config()
         alembic_config.set_main_option("script_location", SCRIPT_LOCATION)
-        alembic_config.set_main_option("sqlalchemy.url", self._db_url)
+        # Alembic stores options in a configparser, where % starts an
+        # interpolation; SQLAlchemy 2.1 renders Windows paths percent-encoded.
+        escaped_url = self._db_url.replace("%", "%%")
+        alembic_config.set_main_option("sqlalchemy.url", escaped_url)
         return alembic_config
 
     def upgrade_to_head(self) -> None:

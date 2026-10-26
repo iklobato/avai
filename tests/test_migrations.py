@@ -131,3 +131,13 @@ def test_control_state_migration_roundtrip(tmp_path):
 
     command.downgrade(AlembicMigrator(f"sqlite:///{db}").config(), "0002_perf_indexes")
     assert "control_state" not in _tables(db)
+
+
+def test_config_keeps_a_percent_encoded_url_verbatim() -> None:
+    """SQLAlchemy 2.1 renders a Windows path as sqlite:///C%3A%5C...; alembic's
+    configparser must not read the % signs as interpolation."""
+    url = "sqlite:///C%3A%5CUsers%5Cdemo%5Cavai.db"
+
+    alembic_config = AlembicMigrator(url).config()
+
+    assert alembic_config.get_main_option("sqlalchemy.url") == url
