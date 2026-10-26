@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from avai.dashboard.queries import Page
-from avai.dashboard.queries.common import MAX_PER_PAGE
+from avai.dashboard.queries.panel_reads import MAX_PER_PAGE
 
 
 class TestPageClamps:

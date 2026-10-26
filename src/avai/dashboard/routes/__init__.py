@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from ..config import DashboardConfig
 from ..control import ControlStore
 
-_EXTENSION_KEY = "avai"
+EXTENSION_KEY = "avai"
 
 
 @dataclass(frozen=True)
@@ -23,12 +23,14 @@ class DashboardServices:
     control: ControlStore
 
     def install(self, app: Flask) -> None:
-        app.extensions[_EXTENSION_KEY] = self
+        app.extensions[EXTENSION_KEY] = self
 
 
-def services() -> DashboardServices:
-    return current_app.extensions[_EXTENSION_KEY]
+class ServiceLookup:
+    """The services the running app installed, from inside a request."""
 
+    def services(self) -> DashboardServices:
+        return current_app.extensions[EXTENSION_KEY]
 
-def read_session() -> Session:
-    return Session(services().read_engine)
+    def read_session(self) -> Session:
+        return Session(self.services().read_engine)

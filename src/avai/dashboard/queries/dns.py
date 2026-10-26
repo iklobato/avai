@@ -3,80 +3,91 @@
 from __future__ import annotations
 
 import ipaddress
+from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .common import _FLOW_SEV, Page, RowFilter, VerdictTable
+from .panel_reads import Page, RowFilter, VerdictRank, VerdictTable
 
 
-def _dns_resolution_level(server_ip, qtype) -> str:
-    """Classify *how/where* a name resolved, from the resolver it was
-    asked and the transport:
+class DnsLevel:
+    """Classify *how/where* a name resolved, from the resolver it was asked
+    and the transport:
 
-    - ``DoH (encrypted)`` — answered over DNS-over-HTTPS (we can't see the
-      name, only that the host used an encrypted resolver).
-    - ``local resolver`` — asked a private/LAN address (the router or a
-      local stub like 127.0.0.1 / mDNSResponder forwarder).
-    - ``external DNS`` — asked a public resolver directly (8.8.8.8, the
-      ISP, …), bypassing any local one.
+    - ``DoH (encrypted)``: answered over DNS-over-HTTPS (the name is hidden,
+      only that the host used an encrypted resolver is visible).
+    - ``local resolver``: asked a private/LAN address (the router or a local
+      stub like 127.0.0.1 / mDNSResponder forwarder).
+    - ``external DNS``: asked a public resolver directly (8.8.8.8, the ISP),
+      bypassing any local one.
 
-    Names served from ``/etc/hosts`` never hit the wire, so they don't
-    appear here — they're shown in the persistence & tampering section.
+    Names served from ``/etc/hosts`` never hit the wire, so they don't appear
+    here; they're shown in the persistence & tampering section.
     """
-    if qtype == "DoH":
-        return "DoH (encrypted)"
-    if not server_ip:
-        return "unknown"
-    try:
-        ip = ipaddress.ip_address(server_ip)
-    except ValueError:
-        return "unknown"
-    if ip.is_private or ip.is_loopback or ip.is_link_local:
-        return "local resolver"
-    return "external DNS"
+
+    def of(self, server_ip: str | None, qtype: str | None) -> str:
+        if qtype == "DoH":
+            return "DoH (encrypted)"
+        if not server_ip:
+            return "unknown"
+        try:
+            address = ipaddress.ip_address(server_ip)
+        except ValueError:
+            return "unknown"
+        if address.is_private or address.is_loopback or address.is_link_local:
+            return "local resolver"
+        return "external DNS"
 
 
-_DNS_TABLE = VerdictTable(
-    "dns_queries",
-    ("qname", "qtype", "server_ip", "process", "count"),
-    search=("qname", "process"),
-    limit=1000,
-)
+@dataclass(frozen=True)
+class DnsQuery:
+    filters: RowFilter = field(default_factory=RowFilter)
+    level: str = ""
+    page: Page = field(default_factory=Page)
 
 
-def dns_queries(
-    session: Session,
-    run_id: str,
-    filters: RowFilter = RowFilter(),
-    level: str = "",
-    page: Page = Page(),
-):
-    """DNS questions seen this run (+ detected DoH endpoints), each with
-    its LLM verdict and the resolution level (where/how it resolved).
-    Returns ``{"summary": {...}, "rows": [...]}`` sorted worst-verdict
-    then most-queried."""
-    rows = _DNS_TABLE.rows(session, run_id)
-    for r in rows:
-        r["level"] = _dns_resolution_level(r["server_ip"], r["qtype"])
-    rows.sort(key=lambda r: (_FLOW_SEV.get(r["verdict"], 4), -(r["count"] or 0)))
+class DnsPanel:
+    """DNS questions seen this run (+ detected DoH endpoints), each with its
+    LLM verdict and the resolution level, worst verdict then most queried."""
 
-    rows = filters.keep(rows, _DNS_TABLE.search)
-    if level:
-        rows = [r for r in rows if r.get("level") == level]
+    TABLE = VerdictTable(
+        "dns_queries",
+        ("qname", "qtype", "server_ip", "process", "count"),
+        search=("qname", "process"),
+        limit=1000,
+    )
 
-    summary = {
-        "domains": len({r["qname"] for r in rows}),
-        "queries": sum(r["count"] or 0 for r in rows),
-        "doh": sum(1 for r in rows if r["qtype"] == "DoH"),
-        "malicious": sum(1 for r in rows if r["verdict"] == "malicious"),
-        "suspicious": sum(1 for r in rows if r["verdict"] == "suspicious"),
-    }
+    def __init__(self, session: Session, run_id: str) -> None:
+        self._session = session
+        self._run_id = run_id
 
-    page_rows, paging = page.slice(rows)
-    return {
-        "summary": summary,
-        "rows": page_rows,
-        **paging,
-        **filters.fields(),
-        "level": level,
-    }
+    def queries(self, query: DnsQuery) -> dict[str, Any]:
+        rows = self.TABLE.rows(self._session, self._run_id)
+        levels = DnsLevel()
+        for row in rows:
+            row["level"] = levels.of(row["server_ip"], row["qtype"])
+        rows = query.filters.keep(sorted(rows, key=self._order), self.TABLE.search)
+        if query.level:
+            rows = [row for row in rows if row.get("level") == query.level]
+        page_rows, paging = query.page.slice(rows)
+        return {
+            "summary": self._summary(rows),
+            "rows": page_rows,
+            **paging,
+            **query.filters.fields(),
+            "level": query.level,
+        }
+
+    def _order(self, row: dict[str, Any]) -> tuple[int, int]:
+        return VerdictRank().rank(row["verdict"]), -(row["count"] or 0)
+
+    def _summary(self, rows: list[dict[str, Any]]) -> dict[str, int]:
+        verdicts = [row["verdict"] for row in rows]
+        return {
+            "domains": len({row["qname"] for row in rows}),
+            "queries": sum(row["count"] or 0 for row in rows),
+            "doh": sum(1 for row in rows if row["qtype"] == "DoH"),
+            "malicious": verdicts.count("malicious"),
+            "suspicious": verdicts.count("suspicious"),
+        }

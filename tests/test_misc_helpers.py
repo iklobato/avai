@@ -9,8 +9,8 @@ import hashlib
 
 from sqlalchemy import create_engine
 
-from avai.dashboard.db import read_only_engine
-from avai.dashboard.serve import _ensure_db_exists
+from avai.dashboard.db import DashboardEngines
+from avai.dashboard.serve import DashboardSchema
 from avai.enrichers.indicators import (
     BrowserExtensionExtractor,
     FileHasher,
@@ -97,8 +97,8 @@ class TestExtensionPermissions:
 class TestDashboardEngine:
     def test_url_is_read_only_but_not_immutable(self, tmp_path):
         db = tmp_path / "x.db"
-        _ensure_db_exists(str(db))
-        url = str(read_only_engine(str(db)).url)
+        DashboardSchema().ensure(str(db))
+        url = str(DashboardEngines().read_only(str(db)).url)
         # mode=ro = read-only; uri=true enables the file: URI form.
         assert "mode=ro" in url
         assert "uri=true" in url
@@ -108,8 +108,8 @@ class TestDashboardEngine:
 
     def test_engine_can_open_existing_db(self, tmp_path):
         db = tmp_path / "exists.db"
-        _ensure_db_exists(str(db))
-        with read_only_engine(str(db)).connect() as conn:
+        DashboardSchema().ensure(str(db))
+        with DashboardEngines().read_only(str(db)).connect() as conn:
             # Anything that proves the connection works.
             conn.exec_driver_sql("select 1")
 

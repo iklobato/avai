@@ -15,10 +15,10 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from avai.dashboard.app import create_app
+from avai.dashboard.app import DashboardApp
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.queries import RowFilter, listening_ports
-from avai.dashboard.queries.ports import _addr_scope
+from avai.dashboard.queries import PortQuery, PortsPanel, RowFilter
+from avai.dashboard.queries import BindScope
 from avai.host_monitor.enums import ThreatCategory, Verdict
 from avai.host_monitor.judge import Judgment
 from avai.host_monitor.models import ListeningPortRow, NetworkConnectionRow, ProcessRow
@@ -30,20 +30,20 @@ LP_FIELDS = ("process_name", "family", "type", "laddr_ip", "laddr_port")
 
 class TestAddrScope:
     def test_wildcard_is_all_interfaces(self):
-        assert _addr_scope("0.0.0.0") == "all"
-        assert _addr_scope("::") == "all"
+        assert BindScope().of("0.0.0.0") == "all"
+        assert BindScope().of("::") == "all"
 
     def test_loopback_local_only(self):
-        assert _addr_scope("127.0.0.1") == "loopback"
-        assert _addr_scope("::1") == "loopback"
+        assert BindScope().of("127.0.0.1") == "loopback"
+        assert BindScope().of("::1") == "loopback"
 
     def test_routable_is_specific(self):
-        assert _addr_scope("192.168.1.10") == "specific"
+        assert BindScope().of("192.168.1.10") == "specific"
 
     def test_blank_or_garbage_unknown(self):
-        assert _addr_scope("") == "unknown"
-        assert _addr_scope(None) == "unknown"
-        assert _addr_scope("not-an-ip") == "unknown"
+        assert BindScope().of("") == "unknown"
+        assert BindScope().of(None) == "unknown"
+        assert BindScope().of("not-an-ip") == "unknown"
 
 
 @pytest.fixture
@@ -167,14 +167,14 @@ class TestListeningPortsRollup:
         # and its echo took the last socket's verdict instead of the user's.
         engine, run_id = seeded
         with Session(engine) as s:
-            data = listening_ports(s, run_id, RowFilter(verdict="malicious"))
+            data = PortsPanel(s, run_id).ports(PortQuery(filters=RowFilter(verdict="malicious")))
         assert [r["port"] for r in data["rows"]] == [22]
         assert data["verdict"] == "malicious"
 
     def test_wildcard_v4_v6_collapse_to_one_row(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
-            rows = listening_ports(s, run_id)["rows"]
+            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
         # two distinct listeners: sshd:22 (v4+v6 merged) and postgres:5432
         assert len(rows) == 2
         ssh = next(r for r in rows if r["port"] == 22)
@@ -186,7 +186,7 @@ class TestListeningPortsRollup:
     def test_worst_verdict_and_sort_order(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
-            rows = listening_ports(s, run_id)["rows"]
+            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
         # malicious sorts first
         assert rows[0]["port"] == 22
         assert rows[0]["verdict"] == "malicious"
@@ -195,7 +195,7 @@ class TestListeningPortsRollup:
     def test_bind_scope_signals_exposure(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
-            rows = listening_ports(s, run_id)["rows"]
+            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
         ssh = next(r for r in rows if r["port"] == 22)
         pg = next(r for r in rows if r["port"] == 5432)
         assert ssh["scope"] == "all" and ssh["exposed"] is True
@@ -204,7 +204,7 @@ class TestListeningPortsRollup:
     def test_process_enrichment_attached(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
-            rows = listening_ports(s, run_id)["rows"]
+            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
         ssh = next(r for r in rows if r["port"] == 22)
         proc = ssh["proc"]
         assert proc["username"] == "root"
@@ -219,7 +219,7 @@ class TestListeningPortsRollup:
     def test_established_connection_count(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
-            rows = listening_ports(s, run_id)["rows"]
+            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
         ssh = next(r for r in rows if r["port"] == 22)
         pg = next(r for r in rows if r["port"] == 5432)
         assert ssh["conns"] == 1  # only the ESTABLISHED row counts
@@ -228,7 +228,7 @@ class TestListeningPortsRollup:
     def test_summary_totals(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
-            summary = listening_ports(s, run_id)["summary"]
+            summary = PortsPanel(s, run_id).ports(PortQuery())["summary"]
         assert summary["ports"] == 2
         assert summary["exposed"] == 1  # only sshd:22 is non-loopback
         assert summary["malicious"] == 1
@@ -239,7 +239,7 @@ class TestFragmentRender:
     def test_renders_port_process_and_verdict(self, seeded):
         engine, run_id = seeded
         db = str(engine.url).replace("sqlite:///", "")
-        with create_app(DashboardConfig(db_path=db)).test_client() as c:
+        with DashboardApp(DashboardConfig(db_path=db)).build().test_client() as c:
             html = c.get("/fragments/listening-ports").data.decode()
         assert ":22" in html
         assert "sshd" in html
@@ -267,14 +267,14 @@ class TestMissingTableGraceful:
     def test_returns_empty_when_table_absent(self, tmp_path):
         engine, _ = self._db_without_ports(tmp_path)
         with Session(engine) as s:
-            data = listening_ports(s, "x")
+            data = PortsPanel(s, "x").ports(PortQuery())
         assert data["rows"] == []
         assert data["summary"]["ports"] == 0
 
     def test_fragment_200_on_db_without_table(self, tmp_path):
         engine, db = self._db_without_ports(tmp_path)
         engine.dispose()
-        with create_app(DashboardConfig(db_path=str(db))).test_client() as c:
+        with DashboardApp(DashboardConfig(db_path=str(db))).build().test_client() as c:
             r = c.get("/fragments/listening-ports")
         # missing table degrades to the empty-state card, not a 500
         assert r.status_code == 200

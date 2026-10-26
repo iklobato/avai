@@ -2,7 +2,7 @@
 
 Installed as the ``avai`` console_script. Routes ``avai monitor ...``
 to :meth:`avai.host_monitor.main.MonitorApp.main` and ``avai dashboard ...`` to
-:func:`avai.dashboard.main`. Each subcommand passes its remaining
+:meth:`avai.dashboard.serve.DashboardCli.main`. Each subcommand passes its remaining
 argv through unchanged.
 """
 
@@ -103,10 +103,10 @@ def _run_monitor(rest: list[str]) -> int:
 
 
 def _run_dashboard(rest: list[str]) -> int:
-    from .dashboard import main as dashboard_main
+    from .dashboard.serve import DashboardCli
 
     sys.argv = ["avai dashboard", *rest]
-    return dashboard_main()
+    return DashboardCli.main()
 
 
 def _run_app(_rest: list[str]) -> int:

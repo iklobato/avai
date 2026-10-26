@@ -3,24 +3,23 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
-from sqlalchemy import (
-    select,
-)
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from avai.host_monitor import (
-    LogEntryRow,
-)
+from avai.host_monitor import LogEntryRow
 
-from .common import Page, _existing_tables
+from .panel_reads import Page, SchemaProbe
 
-# Syslog severities, most severe first — the order the level filter offers.
+# Syslog severities, most severe first: the order the level filter offers.
 LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
 
+ERROR_LEVELS = frozenset({"emerg", "alert", "crit", "err"})
 
-_LOG_ERROR_LEVELS = frozenset({"emerg", "alert", "crit", "err"})
+GROUP_DIMENSIONS = ("unit", "source", "message")
 
 
 @dataclass(frozen=True)
@@ -30,221 +29,202 @@ class LogFilter:
 
     source: str = ""
     level: str = ""
-    q: str = ""
+    search: str = ""
 
     def keep(self, rows: list[LogEntryRow]) -> list[LogEntryRow]:
-        if self.source:
-            rows = [r for r in rows if r.source == self.source]
-        if self.level:
-            rows = [r for r in rows if r.level == self.level]
-        if self.q:
-            needle = self.q.lower()
-            rows = [
-                r
-                for r in rows
-                if needle in (r.message or "").lower()
-                or needle in (r.unit or "").lower()
-            ]
-        return rows
+        kept = [
+            row
+            for row in rows
+            if (not self.source or row.source == self.source)
+            and (not self.level or row.level == self.level)
+        ]
+        if not self.search:
+            return kept
+        needle = self.search.lower()
+        return [
+            row
+            for row in kept
+            if needle in (row.message or "").lower()
+            or needle in (row.unit or "").lower()
+        ]
 
-    def fields(self) -> dict:
+    def fields(self) -> dict[str, str]:
         """The filter values a panel echoes back to its form."""
-        return {"source": self.source, "level": self.level, "q": self.q}
+        return {"source": self.source, "level": self.level, "q": self.search}
 
 
-def _run_log_lines(session: Session, run_id: str) -> list[LogEntryRow]:
-    return list(
-        session.execute(
-            select(LogEntryRow).where(LogEntryRow.run_id == run_id)
-        ).scalars()
-    )
-
-
-def log_entries(
-    session: Session,
-    run_id: str,
-    filters: LogFilter = LogFilter(),
-    page: Page = Page(),
-) -> dict:
-    """Recent host log lines (journald + tailed files) for ``run_id`` as a
-    filtered, paginated, newest-first table. Returns the rows plus
-    pagination + echoed-filter fields the panel expects; an empty result
-    (same shape) if the table is absent (older DB) or the run captured
-    nothing."""
-    empty = {
-        "rows": [],
-        **page.fields(0),
-        **filters.fields(),
-        "sources": [],
-        "levels": list(LOG_LEVELS),
-        "summary": {"total": 0, "err": 0, "warning": 0, "sources": 0},
-    }
-    if "log_entries" not in _existing_tables(session):
-        return empty
-
-    rows = _run_log_lines(session, run_id)
-    # Newest first: event time when known, else insertion order (id).
-    rows.sort(key=lambda r: (r.event_timestamp or "", r.id), reverse=True)
-    # Distinct sources for the dropdown: from the whole run, before filtering.
-    sources = sorted({r.source for r in rows if r.source})
-    rows = filters.keep(rows)
-
-    summary = {
-        "total": len(rows),
-        "err": sum(1 for r in rows if r.level in _LOG_ERROR_LEVELS),
-        "warning": sum(1 for r in rows if r.level == "warning"),
-        "sources": len(sources),
-    }
-    page_rows, paging = page.slice(rows)
-    items = [
-        {
-            "source": r.source,
-            "unit": r.unit,
-            "level": r.level,
-            "event_timestamp": r.event_timestamp,
-            "pid": r.pid,
-            "message": r.message,
-        }
-        for r in page_rows
-    ]
-    return {
-        "rows": items,
-        **paging,
-        **filters.fields(),
-        "sources": sources,
-        "levels": list(LOG_LEVELS),
-        "summary": summary,
-    }
-
-
-_LOG_HEX_RE = re.compile(r"\b[0-9a-fA-F]{8,}\b")
-
-
-_LOG_NUM_RE = re.compile(r"\d+")
-
-
-_LOG_WS_RE = re.compile(r"\s+")
-
-
-def _normalize_log_message(message: str | None) -> str:
+class LogTemplate:
     """Collapse a log line to a template so repeated events with varying ids
     aggregate together: hex tokens (hashes / uuids) and digit runs (pids,
-    ports, timestamps) become ``#``. ``"Accepted password for ik from 10.0.0.5
-    port 22"`` and the next login collapse to the same key."""
-    if not message:
-        return "(empty)"
-    collapsed = _LOG_HEX_RE.sub("#", message.strip())
-    collapsed = _LOG_NUM_RE.sub("#", collapsed)
-    return _LOG_WS_RE.sub(" ", collapsed)[:160]
+    ports, timestamps) become ``#``. ``"Accepted password for ik from
+    10.0.0.5 port 22"`` and the next login collapse to the same key."""
+
+    HEX = re.compile(r"\b[0-9a-fA-F]{8,}\b")
+    DIGITS = re.compile(r"\d+")
+    SPACES = re.compile(r"\s+")
+    MAX_CHARS = 160
+
+    def of(self, message: str | None) -> str:
+        if not message:
+            return "(empty)"
+        collapsed = self.DIGITS.sub("#", self.HEX.sub("#", message.strip()))
+        return self.SPACES.sub(" ", collapsed)[: self.MAX_CHARS]
 
 
-def _log_group_by_unit(row: LogEntryRow) -> str:
-    return row.unit or "(none)"
+class LogGroupKey:
+    """The key a log line groups under for each grouping dimension."""
+
+    def for_dimension(self, dimension: str) -> Callable[[LogEntryRow], str]:
+        keys = {"unit": self._unit, "source": self._source, "message": self._message}
+        return keys[dimension]
+
+    def _unit(self, row: LogEntryRow) -> str:
+        return row.unit or "(none)"
+
+    def _source(self, row: LogEntryRow) -> str:
+        return row.source or "(none)"
+
+    def _message(self, row: LogEntryRow) -> str:
+        return LogTemplate().of(row.message)
 
 
-def _log_group_by_source(row: LogEntryRow) -> str:
-    return row.source or "(none)"
+class LogGroup:
+    """Lines sharing one group key: their count, error / warning counts, the
+    latest timestamp, a sample message, and which units and sources fed it."""
+
+    def __init__(self, key: str) -> None:
+        self._key = key
+        self._rows: list[LogEntryRow] = []
+
+    def add(self, row: LogEntryRow) -> None:
+        self._rows.append(row)
+
+    def values(self) -> dict[str, Any]:
+        rows = self._rows
+        samples = [row.message for row in rows if row.message]
+        return {
+            "key": self._key,
+            "count": len(rows),
+            "errors": sum(1 for row in rows if row.level in ERROR_LEVELS),
+            "warnings": sum(1 for row in rows if row.level == "warning"),
+            "last": max(row.event_timestamp or "" for row in rows),
+            "sample": samples[0] if samples else None,
+            "unit_label": self._label({row.unit for row in rows}, "units"),
+            "source_label": self._label({row.source for row in rows}, "sources"),
+        }
+
+    def _label(self, names: set[str | None], plural: str) -> str:
+        """The one name, or a count when several fed the group."""
+        named = set(filter(None, names))
+        return next(iter(named)) if len(named) == 1 else f"{len(named)} {plural}"
 
 
-def _log_group_by_message(row: LogEntryRow) -> str:
-    return _normalize_log_message(row.message)
+@dataclass(frozen=True)
+class LogQuery:
+    filters: LogFilter = field(default_factory=LogFilter)
+    page: Page = field(default_factory=Page)
 
 
-# group_by value → key function. Doubles as the allow-list of valid dimensions.
-_LOG_GROUPERS = {
-    "unit": _log_group_by_unit,
-    "source": _log_group_by_source,
-    "message": _log_group_by_message,
-}
+@dataclass(frozen=True)
+class LogAggregateQuery:
+    filters: LogFilter = field(default_factory=LogFilter)
+    group_by: str = "unit"
+    page: Page = field(default_factory=Page)
+
+    def dimension(self) -> str:
+        return self.group_by if self.group_by in GROUP_DIMENSIONS else "unit"
 
 
-def _log_groups(rows: list[LogEntryRow], key_of) -> list[dict]:
-    """Count lines per group key, with error / warning counts, the latest
-    timestamp, a sample message, and which units and sources fed it."""
-    groups: dict[str, dict] = {}
-    for r in rows:
-        key = key_of(r)
-        g = groups.get(key)
-        if g is None:
-            g = groups[key] = {
-                "key": key,
-                "count": 0,
-                "errors": 0,
-                "warnings": 0,
-                "last": "",
-                "sample": None,
-                "_units": set(),
-                "_sources": set(),
-            }
-        g["count"] += 1
-        g["errors"] += r.level in _LOG_ERROR_LEVELS
-        g["warnings"] += r.level == "warning"
-        g["last"] = max(g["last"], r.event_timestamp or "")
-        g["sample"] = g["sample"] or r.message or None
-        g["_units"].add(r.unit)
-        g["_sources"].add(r.source)
-    return [_labelled_group(g) for g in groups.values()]
+class LogsPanel:
+    """Recent host log lines (journald + tailed files) for a run. Both views
+    return the same empty shape when the table is absent (older DB) or the
+    run captured nothing."""
 
+    def __init__(self, session: Session, run_id: str) -> None:
+        self._session = session
+        self._run_id = run_id
 
-def _labelled_group(group: dict) -> dict:
-    """Swap the unit / source sets for a label: the one name, or a count."""
-    units = set(filter(None, group.pop("_units")))
-    srcs = set(filter(None, group.pop("_sources")))
-    group["unit_label"] = (
-        next(iter(units)) if len(units) == 1 else f"{len(units)} units"
-    )
-    group["source_label"] = (
-        next(iter(srcs)) if len(srcs) == 1 else f"{len(srcs)} sources"
-    )
-    return group
+    def entries(self, query: LogQuery) -> dict[str, Any]:
+        """A filtered, paginated, newest-first table."""
+        rows = sorted(self._lines(), key=self._newest, reverse=True)
+        # Distinct sources for the dropdown: from the whole run, before filtering.
+        sources = sorted({row.source for row in rows if row.source})
+        kept = query.filters.keep(rows)
+        page_rows, paging = query.page.slice(kept)
+        return {
+            "rows": [self._entry(row) for row in page_rows],
+            **paging,
+            **query.filters.fields(),
+            "sources": sources,
+            "levels": list(LOG_LEVELS),
+            "summary": self._entry_summary(kept, sources),
+        }
 
+    def aggregates(self, query: LogAggregateQuery) -> dict[str, Any]:
+        """Ranked groups by ``unit`` (systemd unit / file), ``source``
+        (journald vs a file) or ``message`` (a normalised template); **most
+        errors first, then most occurrences**. Same filters as the raw view,
+        paginated."""
+        rows = self._lines()
+        sources = sorted({row.source for row in rows if row.source})
+        groups = self._groups(query.filters.keep(rows), query.dimension())
+        page_rows, paging = query.page.slice(sorted(groups, key=self._rank))
+        return {
+            "groups": page_rows,
+            **paging,
+            "group_by": query.dimension(),
+            "group_options": list(GROUP_DIMENSIONS),
+            **query.filters.fields(),
+            "sources": sources,
+            "summary": self._group_summary(groups),
+        }
 
-def log_aggregates(
-    session: Session,
-    run_id: str,
-    filters: LogFilter = LogFilter(),
-    group_by: str = "unit",
-    page: Page = Page(),
-) -> dict:
-    """Aggregate the run's log lines into ranked groups for the log-summary
-    panel. Groups by ``unit`` (systemd unit / file), ``source`` (journald vs a
-    file), or ``message`` (a normalised template, so repeated events count
-    together). Each group carries its occurrence count + error / warning
-    counts; **ranked most-errors-first, then most-occurrences**. Takes the
-    same filters as the raw view, and paginates. Empty shape if the table is
-    absent."""
-    group_by = group_by if group_by in _LOG_GROUPERS else "unit"
-    empty = {
-        "groups": [],
-        **page.fields(0),
-        "group_by": group_by,
-        "group_options": list(_LOG_GROUPERS),
-        **filters.fields(),
-        "sources": [],
-        "summary": {"groups": 0, "errors": 0, "warnings": 0, "lines": 0},
-    }
-    if "log_entries" not in _existing_tables(session):
-        return empty
+    def _entry_summary(
+        self, kept: list[LogEntryRow], sources: list[str]
+    ) -> dict[str, int]:
+        return {
+            "total": len(kept),
+            "err": sum(1 for row in kept if row.level in ERROR_LEVELS),
+            "warning": sum(1 for row in kept if row.level == "warning"),
+            "sources": len(sources),
+        }
 
-    rows = _run_log_lines(session, run_id)
-    sources = sorted({r.source for r in rows if r.source})
-    items = _log_groups(filters.keep(rows), _LOG_GROUPERS[group_by])
-    # Most errors first, then most occurrences, then key for a stable order.
-    items.sort(key=lambda g: (-g["errors"], -g["count"], g["key"]))
+    def _lines(self) -> list[LogEntryRow]:
+        if "log_entries" not in SchemaProbe(self._session).tables():
+            return []
+        statement = select(LogEntryRow).where(LogEntryRow.run_id == self._run_id)
+        return list(self._session.execute(statement).scalars())
 
-    summary = {
-        "groups": len(items),
-        "errors": sum(g["errors"] for g in items),
-        "warnings": sum(g["warnings"] for g in items),
-        "lines": sum(g["count"] for g in items),
-    }
-    page_rows, paging = page.slice(items)
-    return {
-        "groups": page_rows,
-        **paging,
-        "group_by": group_by,
-        "group_options": list(_LOG_GROUPERS),
-        **filters.fields(),
-        "sources": sources,
-        "summary": summary,
-    }
+    def _newest(self, row: LogEntryRow) -> tuple[str, int]:
+        # Event time when known, else insertion order (id).
+        return row.event_timestamp or "", row.id
+
+    def _entry(self, row: LogEntryRow) -> dict[str, Any]:
+        return {
+            "source": row.source,
+            "unit": row.unit,
+            "level": row.level,
+            "event_timestamp": row.event_timestamp,
+            "pid": row.pid,
+            "message": row.message,
+        }
+
+    def _groups(self, rows: list[LogEntryRow], dimension: str) -> list[dict[str, Any]]:
+        key_of = LogGroupKey().for_dimension(dimension)
+        groups: dict[str, LogGroup] = {}
+        for row in rows:
+            key = key_of(row)
+            groups.setdefault(key, LogGroup(key)).add(row)
+        return [group.values() for group in groups.values()]
+
+    def _rank(self, group: dict[str, Any]) -> tuple[int, int, str]:
+        # Most errors first, then most occurrences, then key for a stable order.
+        return -group["errors"], -group["count"], group["key"]
+
+    def _group_summary(self, groups: list[dict[str, Any]]) -> dict[str, int]:
+        return {
+            "groups": len(groups),
+            "errors": sum(group["errors"] for group in groups),
+            "warnings": sum(group["warnings"] for group in groups),
+            "lines": sum(group["count"] for group in groups),
+        }

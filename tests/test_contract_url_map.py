@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from avai.dashboard.app import create_app
+from avai.dashboard.app import DashboardApp
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.serve import _ensure_db_exists
+from avai.dashboard.serve import DashboardSchema
 
 IGNORED_METHODS = frozenset({"HEAD", "OPTIONS"})
 
@@ -69,8 +69,8 @@ EXPECTED_RULES = frozenset(
 
 def test_url_map_paths_endpoints_and_methods_are_unchanged(tmp_path: Path) -> None:
     db_path = str(tmp_path / "contract.db")
-    _ensure_db_exists(db_path)
-    app = create_app(DashboardConfig(db_path=db_path))
+    DashboardSchema().ensure(db_path)
+    app = DashboardApp(DashboardConfig(db_path=db_path)).build()
 
     actual = {
         (rule.rule, rule.endpoint, tuple(sorted(rule.methods - IGNORED_METHODS)))

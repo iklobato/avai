@@ -10,7 +10,10 @@ operator feedback: the monitor stays the sole writer of telemetry. WAL + a
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -21,142 +24,153 @@ from sqlalchemy.orm import Session
 from avai.host_monitor import ControlState, FeedbackRow
 from avai.host_monitor.constants import MONITOR_LIVENESS_WINDOW_S
 
+# The control_state table holds one row with this id.
+CONTROL_ROW_ID = 1
 
-def _ensure_row(session) -> None:
-    # id=1 only; the model's column defaults populate the NOT NULL counters.
-    session.execute(sqlite_insert(ControlState).values(id=1).on_conflict_do_nothing())
+
+@dataclass(frozen=True)
+class SettingsChange:
+    """The settings form; a None field leaves that setting as it is."""
+
+    interval: int | None = None
+    judge: bool | None = None
+    enrich: bool | None = None
+
+    def values(self) -> dict[str, int]:
+        candidates = (
+            ("interval_override", self.interval),
+            ("judge_enabled", self.judge),
+            ("enrich_enabled", self.enrich),
+        )
+        return {column: int(value) for column, value in candidates if value is not None}
+
+
+@dataclass(frozen=True)
+class Feedback:
+    """An operator correction on one finding."""
+
+    content_hash: str
+    collector: str
+    label: str
+    note: str | None
+    artifact: str | None
+
+    def fields(self, created_at: str) -> dict[str, Any]:
+        """The columns a re-submitted correction overwrites."""
+        return {
+            "label": self.label,
+            "note": self.note,
+            "artifact": self.artifact,
+            "created_at": created_at,
+            "applied": 0,
+        }
 
 
 class ControlStore:
     """The dashboard's writes, through one writable engine per app."""
 
-    def __init__(self, engine: Engine):
+    def __init__(self, engine: Engine) -> None:
         self._engine = engine
 
-    def _update(self, **values) -> None:
-        with Session(self._engine) as session:
-            _ensure_row(session)
-            session.execute(
-                update(ControlState).where(ControlState.id == 1).values(**values)
-            )
-            session.commit()
+    def pause(self) -> None:
+        self._update({"paused": 1})
 
-    def set_paused(self, paused: bool) -> None:
-        self._update(paused=int(paused))
+    def resume(self) -> None:
+        self._update({"paused": 0})
 
     def bump_scan_now(self) -> None:
-        """Request an immediate scan (monitor runs one cycle within a poll tick)."""
-        with Session(self._engine) as session:
-            _ensure_row(session)
-            session.execute(
-                update(ControlState)
-                .where(ControlState.id == 1)
-                .values(scan_now_nonce=ControlState.scan_now_nonce + 1)
-            )
-            session.commit()
+        """Request an immediate scan (the monitor runs one cycle within a poll
+        tick)."""
+        self._update({"scan_now_nonce": ControlState.scan_now_nonce + 1})
 
-    def set_settings(self, *, interval=None, judge=None, enrich=None) -> None:
-        values: dict = {}
-        if interval is not None:
-            values["interval_override"] = int(interval)
-        if judge is not None:
-            values["judge_enabled"] = int(judge)
-        if enrich is not None:
-            values["enrich_enabled"] = int(enrich)
+    def set_settings(self, change: SettingsChange) -> None:
+        values = change.values()
         if values:
-            self._update(**values)
+            self._update(values)
 
-    def set_collector(self, name: str, enabled: bool) -> None:
-        with Session(self._engine) as session:
-            _ensure_row(session)
-            row = session.get(ControlState, 1)
-            current = {
-                s.strip()
-                for s in (row.disabled_collectors or "").split(",")
-                if s.strip()
-            }
-            current.discard(name) if enabled else current.add(name)
-            row.disabled_collectors = ",".join(sorted(current)) or None
-            session.commit()
+    def enable_collector(self, name: str) -> None:
+        self._edit_disabled(name, set.discard)
 
-    def record_feedback(
-        self,
-        *,
-        content_hash: str,
-        collector: str,
-        label: str,
-        note: str | None,
-        artifact: str | None,
-    ) -> None:
-        """Persist an operator correction on a finding (latest-wins per finding).
-        The monitor picks it up next cycle: it applies it to the verdict and feeds
-        it back to the judge. This is the one telemetry-adjacent table the
-        dashboard writes; the monitor remains the sole writer of findings."""
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        with Session(self._engine) as session:
-            session.execute(
-                sqlite_insert(FeedbackRow)
-                .values(
-                    content_hash=content_hash,
-                    collector=collector,
-                    label=label,
-                    note=note,
-                    artifact=artifact,
-                    created_at=now,
-                    applied=0,
-                )
-                .on_conflict_do_update(
-                    index_elements=["content_hash", "collector"],
-                    set_={
-                        "label": label,
-                        "note": note,
-                        "artifact": artifact,
-                        "created_at": now,
-                        "applied": 0,
-                    },
-                )
-            )
-            session.commit()
+    def disable_collector(self, name: str) -> None:
+        self._edit_disabled(name, set.add)
 
     def queue_command(self, command: str) -> None:
         """Queue a one-shot maintenance command; the monitor runs + acks it."""
+        self._update(
+            {"command": command, "command_nonce": ControlState.command_nonce + 1}
+        )
+
+    def record_feedback(self, feedback: Feedback) -> None:
+        """Persist an operator correction (latest wins per finding). The
+        monitor applies it to the verdict and feeds it back to the judge next
+        cycle; it stays the sole writer of findings."""
+        fields = feedback.fields(
+            datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
+        keys = {"content_hash": feedback.content_hash, "collector": feedback.collector}
+        statement = (
+            sqlite_insert(FeedbackRow)
+            .values(**keys, **fields)
+            .on_conflict_do_update(index_elements=list(keys), set_=fields)
+        )
         with Session(self._engine) as session:
-            _ensure_row(session)
-            session.execute(
-                update(ControlState)
-                .where(ControlState.id == 1)
-                .values(command=command, command_nonce=ControlState.command_nonce + 1)
-            )
+            session.execute(statement)
             session.commit()
 
+    def _edit_disabled(
+        self, name: str, change: Callable[[set[str], str], None]
+    ) -> None:
+        with Session(self._engine) as session:
+            self._ensure_row(session)
+            row = session.get(ControlState, CONTROL_ROW_ID)
+            raw = (row.disabled_collectors or "").split(",")
+            current = {entry.strip() for entry in raw if entry.strip()}
+            change(current, name)
+            row.disabled_collectors = ",".join(sorted(current)) or None
+            session.commit()
 
-def read_control_state(session: Session) -> dict | None:
-    """Read the control row for display.
+    def _update(self, values: dict[str, Any]) -> None:
+        statement = (
+            update(ControlState).where(ControlState.id == CONTROL_ROW_ID).values(values)
+        )
+        with Session(self._engine) as session:
+            self._ensure_row(session)
+            session.execute(statement)
+            session.commit()
 
-    Degrades to None if the table is absent (e.g. a DB written by an older
-    monitor before _ensure_db_exists has added control_state), so the panel
-    renders 'offline' instead of 500ing. Matches the dashboard's general
-    missing-table tolerance."""
-    try:
-        row = session.get(ControlState, 1)
-    except OperationalError:
-        return None
-    if row is None:
-        return None
-    return {c.name: getattr(row, c.name) for c in ControlState.__table__.columns}
+    def _ensure_row(self, session: Session) -> None:
+        # The model's column defaults populate the NOT NULL counters.
+        statement = sqlite_insert(ControlState).values(id=CONTROL_ROW_ID)
+        session.execute(statement.on_conflict_do_nothing())
 
 
-def monitor_alive(state: dict | None) -> bool:
-    """Heartbeat freshness check. The monitor writes last_seen_at every poll
-    tick (~3s) even while idle/paused, and refreshes it periodically mid-scan
-    (see runner._progress_heartbeat), so this window only ever reads 'dead' if
-    the process is actually gone."""
-    if not state or not state.get("last_seen_at"):
-        return False
-    try:
-        seen = datetime.fromisoformat(state["last_seen_at"])
-    except (TypeError, ValueError):
-        return False
-    return (
-        datetime.now(timezone.utc) - seen
-    ).total_seconds() < MONITOR_LIVENESS_WINDOW_S
+class ControlReader:
+    """The control row for display. None when the table is absent (a DB
+    written by an older monitor), so the panel renders 'offline' instead of
+    500ing."""
+
+    def read(self, session: Session) -> dict[str, Any] | None:
+        try:
+            row = session.get(ControlState, CONTROL_ROW_ID)
+        except OperationalError:
+            return None
+        if row is None:
+            return None
+        columns = ControlState.__table__.columns
+        return {column.name: getattr(row, column.name) for column in columns}
+
+
+class MonitorLiveness:
+    """Heartbeat freshness. The monitor writes last_seen_at every poll tick
+    (~3s) even while idle or paused, and refreshes it mid-scan, so this only
+    reads 'dead' when the process is actually gone."""
+
+    def alive(self, state: dict[str, Any] | None) -> bool:
+        if not state or not state.get("last_seen_at"):
+            return False
+        try:
+            seen = datetime.fromisoformat(state["last_seen_at"])
+        except (TypeError, ValueError):
+            return False
+        age = (datetime.now(timezone.utc) - seen).total_seconds()
+        return age < MONITOR_LIVENESS_WINDOW_S

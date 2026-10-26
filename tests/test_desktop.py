@@ -43,9 +43,9 @@ def test_dashboard_opens_control_and_app_mode_without_touching_env(
     monkeypatch.delenv("AVAI_CONTROL_OPEN", raising=False)
     monkeypatch.delenv("AVAI_APP_MODE", raising=False)
     monkeypatch.setattr(waitress, "serve", lambda *a, **k: None)
-    with patch("avai.dashboard.create_app") as create_app:
+    with patch("avai.dashboard.DashboardApp") as dashboard_app:
         desktop._start_dashboard(str(tmp_path / "avai.db"), 0).join(timeout=5)
-    config = create_app.call_args.args[0]
+    config = dashboard_app.call_args.args[0]
     assert config.control_open and config.app_mode
     # .get, not `in os.environ`: a failure must not print the whole env.
     assert os.environ.get("AVAI_CONTROL_OPEN") is None

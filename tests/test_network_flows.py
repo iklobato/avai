@@ -13,9 +13,9 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard.app import create_app
+from avai.dashboard.app import DashboardApp
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.queries import RowFilter, network_flows
+from avai.dashboard.queries import FlowQuery, FlowsPanel, RowFilter
 from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.collectors import (
     FlowTable,
@@ -272,7 +272,7 @@ class TestNetworkFlowsAggregation:
     def test_groups_by_destination_with_sums_and_counts(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
-            data = network_flows(s, run_id)
+            data = FlowsPanel(s, run_id).flows(FlowQuery())
         rows = data["rows"]
         # 2 distinct destinations (203.0.113.9 collapses its two flows)
         assert len(rows) == 2
@@ -288,7 +288,7 @@ class TestNetworkFlowsAggregation:
     def test_summary_totals(self, seeded):
         engine, run_id = seeded
         with Session(engine) as s:
-            summary = network_flows(s, run_id)["summary"]
+            summary = FlowsPanel(s, run_id).flows(FlowQuery())["summary"]
         assert summary["destinations"] == 2
         assert summary["flows"] == 3
         assert summary["packets"] == 650
@@ -299,14 +299,16 @@ class TestNetworkFlowsAggregation:
         # and its echo took the last flow's verdict instead of the user's.
         engine, run_id = seeded
         with Session(engine) as s:
-            data = network_flows(s, run_id, RowFilter(verdict="malicious"))
+            data = FlowsPanel(s, run_id).flows(
+                FlowQuery(filters=RowFilter(verdict="malicious"))
+            )
         assert [r["dst_ip"] for r in data["rows"]] == ["203.0.113.9"]
         assert data["verdict"] == "malicious"
 
     def test_fragment_renders_interface_and_verdict(self, seeded):
         engine, run_id = seeded
         db = str(engine.url).replace("sqlite:///", "")
-        with create_app(DashboardConfig(db_path=db)).test_client() as c:
+        with DashboardApp(DashboardConfig(db_path=db)).build().test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "203.0.113.9" in html
         assert "en0" in html  # interface column
@@ -351,14 +353,14 @@ class TestTrafficVolume:
     def test_bytes_summed_and_in_summary(self, tmp_path):
         engine, run_id = self._seed_flow(tmp_path, 1_200_000)
         with Session(engine) as s:
-            data = network_flows(s, run_id)
+            data = FlowsPanel(s, run_id).flows(FlowQuery())
         assert data["rows"][0]["bytes"] == 1_200_000
         assert data["summary"]["bytes"] == 1_200_000
 
     def test_fragment_shows_human_volume(self, tmp_path):
         engine, run_id = self._seed_flow(tmp_path, 1_200_000)
         db = str(engine.url).replace("sqlite:///", "")
-        with create_app(DashboardConfig(db_path=db)).test_client() as c:
+        with DashboardApp(DashboardConfig(db_path=db)).build().test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "1.1 MB" in html  # volume headline
         assert "8 pkts" in html  # packets demoted to detail line
@@ -366,7 +368,7 @@ class TestTrafficVolume:
     def test_zero_bytes_falls_back_to_packets(self, tmp_path):
         engine, run_id = self._seed_flow(tmp_path, 0)
         db = str(engine.url).replace("sqlite:///", "")
-        with create_app(DashboardConfig(db_path=db)).test_client() as c:
+        with DashboardApp(DashboardConfig(db_path=db)).build().test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "8 " in html and "pkts" in html  # packet count as headline
 
@@ -426,7 +428,7 @@ class TestGeolocationColumn:
             ],
         )
         with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
         geo = next(r for r in rows if r["dst_ip"] == "203.0.113.9")["geo"]
         assert geo is not None
         assert geo["city"] == "San Jose"
@@ -449,7 +451,7 @@ class TestGeolocationColumn:
             ],
         )
         with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
         geo = next(r for r in rows if r["dst_ip"] == "203.0.113.9")["geo"]
         assert geo["country"] == "DE"
         assert geo["org"] == "Hetzner"
@@ -468,7 +470,7 @@ class TestGeolocationColumn:
             ],
         )
         with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
         benign = next(r for r in rows if r["dst_ip"] == "142.250.80.46")
         assert benign["geo"] is None
 
@@ -516,7 +518,7 @@ class TestGeolocationColumn:
             ],
         )
         with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
         geo = next(r for r in rows if r["dst_ip"] == "2606:4700:4700::1111")["geo"]
         assert geo is not None
         assert geo["city"] == "San Francisco"
@@ -544,7 +546,7 @@ class TestGeolocationColumn:
             ],
         )
         db = str(engine.url).replace("sqlite:///", "")
-        with create_app(DashboardConfig(db_path=db)).test_client() as c:
+        with DashboardApp(DashboardConfig(db_path=db)).build().test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "203.0.113.9" in html  # the IP anchor
         assert "Ashburn" in html  # city, now in the destination cell
@@ -585,41 +587,43 @@ class TestGeolocationColumn:
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE enrichment_evidence"))
         with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
         assert rows[0]["geo"] is None
 
 
 class TestFlagEmoji:
     def test_two_letter_code_to_flag(self):
-        from avai.dashboard.filters import _flag_emoji
+        from avai.dashboard.filters import ValueLabels
 
-        assert _flag_emoji("US") == "\U0001f1fa\U0001f1f8"
-        assert _flag_emoji("de") == "\U0001f1e9\U0001f1ea"  # case-insensitive
+        assert ValueLabels().flag_emoji("US") == "\U0001f1fa\U0001f1f8"
+        assert (
+            ValueLabels().flag_emoji("de") == "\U0001f1e9\U0001f1ea"
+        )  # case-insensitive
 
     def test_non_code_returns_empty(self):
-        from avai.dashboard.filters import _flag_emoji
+        from avai.dashboard.filters import ValueLabels
 
-        assert _flag_emoji("United States") == ""
-        assert _flag_emoji(None) == ""
-        assert _flag_emoji("U1") == ""
-        assert _flag_emoji("") == ""
+        assert ValueLabels().flag_emoji("United States") == ""
+        assert ValueLabels().flag_emoji(None) == ""
+        assert ValueLabels().flag_emoji("U1") == ""
+        assert ValueLabels().flag_emoji("") == ""
 
 
 class TestHumanBytes:
     def test_scales(self):
-        from avai.dashboard.filters import _human_bytes
+        from avai.dashboard.filters import ValueLabels
 
-        assert _human_bytes(927) == "927 B"
-        assert _human_bytes(12345) == "12.1 KB"
-        assert _human_bytes(5_000_000) == "4.8 MB"
-        assert _human_bytes(3_000_000_000) == "2.8 GB"
+        assert ValueLabels().human_bytes(927) == "927 B"
+        assert ValueLabels().human_bytes(12345) == "12.1 KB"
+        assert ValueLabels().human_bytes(5_000_000) == "4.8 MB"
+        assert ValueLabels().human_bytes(3_000_000_000) == "2.8 GB"
 
     def test_zero_or_none_empty(self):
-        from avai.dashboard.filters import _human_bytes
+        from avai.dashboard.filters import ValueLabels
 
-        assert _human_bytes(0) == ""
-        assert _human_bytes(None) == ""
-        assert _human_bytes(-5) == ""
+        assert ValueLabels().human_bytes(0) == ""
+        assert ValueLabels().human_bytes(None) == ""
+        assert ValueLabels().human_bytes(-5) == ""
 
 
 class TestDestinationHostname:
@@ -639,7 +643,7 @@ class TestDestinationHostname:
             ],
         )
         with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
         bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
         assert bad["hostname"] == "evil.example.com"
 
@@ -657,7 +661,7 @@ class TestDestinationHostname:
             ],
         )
         with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
         bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
         assert bad["hostname"] == "bad-host.net"
 
@@ -674,7 +678,7 @@ class TestDestinationHostname:
             ],
         )
         with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
         bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
         assert bad["hostname"] is None
 
@@ -691,7 +695,7 @@ class TestDestinationHostname:
             ],
         )
         db = str(engine.url).replace("sqlite:///", "")
-        with create_app(DashboardConfig(db_path=db)).test_client() as c:
+        with DashboardApp(DashboardConfig(db_path=db)).build().test_client() as c:
             html = c.get("/fragments/network-flows").data.decode()
         assert "host.evil.example" in html
 
@@ -719,24 +723,26 @@ class TestMissingTableGraceful:
     def test_returns_empty_when_table_absent(self, tmp_path):
         engine, _ = self._db_without_flows(tmp_path)
         with Session(engine) as s:
-            data = network_flows(s, "x")
+            data = FlowsPanel(s, "x").flows(FlowQuery())
         assert data["rows"] == []
         assert data["summary"]["destinations"] == 0
 
     def test_fragment_200_on_db_without_table(self, tmp_path):
         engine, db = self._db_without_flows(tmp_path)
         engine.dispose()
-        with create_app(DashboardConfig(db_path=str(db))).test_client() as c:
+        with DashboardApp(DashboardConfig(db_path=str(db))).build().test_client() as c:
             r = c.get("/fragments/network-flows")
         assert r.status_code == 200
         assert "no network flows match the current filters" in r.data.decode()
 
     def test_row_counts_skips_missing_table(self, tmp_path):
-        from avai.dashboard.queries import row_counts
+        from avai.dashboard.queries import RowCounts, RunMark
 
         engine, _ = self._db_without_flows(tmp_path)
         with Session(engine) as s:
-            counts = row_counts(s, "some-run", "2000-01-01")
+            counts = RowCounts(s).for_runs(
+                RunMark("some-run", "2000-01-01"), RunMark(None, None)
+            )
         names = {c["name"] for c in counts}
         assert "network_flows" not in names
         assert "processes" in names
@@ -770,7 +776,7 @@ class TestMissingColumnGraceful:
                 {"r": run_id, "t": ts},
             )
         with Session(engine) as s:
-            data = network_flows(s, run_id)
+            data = FlowsPanel(s, run_id).flows(FlowQuery())
         assert data["summary"]["destinations"] == 1
         assert data["rows"][0]["dst_ip"] == "8.8.8.8"
         assert data["rows"][0]["iface"] == "—"  # NULL → rendered placeholder

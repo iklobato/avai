@@ -21,9 +21,9 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard.app import create_app
+from avai.dashboard.app import DashboardApp
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.queries import dns_queries, network_flows, persistence_tampering
+from avai.dashboard.queries import DnsPanel, DnsQuery, FlowQuery, FlowsPanel, PersistencePages, PersistencePanel, RowFilter
 from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.collectors import (
     CapturedPackets,
@@ -345,7 +345,7 @@ class TestDashboardDns:
             run_id,
         )
         with Session(engine) as s:
-            data = dns_queries(s, run_id)
+            data = DnsPanel(s, run_id).queries(DnsQuery())
         assert data["summary"]["domains"] == 2
         assert data["summary"]["queries"] == 4
         assert data["summary"]["doh"] == 1
@@ -354,14 +354,14 @@ class TestDashboardDns:
         assert by_name["Cloudflare"] == "DoH (encrypted)"
 
     def test_resolution_level_classification(self):
-        from avai.dashboard.queries.dns import _dns_resolution_level
+        from avai.dashboard.queries import DnsLevel
 
-        assert _dns_resolution_level("192.168.1.1", "A") == "local resolver"
-        assert _dns_resolution_level("127.0.0.1", "A") == "local resolver"
-        assert _dns_resolution_level("8.8.8.8", "A") == "external DNS"
-        assert _dns_resolution_level("1.1.1.1", "DoH") == "DoH (encrypted)"
-        assert _dns_resolution_level(None, "A") == "unknown"
-        assert _dns_resolution_level("not-an-ip", "A") == "unknown"
+        assert DnsLevel().of("192.168.1.1", "A") == "local resolver"
+        assert DnsLevel().of("127.0.0.1", "A") == "local resolver"
+        assert DnsLevel().of("8.8.8.8", "A") == "external DNS"
+        assert DnsLevel().of("1.1.1.1", "DoH") == "DoH (encrypted)"
+        assert DnsLevel().of(None, "A") == "unknown"
+        assert DnsLevel().of("not-an-ip", "A") == "unknown"
 
     def test_fragment_renders(self, db):
         engine, sink, run_id, ts = db
@@ -385,7 +385,7 @@ class TestDashboardDns:
             run_id,
         )
         config = DashboardConfig(db_path=engine.url.database)
-        with create_app(config).test_client() as c:
+        with DashboardApp(config).build().test_client() as c:
             html = c.get("/fragments/dns-queries").data.decode()
         assert "tracker.bad" in html and "DNS queries" in html
 
@@ -440,7 +440,7 @@ class TestDashboardPersistence:
             run_id,
         )
         with Session(engine) as s:
-            data = persistence_tampering(s, run_id)
+            data = PersistencePanel(s, run_id).tampering(RowFilter(), PersistencePages())
         assert data["any"] is True
         assert data["counts"]["ssh_keys"]["total"] == 1
         assert data["ssh_keys"][0]["owner"] == "x"
@@ -464,14 +464,14 @@ class TestDashboardPersistence:
             run_id,
         )
         config = DashboardConfig(db_path=engine.url.database)
-        with create_app(config).test_client() as c:
+        with DashboardApp(config).build().test_client() as c:
             html = c.get("/fragments/persistence").data.decode()
         assert "my-bank.com" in html and "persistence" in html.lower()
 
     def test_empty_when_no_data(self, db):
         engine, sink, run_id, ts = db
         with Session(engine) as s:
-            data = persistence_tampering(s, run_id)
+            data = PersistencePanel(s, run_id).tampering(RowFilter(), PersistencePages())
         assert data["any"] is False
 
 
@@ -500,5 +500,5 @@ class TestNetworkFlowProcessColumn:
             run_id,
         )
         with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
         assert rows[0]["process"] == "curl"

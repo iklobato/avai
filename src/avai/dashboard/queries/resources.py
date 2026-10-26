@@ -2,53 +2,20 @@
 
 from __future__ import annotations
 
-from sqlalchemy import (
-    desc,
-    select,
-)
+from typing import Any
+
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from avai.host_monitor import (
-    DiskUsageRow,
-    HostResourceRow,
-)
+from avai.host_monitor import DiskUsageRow, HostResourceRow
 
-from .common import _existing_tables, _parse_json_list
-
-
-def host_resources(session: Session, run_id: str) -> dict | None:
-    """Latest aggregate resource meters (memory/swap/CPU/load/uptime/tasks)
-    for ``run_id`` as ``{"row": HostResourceRow, "per_core": [float, …]}``,
-    or None. Guarded for DBs written before the table existed."""
-    if "host_resources" not in _existing_tables(session):
-        return None
-    row = session.execute(
-        select(HostResourceRow).where(HostResourceRow.run_id == run_id).limit(1)
-    ).scalar_one_or_none()
-    if row is None:
-        return None
-    return {"row": row, "per_core": _parse_json_list(row.cpu_per_core_json)}
-
-
-def disk_usage(session: Session, run_id: str) -> list[DiskUsageRow]:
-    """Per-filesystem usage rows for ``run_id``, fullest first. [] when the
-    table is absent (older DB) or the run collected none."""
-    if "disk_usage" not in _existing_tables(session):
-        return []
-    rows = list(
-        session.execute(
-            select(DiskUsageRow).where(DiskUsageRow.run_id == run_id)
-        ).scalars()
-    )
-    rows.sort(key=lambda r: r.percent if r.percent is not None else -1.0, reverse=True)
-    return rows
-
+from .panel_reads import SchemaProbe, StoredJson
 
 # Pseudo / virtual / read-only loop filesystems that bloat a `df` view: snap
 # squashfs images (one mount per installed snap), tmpfs, and kernel virtual
-# filesystems. Hidden from the primary disk view — a typical Linux desktop has
+# filesystems. Hidden from the primary disk view: a typical Linux desktop has
 # ~20 snap mounts drowning the 2-3 filesystems a person actually cares about.
-_PSEUDO_FSTYPES = frozenset(
+PSEUDO_FSTYPES = frozenset(
     {
         "squashfs",
         "tmpfs",
@@ -77,86 +44,117 @@ _PSEUDO_FSTYPES = frozenset(
 )
 
 
-def primary_filesystems(rows: list[DiskUsageRow]) -> list[DiskUsageRow]:
-    """The 'real' on-disk filesystems worth showing first: drop pseudo /
-    virtual / snap-loop mounts and zero-capacity entries, fullest first.
-    The full set stays available via :func:`mount_tree` (the 'all mounts'
-    drawer)."""
-    real = [
-        r
-        for r in rows
-        if (r.fstype or "").lower() not in _PSEUDO_FSTYPES and (r.total or 0) > 0
-    ]
-    real.sort(key=lambda r: r.percent if r.percent is not None else -1.0, reverse=True)
-    return real
+class ResourceQueries:
+    """Resource meters and disk usage; each guarded for DBs written before
+    its table existed."""
 
+    TREND_POINTS = 60
 
-def _path_components(mountpoint: str) -> tuple[str, ...]:
-    """Path segments of a mountpoint, root ('/') being the empty tuple. Sorting
-    by this key yields pre-order tree order: a parent always precedes its
-    children, and siblings come out alphabetically."""
-    return tuple(part for part in mountpoint.split("/") if part)
+    def __init__(self, session: Session) -> None:
+        self._session = session
 
-
-def _is_ancestor(parent: str, child: str) -> bool:
-    """True if ``parent`` is a mountpoint strictly above ``child`` in the
-    filesystem tree. Root is an ancestor of everything but itself."""
-    if parent == child:
-        return False
-    if parent == "/":
-        return True
-    return child.startswith(parent + "/")
-
-
-def mount_tree(rows: list[DiskUsageRow]) -> list[dict]:
-    """Arrange filesystem rows as a mount-point tree for display.
-
-    Each entry is ``{"row", "depth", "is_last"}``: ``depth`` is how many of the
-    other mountpoints in this set sit above it (so a child filesystem indents
-    under its parent), and ``is_last`` marks the last child of a given parent
-    so the template can draw the correct branch glyph. Ordered as a pre-order
-    walk (parent before children) rather than fullest-first; the usage bar and
-    colour still surface a full filesystem at a glance.
-    """
-    rows = [r for r in rows if r.mountpoint]
-    points = {r.mountpoint for r in rows}
-    ordered = sorted(rows, key=lambda r: _path_components(r.mountpoint))
-
-    nodes: list[dict] = []
-    for row in ordered:
-        ancestors = [m for m in points if _is_ancestor(m, row.mountpoint)]
-        parent = max(ancestors, key=lambda m: len(_path_components(m)), default=None)
-        nodes.append({"row": row, "depth": len(ancestors), "parent": parent})
-
-    siblings: dict = {}
-    for node in nodes:
-        siblings.setdefault(node["parent"], []).append(node)
-    for group in siblings.values():
-        for node in group:
-            node["is_last"] = node is group[-1]
-    return nodes
-
-
-def resource_trend(session: Session, limit: int = 60) -> dict:
-    """Recent memory/CPU/swap percentages oldest→newest for the trend
-    charts. Empty series when the table is absent."""
-    empty = {"labels": [], "mem": [], "cpu": [], "swap": []}
-    if "host_resources" not in _existing_tables(session):
-        return empty
-    rows = session.execute(
-        select(
-            HostResourceRow.collected_at,
-            HostResourceRow.mem_percent,
-            HostResourceRow.cpu_percent,
-            HostResourceRow.swap_percent,
+    def host_resources(self, run_id: str) -> dict[str, Any] | None:
+        """Latest aggregate meters (memory/swap/CPU/load/uptime/tasks) as
+        ``{"row": HostResourceRow, "per_core": [float, ...]}``, or None."""
+        if "host_resources" not in SchemaProbe(self._session).tables():
+            return None
+        statement = (
+            select(HostResourceRow).where(HostResourceRow.run_id == run_id).limit(1)
         )
-        .order_by(desc(HostResourceRow.collected_at))
-        .limit(limit)
-    ).all()
-    rows = list(reversed(rows))
-    return {
-        "labels": [r[0] for r in rows],
-        "mem": [r[1] for r in rows],
-        "cpu": [r[2] for r in rows],
-        "swap": [r[3] for r in rows],
-    }
+        row = self._session.execute(statement).scalar_one_or_none()
+        if row is None:
+            return None
+        return {"row": row, "per_core": StoredJson().as_list(row.cpu_per_core_json)}
+
+    def disk_usage(self, run_id: str) -> list[DiskUsageRow]:
+        """Per-filesystem usage rows, fullest first. [] when absent."""
+        if "disk_usage" not in SchemaProbe(self._session).tables():
+            return []
+        statement = select(DiskUsageRow).where(DiskUsageRow.run_id == run_id)
+        rows = list(self._session.execute(statement).scalars())
+        return sorted(rows, key=DiskOrder().fullness, reverse=True)
+
+    def resource_trend(self, limit: int = TREND_POINTS) -> dict[str, list[Any]]:
+        """Recent memory/CPU/swap percentages oldest to newest for the trend
+        charts. Empty series when the table is absent."""
+        if "host_resources" not in SchemaProbe(self._session).tables():
+            return {"labels": [], "mem": [], "cpu": [], "swap": []}
+        statement = (
+            select(
+                HostResourceRow.collected_at,
+                HostResourceRow.mem_percent,
+                HostResourceRow.cpu_percent,
+                HostResourceRow.swap_percent,
+            )
+            .order_by(desc(HostResourceRow.collected_at))
+            .limit(limit)
+        )
+        rows = list(reversed(self._session.execute(statement).all()))
+        labels, mem, cpu, swap = (
+            (list(series) for series in zip(*rows)) if rows else ([], [], [], [])
+        )
+        return {"labels": labels, "mem": mem, "cpu": cpu, "swap": swap}
+
+
+class DiskOrder:
+    def fullness(self, row: DiskUsageRow) -> float:
+        return row.percent if row.percent is not None else -1.0
+
+    def primary(self, rows: list[DiskUsageRow]) -> list[DiskUsageRow]:
+        """The 'real' on-disk filesystems worth showing first: no pseudo /
+        virtual / snap-loop mounts or zero-capacity entries, fullest first.
+        The full set stays available via :class:`MountTree`."""
+        real = [
+            row
+            for row in rows
+            if (row.fstype or "").lower() not in PSEUDO_FSTYPES and (row.total or 0) > 0
+        ]
+        return sorted(real, key=self.fullness, reverse=True)
+
+
+class MountTree:
+    """Filesystem rows arranged as a mount-point tree for display.
+
+    Each entry is ``{"row", "depth", "parent", "is_last"}``: ``depth`` is how
+    many of the other mountpoints sit above it (so a child filesystem indents
+    under its parent) and ``is_last`` marks the last child of a parent so the
+    template can draw the right branch glyph. Ordered as a pre-order walk
+    (parent before children), not fullest first."""
+
+    def nodes(self, rows: list[DiskUsageRow]) -> list[dict[str, Any]]:
+        mounted = [row for row in rows if row.mountpoint]
+        points = {row.mountpoint for row in mounted}
+        ordered = sorted(mounted, key=self._components_of_row)
+        nodes = [self._node(row, points) for row in ordered]
+        siblings: dict[str | None, list[dict[str, Any]]] = {}
+        for node in nodes:
+            siblings.setdefault(node["parent"], []).append(node)
+        for node in nodes:
+            node["is_last"] = node is siblings[node["parent"]][-1]
+        return nodes
+
+    def _node(self, row: DiskUsageRow, points: set[str]) -> dict[str, Any]:
+        ancestors = [
+            point for point in points if self._is_ancestor(point, row.mountpoint)
+        ]
+        parent = max(ancestors, key=self._depth, default=None)
+        return {"row": row, "depth": len(ancestors), "parent": parent}
+
+    def _components_of_row(self, row: DiskUsageRow) -> tuple[str, ...]:
+        return self._components(row.mountpoint)
+
+    def _depth(self, mountpoint: str) -> int:
+        return len(self._components(mountpoint))
+
+    def _components(self, mountpoint: str) -> tuple[str, ...]:
+        """Path segments of a mountpoint, root being the empty tuple. Sorting
+        by this yields pre-order tree order: a parent precedes its children,
+        siblings alphabetically."""
+        return tuple(part for part in mountpoint.split("/") if part)
+
+    def _is_ancestor(self, parent: str, child: str) -> bool:
+        """True if ``parent`` is a mountpoint strictly above ``child``. Root
+        is an ancestor of everything but itself."""
+        if parent == child:
+            return False
+        return parent == "/" or child.startswith(parent + "/")

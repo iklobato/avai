@@ -16,11 +16,11 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard.app import create_app
+from avai.dashboard.app import DashboardApp
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.db import read_only_engine
-from avai.dashboard.queries import LogFilter, Page, latest_run, system_integrity
-from avai.dashboard.serve import _ensure_db_exists
+from avai.dashboard.db import DashboardEngines
+from avai.dashboard.queries import IntegrityPosture, LogFilter, Page, RunQueries
+from avai.dashboard.serve import DashboardSchema
 from avai.host_monitor.models import SystemIntegrityRow
 from avai.host_monitor.sink import Sink
 
@@ -33,13 +33,13 @@ class TestEnsureDbExists:
     def test_creates_file_when_missing(self, tmp_path):
         db = tmp_path / "new.db"
         assert not db.exists()
-        _ensure_db_exists(str(db))
+        DashboardSchema().ensure(str(db))
         assert db.exists()
         assert db.stat().st_size > 0  # schema bytes written
 
     def test_creates_parent_directory(self, tmp_path):
         db = tmp_path / "nested" / "deeper" / "avai.db"
-        _ensure_db_exists(str(db))
+        DashboardSchema().ensure(str(db))
         assert db.exists()
 
     def test_adds_missing_tables_to_existing_db_preserving_data(self, tmp_path):
@@ -70,7 +70,7 @@ class TestEnsureDbExists:
         con.commit()
         con.close()
 
-        _ensure_db_exists(str(db))  # must re-add it, idempotently
+        DashboardSchema().ensure(str(db))  # must re-add it, idempotently
 
         con = sqlite3.connect(str(db))
         tables = {
@@ -87,7 +87,7 @@ class TestEnsureDbExists:
         ``mode=ro&immutable=1`` — that mode requires the schema to
         already exist. Verify every collector table is present."""
         db = tmp_path / "fresh.db"
-        _ensure_db_exists(str(db))
+        DashboardSchema().ensure(str(db))
 
         # Open the file the same way the dashboard does.
         engine = create_engine(
@@ -122,7 +122,7 @@ class TestEnsureDbExists:
 @pytest.fixture
 def db_path(tmp_path):
     db = tmp_path / "test.db"
-    _ensure_db_exists(str(db))
+    DashboardSchema().ensure(str(db))
     return str(db)
 
 
@@ -132,7 +132,7 @@ def make_client(db_path):
     DashboardConfig fields. Avoids the real app.run() loop entirely."""
 
     def build(**config):
-        app = create_app(DashboardConfig(db_path=db_path, **config))
+        app = DashboardApp(DashboardConfig(db_path=db_path, **config)).build()
         app.config["TESTING"] = True
         return app.test_client()
 
@@ -1098,7 +1098,7 @@ class TestDashboardEndpoints:
 
 class TestRowCountsDelta:
     def test_delta_and_is_new(self, tmp_path):
-        from avai.dashboard.queries import row_counts
+        from avai.dashboard.queries import RowCounts, RunMark
         from avai.host_monitor.models import ListeningPortRow, ProcessRow
         from avai.host_monitor.sink import Sink
 
@@ -1129,7 +1129,10 @@ class TestRowCountsDelta:
         )
         with Session(eng) as s:
             # snapshot collectors are counted by run_id now
-            counts = {c["name"]: c for c in row_counts(s, "r1", cur, "r0", prev)}
+            counts = {
+                c["name"]: c
+                for c in RowCounts(s).for_runs(RunMark("r1", cur), RunMark("r0", prev))
+            }
         assert counts["processes"]["rows"] == 5
         assert counts["processes"]["delta"] == 2  # 5 − 3
         assert counts["processes"]["is_new"] is False
@@ -1139,30 +1142,35 @@ class TestRowCountsDelta:
 
 class TestDatetimeFmt:
     def test_formats_iso_to_human_utc(self):
-        from avai.dashboard.filters import _datetime_fmt
+        from avai.dashboard.filters import TimeLabels
 
         assert (
-            _datetime_fmt("2026-05-30T18:57:20+00:00") == "May 30, 2026 · 18:57:20 UTC"
+            TimeLabels().absolute("2026-05-30T18:57:20+00:00")
+            == "May 30, 2026 · 18:57:20 UTC"
         )
 
     def test_naive_timestamp_assumed_utc(self):
-        from avai.dashboard.filters import _datetime_fmt
+        from avai.dashboard.filters import TimeLabels
 
-        assert _datetime_fmt("2026-05-30T18:57:20") == "May 30, 2026 · 18:57:20 UTC"
+        assert (
+            TimeLabels().absolute("2026-05-30T18:57:20")
+            == "May 30, 2026 · 18:57:20 UTC"
+        )
 
     def test_non_utc_offset_converted_to_utc(self):
-        from avai.dashboard.filters import _datetime_fmt
+        from avai.dashboard.filters import TimeLabels
 
         # 20:57 +02:00 == 18:57 UTC
         assert (
-            _datetime_fmt("2026-05-30T20:57:20+02:00") == "May 30, 2026 · 18:57:20 UTC"
+            TimeLabels().absolute("2026-05-30T20:57:20+02:00")
+            == "May 30, 2026 · 18:57:20 UTC"
         )
 
     def test_empty_and_garbage_pass_through(self):
-        from avai.dashboard.filters import _datetime_fmt
+        from avai.dashboard.filters import TimeLabels
 
-        assert _datetime_fmt("") == ""
-        assert _datetime_fmt("not-a-date") == "not-a-date"
+        assert TimeLabels().absolute("") == ""
+        assert TimeLabels().absolute("not-a-date") == "not-a-date"
 
 
 def _engine_rw(db_path):
@@ -1221,7 +1229,7 @@ class TestSystemIntegrityPlatform:
             ],
         )
         with Session(sink.engine) as s:
-            si = system_integrity(s, run_id)
+            si = IntegrityPosture(s).for_run(run_id)
         assert si["platform"] == "Linux"
         labels = [name for name, _enabled, _active in si["rows"]]
         # macOS-only labels must NOT appear for Linux data.
@@ -1254,7 +1262,7 @@ class TestSystemIntegrityPlatform:
             ],
         )
         with Session(sink.engine) as s:
-            si = system_integrity(s, run_id)
+            si = IntegrityPosture(s).for_run(run_id)
         assert si["platform"] == "macOS"
         d = {name: enabled for name, enabled, _active in si["rows"]}
         assert "FileVault" in d
@@ -1288,7 +1296,7 @@ class TestSystemIntegrityPlatform:
             ],
         )
         with Session(sink.engine) as s:
-            si = system_integrity(s, run_id)
+            si = IntegrityPosture(s).for_run(run_id)
         active = {name: act for name, _enabled, act in si["rows"]}
         assert active["SSH (sshd)"] == 1  # live session surfaced as the pill
         assert active["Screen Sharing"] == 0
@@ -1298,7 +1306,7 @@ class TestSystemIntegrityPlatform:
         sink = self._sink(tmp_path)
         run_id, _ = self._run(sink)
         with Session(sink.engine) as s:
-            assert system_integrity(s, run_id) is None
+            assert IntegrityPosture(s).for_run(run_id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1311,7 +1319,7 @@ class TestSystemIntegrityPlatform:
 class TestWalVisibility:
     def test_engine_url_is_not_immutable(self):
         # immutable=1 ignores the WAL, so it must not be used.
-        url = str(read_only_engine("/tmp/whatever.db").url)
+        url = str(DashboardEngines().read_only("/tmp/whatever.db").url)
         assert "immutable" not in url
         assert "mode=ro" in url
 
@@ -1330,7 +1338,7 @@ class TestWalVisibility:
         w.execute("INSERT INTO collection_runs VALUES ('x')")
         w.commit()
         try:
-            with read_only_engine(str(db)).connect() as c:
+            with DashboardEngines().read_only(str(db)).connect() as c:
                 n = c.execute(text("SELECT count(*) FROM collection_runs")).scalar()
             # Pre-fix (immutable=1) this raised "no such table".
             assert n == 1
@@ -1355,7 +1363,7 @@ class TestLatestRunFallback:
         sink = self._sink(tmp_path)
         sink.start_run("h", 5)  # in-progress, finished_at is NULL
         with Session(sink.engine) as s:
-            run = latest_run(s)
+            run = RunQueries(s).latest_run()
         assert run is not None  # not None → dashboard shows it
         assert run.finished_at is None
 
@@ -1365,7 +1373,7 @@ class TestLatestRunFallback:
         sink.end_run(ok=3, failed=0)  # completed (older)
         sink.start_run("h", 5)  # newer, in-progress
         with Session(sink.engine) as s:
-            run = latest_run(s)
+            run = RunQueries(s).latest_run()
         # Steady state: show the stable completed run, not the empty new one.
         assert run.run_id == done_id
         assert run.finished_at is not None
@@ -1373,7 +1381,7 @@ class TestLatestRunFallback:
     def test_none_when_no_runs_at_all(self, tmp_path):
         sink = self._sink(tmp_path)
         with Session(sink.engine) as s:
-            assert latest_run(s) is None
+            assert RunQueries(s).latest_run() is None
 
 
 # ---------------------------------------------------------------------------
@@ -1384,10 +1392,10 @@ class TestLatestRunFallback:
 class TestControlPlane:
     @staticmethod
     def _state(db_path):
-        from avai.dashboard.control import read_control_state
+        from avai.dashboard.control import ControlReader
 
-        with Session(read_only_engine(db_path)) as s:
-            return read_control_state(s)
+        with Session(DashboardEngines().read_only(db_path)) as s:
+            return ControlReader().read(s)
 
     def test_fragment_control_renders(self, client):
         r = client.get("/fragments/control")
@@ -1403,10 +1411,10 @@ class TestControlPlane:
         con.execute("DROP TABLE IF EXISTS control_state")
         con.commit()
         con.close()
-        from avai.dashboard.control import read_control_state
+        from avai.dashboard.control import ControlReader
 
-        with Session(read_only_engine(db_path)) as s:
-            assert read_control_state(s) is None  # degraded, did not raise
+        with Session(DashboardEngines().read_only(db_path)) as s:
+            assert ControlReader().read(s) is None  # degraded, did not raise
         assert client.get("/fragments/control").status_code == 200
 
     def test_post_without_token_is_forbidden(self, client):
@@ -1561,9 +1569,9 @@ class TestMountTree:
         return [SimpleNamespace(mountpoint=m) for m in mountpoints]
 
     def test_children_nest_under_parents_in_preorder(self):
-        from avai.dashboard.queries import mount_tree
+        from avai.dashboard.queries import MountTree
 
-        tree = mount_tree(self._rows("/home", "/", "/boot/efi", "/boot"))
+        tree = MountTree().nodes(self._rows("/home", "/", "/boot/efi", "/boot"))
         assert [(n["row"].mountpoint, n["depth"]) for n in tree] == [
             ("/", 0),
             ("/boot", 1),
@@ -1572,30 +1580,30 @@ class TestMountTree:
         ]
 
     def test_last_child_flagged_for_branch_glyph(self):
-        from avai.dashboard.queries import mount_tree
+        from avai.dashboard.queries import MountTree
 
         flags = {
             n["row"].mountpoint: n["is_last"]
-            for n in mount_tree(self._rows("/", "/home", "/var"))
+            for n in MountTree().nodes(self._rows("/", "/home", "/var"))
         }
         assert flags["/var"] is True  # last child of root → '└'
         assert flags["/home"] is False  # has a sibling below → '├'
         assert flags["/"] is True  # only node at its level
 
     def test_orphan_mount_without_present_parent_is_depth_zero(self):
-        from avai.dashboard.queries import mount_tree
+        from avai.dashboard.queries import MountTree
 
         # Root not collected: neither mount has an ancestor in the set.
         depths = {
             n["row"].mountpoint: n["depth"]
-            for n in mount_tree(self._rows("/home", "/var/log"))
+            for n in MountTree().nodes(self._rows("/home", "/var/log"))
         }
         assert depths == {"/home": 0, "/var/log": 0}
 
     def test_rows_without_mountpoint_are_dropped(self):
-        from avai.dashboard.queries import mount_tree
+        from avai.dashboard.queries import MountTree
 
-        tree = mount_tree(self._rows(None, "/"))
+        tree = MountTree().nodes(self._rows(None, "/"))
         assert [n["row"].mountpoint for n in tree] == ["/"]
 
 
@@ -1603,25 +1611,25 @@ class TestSeverityHelpers:
     """Pure CVSS-band → severity mapping that drives the panel's sort/filter."""
 
     def test_cvss_bands(self):
-        from avai.dashboard.queries.vulnerabilities import _severity_from_cvss
+        from avai.dashboard.queries.vulnerabilities import Severity
 
-        assert _severity_from_cvss(9.8) == "critical"
-        assert _severity_from_cvss(7.0) == "high"
-        assert _severity_from_cvss(4.0) == "medium"
-        assert _severity_from_cvss(0.1) == "low"
-        assert _severity_from_cvss(0.0) == "none"
-        assert _severity_from_cvss(None) is None
+        assert Severity().from_cvss(9.8) == "critical"
+        assert Severity().from_cvss(7.0) == "high"
+        assert Severity().from_cvss(4.0) == "medium"
+        assert Severity().from_cvss(0.1) == "low"
+        assert Severity().from_cvss(0.0) == "none"
+        assert Severity().from_cvss(None) is None
 
     def test_item_severity_falls_back_to_cve_label_then_kev(self):
-        from avai.dashboard.queries.vulnerabilities import _item_severity
+        from avai.dashboard.queries.vulnerabilities import Severity
 
         # No score on the item, but a labelled CVE → use the worst label.
         cves = [{"severity": "high"}, {"severity": "low"}]
-        assert _item_severity(None, cves, kev=False) == "high"
+        assert Severity().of_item(None, cves) == "high"
         # No score, no labels, but actively exploited → critical.
-        assert _item_severity(None, [{}], kev=True) == "critical"
+        assert Severity().of_item(None, [{"kev": True}]) == "critical"
         # Nothing at all → none.
-        assert _item_severity(None, [{}], kev=False) == "none"
+        assert Severity().of_item(None, [{}]) == "none"
 
 
 class TestVulnerabilitiesPanel:
@@ -1682,13 +1690,13 @@ class TestVulnerabilitiesPanel:
             s.commit()
 
     def test_sorted_by_severity_with_metadata(self, tmp_path):
-        from avai.dashboard.queries import vulnerabilities
+        from avai.dashboard.queries import VulnQuery, VulnerabilitiesPanel
 
         db = tmp_path / "v.db"
-        _ensure_db_exists(str(db))
+        DashboardSchema().ensure(str(db))
         self._seed(str(db))
         with Session(_engine_rw(str(db))) as s:
-            res = vulnerabilities(s)
+            res = VulnerabilitiesPanel(s).vulnerabilities(VulnQuery())
         assert [r["software"] for r in res["rows"]] == [
             "openssl@3.0.0",  # critical first
             "leftpad@1.0.0",  # then medium
@@ -1698,37 +1706,41 @@ class TestVulnerabilitiesPanel:
         assert res["summary"]["critical"] == 1
 
     def test_severity_filter(self, tmp_path):
-        from avai.dashboard.queries import vulnerabilities
+        from avai.dashboard.queries import VulnQuery, VulnerabilitiesPanel
 
         db = tmp_path / "v.db"
-        _ensure_db_exists(str(db))
+        DashboardSchema().ensure(str(db))
         self._seed(str(db))
         with Session(_engine_rw(str(db))) as s:
-            res = vulnerabilities(s, severity="medium")
+            res = VulnerabilitiesPanel(s).vulnerabilities(VulnQuery(severity="medium"))
         assert [r["software"] for r in res["rows"]] == ["leftpad@1.0.0"]
         assert res["total"] == 1
 
     def test_search_filter(self, tmp_path):
-        from avai.dashboard.queries import vulnerabilities
+        from avai.dashboard.queries import VulnQuery, VulnerabilitiesPanel
 
         db = tmp_path / "v.db"
-        _ensure_db_exists(str(db))
+        DashboardSchema().ensure(str(db))
         self._seed(str(db))
         with Session(_engine_rw(str(db))) as s:
-            by_name = vulnerabilities(s, q="openssl")
-            by_cve = vulnerabilities(s, q="cve-2021-bbbb")
+            by_name = VulnerabilitiesPanel(s).vulnerabilities(
+                VulnQuery(search="openssl")
+            )
+            by_cve = VulnerabilitiesPanel(s).vulnerabilities(
+                VulnQuery(search="cve-2021-bbbb")
+            )
         assert [r["software"] for r in by_name["rows"]] == ["openssl@3.0.0"]
         assert [r["software"] for r in by_cve["rows"]] == ["leftpad@1.0.0"]
 
     def test_pagination_slices_and_reports_pages(self, tmp_path):
-        from avai.dashboard.queries import vulnerabilities
+        from avai.dashboard.queries import VulnQuery, VulnerabilitiesPanel
 
         db = tmp_path / "v.db"
-        _ensure_db_exists(str(db))
+        DashboardSchema().ensure(str(db))
         self._seed(str(db))
         with Session(_engine_rw(str(db))) as s:
-            p1 = vulnerabilities(s, page=Page(1, 1))
-            p2 = vulnerabilities(s, page=Page(2, 1))
+            p1 = VulnerabilitiesPanel(s).vulnerabilities(VulnQuery(page=Page(1, 1)))
+            p2 = VulnerabilitiesPanel(s).vulnerabilities(VulnQuery(page=Page(2, 1)))
         assert p1["total"] == 2 and p1["total_pages"] == 2
         assert len(p1["rows"]) == 1 and p1["rows"][0]["software"] == "openssl@3.0.0"
         assert len(p2["rows"]) == 1 and p2["rows"][0]["software"] == "leftpad@1.0.0"
@@ -1800,7 +1812,7 @@ class TestLogsPanel:
         from avai.host_monitor.models import CollectionRun
 
         db = tmp_path / "logs.db"
-        _ensure_db_exists(str(db))
+        DashboardSchema().ensure(str(db))
         with Session(_engine_rw(str(db))) as s:
             s.add(
                 CollectionRun(
@@ -1815,11 +1827,11 @@ class TestLogsPanel:
         return db
 
     def test_newest_first_with_summary_and_sources(self, tmp_path):
-        from avai.dashboard.queries import log_entries
+        from avai.dashboard.queries import LogQuery, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = log_entries(s, "r1")
+            res = LogsPanel(s, "r1").entries(LogQuery())
         assert [r["message"][:7] for r in res["rows"]] == [
             "pam_uni",
             "EXT4-fs",
@@ -1830,43 +1842,40 @@ class TestLogsPanel:
         assert res["sources"] == ["/var/log/dpkg.log", "journald"]
 
     def test_level_and_source_and_search_filters(self, tmp_path):
-        from avai.dashboard.queries import log_entries
+        from avai.dashboard.queries import LogQuery, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            assert [
-                r["message"][:7]
-                for r in log_entries(s, "r1", LogFilter(level="err"))["rows"]
-            ] == ["EXT4-fs"]
-            assert [
-                r["unit"]
-                for r in log_entries(s, "r1", LogFilter(source="/var/log/dpkg.log"))[
-                    "rows"
-                ]
-            ] == ["dpkg.log"]
-            assert [
-                r["message"][:7]
-                for r in log_entries(s, "r1", LogFilter(q="openssl"))["rows"]
-            ] == ["status "]
+            panel = LogsPanel(s, "r1")
+
+            def rows(filters: LogFilter) -> list[dict]:
+                return panel.entries(LogQuery(filters=filters))["rows"]
+
+            errors = [r["message"][:7] for r in rows(LogFilter(level="err"))]
+            dpkg = [r["unit"] for r in rows(LogFilter(source="/var/log/dpkg.log"))]
+            matched = [r["message"][:7] for r in rows(LogFilter(search="openssl"))]
+        assert errors == ["EXT4-fs"]
+        assert dpkg == ["dpkg.log"]
+        assert matched == ["status "]
 
     def test_pagination(self, tmp_path):
-        from avai.dashboard.queries import log_entries
+        from avai.dashboard.queries import LogQuery, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            p1 = log_entries(s, "r1", page=Page(1, 2))
-            p2 = log_entries(s, "r1", page=Page(2, 2))
+            p1 = LogsPanel(s, "r1").entries(LogQuery(page=Page(1, 2)))
+            p2 = LogsPanel(s, "r1").entries(LogQuery(page=Page(2, 2)))
         assert p1["total"] == 4 and p1["total_pages"] == 2
         assert len(p1["rows"]) == 2 and len(p2["rows"]) == 2
 
     def test_page_past_the_end_echoes_the_last_page(self, tmp_path):
         # Regression: the panel sliced the last page but echoed the page that
         # was asked for, so the bar read "page 99 / 2".
-        from avai.dashboard.queries import log_entries
+        from avai.dashboard.queries import LogQuery, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = log_entries(s, "r1", page=Page(99, 2))
+            res = LogsPanel(s, "r1").entries(LogQuery(page=Page(99, 2)))
         assert (res["page"], res["total_pages"]) == (2, 2)
         assert len(res["rows"]) == 2
 
@@ -1888,7 +1897,7 @@ class TestPrimaryFilesystems:
         )
 
     def test_drops_pseudo_and_snap_and_sorts_fullest_first(self):
-        from avai.dashboard.queries import primary_filesystems
+        from avai.dashboard.queries import DiskOrder
 
         rows = [
             self._row("/snap/core/1", "squashfs", 100, 100.0),
@@ -1897,14 +1906,14 @@ class TestPrimaryFilesystems:
             self._row("/run", "tmpfs", 100, 5.0),
             self._row("/dev", "devtmpfs", 0, 0.0),
         ]
-        out = primary_filesystems(rows)
+        out = DiskOrder().primary(rows)
         # ext4 only, fullest-first; squashfs/tmpfs/devtmpfs dropped.
         assert [r.mountpoint for r in out] == ["/boot", "/"]
 
     def test_zero_capacity_real_fs_is_dropped(self):
-        from avai.dashboard.queries import primary_filesystems
+        from avai.dashboard.queries import DiskOrder
 
-        assert primary_filesystems([self._row("/x", "ext4", 0, 0.0)]) == []
+        assert DiskOrder().primary([self._row("/x", "ext4", 0, 0.0)]) == []
 
 
 class TestLogAggregates:
@@ -1967,7 +1976,7 @@ class TestLogAggregates:
         from avai.host_monitor.models import CollectionRun
 
         db = tmp_path / "agg.db"
-        _ensure_db_exists(str(db))
+        DashboardSchema().ensure(str(db))
         with Session(_engine_rw(str(db))) as s:
             s.add(
                 CollectionRun(
@@ -1982,11 +1991,11 @@ class TestLogAggregates:
         return db
 
     def test_group_by_unit_ranks_errors_then_occurrences(self, tmp_path):
-        from avai.dashboard.queries import log_aggregates
+        from avai.dashboard.queries import LogAggregateQuery, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = log_aggregates(s, "r1", group_by="unit")
+            res = LogsPanel(s, "r1").aggregates(LogAggregateQuery(group_by="unit"))
         keys = [(g["key"], g["count"], g["errors"]) for g in res["groups"]]
         # cron (2 err) first, then kernel (1 err), then ssh (0 err) last
         assert keys == [
@@ -1997,11 +2006,11 @@ class TestLogAggregates:
         assert res["summary"] == {"groups": 3, "errors": 3, "warnings": 1, "lines": 10}
 
     def test_group_by_message_collapses_variable_ids(self, tmp_path):
-        from avai.dashboard.queries import log_aggregates
+        from avai.dashboard.queries import LogAggregateQuery, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = log_aggregates(s, "r1", group_by="message")
+            res = LogsPanel(s, "r1").aggregates(LogAggregateQuery(group_by="message"))
         # The 3 ssh logins (varying IP) collapse to one templated group.
         ssh = [g for g in res["groups"] if "Accepted password" in g["key"]]
         assert len(ssh) == 1
@@ -2009,22 +2018,24 @@ class TestLogAggregates:
         assert "#.#.#.#" in ssh[0]["key"]  # ip + port digits normalised
 
     def test_invalid_group_by_falls_back_to_unit(self, tmp_path):
-        from avai.dashboard.queries import log_aggregates
+        from avai.dashboard.queries import LogAggregateQuery, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = log_aggregates(s, "r1", group_by="bogus")
+            res = LogsPanel(s, "r1").aggregates(LogAggregateQuery(group_by="bogus"))
         assert res["group_by"] == "unit"
 
     def test_source_filter_then_aggregate(self, tmp_path):
-        from avai.dashboard.queries import log_aggregates
+        from avai.dashboard.queries import LogAggregateQuery, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = log_aggregates(s, "r1", LogFilter(source="journald"))
+            res = LogsPanel(s, "r1").aggregates(
+                LogAggregateQuery(filters=LogFilter(source="journald"))
+            )
         assert res["summary"]["lines"] == 10
-        none = log_aggregates(  # a source with no rows aggregates to empty
-            Session(_engine_rw(str(db))), "r1", LogFilter(source="/var/log/nope.log")
+        none = LogsPanel(Session(_engine_rw(str(db))), "r1").aggregates(
+            LogAggregateQuery(filters=LogFilter(source="/var/log/nope.log"))
         )
         assert none["groups"] == []
 

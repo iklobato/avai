@@ -177,12 +177,12 @@ class TestContentHashStability:
 def seeded_dashboard(tmp_path):
     """A dashboard bound to a DB containing one active malicious finding
     and one benign one, with a latest run so active/resolved resolves."""
-    from avai.dashboard.app import create_app
+    from avai.dashboard.app import DashboardApp
     from avai.dashboard.config import DashboardConfig
-    from avai.dashboard.serve import _ensure_db_exists
+    from avai.dashboard.serve import DashboardSchema
 
     db = tmp_path / "seeded.db"
-    _ensure_db_exists(str(db))
+    DashboardSchema().ensure(str(db))
     engine = create_engine(f"sqlite:///{db}")
     sink = Sink.create(engine)
     sink.setup()
@@ -227,7 +227,7 @@ def seeded_dashboard(tmp_path):
         conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
     engine.dispose()
 
-    with create_app(DashboardConfig(db_path=str(db))).test_client() as c:
+    with DashboardApp(DashboardConfig(db_path=str(db))).build().test_client() as c:
         yield c
 
 

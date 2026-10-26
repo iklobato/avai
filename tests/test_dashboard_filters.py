@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard.queries import FindingFilter, LogFilter, RowFilter, findings
+from avai.dashboard.queries import FindingFilter, FindingsPanel, FindingsQuery, LogFilter, RowFilter
 from avai.host_monitor.enums import ThreatCategory, Verdict
 from avai.host_monitor.judge import Judgment
 from avai.host_monitor.sink import Sink
@@ -29,19 +29,19 @@ class TestRowFilter:
         assert [r["process"] for r in kept] == ["sshd"]
 
     def test_search_is_case_insensitive_over_the_given_fields(self):
-        kept = RowFilter(q="SSH").keep(_ROWS, ("process",))
+        kept = RowFilter(search="SSH").keep(_ROWS, ("process",))
         assert [r["process"] for r in kept] == ["sshd"]
 
     def test_search_ignores_the_case_of_the_row_value(self):
         rows = [{"verdict": None, "process": "Google Chrome"}]
-        assert RowFilter(q="chrome").keep(rows, ("process",)) == rows
+        assert RowFilter(search="chrome").keep(rows, ("process",)) == rows
 
     def test_search_matches_numbers_and_skips_missing_values(self):
-        kept = RowFilter(q="22").keep(_ROWS, ("process", "port"))
+        kept = RowFilter(search="22").keep(_ROWS, ("process", "port"))
         assert [r["port"] for r in kept] == [22, 8022]
 
     def test_search_ignores_fields_not_listed(self):
-        assert RowFilter(q="curl").keep(_ROWS, ("port",)) == []
+        assert RowFilter(search="curl").keep(_ROWS, ("port",)) == []
 
     def test_fields_echo_the_values(self):
         assert RowFilter("suspicious", "x").fields() == {
@@ -67,8 +67,8 @@ class TestLogFilter:
         assert [r.unit for r in kept] == ["sshd"]
 
     def test_search_covers_message_and_unit(self):
-        assert len(LogFilter(q="SSHD").keep(_LINES)) == 1
-        assert len(LogFilter(q="openssl").keep(_LINES)) == 1
+        assert len(LogFilter(search="SSHD").keep(_LINES)) == 1
+        assert len(LogFilter(search="openssl").keep(_LINES)) == 1
 
     def test_fields_echo_the_values(self):
         assert LogFilter("a", "b", "c").fields() == {
@@ -115,7 +115,7 @@ def judged(tmp_path):
 
 def _reasons(engine, filters: FindingFilter) -> list[str]:
     with Session(engine) as s:
-        return [f["reasoning"] for f in findings(s, filters=filters)["items"]]
+        return [f["reasoning"] for f in FindingsPanel(s).findings(FindingsQuery(filters=filters))["items"]]
 
 
 class TestFindingFilter:

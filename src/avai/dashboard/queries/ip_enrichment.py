@@ -2,116 +2,108 @@
 
 from __future__ import annotations
 
-import json
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from avai.enrichers import IndicatorType
+from avai.enrichers.cache import EnrichmentSchema
 from avai.host_monitor import Base
 
-from .common import _existing_tables
+from .panel_reads import SchemaProbe, StoredJson
 
 
-def _geo_from_details(details: dict) -> dict | None:
-    """Extract a normalised geolocation from one evidence row's details,
-    tolerating each source's own key names: ipwho.is
-    (country/city/region/asn/org), AbuseIPDB (countryCode/isp), Feodo
-    (country/as_name/as_number). Returns ``None`` when the row carries no
-    geo at all."""
-    cc = details.get("country_code") or details.get("countryCode")
-    country = details.get("country") or cc
-    city = details.get("city")
-    region = details.get("region")
-    org = details.get("org") or details.get("as_name") or details.get("isp")
-    asn = details.get("asn") or details.get("as_number")
-    if not any((country, city, org, asn)):
-        return None
-    return {
-        "country": country,
-        "cc": cc,
-        "city": city,
-        "region": region,
-        "org": org,
-        "asn": asn,
-    }
+class IpDetails:
+    """One evidence row's details about an IP, read across each source's own
+    key names."""
+
+    def __init__(self, details: dict[str, Any]) -> None:
+        self._details = details
+
+    def geo(self) -> dict[str, Any] | None:
+        """A normalised geolocation: ipwho.is (country/city/region/asn/org),
+        AbuseIPDB (countryCode/isp), Feodo (country/as_name/as_number). None
+        when the row carries no geo at all."""
+        details = self._details
+        code = details.get("country_code") or details.get("countryCode")
+        org = details.get("org") or details.get("as_name") or details.get("isp")
+        asn = details.get("asn") or details.get("as_number")
+        geo = {
+            "country": details.get("country") or code,
+            "cc": code,
+            "city": details.get("city"),
+            "region": details.get("region"),
+            "org": org,
+            "asn": asn,
+        }
+        named = (geo["country"], geo["city"], org, asn)
+        return geo if any(named) else None
+
+    def host(self) -> str | None:
+        """A hostname / domain for the IP: Shodan InternetDB's reverse-DNS
+        ``hostnames`` or AbuseIPDB's registered ``domain``."""
+        hostnames = self._details.get("hostnames")
+        names = hostnames if isinstance(hostnames, list) else []
+        named = [name for name in names if isinstance(name, str) and name]
+        if named:
+            return named[0]
+        domain = self._details.get("domain")
+        return domain if isinstance(domain, str) and domain else None
 
 
-def _geo_richness(g: dict) -> int:
-    """Count how many fields a geo candidate fills — used to keep the
-    most detailed geolocation when several sources disagree."""
-    return sum(
-        1 for v in (g["city"], g["region"], g["country"], g["org"], g["asn"]) if v
-    )
+class IpEnrichment:
+    """Fills each flow row's ``geo`` (the richest geolocation across sources)
+    and ``hostname`` (a reverse-DNS name, if any source resolved one) from
+    the cached enrichment evidence. Both stay None without evidence."""
 
+    GEO_FIELDS = ("city", "region", "country", "org", "asn")
 
-def _host_from_details(details: dict) -> str | None:
-    """Pull a hostname / domain for the IP out of one evidence row's
-    details: Shodan InternetDB carries reverse-DNS ``hostnames`` (keyless,
-    on by default), AbuseIPDB carries a registered ``domain``. ``None``
-    when the row names no host."""
-    hostnames = details.get("hostnames")
-    if isinstance(hostnames, list):
-        for h in hostnames:
-            if isinstance(h, str) and h:
-                return h
-    dom = details.get("domain")
-    if isinstance(dom, str) and dom:
-        return dom
-    return None
+    def __init__(self, session: Session) -> None:
+        self._session = session
 
+    def attach(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            row["geo"] = None
+            row["hostname"] = None
+        ips = [row["dst_ip"] for row in rows if row.get("dst_ip")]
+        if not ips or "enrichment_evidence" not in SchemaProbe(self._session).tables():
+            return
+        geo_by_ip, hosts_by_ip = self._evidence(ips)
+        for row in rows:
+            row["geo"] = geo_by_ip.get(row["dst_ip"])
+            hosts = hosts_by_ip.get(row["dst_ip"])
+            # Deterministic pick when several sources name different hosts.
+            row["hostname"] = sorted(hosts)[0] if hosts else None
 
-def _attach_ip_enrichment(session: Session, rows: list[dict]) -> None:
-    """Populate each flow row from the cached enrichment evidence for its
-    destination IP:
-
-    - ``geo``:      the richest geolocation (country / city / region /
-      org / ASN) across any source — ipwho.is primarily, with AbuseIPDB /
-      Feodo as fallbacks.
-    - ``hostname``: a reverse-DNS hostname / domain for the IP, if any
-      source resolved one (Shodan ``hostnames``, AbuseIPDB ``domain``).
-
-    Both default to ``None``. No-op if the enrichment cache table doesn't
-    exist or there are no rows.
-    """
-    for r in rows:
-        r["geo"] = None
-        r["hostname"] = None
-    if not rows or "enrichment_evidence" not in _existing_tables(session):
-        return
-    ips = [r["dst_ip"] for r in rows if r.get("dst_ip")]
-    if not ips:
-        return
-    # Register the enrichment ORM model against the dashboard's Base
-    # (idempotent — no-op if the monitor's startup already did it) so we
-    # can query the cache through the ORM rather than raw SQL.
-    from avai.enrichers import IndicatorType
-    from avai.enrichers.cache import EnrichmentSchema
-
-    model = EnrichmentSchema(Base).model()
-    stmt = select(
-        model.indicator_value,
-        model.details_json,
-    ).where(
-        model.indicator_type.in_([str(IndicatorType.IPV4), str(IndicatorType.IPV6)]),
-        model.indicator_value.in_(ips),
-    )
-    geo_by_ip: dict[str, dict] = {}
-    host_by_ip: dict[str, set] = {}
-    for ip, details_json in session.execute(stmt).all():
-        try:
-            details = json.loads(details_json) if details_json else {}
-        except (TypeError, ValueError):
-            details = {}
-        geo = _geo_from_details(details)
-        if geo is not None:
-            best = geo_by_ip.get(ip)
-            if best is None or _geo_richness(geo) > _geo_richness(best):
+    def _evidence(
+        self, ips: list[str]
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, set[str]]]:
+        geo_by_ip: dict[str, dict[str, Any]] = {}
+        hosts_by_ip: dict[str, set[str]] = {}
+        for ip, details_json in self._rows(ips):
+            details = IpDetails(StoredJson().as_dict(details_json))
+            geo, host = details.geo(), details.host()
+            if geo is not None and self._richness(geo) > self._richness(
+                geo_by_ip.get(ip)
+            ):
                 geo_by_ip[ip] = geo
-        host = _host_from_details(details)
-        if host:
-            host_by_ip.setdefault(ip, set()).add(host)
-    for r in rows:
-        r["geo"] = geo_by_ip.get(r["dst_ip"])
-        hosts = host_by_ip.get(r["dst_ip"])
-        # Deterministic pick when several sources name different hosts.
-        r["hostname"] = sorted(hosts)[0] if hosts else None
+            if host:
+                hosts_by_ip.setdefault(ip, set()).add(host)
+        return geo_by_ip, hosts_by_ip
+
+    def _rows(self, ips: list[str]) -> list[Any]:
+        # Registering the model is idempotent (the monitor's startup usually
+        # did it), so the cache is read through the ORM, not raw SQL.
+        model = EnrichmentSchema(Base).model()
+        address_types = [str(IndicatorType.IPV4), str(IndicatorType.IPV6)]
+        statement = select(model.indicator_value, model.details_json).where(
+            model.indicator_type.in_(address_types), model.indicator_value.in_(ips)
+        )
+        return list(self._session.execute(statement).all())
+
+    def _richness(self, geo: dict[str, Any] | None) -> int:
+        """How many fields a geo candidate fills; the most detailed wins."""
+        if geo is None:
+            return -1
+        return sum(1 for name in self.GEO_FIELDS if geo[name])

@@ -15,9 +15,9 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from avai.dashboard.app import create_app
+from avai.dashboard.app import DashboardApp
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.queries import disk_usage, host_resources, resource_trend
+from avai.dashboard.queries import ResourceQueries
 from avai.host_monitor.collectors import DiskUsageCollector, HostResourcesCollector
 from avai.host_monitor.models import DiskUsageRow, HostResourceRow
 from avai.host_monitor.runtime import Digest, FrozenClock
@@ -263,7 +263,7 @@ class TestQueries:
         engine, _, run_id, _, _ = db
         _seed(db)
         with Session(engine) as s:
-            res = host_resources(s, run_id)
+            res = ResourceQueries(s).host_resources(run_id)
         assert res is not None
         assert res["row"].mem_percent == 42.0
         assert res["per_core"] == [10.0, 16.0]
@@ -272,14 +272,14 @@ class TestQueries:
         engine, _, run_id, _, _ = db
         _seed(db)
         with Session(engine) as s:
-            disks = disk_usage(s, run_id)
+            disks = ResourceQueries(s).disk_usage(run_id)
         assert [d.mountpoint for d in disks] == ["/boot", "/"]  # 95% before 60%
 
     def test_resource_trend_shape(self, db):
         engine, _, run_id, _, _ = db
         _seed(db)
         with Session(engine) as s:
-            trend = resource_trend(s)
+            trend = ResourceQueries(s).resource_trend()
         assert trend["mem"] == [42.0]
         assert trend["cpu"] == [13.0]
         assert len(trend["labels"]) == 1
@@ -290,9 +290,9 @@ class TestQueries:
             conn.execute(text("DROP TABLE host_resources"))
             conn.execute(text("DROP TABLE disk_usage"))
         with Session(engine) as s:
-            assert host_resources(s, run_id) is None
-            assert disk_usage(s, run_id) == []
-            assert resource_trend(s)["labels"] == []
+            assert ResourceQueries(s).host_resources(run_id) is None
+            assert ResourceQueries(s).disk_usage(run_id) == []
+            assert ResourceQueries(s).resource_trend()["labels"] == []
 
 
 class TestRoutes:
@@ -300,9 +300,9 @@ class TestRoutes:
         engine, _, _, _, tmp_path = db
         _seed(db)
         engine.dispose()
-        with create_app(
+        with DashboardApp(
             DashboardConfig(db_path=str(tmp_path / "r.db"))
-        ).test_client() as c:
+        ).build().test_client() as c:
             r = c.get("/fragments/resources")
         assert r.status_code == 200
         body = r.data.decode()
@@ -316,9 +316,9 @@ class TestRoutes:
             conn.execute(text("DROP TABLE host_resources"))
             conn.execute(text("DROP TABLE disk_usage"))
         engine.dispose()
-        with create_app(
+        with DashboardApp(
             DashboardConfig(db_path=str(tmp_path / "e.db"))
-        ).test_client() as c:
+        ).build().test_client() as c:
             r = c.get("/fragments/resources")
         assert r.status_code == 200
 
@@ -326,9 +326,9 @@ class TestRoutes:
         engine, _, _, _, tmp_path = db
         _seed(db)
         engine.dispose()
-        with create_app(
+        with DashboardApp(
             DashboardConfig(db_path=str(tmp_path / "r.db"))
-        ).test_client() as c:
+        ).build().test_client() as c:
             r = c.get("/api/chart/resources")
         assert r.status_code == 200
         data = r.get_json()

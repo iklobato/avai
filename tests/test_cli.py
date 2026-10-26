@@ -7,6 +7,8 @@ help short-circuits — without touching ``host_monitor`` or
 
 from __future__ import annotations
 
+import io
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,7 +46,7 @@ class TestDispatch:
 
     @pytest.mark.parametrize("alias", ["dashboard", "ui", "serve"])
     def test_dashboard_aliases_route_to_dashboard(self, alias):
-        with patch("avai.dashboard.main", return_value=0) as d:
+        with patch("avai.dashboard.serve.DashboardCli.main", return_value=0) as d:
             rc = main([alias, "--port", "9000"])
         assert rc == 0
         d.assert_called_once_with()
@@ -53,7 +55,7 @@ class TestDispatch:
         "cmd,target",
         [
             ("monitor", "avai.host_monitor.main.MonitorApp"),
-            ("dashboard", "avai.dashboard"),
+            ("dashboard", "avai.dashboard.serve.DashboardCli"),
         ],
     )
     def test_remaining_argv_passed_through(self, cmd, target):
@@ -209,9 +211,9 @@ class TestDefaultArgs:
     def test_dashboard_defaults(self):
         from pathlib import Path
 
-        from avai.dashboard.serve import _build_parser
+        from avai.dashboard.serve import DashboardArgs
 
-        ns = _build_parser().parse_args([])
+        ns = DashboardArgs().parser().parse_args([])
         assert ns.db == str(Path.home() / ".avai" / "avai.db")
         assert ns.port == 8765
 
@@ -221,20 +223,21 @@ class TestDashboardServer:
     (no Werkzeug 'development server' warning); --debug uses app.run."""
 
     def test_default_serves_via_waitress(self):
-        import avai.dashboard.serve as d
+        from avai.dashboard.serve import DashboardServer, ServeOptions
 
         app = MagicMock()
         with patch("waitress.serve") as wserve:
-            d._serve(app, "127.0.0.1", 8765, debug=False)
+            DashboardServer(app, io.StringIO()).serve(ServeOptions("127.0.0.1", 8765))
         wserve.assert_called_once()
         assert wserve.call_args.args[0] is app
         app.run.assert_not_called()
 
     def test_debug_uses_dev_server(self):
-        import avai.dashboard.serve as d
+        from avai.dashboard.serve import DashboardServer, ServeOptions
 
         app = MagicMock()
+        options = ServeOptions("127.0.0.1", 8765, debug=True)
         with patch("waitress.serve") as wserve:
-            d._serve(app, "127.0.0.1", 8765, debug=True)
+            DashboardServer(app, io.StringIO()).serve(options)
         app.run.assert_called_once()
         wserve.assert_not_called()

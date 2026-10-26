@@ -5,137 +5,183 @@ secret token (fail closed when unset)."""
 from __future__ import annotations
 
 import hmac
-from functools import wraps
+from http import HTTPStatus
+from typing import ClassVar
 
 from flask import Blueprint, abort, render_template, request
+from flask.views import View
 
 from avai.host_monitor import FeedbackLabel
 
-from ..control import monitor_alive, read_control_state
-from ..queries import COLLECTOR_MODELS
-from . import read_session, services
+from ..control import (
+    ControlReader,
+    ControlStore,
+    Feedback,
+    MonitorLiveness,
+    SettingsChange,
+)
+from ..queries import CollectorTables
+from . import ServiceLookup
 
-bp = Blueprint("control", __name__)
+MAINTENANCE_ACTIONS = frozenset(
+    {"prune", "clear", "rejudge", "renarrate", "reset_baseline"}
+)
+TRUTHY_FORM_VALUES = ("1", "true", "on", "yes")
 
 
-_MAINTENANCE_ACTIONS = {"prune", "clear", "rejudge", "renarrate", "reset_baseline"}
-
-
-def require_control_token(fn):
+class TokenGate:
     """Gate a control action behind the configured token. Fails closed: with
-    no token, control is disabled entirely (403). The token is read from the
-    ``X-Avai-Token`` header; a custom header can't be set by a cross-site
-    form, so it doubles as the CSRF defence. Bypassed in open mode (see
-    ``DashboardConfig.control_open``)."""
+    no token, control is disabled entirely (403). The token comes from the
+    ``X-Avai-Token`` header; a cross-site form can't set a custom header, so
+    it doubles as the CSRF defence. Open mode (see
+    ``DashboardConfig.control_open``) skips the check."""
 
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        config = services().config
+    def check(self) -> None:
+        config = ServiceLookup().services().config
         if config.control_open:
-            return fn(*args, **kwargs)
+            return
         supplied = request.headers.get("X-Avai-Token", "")
         token = config.control_token
         if not token or not hmac.compare_digest(token, supplied):
-            abort(403)
-        return fn(*args, **kwargs)
-
-    return wrapper
+            abort(HTTPStatus.FORBIDDEN)
 
 
-def _control_panel():
-    config = services().config
-    with read_session() as s:
-        state = read_control_state(s)
-    return render_template(
-        "partials/_control.html",
-        ctrl=state,
-        alive=monitor_alive(state),
-        collectors=sorted(COLLECTOR_MODELS),
-        control_enabled=config.control_enabled,
-        control_open=config.control_open,
-    )
+class ControlPanel:
+    def render(self) -> str:
+        lookup = ServiceLookup()
+        config = lookup.services().config
+        with lookup.read_session() as session:
+            state = ControlReader().read(session)
+        return render_template(
+            "partials/_control.html",
+            ctrl=state,
+            alive=MonitorLiveness().alive(state),
+            collectors=sorted(CollectorTables().models()),
+            control_enabled=config.control_enabled,
+            control_open=config.control_open,
+        )
 
 
-@bp.route("/fragments/control")
-def fragment_control():
-    return _control_panel()
+class GuardedAction(View):
+    """A token-guarded POST that changes the control row, then re-renders the
+    control panel."""
+
+    methods: ClassVar[list[str]] = ["POST"]
+
+    def store(self) -> ControlStore:
+        return ServiceLookup().services().control
 
 
-@bp.route("/control/pause", methods=["POST"])
-@require_control_token
-def control_pause():
-    services().control.set_paused(True)
-    return _control_panel()
+class ControlFragment(View):
+    methods: ClassVar[list[str]] = ["GET"]
+
+    def dispatch_request(self) -> str:
+        return ControlPanel().render()
 
 
-@bp.route("/control/resume", methods=["POST"])
-@require_control_token
-def control_resume():
-    services().control.set_paused(False)
-    return _control_panel()
+class PauseAction(GuardedAction):
+    def dispatch_request(self) -> str:
+        TokenGate().check()
+        self.store().pause()
+        return ControlPanel().render()
 
 
-@bp.route("/control/scan-now", methods=["POST"])
-@require_control_token
-def control_scan_now():
-    services().control.bump_scan_now()
-    return _control_panel()
+class ResumeAction(GuardedAction):
+    def dispatch_request(self) -> str:
+        TokenGate().check()
+        self.store().resume()
+        return ControlPanel().render()
 
 
-@bp.route("/control/collector/<name>/<state>", methods=["POST"])
-@require_control_token
-def control_collector(name, state):
-    if name not in COLLECTOR_MODELS or state not in ("on", "off"):
-        abort(400)
-    services().control.set_collector(name, enabled=(state == "on"))
-    return _control_panel()
+class ScanNowAction(GuardedAction):
+    def dispatch_request(self) -> str:
+        TokenGate().check()
+        self.store().bump_scan_now()
+        return ControlPanel().render()
 
 
-@bp.route("/control/settings", methods=["POST"])
-@require_control_token
-def control_settings():
-    def _int(field):
-        v = request.form.get(field, "").strip()
-        return int(v) if v.isdigit() else None
-
-    def _bool(field):
-        v = request.form.get(field)
-        return None if v is None else v in ("1", "true", "on", "yes")
-
-    services().control.set_settings(
-        interval=_int("interval"), judge=_bool("judge"), enrich=_bool("enrich")
-    )
-    return _control_panel()
+class CollectorAction(GuardedAction):
+    def dispatch_request(self, name: str, state: str) -> str:
+        TokenGate().check()
+        if CollectorTables().model(name) is None or state not in ("on", "off"):
+            abort(HTTPStatus.BAD_REQUEST)
+        if state == "on":
+            self.store().enable_collector(name)
+        if state == "off":
+            self.store().disable_collector(name)
+        return ControlPanel().render()
 
 
-@bp.route("/control/maintenance/<action>", methods=["POST"])
-@require_control_token
-def control_maintenance(action):
-    if action not in _MAINTENANCE_ACTIONS:
-        abort(400)
-    services().control.queue_command(action)
-    return _control_panel()
+class SettingsAction(GuardedAction):
+    def dispatch_request(self) -> str:
+        TokenGate().check()
+        change = SettingsChange(
+            interval=self._number("interval"),
+            judge=self._flag("judge"),
+            enrich=self._flag("enrich"),
+        )
+        self.store().set_settings(change)
+        return ControlPanel().render()
+
+    def _number(self, field: str) -> int | None:
+        value = request.form.get(field, "").strip()
+        return int(value) if value.isdigit() else None
+
+    def _flag(self, field: str) -> bool | None:
+        value = request.form.get(field)
+        return None if value is None else value in TRUTHY_FORM_VALUES
 
 
-_FEEDBACK_LABELS = {label.value for label in FeedbackLabel}
+class MaintenanceAction(GuardedAction):
+    def dispatch_request(self, action: str) -> str:
+        TokenGate().check()
+        if action not in MAINTENANCE_ACTIONS:
+            abort(HTTPStatus.BAD_REQUEST)
+        self.store().queue_command(action)
+        return ControlPanel().render()
 
 
-@bp.route("/feedback/<collector>/<content_hash>/<label>", methods=["POST"])
-@require_control_token
-def feedback_record(collector, content_hash, label):
+class FeedbackAction(GuardedAction):
     """Record an operator correction on a finding. The monitor applies it to
     the verdict and feeds it back to the judge next cycle, so the on-screen
     verdict updates on the following refresh (not instantly)."""
-    if collector not in COLLECTOR_MODELS or label not in _FEEDBACK_LABELS:
-        abort(400)
-    services().control.record_feedback(
-        content_hash=content_hash,
-        collector=collector,
-        label=label,
-        note=(request.form.get("note", "").strip() or None),
-        artifact=(request.form.get("artifact", "").strip() or None),
-    )
-    return (
+
+    RECORDED = (
         '<span class="text-emerald-400 text-[10px] uppercase tracking-wider">'
         "✓ recorded — applies next cycle</span>"
     )
+
+    def dispatch_request(self, collector: str, content_hash: str, label: str) -> str:
+        TokenGate().check()
+        labels = {known.value for known in FeedbackLabel}
+        if CollectorTables().model(collector) is None or label not in labels:
+            abort(HTTPStatus.BAD_REQUEST)
+        note = request.form.get("note", "").strip() or None
+        artifact = request.form.get("artifact", "").strip() or None
+        self.store().record_feedback(
+            Feedback(content_hash, collector, label, note, artifact)
+        )
+        return self.RECORDED
+
+
+class ControlRoutes:
+    ROUTES = (
+        ("/fragments/control", "fragment_control", ControlFragment),
+        ("/control/pause", "control_pause", PauseAction),
+        ("/control/resume", "control_resume", ResumeAction),
+        ("/control/scan-now", "control_scan_now", ScanNowAction),
+        ("/control/collector/<name>/<state>", "control_collector", CollectorAction),
+        ("/control/settings", "control_settings", SettingsAction),
+        ("/control/maintenance/<action>", "control_maintenance", MaintenanceAction),
+        (
+            "/feedback/<collector>/<content_hash>/<label>",
+            "feedback_record",
+            FeedbackAction,
+        ),
+    )
+
+    def blueprint(self) -> Blueprint:
+        blueprint = Blueprint("control", __name__)
+        for path, endpoint, view in self.ROUTES:
+            blueprint.add_url_rule(path, view_func=view.as_view(endpoint))
+        return blueprint
