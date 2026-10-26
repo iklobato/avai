@@ -17,7 +17,13 @@ from avai.dashboard.app import create_app
 from avai.dashboard.config import DashboardConfig
 from avai.dashboard.queries import RowFilter, network_flows
 from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
-from avai.host_monitor.collectors import NetworkFlowsCollector
+from avai.host_monitor.collectors import (
+    FlowTable,
+    PacketFlow,
+    PayloadSize,
+    TcpdumpBanner,
+    TcpdumpLine,
+)
 from avai.host_monitor.models import NetworkFlowRow
 from avai.host_monitor.sink import Sink
 
@@ -39,43 +45,55 @@ wlan0 Out IP 10.0.0.5.51000 > 1.2.3.4.443: tcp 52
 
 
 class TestParseLine:
+    def parse(self, line: str) -> PacketFlow | None:
+        return TcpdumpLine.of(line).flow()
+
     def test_macos_tcp_line_no_iface(self):
         # 5-tuple now includes the payload byte count (trailing 'tcp 0' → 0)
-        assert NetworkFlowsCollector._parse_line(
-            "IP 10.0.0.5.54321 > 142.250.80.46.443: tcp 0"
-        ) == (None, "tcp", "142.250.80.46", 443, 0)
+        assert self.parse("IP 10.0.0.5.54321 > 142.250.80.46.443: tcp 0") == (
+            None,
+            "tcp",
+            "142.250.80.46",
+            443,
+            0,
+        )
 
     def test_udp_line_with_comma(self):
         # 'UDP, length 45' → 45 payload bytes
-        assert NetworkFlowsCollector._parse_line(
-            "IP 10.0.0.5.5353 > 224.0.0.251.5353: UDP, length 45"
-        ) == (None, "udp", "224.0.0.251", 5353, 45)
+        assert self.parse("IP 10.0.0.5.5353 > 224.0.0.251.5353: UDP, length 45") == (
+            None,
+            "udp",
+            "224.0.0.251",
+            5353,
+            45,
+        )
 
     def test_linux_any_line_has_interface(self):
         # 'eth0 Out IP ...' → interface is the leading token
-        assert NetworkFlowsCollector._parse_line(
-            "eth0 Out IP 10.0.0.5.54321 > 1.2.3.4.443: tcp 0"
-        ) == ("eth0", "tcp", "1.2.3.4", 443, 0)
+        assert self.parse("eth0 Out IP 10.0.0.5.54321 > 1.2.3.4.443: tcp 0") == (
+            "eth0",
+            "tcp",
+            "1.2.3.4",
+            443,
+            0,
+        )
 
     def test_arp_and_blank_skipped(self):
-        assert NetworkFlowsCollector._parse_line("ARP, Request who-has x") is None
-        assert NetworkFlowsCollector._parse_line("") is None
+        assert self.parse("ARP, Request who-has x") is None
+        assert self.parse("") is None
 
     def test_non_numeric_port_skipped(self):
-        assert (
-            NetworkFlowsCollector._parse_line("IP 10.0.0.5.x > host.example: tcp 0")
-            is None
-        )
+        assert self.parse("IP 10.0.0.5.x > host.example: tcp 0") is None
 
     def test_ipv6_line_macos(self):
         # tcpdump 'IP6' lines append the port after a final '.' just like
         # IPv4, so the trailing .443 splits off the v6 destination.
-        assert NetworkFlowsCollector._parse_line(
+        assert self.parse(
             "IP6 2600:1f18::1.50000 > 2606:4700:4700::1111.443: tcp 0"
         ) == (None, "tcp", "2606:4700:4700::1111", 443, 0)
 
     def test_ipv6_line_linux_any(self):
-        assert NetworkFlowsCollector._parse_line(
+        assert self.parse(
             "eth0 Out IP6 fe80::1.5353 > 2001:4860:4860::8888.443: tcp 52"
         ) == ("eth0", "tcp", "2001:4860:4860::8888", 443, 52)
 
@@ -83,63 +101,63 @@ class TestParseLine:
         # macOS '-k I' prefixes the real interface in parentheses (verified
         # live: "(en6) IP 18.190.38.130.443 > ..."), so flows land on
         # en6/en0/… instead of the 'pktap' pseudo-device.
-        assert NetworkFlowsCollector._parse_line(
+        assert self.parse(
             "(en6) IP 192.168.1.209.56258 > 18.190.38.130.443: tcp 0"
         ) == ("en6", "tcp", "18.190.38.130", 443, 0)
 
     def test_macos_k_ipv6_expanded_address(self):
         # Real macOS capture: '-k I' + IP6 + a fully-expanded v6 address
         # (no '::'); the trailing '.443' still splits off the port.
-        assert NetworkFlowsCollector._parse_line(
+        assert self.parse(
             "(en6) IP6 2803:9810:469f:7108:f5ff:a108:be74:f78a.55987 "
             "> 2a03:2880:f205:2c6:face:b00c:0:7260.443: tcp 1380"
         ) == ("en6", "tcp", "2a03:2880:f205:2c6:face:b00c:0:7260", 443, 1380)
 
 
 class TestPayloadBytes:
-    def test_tcp_trailing_length(self):
-        from avai.host_monitor.collectors import _payload_bytes
+    def payload(self, line: str) -> int:
+        return PayloadSize(line.split()).bytes()
 
-        assert _payload_bytes("IP a > b: tcp 1380".split()) == 1380
-        assert _payload_bytes("IP a > b: tcp 0".split()) == 0
+    def test_tcp_trailing_length(self):
+        assert self.payload("IP a > b: tcp 1380") == 1380
+        assert self.payload("IP a > b: tcp 0") == 0
 
     def test_udp_length_token(self):
-        from avai.host_monitor.collectors import _payload_bytes
-
-        assert _payload_bytes("IP a > b: UDP, length 45".split()) == 45
+        assert self.payload("IP a > b: UDP, length 45") == 45
 
     def test_absent_returns_zero(self):
-        from avai.host_monitor.collectors import _payload_bytes
-
-        assert _payload_bytes("IP a > b: Flags [S]".split()) == 0
-        assert _payload_bytes([]) == 0
+        assert self.payload("IP a > b: Flags [S]") == 0
+        assert self.payload("") == 0
 
 
 class TestIfaceFromBanner:
     def test_extracts_interface(self):
         stderr = "tcpdump: listening on en0, link-type EN10MB (Ethernet), capture..."
-        assert NetworkFlowsCollector._iface_from_banner(stderr) == "en0"
+        assert TcpdumpBanner(stderr).listening_iface() == "en0"
 
     def test_none_when_absent(self):
-        assert NetworkFlowsCollector._iface_from_banner("some other output") is None
+        assert TcpdumpBanner("some other output").listening_iface() is None
 
 
 class TestNormalizeDefaultIface:
+    def default_iface(self, iface: str) -> str | None:
+        return TcpdumpBanner(f"listening on {iface}, link-type").default_iface()
+
     def test_pktap_pseudo_device_dropped(self):
         # 'pktap'/'pktap0' is the macOS aggregating tap, not a real iface
-        assert NetworkFlowsCollector._normalize_default_iface("pktap0") is None
-        assert NetworkFlowsCollector._normalize_default_iface("pktap") is None
+        assert self.default_iface("pktap0") is None
+        assert self.default_iface("pktap") is None
 
     def test_real_interface_kept(self):
-        assert NetworkFlowsCollector._normalize_default_iface("en0") == "en0"
+        assert self.default_iface("en0") == "en0"
 
     def test_none_passthrough(self):
-        assert NetworkFlowsCollector._normalize_default_iface(None) is None
+        assert TcpdumpBanner("").default_iface() is None
 
 
 class TestAggregate:
     def test_macos_uses_default_iface_and_counts(self):
-        flows = NetworkFlowsCollector()._aggregate(SAMPLE_MACOS, "en0")
+        flows = FlowTable().aggregate(SAMPLE_MACOS, "en0")
         assert len(flows) == 3  # google:443 (x2), mdns, dns
         g = flows[("en0", "tcp", "142.250.80.46", 443)]
         assert g["packets"] == 2
@@ -147,13 +165,13 @@ class TestAggregate:
         assert g["iface"] == "en0"
 
     def test_linux_per_line_interface(self):
-        flows = NetworkFlowsCollector()._aggregate(SAMPLE_LINUX, None)
+        flows = FlowTable().aggregate(SAMPLE_LINUX, None)
         # same dst:port but different interfaces → two distinct flows
         assert ("eth0", "tcp", "1.2.3.4", 443) in flows
         assert ("wlan0", "tcp", "1.2.3.4", 443) in flows
 
     def test_empty(self):
-        assert NetworkFlowsCollector()._aggregate("", "en0") == {}
+        assert FlowTable().aggregate("", "en0") == {}
 
 
 class TestFlowIndicators:

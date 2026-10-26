@@ -22,6 +22,7 @@ from avai.host_monitor import constants
 from avai.host_monitor.collectors import (
     BluetoothCollector,
     BrowserExtensionsCollector,
+    CapturedPackets,
     DnsQueriesCollector,
     FileIntegrityCollector,
     HostsFileCollector,
@@ -48,6 +49,7 @@ from avai.host_monitor.collectors import (
     SshAuthorizedKeysCollector,
     SystemExtensionsCollector,
     SystemIntegrityCollector,
+    TcpdumpCapture,
     UsbDevicesCollector,
     WifiCollector,
 )
@@ -57,6 +59,7 @@ from avai.host_monitor.runtime import (
     CommandRunner,
     DiskMetrics,
     HostPaths,
+    PsutilConnections,
     SystemMetrics,
 )
 
@@ -205,7 +208,7 @@ class TestListeningPortsCollector:
 
         monkeypatch.setattr(psutil, "net_connections", lambda kind="inet": conns)
         monkeypatch.setattr(psutil, "Process", process)
-        rows = list(ListeningPortsCollector().collect())
+        rows = list(ListeningPortsCollector(PsutilConnections()).collect())
         assert [(r["laddr_port"], r["process_name"]) for r in rows] == [
             (22, "sshd"),
             (2222, "sshd"),
@@ -221,7 +224,7 @@ class TestProcessConnectionResolver:
             raise psutil.AccessDenied()
 
         monkeypatch.setattr(psutil, "net_connections", denied)
-        assert ProcessConnectionResolver().snapshot() == {}
+        assert ProcessConnectionResolver(PsutilConnections()).snapshot() == {}
 
     def test_vanished_process_is_labelled_by_pid_and_first_owner_wins(
         self, monkeypatch
@@ -237,7 +240,7 @@ class TestProcessConnectionResolver:
 
         monkeypatch.setattr(psutil, "net_connections", lambda kind="inet": conns)
         monkeypatch.setattr(psutil, "Process", gone)
-        assert ProcessConnectionResolver().snapshot() == {
+        assert ProcessConnectionResolver(PsutilConnections()).snapshot() == {
             ("8.8.8.8", 443): ("pid 40", 40)
         }
 
@@ -271,7 +274,7 @@ class TestNetworkInterfacesCollector:
         monkeypatch.setattr(
             psutil, "net_io_counters", lambda pernic=True: {"en0": counters}
         )
-        en0, utun = list(NetworkInterfacesCollector().collect())
+        en0, utun = list(NetworkInterfacesCollector(SystemMetrics()).collect())
         assert (en0["is_up"], en0["mtu"], en0["bytes_recv"]) == (1, 1500, 2)
         assert json.loads(en0["addresses_json"])[0]["address"] == "10.0.0.5"
         assert (utun["is_up"], utun["bytes_sent"], utun["addresses_json"]) == (
@@ -304,10 +307,20 @@ class TestMountsCollector:
 
 
 class TestTcpdumpCapture:
+    def flows(self, iface_args: tuple[str, ...] = ()) -> NetworkFlowsCollector:
+        resolver = ProcessConnectionResolver(PsutilConnections())
+        return NetworkFlowsCollector(
+            TcpdumpCapture(CommandRunner(), iface_args), resolver
+        )
+
+    def dns(self) -> DnsQueriesCollector:
+        resolver = ProcessConnectionResolver(PsutilConnections())
+        return DnsQueriesCollector(TcpdumpCapture(CommandRunner(), ()), resolver)
+
     def test_flows_capture_needs_tcpdump(self, monkeypatch):
         _on_path(monkeypatch)
         with pytest.raises(RuntimeError, match="tcpdump not found"):
-            NetworkFlowsCollector()._capture()
+            self.flows().capture()
 
     def test_flows_capture_reads_banner_iface_and_passes_iface_args(self, monkeypatch):
         _on_path(monkeypatch, "tcpdump")
@@ -319,7 +332,7 @@ class TestTcpdumpCapture:
                 "listening on en0, link",
             ),
         )
-        stdout, iface = NetworkFlowsCollector(iface_args=["-k", "I"])._capture()
+        stdout, iface = self.flows(("-k", "I")).capture()
         assert iface == "en0"
         assert stdout.startswith("IP 1.1.1.1.5")
         assert run.calls[0][:7] == ["tcpdump", "-n", "-q", "-l", "-t", "-c", "2000"]
@@ -333,7 +346,7 @@ class TestTcpdumpCapture:
                 cmd, 8, output=b"partial", stderr=b"listening on pktap, link"
             ),
         )
-        assert NetworkFlowsCollector()._capture() == ("partial", None)
+        assert self.flows().capture() == ("partial", None)
 
     def test_dns_capture_filters_port_53_and_keeps_partial_output(self, monkeypatch):
         _on_path(monkeypatch, "tcpdump")
@@ -343,13 +356,22 @@ class TestTcpdumpCapture:
                 cmd, 8, output=None, stderr="listening on eth0, link"
             ),
         )
-        assert DnsQueriesCollector()._capture() == ("", "eth0")
+        assert self.dns().capture() == ("", "eth0")
         assert run.calls[0][-7:] == ["udp", "port", "53", "or", "tcp", "port", "53"]
 
     def test_dns_capture_needs_tcpdump(self, monkeypatch):
         _on_path(monkeypatch)
         with pytest.raises(RuntimeError, match="tcpdump not found"):
-            DnsQueriesCollector()._capture()
+            self.dns().capture()
+
+
+class _FakeCapture:
+    """A capture that hands back no packets."""
+
+    def record(
+        self, flags: list[str], bpf_filter: list[str], timeout: int
+    ) -> CapturedPackets:
+        return CapturedPackets("", None)
 
 
 class _FakeResolver:
@@ -363,15 +385,15 @@ class _FakeResolver:
 class TestDnsDoh:
     def test_connection_to_a_doh_resolver_is_reported_once(self, monkeypatch):
         c = DnsQueriesCollector(
-            resolver=_FakeResolver(
+            _FakeCapture(),
+            _FakeResolver(
                 {
                     ("1.1.1.1", 443): ("firefox", 9),
                     ("1.1.1.1", 80): ("curl", 10),
                     ("5.5.5.5", 443): ("curl", 11),
                 }
-            )
+            ),
         )
-        monkeypatch.setattr(c, "_capture", lambda: ("", None))
         (row,) = c.collect()
         assert (row["qname"], row["qtype"], row["server_ip"], row["process"]) == (
             "Cloudflare",
@@ -402,7 +424,7 @@ class TestSystemProfilerCollectors:
                 ]
             },
         )
-        hub, key = UsbDevicesCollector().collect()
+        hub, key = UsbDevicesCollector(CommandRunner()).collect()
         assert run.calls[0] == ["system_profiler", "-json", "SPUSBDataType"]
         assert (key["name"], key["location_id"]) == ("YubiKey", "0x14")
         assert "_items" not in json.loads(hub["raw_json"])
@@ -426,7 +448,7 @@ class TestSystemProfilerCollectors:
                 ]
             },
         )
-        rows = list(BluetoothCollector().collect())
+        rows = list(BluetoothCollector(CommandRunner()).collect())
         assert [(r["name"], r["connected"], r["paired"]) for r in rows] == [
             ("AirPods", 1, 1),
             ("Mouse", 0, 0),
@@ -453,7 +475,7 @@ class TestSystemProfilerCollectors:
                 ]
             },
         )
-        en0, awdl = WifiCollector().collect()
+        en0, awdl = WifiCollector(CommandRunner()).collect()
         assert (en0["ssid"], en0["channel"], en0["security"]) == ("home", "36", "wpa3")
         assert (awdl["ssid"], awdl["channel"]) == (None, None)
 
@@ -834,7 +856,7 @@ class TestLinuxDevices:
                 "",
             ),
         )
-        (row,) = LinuxWifiCollector().collect()
+        (row,) = LinuxWifiCollector(CommandRunner()).collect()
         assert (row["interface"], row["ssid"], row["bssid"], row["channel"]) == (
             "wlan0",
             "home",
@@ -845,17 +867,17 @@ class TestLinuxDevices:
     def test_wifi_without_iw_still_lists_the_interface(self, host_root, monkeypatch):
         (host_root / "sys" / "class" / "net" / "wlan0" / "wireless").mkdir(parents=True)
         _on_path(monkeypatch)
-        (row,) = LinuxWifiCollector().collect()
+        (row,) = LinuxWifiCollector(CommandRunner()).collect()
         assert (row["interface"], row["ssid"], row["raw_json"]) == ("wlan0", None, "{}")
 
     def test_wifi_not_connected_and_failed_iw(self, host_root, monkeypatch):
         (host_root / "sys" / "class" / "net" / "wlan0" / "wireless").mkdir(parents=True)
         _on_path(monkeypatch, "iw")
         _fake_run(monkeypatch, lambda cmd: ("Not connected.\n", 0, ""))
-        (row,) = LinuxWifiCollector().collect()
+        (row,) = LinuxWifiCollector(CommandRunner()).collect()
         assert json.loads(row["raw_json"]) == {"connected": "no"}
         _fake_run(monkeypatch, lambda cmd: ("", 1, "nl80211 not found"))
-        (row,) = LinuxWifiCollector().collect()
+        (row,) = LinuxWifiCollector(CommandRunner()).collect()
         assert row["raw_json"] == "{}"
 
 

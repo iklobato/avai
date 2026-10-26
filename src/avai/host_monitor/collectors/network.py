@@ -1,96 +1,233 @@
-"""Sockets and traffic: connections, listeners, tcpdump flows and DNS, interfaces."""
-
 from __future__ import annotations
 
 import json
 import socket
-from typing import Optional
+from collections.abc import Iterator, Mapping
+from typing import Any, NamedTuple
 
 from .. import slices
 from ..runtime import Clock, CommandRunner, PsutilConnections, SystemMetrics
+from ..runtime.row_source import MissingToolError
 from .base import SnapshotCollector
 
+DNS_PORT = 53
+DOH_PORT = 443
+NO_PAYLOAD = 0
+# Well-known DoH resolver endpoints. Plaintext DNS (53) is visible to us;
+# DoH (TLS/443) isn't — so a host talking to one of these on 443 is
+# resolving names out of our sight.
+DOH_RESOLVERS = (
+    ("1.1.1.1", "Cloudflare"),
+    ("1.0.0.1", "Cloudflare"),
+    ("8.8.8.8", "Google"),
+    ("8.8.4.4", "Google"),
+    ("9.9.9.9", "Quad9"),
+    ("149.112.112.112", "Quad9"),
+    ("208.67.222.222", "OpenDNS"),
+    ("208.67.220.220", "OpenDNS"),
+    ("2606:4700:4700::1111", "Cloudflare"),
+    ("2001:4860:4860::8888", "Google"),
+)
+IP_TOKENS = ("IP", "IP6")
+# Token offsets after tcpdump's ">": the destination, then the protocol /
+# DNS payload.
+DESTINATION_OFFSET = 1
+PROTO_OFFSET = 2
+SERVICE_PROTOCOLS = frozenset({"tcp", "udp"})
+INTERFACE_STAT_FIELDS = ("mtu",)
+IO_COUNTER_FIELDS = (
+    "bytes_sent",
+    "bytes_recv",
+    "packets_sent",
+    "packets_recv",
+    "errin",
+    "errout",
+    "dropin",
+    "dropout",
+)
 
-class NetworkConnectionsCollector(SnapshotCollector):
-    slice = slices.NETWORK_CONNECTIONS
-    # Judged on the remote-endpoint identity. Dedup over (remote ip, port,
-    # status) collapses the many sockets to one verdict per peer (judged once
-    # ever via content_hash), and threat-intel for the remote IP is attached
-    # by enrichment. tcpdump `network_flows` cover active outbound traffic;
-    # this catches established/idle remote peers a capture window can miss.
-    # Private/loopback/no-remote rows collapse to a single benign entry.
-    judge_fields = ("raddr_ip", "raddr_port", "status")
-
-    def collect(self):
-        for c in PsutilConnections().inet():
-            yield {
-                "pid": c.pid,
-                "family": c.family.name,
-                "type": c.type.name,
-                "laddr_ip": c.laddr.ip if c.laddr else None,
-                "laddr_port": c.laddr.port if c.laddr else None,
-                "raddr_ip": c.raddr.ip if c.raddr else None,
-                "raddr_port": c.raddr.port if c.raddr else None,
-                "status": c.status,
-            }
-
-
-class ListeningPortsCollector(SnapshotCollector):
-    slice = slices.LISTENING_PORTS
-    judge_fields = ("process_name", "family", "type", "laddr_ip", "laddr_port")
-
-    def __init__(
-        self,
-        judge_hints: str = "",
-        connections: Optional[PsutilConnections] = None,
-    ) -> None:
-        super().__init__(judge_hints)
-        self._connections = connections or PsutilConnections()
-
-    def collect(self):
-        names: dict[int, Optional[str]] = {}
-        for c in self._connections.listening():
-            if c.pid is not None and c.pid not in names:
-                names[c.pid] = self._connections.process_name(c.pid)
-            yield {
-                "pid": c.pid,
-                "process_name": names.get(c.pid) if c.pid else None,
-                "family": c.family.name,
-                "type": c.type.name,
-                "laddr_ip": c.laddr.ip if c.laddr else None,
-                "laddr_port": c.laddr.port if c.laddr else None,
-            }
+Owners = Mapping[tuple[str, int], tuple[str, int]]
 
 
-def _payload_bytes(parts: list[str]) -> int:
-    """Pull the payload length tcpdump prints for one packet (so flows
-    can report data volume, not just a packet count): TCP shows it as the
-    trailing token (``tcp 1380``), UDP/ICMP as ``length <n>``. Returns 0
-    when absent or unparseable."""
-    if "length" in parts:
-        i = parts.index("length")
-        if i + 1 < len(parts):
-            tok = parts[i + 1].rstrip(".,")
-            if tok.isdigit():
-                return int(tok)
-        return 0
-    tail = parts[-1].rstrip(".,") if parts else ""
-    return int(tail) if tail.isdigit() else 0
+class PacketFlow(NamedTuple):
+    iface: str | None
+    proto: str
+    dst_ip: str
+    dst_port: int
+    nbytes: int
 
 
-def _run_tcpdump(
-    runner: CommandRunner, cmd: list[str], timeout: int
-) -> tuple[str, Optional[str]]:
-    """Return (stdout, default_iface) of one bounded tcpdump capture.
-    default_iface is the interface tcpdump reported listening on (used
-    when a line carries no per-packet interface, i.e. not the Linux
-    '-i any' path). Hitting the time cap before the packet cap is normal
-    on a slow link, so the partial output is kept."""
-    if not runner.exists("tcpdump"):
-        raise RuntimeError("tcpdump not found on PATH")
-    out = runner.capture(cmd, timeout)
-    iface = NetworkFlowsCollector._iface_from_banner(out.stderr)
-    return out.stdout, NetworkFlowsCollector._normalize_default_iface(iface)
+class DnsQuestion(NamedTuple):
+    iface: str | None
+    qname: str
+    qtype: str | None
+    server_ip: str
+
+
+class CapturedPackets(NamedTuple):
+    stdout: str
+    default_iface: str | None
+
+
+class PayloadSize:
+    """The payload length tcpdump prints for one packet (so flows can report
+    data volume, not just a packet count): TCP shows it as the trailing token
+    (``tcp 1380``), UDP/ICMP as ``length <n>``. 0 when absent or unparseable."""
+
+    def __init__(self, parts: list[str]) -> None:
+        self._parts = parts
+
+    def bytes(self) -> int:
+        if "length" in self._parts:
+            index = self._parts.index("length") + 1
+            token = self._parts[index] if index < len(self._parts) else ""
+            return self._number(token)
+        return self._number(self._parts[-1] if self._parts else "")
+
+    def _number(self, token: str) -> int:
+        cleaned = token.rstrip(".,")
+        return int(cleaned) if cleaned.isdigit() else NO_PAYLOAD
+
+
+class TcpdumpLine:
+    """One ``tcpdump -n -t`` packet line.
+
+    Parsing is split-based (no regex): tcpdump prints one line per packet
+    as ``IP src.port > dst.port: proto len``. If "IP" isn't the first token,
+    the leading token is the interface — Linux '-i any' prefixes
+    "<iface> In/Out IP …", macOS '-k I' prefixes "(<iface>) IP …".
+
+        macOS '-k I':   ``(en6) IP src.port > dst.port: tcp 1380``
+        Linux -i any:   ``eth0 Out IP6 src.port > dst.port: UDP, length 45``
+    """
+
+    def __init__(self, parts: list[str]) -> None:
+        self._parts = parts
+
+    @classmethod
+    def of(cls, line: str) -> TcpdumpLine:
+        return cls(line.split())
+
+    def flow(self) -> PacketFlow | None:
+        """(iface, proto, dst_ip, dst_port, nbytes) of a TCP/UDP packet.
+        IPv4 and IPv6 both append the port after a final ``.``, so the
+        trailing ``.<port>`` splits off the destination address."""
+        destination = self._destination()
+        if destination is None:
+            return None
+        ip, _, port = destination.rpartition(".")
+        if not ip or not port.isdigit():
+            return None
+        after = self._after_arrow(PROTO_OFFSET)
+        proto = after.rstrip(",").lower() if after else "ip"
+        size = PayloadSize(self._parts).bytes()
+        return PacketFlow(self._iface(), proto, ip, int(port), size)
+
+    def dns_question(self) -> DnsQuestion | None:
+        """(iface, qname, qtype, server_ip) of an outbound DNS question.
+        Only questions *to* port 53 are kept (a response has src port 53
+        and no ``A?``-style token)."""
+        destination = self._destination()
+        if destination is None:
+            return None
+        server_ip, _, server_port = destination.rpartition(".")
+        if server_port != str(DNS_PORT) or not server_ip:
+            return None
+        qtype, qname = self._question()
+        if not qname:
+            return None
+        return DnsQuestion(self._iface(), qname, qtype, server_ip)
+
+    def _destination(self) -> str | None:
+        has_ip = any(token in self._parts for token in IP_TOKENS)
+        if ">" not in self._parts or not has_ip:
+            return None
+        target = self._after_arrow(DESTINATION_OFFSET)
+        return target.rstrip(":") if target else None
+
+    def _after_arrow(self, offset: int) -> str | None:
+        index = self._parts.index(">") + offset
+        return self._parts[index] if index < len(self._parts) else None
+
+    def _iface(self) -> str | None:
+        ip_index = min(
+            self._parts.index(token) for token in IP_TOKENS if token in self._parts
+        )
+        return self._parts[0].strip("()") if ip_index >= 1 else None
+
+    def _question(self) -> tuple[str | None, str | None]:
+        """The question type is the token ending in '?' (A?, AAAA?, PTR?, …);
+        the queried name is the token right after it."""
+        payload = self._parts[self._parts.index(">") + PROTO_OFFSET :]
+        for index, token in enumerate(payload):
+            if len(token) > 1 and token.endswith("?"):
+                name = (
+                    payload[index + 1].rstrip(".") if index + 1 < len(payload) else None
+                )
+                return token[:-1], name
+        return None, None
+
+
+class TcpdumpBanner:
+    """tcpdump's stderr banner: 'listening on en0, link-type ...'."""
+
+    def __init__(self, stderr: str) -> None:
+        self._stderr = stderr
+
+    def listening_iface(self) -> str | None:
+        for line in self._stderr.splitlines():
+            if "listening on" in line:
+                rest = line.split("listening on", 1)[1].strip()
+                return rest.split(",", 1)[0].strip() or None
+        return None
+
+    def default_iface(self) -> str | None:
+        """The banner interface, dropping the macOS 'pktap' pseudo-device:
+        pktap0 / pktap aren't real interfaces — they're the aggregating tap
+        macOS captures through. With '-k I' each line carries its real
+        interface, so a pktap banner falls back to 'unknown' rather than
+        mislabel every flow 'pktap'."""
+        iface = self.listening_iface()
+        if iface and iface.startswith("pktap"):
+            return None
+        return iface
+
+
+class TcpdumpCapture:
+    """One bounded tcpdump capture. ``iface_args`` are the host's interface
+    flags: Linux '-i any' prefixes each line with the interface + direction;
+    macOS '-k I' prints the real per-packet interface (otherwise every flow
+    is labelled with the 'pktap' aggregating pseudo-device)."""
+
+    def __init__(self, runner: CommandRunner, iface_args: tuple[str, ...]) -> None:
+        self._runner = runner
+        self._iface_args = iface_args
+
+    def record(
+        self, flags: list[str], bpf_filter: list[str], timeout: int
+    ) -> CapturedPackets:
+        """Hitting the time cap before the packet cap is normal on a slow
+        link, so the partial output is kept. The default interface is the
+        one tcpdump reported listening on (used when a line carries no
+        per-packet interface)."""
+        if not self._runner.exists("tcpdump"):
+            raise MissingToolError("tcpdump not found on PATH")
+        cmd = ["tcpdump", *flags, *self._iface_args, *bpf_filter]
+        output = self._runner.capture(cmd, timeout)
+        return CapturedPackets(
+            output.stdout, TcpdumpBanner(output.stderr).default_iface()
+        )
+
+
+class PortService:
+    """The well-known service name of a port, from the system services db."""
+
+    def name(self, port: int, proto: str) -> str | None:
+        lookup_proto = proto if proto in SERVICE_PROTOCOLS else "tcp"
+        try:
+            return socket.getservbyport(port, lookup_proto)
+        except (OSError, OverflowError, TypeError):
+            return None
 
 
 class ProcessConnectionResolver:
@@ -105,30 +242,151 @@ class ProcessConnectionResolver:
     time, in which case the flow simply carries no process.
     """
 
-    def __init__(self, connections: Optional[PsutilConnections] = None) -> None:
-        self._connections = connections or PsutilConnections()
+    def __init__(self, connections: PsutilConnections) -> None:
+        self._connections = connections
 
     def snapshot(self) -> dict[tuple[str, int], tuple[str, int]]:
         """Map remote ``(ip, port)`` → ``(process_name, pid)`` for every
         inet socket that has a remote peer and a resolvable owner."""
-        out: dict[tuple[str, int], tuple[str, int]] = {}
         try:
             conns = self._connections.inet()
         except OSError:
-            return out
-        for c in conns:
-            raddr = c.raddr
-            if not raddr or c.pid is None:
+            return {}
+        owners: dict[tuple[str, int], tuple[str, int]] = {}
+        for conn in conns:
+            if not conn.raddr or conn.pid is None:
                 continue
-            key = (raddr.ip, raddr.port)
-            if key in out:
-                continue
-            out[key] = (self._proc_name(c.pid), c.pid)
-        return out
+            key = (conn.raddr.ip, conn.raddr.port)
+            if key not in owners:
+                owners[key] = (self._process_name(conn.pid), conn.pid)
+        return owners
 
-    def _proc_name(self, pid: int) -> str:
+    def _process_name(self, pid: int) -> str:
         name = self._connections.process_name(pid)
         return f"pid {pid}" if name is None else name
+
+
+class FlowTable:
+    """Packets aggregated into distinct ``(iface, proto, dst_ip, dst_port)``
+    flows with packet and byte counts."""
+
+    def aggregate(
+        self, output: str, default_iface: str | None
+    ) -> dict[tuple[Any, ...], dict[str, Any]]:
+        now = Clock().now_iso()
+        flows: dict[tuple[Any, ...], dict[str, Any]] = {}
+        packets = (TcpdumpLine.of(line).flow() for line in output.splitlines())
+        for packet in (packet for packet in packets if packet is not None):
+            iface = packet.iface or default_iface
+            key = (iface, packet.proto, packet.dst_ip, packet.dst_port)
+            if key not in flows:
+                flows[key] = self._new_flow(packet, iface, now)
+            flow = flows[key]
+            flow["packets"] += 1
+            flow["byte_count"] += packet.nbytes
+            flow["last_seen"] = now
+        return flows
+
+    def _new_flow(
+        self, packet: PacketFlow, iface: str | None, now: str
+    ) -> dict[str, Any]:
+        return {
+            "iface": iface,
+            "proto": packet.proto,
+            "dst_ip": packet.dst_ip,
+            "dst_port": packet.dst_port,
+            "service": PortService().name(packet.dst_port, packet.proto),
+            "packets": 0,
+            "byte_count": 0,
+            "first_seen": now,
+            "last_seen": now,
+        }
+
+
+class QueryTable:
+    """DNS questions aggregated by ``(qname, qtype, resolver)`` with a count."""
+
+    def aggregate(
+        self, output: str, default_iface: str | None, owners: Owners
+    ) -> dict[tuple[Any, ...], dict[str, Any]]:
+        now = Clock().now_iso()
+        queries: dict[tuple[Any, ...], dict[str, Any]] = {}
+        parsed = (TcpdumpLine.of(line).dns_question() for line in output.splitlines())
+        for question in (question for question in parsed if question is not None):
+            key = (question.qname, question.qtype, question.server_ip)
+            if key not in queries:
+                located = question._replace(iface=question.iface or default_iface)
+                owner = owners.get((question.server_ip, DNS_PORT))
+                queries[key] = self._new_query(located, owner, now)
+                continue
+            queries[key]["count"] += 1
+            queries[key]["last_seen"] = now
+        return queries
+
+    def _new_query(
+        self, question: DnsQuestion, owner: tuple[str, int] | None, now: str
+    ) -> dict[str, Any]:
+        return {
+            "iface": question.iface,
+            "qname": question.qname,
+            "qtype": question.qtype,
+            "server_ip": question.server_ip,
+            "process": owner[0] if owner else None,
+            "count": 1,
+            "first_seen": now,
+            "last_seen": now,
+        }
+
+
+class NetworkConnectionsCollector(SnapshotCollector):
+    slice = slices.NETWORK_CONNECTIONS
+    # Judged on the remote-endpoint identity. Dedup over (remote ip, port,
+    # status) collapses the many sockets to one verdict per peer (judged once
+    # ever via content_hash), and threat-intel for the remote IP is attached
+    # by enrichment. tcpdump `network_flows` cover active outbound traffic;
+    # this catches established/idle remote peers a capture window can miss.
+    # Private/loopback/no-remote rows collapse to a single benign entry.
+    judge_fields = ("raddr_ip", "raddr_port", "status")
+
+    def __init__(self, connections: PsutilConnections, judge_hints: str = "") -> None:
+        super().__init__(judge_hints)
+        self._connections = connections
+
+    def collect(self) -> Iterator[dict[str, Any]]:
+        for conn in self._connections.inet():
+            yield {
+                "pid": conn.pid,
+                "family": conn.family.name,
+                "type": conn.type.name,
+                "laddr_ip": conn.laddr.ip if conn.laddr else None,
+                "laddr_port": conn.laddr.port if conn.laddr else None,
+                "raddr_ip": conn.raddr.ip if conn.raddr else None,
+                "raddr_port": conn.raddr.port if conn.raddr else None,
+                "status": conn.status,
+            }
+
+
+class ListeningPortsCollector(SnapshotCollector):
+    slice = slices.LISTENING_PORTS
+    judge_fields = ("process_name", "family", "type", "laddr_ip", "laddr_port")
+
+    def __init__(self, connections: PsutilConnections, judge_hints: str = "") -> None:
+        super().__init__(judge_hints)
+        self._connections = connections
+
+    def collect(self) -> Iterator[dict[str, Any]]:
+        names: dict[int, str | None] = {}
+        for conn in self._connections.listening():
+            if conn.pid is not None and conn.pid not in names:
+                names[conn.pid] = self._connections.process_name(conn.pid)
+            yield {
+                "pid": conn.pid,
+                "process_name": names.get(conn.pid) if conn.pid else None,
+                "family": conn.family.name,
+                "type": conn.type.name,
+                "laddr_ip": conn.laddr.ip if conn.laddr else None,
+                "laddr_port": conn.laddr.port if conn.laddr else None,
+            }
 
 
 class NetworkFlowsCollector(SnapshotCollector):
@@ -142,14 +400,12 @@ class NetworkFlowsCollector(SnapshotCollector):
     then judged by the LLM, so malicious requests — C2 beacons,
     exfiltration, connections to known-bad IPs — surface as findings.
 
-    Parsing is split-based (no regex): with ``-t -n -q`` tcpdump prints
-    one line per packet as ``IP src.port > dst.port: proto len``. On
-    Linux we capture with ``-i any``, which prefixes each line with the
-    interface + direction (``eth0 Out IP …``) — that's where the
-    per-flow interface comes from. On macOS ``-i any`` isn't supported,
-    so we capture the default interface and read its name from
-    tcpdump's "listening on <iface>" banner on stderr.
-    Requires root to capture — the monitor already runs as root.
+    On Linux we capture with ``-i any``, which prefixes each line with the
+    interface + direction (``eth0 Out IP …``) — that's where the per-flow
+    interface comes from. On macOS ``-i any`` isn't supported, so we
+    capture the default interface and read its name from tcpdump's
+    "listening on <iface>" banner on stderr. Requires root to capture —
+    the monitor already runs as root.
     """
 
     slice = slices.NETWORK_FLOWS
@@ -161,140 +417,32 @@ class NetworkFlowsCollector(SnapshotCollector):
 
     def __init__(
         self,
+        capture: TcpdumpCapture,
+        resolver: ProcessConnectionResolver,
         judge_hints: str = "",
-        resolver: Optional["ProcessConnectionResolver"] = None,
-        iface_args: Optional[list[str]] = None,
-        runner: Optional[CommandRunner] = None,
-    ):
+    ) -> None:
         super().__init__(judge_hints)
-        self._resolver = resolver or ProcessConnectionResolver()
-        self._runner = runner or CommandRunner()
-        # tcpdump flags that make each line carry its interface name;
-        # supplied by the host (Linux '-i any' vs macOS '-k I').
-        self._iface_args = list(iface_args or [])
+        self._capture = capture
+        self._resolver = resolver
 
-    def collect(self):
-        stdout, default_iface = self._capture()
-        flows = self._aggregate(stdout, default_iface)
-        proc_map = self._resolver.snapshot()
-        ranked = sorted(flows.values(), key=lambda f: f["packets"], reverse=True)
-        for f in ranked[: self.MAX_FLOWS]:
-            owner = proc_map.get((f["dst_ip"], f["dst_port"]))
+    def capture(self) -> CapturedPackets:
+        # -t drops timestamps (we stamp our own); TCP/UDP (v4 + v6) only.
+        flags = ["-n", "-q", "-l", "-t", "-c", str(self.MAX_PACKETS)]
+        return self._capture.record(flags, ["tcp", "or", "udp"], self.CAPTURE_SECONDS)
+
+    def collect(self) -> Iterator[dict[str, Any]]:
+        packets = self.capture()
+        flows = FlowTable().aggregate(packets.stdout, packets.default_iface)
+        owners = self._resolver.snapshot()
+        ranked = sorted(flows.values(), key=lambda flow: flow["packets"], reverse=True)
+        for flow in ranked[: self.MAX_FLOWS]:
+            owner = owners.get((flow["dst_ip"], flow["dst_port"]))
             # Set both unconditionally (None when unresolved) so every
             # emitted row carries the same keys — Sink.write does a
             # uniform-column executemany insert.
-            f["process"] = owner[0] if owner else None
-            f["pid"] = owner[1] if owner else None
-            yield f
-
-    def _capture(self) -> tuple[str, Optional[str]]:
-        # -t drops timestamps (we stamp our own); TCP/UDP (v4 + v6) only.
-        cmd = ["tcpdump", "-n", "-q", "-l", "-t", "-c", str(self.MAX_PACKETS)]
-        # Interface flags supplied by the host: Linux '-i any' prefixes
-        # each line with the interface + direction; macOS '-k I' prints
-        # the real per-packet interface (otherwise every flow is labelled
-        # with the 'pktap' aggregating pseudo-device). Both yield the
-        # leading-interface-token shape that _parse_line expects.
-        cmd += self._iface_args
-        cmd += ["tcp", "or", "udp"]
-        return _run_tcpdump(self._runner, cmd, self.CAPTURE_SECONDS)
-
-    @staticmethod
-    def _iface_from_banner(stderr: str) -> Optional[str]:
-        """tcpdump prints 'listening on en0, link-type ...' to stderr."""
-        for line in stderr.splitlines():
-            if "listening on" in line:
-                rest = line.split("listening on", 1)[1].strip()
-                return rest.split(",", 1)[0].strip() or None
-        return None
-
-    @staticmethod
-    def _normalize_default_iface(iface: Optional[str]) -> Optional[str]:
-        """Drop the macOS 'pktap' pseudo-device as a default interface.
-
-        pktap0 / pktap aren't real interfaces — they're the aggregating
-        tap macOS captures through. With '-k I' each line carries its
-        real interface, so a pktap banner should fall back to 'unknown'
-        rather than mislabel every flow 'pktap'."""
-        if iface and iface.startswith("pktap"):
-            return None
-        return iface
-
-    def _aggregate(self, output: str, default_iface: Optional[str]) -> dict:
-        now = Clock().now_iso()
-        flows: dict[tuple, dict] = {}
-        for line in output.splitlines():
-            parsed = self._parse_line(line)
-            if parsed is None:
-                continue
-            iface, proto, dst_ip, dst_port, nbytes = parsed
-            iface = iface or default_iface
-            key = (iface, proto, dst_ip, dst_port)
-            f = flows.get(key)
-            if f is None:
-                flows[key] = {
-                    "iface": iface,
-                    "proto": proto,
-                    "dst_ip": dst_ip,
-                    "dst_port": dst_port,
-                    "service": self._service(dst_port, proto),
-                    "packets": 1,
-                    "byte_count": nbytes,
-                    "first_seen": now,
-                    "last_seen": now,
-                }
-            else:
-                f["packets"] += 1
-                f["byte_count"] += nbytes
-                f["last_seen"] = now
-        return flows
-
-    @staticmethod
-    def _parse_line(line: str):
-        """Return (iface, proto, dst_ip, dst_port, nbytes) from one tcpdump
-        -t -q line, or None if it isn't a parseable TCP/UDP packet.
-        ``nbytes`` is the payload length tcpdump prints (0 when absent).
-
-        Handles both IPv4 (``IP``) and IPv6 (``IP6``) — tcpdump appends
-        the port after a final ``.`` for both families, so the trailing
-        ``.<port>`` splits off the destination address either way.
-
-        macOS '-k I':   ``(en6) IP src.port > dst.port: tcp 1380``
-        Linux -i any:   ``eth0 Out IP6 src.port > dst.port: UDP, length 45``
-        """
-        parts = line.split()
-        if ">" not in parts:
-            return None
-        if "IP" in parts:
-            ip_idx = parts.index("IP")
-        elif "IP6" in parts:
-            ip_idx = parts.index("IP6")
-        else:
-            return None
-        # If "IP" isn't the first token, the leading token is the
-        # interface — Linux '-i any' prefixes "<iface> In/Out IP …",
-        # macOS '-k I' prefixes "<iface> IP …". Strip any decoration.
-        iface = parts[0].strip("()") if ip_idx >= 1 else None
-        gt = parts.index(">")
-        if gt + 1 >= len(parts):
-            return None
-        dst = parts[gt + 1].rstrip(":")  # e.g. 142.250.80.46.443
-        ip, _, port_s = dst.rpartition(".")  # ip=142.250.80.46 port=443
-        if not ip or not port_s.isdigit():
-            return None
-        proto = "ip"
-        if gt + 2 < len(parts):
-            proto = parts[gt + 2].rstrip(",").lower()
-        return iface, proto, ip, int(port_s), _payload_bytes(parts)
-
-    @staticmethod
-    def _service(port: int, proto: str):
-        try:
-            return socket.getservbyport(
-                port, proto if proto in ("tcp", "udp") else "tcp"
-            )
-        except (OSError, OverflowError, TypeError):
-            return None
+            flow["process"] = owner[0] if owner else None
+            flow["pid"] = owner[1] if owner else None
+            yield flow
 
 
 class DnsQueriesCollector(SnapshotCollector):
@@ -310,10 +458,8 @@ class DnsQueriesCollector(SnapshotCollector):
     also flag connections to well-known DoH resolver endpoints on :443 —
     a host using those is bypassing local DNS visibility.
 
-    Parsing is split-based (no regex): without ``-q`` tcpdump decodes the
-    DNS payload as ``… 1234+ A? example.com. (29)`` — we pull the qtype
-    (the token ending in ``?``) and the qname (the token after it).
-    Requires root to capture.
+    Without ``-q`` tcpdump decodes the DNS payload as
+    ``… 1234+ A? example.com. (29)``. Requires root to capture.
     """
 
     slice = slices.DNS_QUERIES
@@ -323,177 +469,87 @@ class DnsQueriesCollector(SnapshotCollector):
     MAX_PACKETS = 2000
     MAX_QUERIES = 200
 
-    # Well-known DoH resolver endpoints. Plaintext DNS (53) is visible to
-    # us; DoH (TLS/443) isn't — so a host talking to one of these on 443
-    # is resolving names out of our sight.
-    _DOH_PORT = 443
-    _DOH_IPS = {
-        "1.1.1.1": "Cloudflare",
-        "1.0.0.1": "Cloudflare",
-        "8.8.8.8": "Google",
-        "8.8.4.4": "Google",
-        "9.9.9.9": "Quad9",
-        "149.112.112.112": "Quad9",
-        "208.67.222.222": "OpenDNS",
-        "208.67.220.220": "OpenDNS",
-        "2606:4700:4700::1111": "Cloudflare",
-        "2001:4860:4860::8888": "Google",
-    }
-
     def __init__(
         self,
+        capture: TcpdumpCapture,
+        resolver: ProcessConnectionResolver,
         judge_hints: str = "",
-        resolver: Optional["ProcessConnectionResolver"] = None,
-        iface_args: Optional[list[str]] = None,
-        runner: Optional[CommandRunner] = None,
-    ):
+    ) -> None:
         super().__init__(judge_hints)
-        self._resolver = resolver or ProcessConnectionResolver()
-        self._runner = runner or CommandRunner()
-        self._iface_args = list(iface_args or [])
+        self._capture = capture
+        self._resolver = resolver
 
-    def collect(self):
-        stdout, default_iface = self._capture()
-        proc_map = self._resolver.snapshot()
-        queries = self._aggregate(stdout, default_iface, proc_map)
-        # DoH: connections to known DoH endpoints on :443 bypass plaintext
-        # DNS visibility entirely — surface them alongside the queries.
-        for (ip, port), (name, _pid) in proc_map.items():
-            if port != self._DOH_PORT or ip not in self._DOH_IPS:
-                continue
-            provider = self._DOH_IPS[ip]
-            key = (provider, "DoH", ip)
-            if key not in queries:
-                now = Clock().now_iso()
-                queries[key] = {
-                    "iface": None,
-                    "qname": provider,
-                    "qtype": "DoH",
-                    "server_ip": ip,
-                    "process": name,
-                    "count": 1,
-                    "first_seen": now,
-                    "last_seen": now,
-                }
-        ranked = sorted(queries.values(), key=lambda q: q["count"], reverse=True)
-        yield from ranked[: self.MAX_QUERIES]
-
-    def _capture(self) -> tuple[str, Optional[str]]:
+    def capture(self) -> CapturedPackets:
         """Capture port-53 traffic *without* ``-q`` so tcpdump decodes the
         DNS question."""
-        cmd = ["tcpdump", "-n", "-l", "-t", "-c", str(self.MAX_PACKETS)]
-        cmd += self._iface_args
-        cmd += ["udp", "port", "53", "or", "tcp", "port", "53"]
-        return _run_tcpdump(self._runner, cmd, self.CAPTURE_SECONDS)
+        flags = ["-n", "-l", "-t", "-c", str(self.MAX_PACKETS)]
+        bpf_filter = ["udp", "port", "53", "or", "tcp", "port", "53"]
+        return self._capture.record(flags, bpf_filter, self.CAPTURE_SECONDS)
 
-    def _aggregate(self, output: str, default_iface: Optional[str], proc_map: dict):
+    def collect(self) -> Iterator[dict[str, Any]]:
+        packets = self.capture()
+        owners = self._resolver.snapshot()
+        queries = QueryTable().aggregate(packets.stdout, packets.default_iface, owners)
+        # DoH: connections to known DoH endpoints on :443 bypass plaintext
+        # DNS visibility entirely — surface them alongside the queries.
+        for key, row in self._doh_rows(owners):
+            queries.setdefault(key, row)
+        ranked = sorted(
+            queries.values(), key=lambda query: query["count"], reverse=True
+        )
+        yield from ranked[: self.MAX_QUERIES]
+
+    def _doh_rows(
+        self, owners: Owners
+    ) -> Iterator[tuple[tuple[Any, ...], dict[str, Any]]]:
+        resolvers = dict(DOH_RESOLVERS)
         now = Clock().now_iso()
-        queries: dict[tuple, dict] = {}
-        for line in output.splitlines():
-            parsed = self._parse_dns_line(line)
-            if parsed is None:
+        for (ip, port), (process, _pid) in owners.items():
+            if port != DOH_PORT or ip not in resolvers:
                 continue
-            iface, qname, qtype, server_ip = parsed
-            iface = iface or default_iface
-            key = (qname, qtype, server_ip)
-            g = queries.get(key)
-            if g is None:
-                owner = proc_map.get((server_ip, 53))
-                queries[key] = {
-                    "iface": iface,
-                    "qname": qname,
-                    "qtype": qtype,
-                    "server_ip": server_ip,
-                    "process": owner[0] if owner else None,
-                    "count": 1,
-                    "first_seen": now,
-                    "last_seen": now,
-                }
-            else:
-                g["count"] += 1
-                g["last_seen"] = now
-        return queries
-
-    @staticmethod
-    def _parse_dns_line(line: str):
-        """Return (iface, qname, qtype, server_ip) from one decoded
-        tcpdump DNS line, or None if it isn't an outbound query.
-
-        Example (macOS '-k I'):
-            ``(en6) IP 10.0.0.5.51000 > 8.8.8.8.53: 1234+ A? example.com. (29)``
-        Only questions *to* port 53 are kept (a response has src port 53
-        and no ``A?``-style token).
-        """
-        parts = line.split()
-        if ">" not in parts:
-            return None
-        if "IP" in parts:
-            ip_idx = parts.index("IP")
-        elif "IP6" in parts:
-            ip_idx = parts.index("IP6")
-        else:
-            return None
-        iface = parts[0].strip("()") if ip_idx >= 1 else None
-        gt = parts.index(">")
-        if gt + 1 >= len(parts):
-            return None
-        server = parts[gt + 1].rstrip(":")
-        server_ip, _, server_port = server.rpartition(".")
-        if server_port != "53" or not server_ip:
-            return None
-        qtype = qname = None
-        payload = parts[gt + 2 :]
-        for i, tok in enumerate(payload):
-            # The question type is the token ending in '?' (A?, AAAA?,
-            # PTR?, …); the queried name is the token right after it.
-            if len(tok) > 1 and tok.endswith("?"):
-                qtype = tok[:-1]
-                if i + 1 < len(payload):
-                    qname = payload[i + 1].rstrip(".")
-                break
-        if not qname:
-            return None
-        return iface, qname, qtype, server_ip
+            provider = resolvers[ip]
+            yield (provider, "DoH", ip), {
+                "iface": None,
+                "qname": provider,
+                "qtype": "DoH",
+                "server_ip": ip,
+                "process": process,
+                "count": 1,
+                "first_seen": now,
+                "last_seen": now,
+            }
 
 
 class NetworkInterfacesCollector(SnapshotCollector):
     slice = slices.NETWORK_INTERFACES
     judge_enabled = False  # counters need behavioural analysis
 
-    def __init__(
-        self, judge_hints: str = "", metrics: Optional[SystemMetrics] = None
-    ) -> None:
+    def __init__(self, metrics: SystemMetrics, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._metrics = metrics or SystemMetrics()
+        self._metrics = metrics
 
-    def collect(self):
-        addrs = self._metrics.net_if_addrs()
+    def collect(self) -> Iterator[dict[str, Any]]:
         stats = self._metrics.net_if_stats()
         counters = self._metrics.net_io_counters()
-        for name, addr_list in addrs.items():
-            s, c = stats.get(name), counters.get(name)
+        for name, addresses in self._metrics.net_if_addrs().items():
+            stat, counter = stats.get(name), counters.get(name)
             yield {
                 "name": name,
-                "is_up": int(s.isup) if s else None,
-                "speed_mbps": s.speed if s else None,
-                "mtu": s.mtu if s else None,
-                "bytes_sent": c.bytes_sent if c else None,
-                "bytes_recv": c.bytes_recv if c else None,
-                "packets_sent": c.packets_sent if c else None,
-                "packets_recv": c.packets_recv if c else None,
-                "errin": c.errin if c else None,
-                "errout": c.errout if c else None,
-                "dropin": c.dropin if c else None,
-                "dropout": c.dropout if c else None,
+                "is_up": int(stat.isup) if stat else None,
+                "speed_mbps": stat.speed if stat else None,
+                **{
+                    field: getattr(stat, field, None) for field in INTERFACE_STAT_FIELDS
+                },
+                **{field: getattr(counter, field, None) for field in IO_COUNTER_FIELDS},
                 "addresses_json": json.dumps(
-                    [
-                        {
-                            "family": a.family.name,
-                            "address": a.address,
-                            "netmask": a.netmask,
-                            "broadcast": a.broadcast,
-                        }
-                        for a in addr_list
-                    ]
+                    [self._address(address) for address in addresses]
                 ),
             }
+
+    def _address(self, address: Any) -> dict[str, Any]:
+        return {
+            "family": address.family.name,
+            "address": address.address,
+            "netmask": address.netmask,
+            "broadcast": address.broadcast,
+        }

@@ -26,12 +26,16 @@ from avai.dashboard.config import DashboardConfig
 from avai.dashboard.queries import dns_queries, network_flows, persistence_tampering
 from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.collectors import (
+    CapturedPackets,
     DnsQueriesCollector,
+    DnsQuestion,
     HostsFileCollector,
     NetworkFlowsCollector,
     PrivilegeConfigCollector,
     ProcessConnectionResolver,
+    QueryTable,
     SshAuthorizedKeysCollector,
+    TcpdumpLine,
 )
 from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 from avai.host_monitor.models import (
@@ -41,8 +45,22 @@ from avai.host_monitor.models import (
     PrivilegeConfigRow,
     SshAuthorizedKeyRow,
 )
-from avai.host_monitor.runtime import Digest
+from avai.host_monitor.runtime import Digest, PsutilConnections
 from avai.host_monitor.sink import Sink
+
+
+class _FakeCapture:
+    """A capture that hands back canned tcpdump output."""
+
+    def __init__(self, stdout: str, default_iface: str | None) -> None:
+        self._stdout = stdout
+        self._default_iface = default_iface
+
+    def record(
+        self, flags: list[str], bpf_filter: list[str], timeout: int
+    ) -> CapturedPackets:
+        return CapturedPackets(self._stdout, self._default_iface)
+
 
 # ---------------------------------------------------------------------------
 # process -> flow attribution
@@ -68,16 +86,16 @@ class TestProcessAttribution:
         monkeypatch.setattr(
             psutil, "Process", lambda pid: SimpleNamespace(name=lambda: "curl")
         )
-        snap = ProcessConnectionResolver().snapshot()
+        snap = ProcessConnectionResolver(PsutilConnections()).snapshot()
         assert snap[("8.8.8.8", 443)] == ("curl", 4321)
         assert ("1.2.3.4", 53) not in snap  # pid None skipped
 
     def test_collect_attaches_process_to_matching_flow(self, monkeypatch):
         sample = "(en6) IP 10.0.0.5.55555 > 8.8.8.8.443: tcp 0"
         c = NetworkFlowsCollector(
-            resolver=_FakeResolver({("8.8.8.8", 443): ("curl", 4321)})
+            _FakeCapture(sample, "en6"),
+            _FakeResolver({("8.8.8.8", 443): ("curl", 4321)}),
         )
-        monkeypatch.setattr(c, "_capture", lambda: (sample, "en6"))
         rows = list(c.collect())
         assert len(rows) == 1
         assert rows[0]["process"] == "curl"
@@ -85,8 +103,7 @@ class TestProcessAttribution:
 
     def test_collect_sets_process_none_when_unresolved(self, monkeypatch):
         sample = "(en6) IP 10.0.0.5.55555 > 9.9.9.9.443: tcp 0"
-        c = NetworkFlowsCollector(resolver=_FakeResolver({}))
-        monkeypatch.setattr(c, "_capture", lambda: (sample, "en6"))
+        c = NetworkFlowsCollector(_FakeCapture(sample, "en6"), _FakeResolver({}))
         row = list(c.collect())[0]
         # keys must be present (uniform-column insert) even when unresolved
         assert row["process"] is None and row["pid"] is None
@@ -98,42 +115,41 @@ class TestProcessAttribution:
 
 
 class TestDnsParse:
+    def parse(self, line: str) -> DnsQuestion | None:
+        return TcpdumpLine.of(line).dns_question()
+
     def test_query_line(self):
-        assert DnsQueriesCollector._parse_dns_line(
+        assert self.parse(
             "(en6) IP 10.0.0.5.51000 > 8.8.8.8.53: 1234+ A? example.com. (29)"
         ) == ("en6", "example.com", "A", "8.8.8.8")
 
     def test_aaaa_query_ipv6_resolver(self):
-        out = DnsQueriesCollector._parse_dns_line(
+        out = self.parse(
             "(en6) IP6 fe80::1.51000 > 2001:4860:4860::8888.53: 5+ AAAA? host.test. (30)"
         )
         assert out == ("en6", "host.test", "AAAA", "2001:4860:4860::8888")
 
     def test_response_is_ignored(self):
         # src port 53 → a response, not a question
-        assert (
-            DnsQueriesCollector._parse_dns_line(
-                "(en6) IP 8.8.8.8.53 > 10.0.0.5.51000: 1234 1/0/0 A 93.184.216.34 (45)"
-            )
-            is None
-        )
+        line = "(en6) IP 8.8.8.8.53 > 10.0.0.5.51000: 1234 1/0/0 A 93.184.216.34 (45)"
+        assert self.parse(line) is None
 
     def test_non_dns_line_ignored(self):
-        assert DnsQueriesCollector._parse_dns_line("ARP, Request who-has x") is None
+        assert self.parse("ARP, Request who-has x") is None
 
     def test_aggregate_counts_repeats(self):
         out = (
             "(en6) IP 10.0.0.5.5.53 > 8.8.8.8.53: 1+ A? a.com. (20)\n"
             "(en6) IP 10.0.0.5.6.53 > 8.8.8.8.53: 2+ A? a.com. (20)\n"
         )
-        agg = DnsQueriesCollector()._aggregate(out, "en6", {})
+        agg = QueryTable().aggregate(out, "en6", {})
         assert agg[("a.com", "A", "8.8.8.8")]["count"] == 2
 
     def test_doh_endpoint_detected_from_connections(self, monkeypatch):
         c = DnsQueriesCollector(
-            resolver=_FakeResolver({("1.1.1.1", 443): ("firefox", 22)})
+            _FakeCapture("", None),
+            _FakeResolver({("1.1.1.1", 443): ("firefox", 22)}),
         )
-        monkeypatch.setattr(c, "_capture", lambda: ("", None))
         rows = list(c.collect())
         doh = [r for r in rows if r["qtype"] == "DoH"]
         assert len(doh) == 1

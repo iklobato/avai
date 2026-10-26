@@ -78,6 +78,7 @@ from ..runtime import (
     CommandSnapshot,
     DiskMetrics,
     JsonLineStreamSource,
+    PsutilConnections,
     SystemMetrics,
 )
 
@@ -785,9 +786,15 @@ class WindowsHost:
         h = prompts.hint_for
         return [
             ProcessCollector(SystemMetrics(), judge_hints=h("processes")),
-            NetworkConnectionsCollector(judge_hints=h("network_connections")),
-            ListeningPortsCollector(judge_hints=h("listening_ports")),
-            NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
+            NetworkConnectionsCollector(
+                PsutilConnections(), judge_hints=h("network_connections")
+            ),
+            ListeningPortsCollector(
+                PsutilConnections(), judge_hints=h("listening_ports")
+            ),
+            NetworkInterfacesCollector(
+                SystemMetrics(), judge_hints=h("network_interfaces")
+            ),
             HostResourcesCollector(
                 SystemMetrics(), Clock(), judge_hints=h("host_resources")
             ),

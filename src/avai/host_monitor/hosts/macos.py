@@ -28,6 +28,7 @@ from ..collectors import (
     NetworkInterfacesCollector,
     PrivilegeConfigCollector,
     ProcessCollector,
+    ProcessConnectionResolver,
     QuarantineCollector,
     SetuidFilesCollector,
     SnapshotCollector,
@@ -35,6 +36,7 @@ from ..collectors import (
     StreamingCollector,
     SystemExtensionsCollector,
     SystemIntegrityCollector,
+    TcpdumpCapture,
     UsbDevicesCollector,
     WifiCollector,
 )
@@ -66,7 +68,14 @@ from ..persistence_collectors import (
     SshKnownHostsCollector,
 )
 from ..prompts import Prompts
-from ..runtime import Clock, CommandRunner, CommandSnapshot, DiskMetrics, SystemMetrics
+from ..runtime import (
+    Clock,
+    CommandRunner,
+    CommandSnapshot,
+    DiskMetrics,
+    PsutilConnections,
+    SystemMetrics,
+)
 
 
 class MacOSFilesystemLayout:
@@ -182,18 +191,21 @@ class MacOSHost:
 
     def snapshot_collectors(self, prompts: Prompts) -> list[SnapshotCollector]:
         h = prompts.hint_for
-        iface = self._fs.tcpdump_interface_args()
+        capture = TcpdumpCapture(self._runner, tuple(self._fs.tcpdump_interface_args()))
+        resolver = ProcessConnectionResolver(PsutilConnections())
         return [
             ProcessCollector(SystemMetrics(), judge_hints=h("processes")),
-            NetworkConnectionsCollector(judge_hints=h("network_connections")),
-            ListeningPortsCollector(judge_hints=h("listening_ports")),
-            NetworkFlowsCollector(
-                judge_hints=h("network_flows"), iface_args=iface, runner=self._runner
+            NetworkConnectionsCollector(
+                PsutilConnections(), judge_hints=h("network_connections")
             ),
-            DnsQueriesCollector(
-                judge_hints=h("dns_queries"), iface_args=iface, runner=self._runner
+            ListeningPortsCollector(
+                PsutilConnections(), judge_hints=h("listening_ports")
             ),
-            NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
+            NetworkFlowsCollector(capture, resolver, judge_hints=h("network_flows")),
+            DnsQueriesCollector(capture, resolver, judge_hints=h("dns_queries")),
+            NetworkInterfacesCollector(
+                SystemMetrics(), judge_hints=h("network_interfaces")
+            ),
             HostResourcesCollector(
                 SystemMetrics(), Clock(), judge_hints=h("host_resources")
             ),

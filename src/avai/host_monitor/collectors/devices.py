@@ -1,126 +1,150 @@
-"""Attached hardware: USB, Bluetooth and Wi-Fi, on macOS and Linux."""
-
 from __future__ import annotations
 
 import configparser
 import json
-from typing import Optional
+from collections.abc import Iterable, Iterator, Mapping
+from pathlib import Path
+from typing import Any
 
 from .. import slices
 from ..runtime import Coerce, CommandRunner, HostPaths
 from .base import SnapshotCollector
+
+PROFILER_TIMEOUT_S = 30
+IW_TIMEOUT_S = 5
+
+
+class SystemProfiler:
+    """The sections ``system_profiler -json <DataType>`` reports."""
+
+    def __init__(self, runner: CommandRunner, data_type: str) -> None:
+        self._runner = runner
+        self._data_type = data_type
+
+    def sections(self) -> list[Any]:
+        report = self._runner.json(
+            ["system_profiler", "-json", self._data_type], timeout=PROFILER_TIMEOUT_S
+        )
+        if isinstance(report, dict):
+            return report.get(self._data_type, [])
+        return report or []
 
 
 class UsbDevicesCollector(SnapshotCollector):
     slice = slices.USB_DEVICES
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
-    def __init__(
-        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
-    ) -> None:
+    def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._runner = runner or CommandRunner()
+        self._runner = runner
 
-    def collect(self):
-        data = self._runner.json(
-            ["system_profiler", "-json", "SPUSBDataType"], timeout=30
+    def collect(self) -> Iterator[dict[str, Any]]:
+        yield from self._walk(
+            SystemProfiler(self._runner, "SPUSBDataType").sections(), None
         )
-        root = data.get("SPUSBDataType", []) if isinstance(data, dict) else (data or [])
-        yield from self._walk(root, None)
 
-    def _walk(self, items, parent_location):
+    def _walk(
+        self, items: Iterable[Mapping[str, Any]] | None, parent_location: str | None
+    ) -> Iterator[dict[str, Any]]:
         for item in items or []:
-            loc = item.get("location_id") or parent_location
+            location = item.get("location_id") or parent_location
+            details = {key: value for key, value in item.items() if key != "_items"}
             yield {
                 "name": item.get("_name"),
                 "vendor_id": item.get("vendor_id"),
                 "product_id": item.get("product_id"),
                 "serial_number": item.get("serial_num"),
                 "manufacturer": item.get("manufacturer"),
-                "location_id": loc,
+                "location_id": location,
                 "speed": item.get("device_speed"),
-                "raw_json": json.dumps(
-                    {k: Coerce().jsonable(v) for k, v in item.items() if k != "_items"}
-                ),
+                "raw_json": json.dumps(Coerce().jsonable(details)),
             }
-            yield from self._walk(item.get("_items"), loc)
+            yield from self._walk(item.get("_items"), location)
 
 
 class BluetoothCollector(SnapshotCollector):
     slice = slices.BLUETOOTH_DEVICES
     judge_fields = ("name", "address", "minor_type")
-    _GROUPS = (
+    GROUPS = (
         "device_connected",
         "device_not_connected",
         "device_paired",
         "devices_list",
     )
-    _PAIRED_GROUPS = {"device_connected", "device_not_connected", "device_paired"}
+    PAIRED_GROUPS = frozenset(
+        {"device_connected", "device_not_connected", "device_paired"}
+    )
 
-    def __init__(
-        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
-    ) -> None:
+    def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._runner = runner or CommandRunner()
+        self._runner = runner
 
-    def collect(self):
-        data = self._runner.json(
-            ["system_profiler", "-json", "SPBluetoothDataType"], timeout=30
+    def collect(self) -> Iterator[dict[str, Any]]:
+        for section in SystemProfiler(self._runner, "SPBluetoothDataType").sections():
+            for group in self.GROUPS:
+                yield from self._group_rows(group, section.get(group, []) or [])
+
+    def _group_rows(self, group: str, entries: list[Any]) -> Iterator[dict[str, Any]]:
+        devices = (
+            (device_name, device)
+            for entry in entries
+            if isinstance(entry, dict)
+            for device_name, device in entry.items()
+            if isinstance(device, dict)
         )
-        sections = (
-            data.get("SPBluetoothDataType", [])
-            if isinstance(data, dict)
-            else (data or [])
-        )
-        for section in sections:
-            for group in self._GROUPS:
-                for entry in section.get(group, []) or []:
-                    if not isinstance(entry, dict):
-                        continue
-                    for dev_name, dev in entry.items():
-                        if not isinstance(dev, dict):
-                            continue
-                        yield {
-                            "name": dev_name,
-                            "address": dev.get("device_address"),
-                            "connected": int(group == "device_connected"),
-                            "paired": int(group in self._PAIRED_GROUPS),
-                            "minor_type": dev.get("device_minorType"),
-                            "raw_json": json.dumps(Coerce().jsonable(dev)),
-                        }
+        for device_name, device in devices:
+            yield {
+                "name": device_name,
+                "address": device.get("device_address"),
+                "connected": int(group == "device_connected"),
+                "paired": int(group in self.PAIRED_GROUPS),
+                "minor_type": device.get("device_minorType"),
+                "raw_json": json.dumps(Coerce().jsonable(device)),
+            }
 
 
 class WifiCollector(SnapshotCollector):
     slice = slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
-    def __init__(
-        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
-    ) -> None:
+    def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._runner = runner or CommandRunner()
+        self._runner = runner
 
-    def collect(self):
-        data = self._runner.json(
-            ["system_profiler", "-json", "SPAirPortDataType"], timeout=30
+    def collect(self) -> Iterator[dict[str, Any]]:
+        interfaces = (
+            iface
+            for entry in SystemProfiler(self._runner, "SPAirPortDataType").sections()
+            for iface in entry.get("spairport_airport_interfaces", []) or []
         )
-        sections = (
-            data.get("SPAirPortDataType", [])
-            if isinstance(data, dict)
-            else (data or [])
-        )
-        for entry in sections:
-            for iface in entry.get("spairport_airport_interfaces", []) or []:
-                cur = iface.get("spairport_current_network_information") or {}
-                channel = cur.get("spairport_network_channel")
-                yield {
-                    "interface": iface.get("_name"),
-                    "ssid": cur.get("_name"),
-                    "bssid": cur.get("spairport_network_bssid"),
-                    "channel": str(channel) if channel is not None else None,
-                    "security": cur.get("spairport_security_mode"),
-                    "raw_json": json.dumps(Coerce().jsonable(cur)),
-                }
+        for iface in interfaces:
+            network = iface.get("spairport_current_network_information") or {}
+            channel = network.get("spairport_network_channel")
+            yield {
+                "interface": iface.get("_name"),
+                "ssid": network.get("_name"),
+                "bssid": network.get("spairport_network_bssid"),
+                "channel": str(channel) if channel is not None else None,
+                "security": network.get("spairport_security_mode"),
+                "raw_json": json.dumps(Coerce().jsonable(network)),
+            }
+
+
+class SysfsDirectory:
+    """The sub-directories of one sysfs/host directory, sorted by name;
+    empty when the directory is missing or unreadable."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def children(self) -> list[Path]:
+        if not self._path.is_dir():
+            return []
+        try:
+            entries = sorted(self._path.iterdir(), key=lambda entry: entry.name)
+        except OSError:
+            return []
+        return [entry for entry in entries if entry.is_dir()]
 
 
 class LinuxUsbDevicesCollector(SnapshotCollector):
@@ -136,7 +160,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
     slice = slices.USB_DEVICES
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
-    _ATTRS = (
+    ATTRS = (
         "idVendor",
         "idProduct",
         "manufacturer",
@@ -151,37 +175,76 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
         "devnum",
     )
 
-    def collect(self):
+    def collect(self) -> Iterator[dict[str, Any]]:
         root = HostPaths().translate("/sys/bus/usb/devices")
-        if not root.is_dir():
-            return
+        # USB device nodes are named like "1-1", "2-1.2", "usb1". Interfaces
+        # (which carry a colon) are sub-descriptors of devices — skip them.
+        devices = [
+            dev for dev in SysfsDirectory(root).children() if ":" not in dev.name
+        ]
+        for device in devices:
+            attrs = self._attrs(device)
+            # Skip empty entries (e.g. root hubs without descriptors).
+            if attrs.get("idVendor") or attrs.get("product"):
+                yield self._row(device.name, attrs)
+
+    def _attrs(self, device: Path) -> dict[str, str]:
+        paths = HostPaths()
+        read = {attr: paths.read_sysfs(device / attr) for attr in self.ATTRS}
+        return {attr: value for attr, value in read.items() if value is not None}
+
+    def _row(self, location: str, attrs: Mapping[str, str]) -> dict[str, Any]:
+        return {
+            "name": attrs.get("product"),
+            "vendor_id": attrs.get("idVendor"),
+            "product_id": attrs.get("idProduct"),
+            "serial_number": attrs.get("serial"),
+            "manufacturer": attrs.get("manufacturer"),
+            "location_id": location,
+            "speed": attrs.get("speed"),
+            "raw_json": json.dumps(attrs),
+        }
+
+
+class BluezDevice:
+    """One paired device under ``/var/lib/bluetooth/<adapter>/<device>``,
+    read from its INI ``info`` file."""
+
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory
+
+    def row(self) -> dict[str, Any] | None:
+        parser = self._read()
+        if parser is None:
+            return None
+        general = dict(parser["General"]) if parser.has_section("General") else {}
+        return {
+            "name": general.get("Alias") or general.get("Name"),
+            # BlueZ stores the MAC with underscores; restore colons.
+            "address": self._directory.name.replace("_", ":"),
+            "connected": 0,
+            "paired": 1,
+            "minor_type": general.get("Class"),
+            "raw_json": json.dumps(
+                {section: dict(parser[section]) for section in parser.sections()}
+            ),
+        }
+
+    def _read(self) -> configparser.ConfigParser | None:
+        info_file = self._directory / "info"
+        if not info_file.is_file():
+            return None
+        parser = configparser.ConfigParser(
+            interpolation=None, strict=False, inline_comment_prefixes=("#", ";")
+        )
+        # BlueZ info keys are CamelCase (Alias, Name, Class). Preserve case —
+        # default lowercasing blanked the device name + class.
+        parser.optionxform = str
         try:
-            entries = sorted(root.iterdir(), key=lambda p: p.name)
-        except OSError:
-            return
-        for dev in entries:
-            # USB device nodes are named like "1-1", "2-1.2", "usb1".
-            # Interfaces (which carry a colon) are sub-descriptors of
-            # devices — skip them.
-            if ":" in dev.name:
-                continue
-            if not dev.is_dir():
-                continue
-            attrs = {a: HostPaths().read_sysfs(dev / a) for a in self._ATTRS}
-            attrs = {k: v for k, v in attrs.items() if v is not None}
-            if not attrs.get("idVendor") and not attrs.get("product"):
-                # Empty entry (e.g. root hubs without descriptors).
-                continue
-            yield {
-                "name": attrs.get("product"),
-                "vendor_id": attrs.get("idVendor"),
-                "product_id": attrs.get("idProduct"),
-                "serial_number": attrs.get("serial"),
-                "manufacturer": attrs.get("manufacturer"),
-                "location_id": dev.name,
-                "speed": attrs.get("speed"),
-                "raw_json": json.dumps(attrs),
-            }
+            parser.read(info_file, encoding="utf-8")
+        except (configparser.Error, OSError):
+            return None
+        return parser
 
 
 class LinuxBluetoothCollector(SnapshotCollector):
@@ -201,52 +264,39 @@ class LinuxBluetoothCollector(SnapshotCollector):
     slice = slices.BLUETOOTH_DEVICES
     judge_fields = ("name", "address", "minor_type")
 
-    def collect(self):
+    def collect(self) -> Iterator[dict[str, Any]]:
         root = HostPaths().translate("/var/lib/bluetooth")
-        if not root.is_dir():
-            return
-        try:
-            adapters = list(root.iterdir())
-        except PermissionError:
-            return
-        for adapter in adapters:
-            if not adapter.is_dir():
-                continue
-            try:
-                devices = list(adapter.iterdir())
-            except PermissionError:
-                continue
-            for dev in devices:
-                if not dev.is_dir():
-                    continue
-                info_file = dev / "info"
-                if not info_file.is_file():
-                    continue
-                cp = configparser.ConfigParser(
-                    interpolation=None,
-                    strict=False,
-                    inline_comment_prefixes=("#", ";"),
-                )
-                # BlueZ info keys are CamelCase (Alias, Name, Class).
-                # Preserve case — default lowercasing blanked the
-                # device name + class.
-                cp.optionxform = str
-                try:
-                    cp.read(info_file, encoding="utf-8")
-                except (configparser.Error, OSError):
-                    continue
-                general = dict(cp["General"]) if cp.has_section("General") else {}
-                # BlueZ stores the MAC with underscores; restore colons.
-                mac = dev.name.replace("_", ":")
-                full = {sec: dict(cp[sec]) for sec in cp.sections()}
-                yield {
-                    "name": general.get("Alias") or general.get("Name"),
-                    "address": mac,
-                    "connected": 0,
-                    "paired": 1,
-                    "minor_type": general.get("Class"),
-                    "raw_json": json.dumps(full),
-                }
+        devices = (
+            device
+            for adapter in SysfsDirectory(root).children()
+            for device in SysfsDirectory(adapter).children()
+        )
+        for device in devices:
+            row = BluezDevice(device).row()
+            if row is not None:
+                yield row
+
+
+class IwLink:
+    """``iw dev <iface> link`` output parsed line by line (``key: value``)."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def fields(self) -> dict[str, str]:
+        parsed: dict[str, str] = {}
+        for raw in self._text.splitlines():
+            parsed.update(self._line_fields(raw.strip()))
+        return parsed
+
+    def _line_fields(self, line: str) -> dict[str, str]:
+        if line.startswith("Connected to"):
+            bssid = line.removeprefix("Connected to").split()
+            return {"BSSID": bssid[0]} if bssid else {}
+        if line.startswith("Not connected"):
+            return {"connected": "no"}
+        key, sep, value = line.partition(":")
+        return {key.strip(): value.strip()} if sep else {}
 
 
 class LinuxWifiCollector(SnapshotCollector):
@@ -264,31 +314,21 @@ class LinuxWifiCollector(SnapshotCollector):
     slice = slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
-    def __init__(
-        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
-    ) -> None:
+    def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._runner = runner or CommandRunner()
+        self._runner = runner
 
-    def collect(self):
-        # sysfs discovery via HOST_PREFIX; iw queries via netlink which
-        # the host-network namespace (network_mode: host) already
-        # exposes to the container.
-        net = HostPaths().translate("/sys/class/net")
-        if not net.is_dir():
-            return
-        try:
-            ifaces = list(net.iterdir())
-        except OSError:
-            return
+    def collect(self) -> Iterator[dict[str, Any]]:
+        # sysfs discovery via HOST_PREFIX; iw queries via netlink which the
+        # host-network namespace (network_mode: host) already exposes to the
+        # container.
+        interfaces = SysfsDirectory(HostPaths().translate("/sys/class/net")).children()
+        wireless = [iface for iface in interfaces if (iface / "wireless").is_dir()]
         iw_available = self._runner.exists("iw")
-        for iface_dir in ifaces:
-            if not (iface_dir / "wireless").is_dir():
-                continue
-            iface = iface_dir.name
-            link = self._iw_link(iface) if iw_available else {}
+        for iface_dir in wireless:
+            link = self._link(iface_dir.name) if iw_available else {}
             yield {
-                "interface": iface,
+                "interface": iface_dir.name,
                 "ssid": link.get("SSID"),
                 "bssid": link.get("BSSID"),
                 "channel": link.get("freq"),
@@ -296,22 +336,6 @@ class LinuxWifiCollector(SnapshotCollector):
                 "raw_json": json.dumps(link),
             }
 
-    def _iw_link(self, iface: str) -> dict:
-        link = self._runner.text(["iw", "dev", iface, "link"], timeout=5)
-        out: dict = {}
-        for raw in link.splitlines():
-            line = raw.strip()
-            if not line:
-                continue
-            if line.startswith("Connected to"):
-                bssid = line.removeprefix("Connected to").split()
-                if bssid:
-                    out["BSSID"] = bssid[0]
-                continue
-            if line.startswith("Not connected"):
-                out["connected"] = "no"
-                continue
-            key, sep, value = line.partition(":")
-            if sep:
-                out[key.strip()] = value.strip()
-        return out
+    def _link(self, iface: str) -> dict[str, str]:
+        text = self._runner.text(["iw", "dev", iface, "link"], timeout=IW_TIMEOUT_S)
+        return IwLink(text).fields()
