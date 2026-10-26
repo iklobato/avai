@@ -22,6 +22,7 @@ from typing import Any, Iterator
 
 from .. import slices
 from ..collectors import SnapshotCollector, StreamingCollector
+from ..net_collectors import PsJson
 from ..runtime import CommandRunner, CommandSnapshot, JsonLineStreamSource, RowParser
 from ..runtime.command_runner import CommandFailedError
 
@@ -46,17 +47,6 @@ class PowerShell:
 
     def snapshot(self, script: str, parser: RowParser) -> CommandSnapshot:
         return CommandSnapshot(self._runner, self.command(script), parser)
-
-
-class PsJson:
-    """``ConvertTo-Json`` emits a bare object for one result and an array
-    for many; normalise both to a list of objects."""
-
-    def objects(self, payload: Any) -> list[dict[str, Any]]:
-        if payload is None:
-            return []
-        items = payload if isinstance(payload, list) else [payload]
-        return [item for item in items if isinstance(item, dict)]
 
 
 class LocalGroupParser:

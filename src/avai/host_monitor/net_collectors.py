@@ -16,27 +16,46 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
+from typing import Any
 
 from . import slices
 from .collectors import SnapshotCollector
 from .runtime import RowSource
 
-_MAC_RE = re.compile(r"^([0-9a-fA-F]{1,2}:){5}[0-9a-fA-F]{1,2}$")
+
+class PsJson:
+    """PowerShell ``ConvertTo-Json`` emits a bare object for one result, an
+    array for many and nothing for none; normalise all three to a list of
+    objects."""
+
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        stripped = text.strip()
+        if not stripped:
+            return []
+        try:
+            return self.objects(json.loads(stripped))
+        except json.JSONDecodeError:
+            return []
+
+    def objects(self, payload: Any) -> list[dict[str, Any]]:
+        if payload is None:
+            return []
+        items = payload if isinstance(payload, list) else [payload]
+        return [item for item in items if isinstance(item, dict)]
 
 
-def _load_ps_json(text: str) -> list:
-    """Normalise PowerShell ``ConvertTo-Json`` output (bare object for one
-    result, array for many, empty for none) into a list of dicts."""
-    text = text.strip()
-    if not text:
-        return []
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return []
-    if data is None:
-        return []
-    return data if isinstance(data, list) else [data]
+class KeywordTokens:
+    """The whitespace-split words of one command-output line."""
+
+    def __init__(self, words: list[str]) -> None:
+        self._words = words
+
+    def after(self, keyword: str) -> str | None:
+        """The word that follows ``keyword``, or None when it is absent."""
+        if keyword not in self._words:
+            return None
+        return self._words[self._words.index(keyword) + 1]
 
 
 # ---------------------------------------------------------------------------
@@ -44,33 +63,33 @@ def _load_ps_json(text: str) -> list:
 # ---------------------------------------------------------------------------
 
 
-class _SourceSnapshotCollector(SnapshotCollector):
+class SourceSnapshotCollector(SnapshotCollector):
     """A snapshot collector whose rows come from an injected RowSource."""
 
-    def __init__(self, source: RowSource, judge_hints: str = ""):
+    def __init__(self, source: RowSource, judge_hints: str = "") -> None:
         super().__init__(judge_hints=judge_hints)
         self._source = source
 
-    def collect(self):
+    def collect(self) -> Iterator[dict[str, Any]]:
         yield from self._source.rows()
 
 
-class ArpTableCollector(_SourceSnapshotCollector):
+class ArpTableCollector(SourceSnapshotCollector):
     slice = slices.ARP_TABLE
     judge_fields = ("ip", "mac", "interface", "flags")
 
 
-class NdpNeighborsCollector(_SourceSnapshotCollector):
+class NdpNeighborsCollector(SourceSnapshotCollector):
     slice = slices.NDP_NEIGHBORS
     judge_fields = ("ip", "mac", "interface", "state")
 
 
-class RoutesCollector(_SourceSnapshotCollector):
+class RoutesCollector(SourceSnapshotCollector):
     slice = slices.ROUTES
     judge_fields = ("destination", "gateway", "interface", "flags")
 
 
-class DnsResolversCollector(_SourceSnapshotCollector):
+class DnsResolversCollector(SourceSnapshotCollector):
     slice = slices.DNS_RESOLVERS
     judge_fields = ("server", "scope", "search", "interface")
 
@@ -79,158 +98,162 @@ class DnsResolversCollector(_SourceSnapshotCollector):
 # macOS parsers (validated against real output)
 # ---------------------------------------------------------------------------
 
+INCOMPLETE_MAC = "(incomplete)"
+
 
 class MacosArpParser:
-    """``arp -an`` → ``? (IP) at MAC on IFACE [flags] [ethernet]``."""
+    """``arp -an`` -> ``? (IP) at MAC on IFACE [flags] [ethernet]``."""
 
-    def parse(self, text: str) -> list[dict]:
-        rows = []
-        for line in text.splitlines():
-            toks = line.split()
-            if "at" not in toks or "on" not in toks:
-                continue
-            ip = next(
-                (t[1:-1] for t in toks if t.startswith("(") and t.endswith(")")), None
-            )
-            if not ip:
-                continue
-            ai, oi = toks.index("at"), toks.index("on")
-            mac = toks[ai + 1]
-            if mac == "(incomplete)":
-                mac = None
-            iface = toks[oi + 1] if oi + 1 < len(toks) else None
-            flags = (
-                " ".join(
-                    t
-                    for t in toks[oi + 2 :]
-                    if not (t.startswith("[") and t.endswith("]"))
-                )
-                or None
-            )
-            rows.append(
-                {
-                    "ip": ip,
-                    "mac": mac,
-                    "interface": iface,
-                    "flags": flags,
-                    "raw_json": json.dumps(line.strip()),
-                }
-            )
-        return rows
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        rows = (self._row(line) for line in text.splitlines())
+        return [row for row in rows if row is not None]
+
+    def _row(self, line: str) -> dict[str, Any] | None:
+        tokens = line.split()
+        if "at" not in tokens or "on" not in tokens:
+            return None
+        addresses = (token for token in tokens if self._wrapped(token, "()"))
+        ip = next((token[1:-1] for token in addresses), None)
+        if not ip:
+            return None
+        mac = tokens[tokens.index("at") + 1]
+        iface_at = tokens.index("on") + 1
+        trailing = tokens[iface_at + 1 :]
+        flags = [token for token in trailing if not self._wrapped(token, "[]")]
+        return {
+            "ip": ip,
+            "mac": None if mac == INCOMPLETE_MAC else mac,
+            "interface": tokens[iface_at] if iface_at < len(tokens) else None,
+            "flags": " ".join(flags) or None,
+            "raw_json": json.dumps(line.strip()),
+        }
+
+    def _wrapped(self, token: str, brackets: str) -> bool:
+        opening, closing = brackets
+        return token.startswith(opening) and token.endswith(closing)
 
 
 class MacosNdpParser:
     """``ndp -an`` columns: Neighbor LinklayerAddr Netif Expire St ..."""
 
-    _MIN_COLUMNS = 3  # Neighbor LinklayerAddr Netif
-    _EXPIRE, _STATE = 3, 4
+    MIN_COLUMNS = 3  # Neighbor LinklayerAddr Netif
+    EXPIRE, STATE = 3, 4
 
-    def parse(self, text: str) -> list[dict]:
-        rows = []
-        for line in text.splitlines():
-            if not line.strip() or line.startswith("Neighbor"):
-                continue
-            cols = line.split()
-            if len(cols) < self._MIN_COLUMNS:
-                continue
-            mac = cols[1] if cols[1] != "(incomplete)" else None
-            state = next(
-                (cols[i] for i in (self._STATE, self._EXPIRE) if len(cols) > i), None
-            )
-            rows.append(
-                {
-                    "ip": cols[0],
-                    "mac": mac,
-                    "interface": cols[2],
-                    "state": state,
-                    "raw_json": json.dumps(line.strip()),
-                }
-            )
-        return rows
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        rows = (self._row(line) for line in text.splitlines())
+        return [row for row in rows if row is not None]
+
+    def _row(self, line: str) -> dict[str, Any] | None:
+        cols = line.split()
+        if line.startswith("Neighbor") or len(cols) < self.MIN_COLUMNS:
+            return None
+        ip, mac, iface = cols[: self.MIN_COLUMNS]
+        states = (
+            cols[index] for index in (self.STATE, self.EXPIRE) if len(cols) > index
+        )
+        return {
+            "ip": ip,
+            "mac": None if mac == INCOMPLETE_MAC else mac,
+            "interface": iface,
+            "state": next(states, None),
+            "raw_json": json.dumps(line.strip()),
+        }
 
 
 class MacosRouteParser:
-    """``netstat -rn`` — keep default routes and IP-next-hop routes; drop
+    """``netstat -rn``: keep default routes and IP-next-hop routes; drop
     link# and MAC-gateway (neighbor) rows already covered by ARP."""
 
-    _MIN_COLUMNS = 4  # Destination Gateway Flags Netif
+    MIN_COLUMNS = 4  # Destination Gateway Flags Netif
+    MAC_ADDRESS = re.compile(r"^([0-9a-fA-F]{1,2}:){5}[0-9a-fA-F]{1,2}$")
 
-    def parse(self, text: str) -> list[dict]:
-        rows = []
-        in_table = False
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        return [row for section in self._sections(text) for row in self._table(section)]
+
+    def _sections(self, text: str) -> list[list[str]]:
+        """Blank-line-separated blocks; each routing table is one block."""
+        sections: list[list[str]] = [[]]
         for line in text.splitlines():
-            s = line.rstrip()
-            if not s.strip():
-                in_table = False
+            if not line.strip():
+                sections.append([])
                 continue
-            if s.startswith("Destination") and "Gateway" in s:
-                in_table = True
-                continue
-            if not in_table:
-                continue
-            cols = s.split()
-            if len(cols) < self._MIN_COLUMNS:
-                continue
-            dest, gw, flags, netif = cols[0], cols[1], cols[2], cols[3]
-            if not self._is_route(dest, gw):
-                continue
-            rows.append(
-                {
-                    "destination": dest,
-                    "gateway": gw,
-                    "interface": netif,
-                    "flags": flags,
-                    "raw_json": json.dumps(s.strip()),
-                }
-            )
-        return rows
+            sections[-1].append(line.rstrip())
+        return sections
 
-    @staticmethod
-    def _is_route(dest: str, gw: str) -> bool:
-        if dest == "default":
+    def _table(self, lines: list[str]) -> list[dict[str, Any]]:
+        headers = (index for index, line in enumerate(lines) if self._header(line))
+        start = next(headers, None)
+        if start is None:
+            return []
+        rows = (self._row(line) for line in lines[start + 1 :])
+        return [row for row in rows if row is not None]
+
+    def _header(self, line: str) -> bool:
+        return line.startswith("Destination") and "Gateway" in line
+
+    def _row(self, line: str) -> dict[str, Any] | None:
+        cols = line.split()
+        if len(cols) < self.MIN_COLUMNS:
+            return None
+        destination, gateway, flags, netif = cols[: self.MIN_COLUMNS]
+        if not self._is_route(destination, gateway):
+            return None
+        return {
+            "destination": destination,
+            "gateway": gateway,
+            "interface": netif,
+            "flags": flags,
+            "raw_json": json.dumps(line.strip()),
+        }
+
+    def _is_route(self, destination: str, gateway: str) -> bool:
+        if destination == "default":
             return True
-        if gw.startswith("link#") or _MAC_RE.match(gw):
+        if gateway.startswith("link#") or self.MAC_ADDRESS.match(gateway):
             return False
-        return ("." in gw) or (":" in gw)
+        return ("." in gateway) or (":" in gateway)
 
 
 class MacosDnsParser:
-    """``scutil --dns`` — one row per nameserver per resolver block."""
+    """``scutil --dns``: one row per nameserver per resolver block."""
 
-    def parse(self, text: str) -> list[dict]:
-        rows: list[dict] = []
-        scope = None
-        searches: list[str] = []
-        iface = None
-        servers: list[str] = []
+    RESOLVER = "resolver #"
 
-        def flush():
-            for srv in servers:
-                rows.append(
-                    {
-                        "server": srv,
-                        "scope": scope,
-                        "search": " ".join(searches) or None,
-                        "interface": iface,
-                        "raw_json": json.dumps({"resolver": scope, "search": searches}),
-                    }
-                )
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        return [row for block in self._blocks(text) for row in self._block_rows(block)]
 
+    def _blocks(self, text: str) -> list[list[str]]:
+        blocks: list[list[str]] = [[]]
         for line in text.splitlines():
-            s = line.strip()
-            if s.startswith("resolver #"):
-                flush()
-                scope, searches, iface, servers = s, [], None, []
-            elif s.startswith("nameserver["):
-                servers.append(s.split(":", 1)[1].strip())
-            elif s.startswith("search domain[") or s.startswith("domain "):
-                searches.append(s.split(":", 1)[1].strip())
-            elif s.startswith("if_index"):
-                val = s.split(":", 1)[1].strip()
-                if "(" in val:
-                    iface = val.split("(", 1)[1].rstrip(")")
-        flush()
-        return rows
+            stripped = line.strip()
+            if stripped.startswith(self.RESOLVER):
+                blocks.append([])
+            blocks[-1].append(stripped)
+        return blocks
+
+    def _block_rows(self, lines: list[str]) -> list[dict[str, Any]]:
+        scope = lines[0] if lines and lines[0].startswith(self.RESOLVER) else None
+        searches = self._values(lines, ("search domain[", "domain "))
+        return [
+            {
+                "server": server,
+                "scope": scope,
+                "search": " ".join(searches) or None,
+                "interface": self._interface(lines),
+                "raw_json": json.dumps({"resolver": scope, "search": searches}),
+            }
+            for server in self._values(lines, ("nameserver[",))
+        ]
+
+    def _values(self, lines: list[str], prefixes: tuple[str, ...]) -> list[str]:
+        return [
+            line.split(":", 1)[1].strip() for line in lines if line.startswith(prefixes)
+        ]
+
+    def _interface(self, lines: list[str]) -> str | None:
+        values = self._values(lines, ("if_index",))
+        names = [value.split("(", 1)[1].rstrip(")") for value in values if "(" in value]
+        return names[-1] if names else None
 
 
 # ---------------------------------------------------------------------------
@@ -245,84 +268,78 @@ class IpNeighParser:
     ``state_key`` is the model field for the trailing state token: ``flags``
     for the ARP table, ``state`` for the NDP table."""
 
-    _MIN_COLUMNS = 3  # ip, then dev/lladdr pairs
+    MIN_COLUMNS = 3  # ip, then dev/lladdr pairs
 
-    def __init__(self, state_key: str):
+    def __init__(self, state_key: str) -> None:
         self._state_key = state_key
 
-    def parse(self, text: str) -> list[dict]:
-        rows = []
-        for line in text.splitlines():
-            cols = line.split()
-            if len(cols) < self._MIN_COLUMNS:
-                continue
-            iface = cols[cols.index("dev") + 1] if "dev" in cols else None
-            mac = cols[cols.index("lladdr") + 1] if "lladdr" in cols else None
-            rows.append(
-                {
-                    "ip": cols[0],
-                    "mac": mac,
-                    "interface": iface,
-                    self._state_key: cols[-1],
-                    "raw_json": json.dumps(line.strip()),
-                }
-            )
-        return rows
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        lines = text.splitlines()
+        return [
+            self._row(line) for line in lines if len(line.split()) >= self.MIN_COLUMNS
+        ]
+
+    def _row(self, line: str) -> dict[str, Any]:
+        cols = line.split()
+        tokens = KeywordTokens(cols)
+        return {
+            "ip": cols[0],
+            "mac": tokens.after("lladdr"),
+            "interface": tokens.after("dev"),
+            self._state_key: cols[-1],
+            "raw_json": json.dumps(line.strip()),
+        }
 
 
 class IpRouteParser:
     """``ip route``: ``default via GW dev IFACE proto P`` /
     ``PREFIX dev IFACE proto kernel ...``. Keep default + via routes."""
 
-    def parse(self, text: str) -> list[dict]:
-        rows = []
-        for line in text.splitlines():
-            cols = line.split()
-            if not cols:
-                continue
-            dest = cols[0]
-            gw = cols[cols.index("via") + 1] if "via" in cols else None
-            iface = cols[cols.index("dev") + 1] if "dev" in cols else None
-            flags = cols[cols.index("proto") + 1] if "proto" in cols else None
-            if dest == "default" or gw:
-                rows.append(
-                    {
-                        "destination": dest,
-                        "gateway": gw,
-                        "interface": iface,
-                        "flags": flags,
-                        "raw_json": json.dumps(line.strip()),
-                    }
-                )
-        return rows
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        rows = (self._row(line) for line in text.splitlines() if line.split())
+        return [
+            row for row in rows if row["destination"] == "default" or row["gateway"]
+        ]
+
+    def _row(self, line: str) -> dict[str, Any]:
+        cols = line.split()
+        tokens = KeywordTokens(cols)
+        return {
+            "destination": cols[0],
+            "gateway": tokens.after("via"),
+            "interface": tokens.after("dev"),
+            "flags": tokens.after("proto"),
+            "raw_json": json.dumps(line.strip()),
+        }
 
 
 class ResolvConfParser:
     """``/etc/resolv.conf`` nameserver/search lines."""
 
-    def parse(self, text: str) -> list[dict]:
-        servers: list[str] = []
-        searches: list[str] = []
-        for line in text.splitlines():
-            s = line.strip()
-            if not s or s.startswith("#"):
-                continue
-            if s.startswith("nameserver"):
-                _keyword, *values = s.split()
-                if values:
-                    servers.append(values[0])
-            elif s.startswith(("search", "domain")):
-                searches += s.split()[1:]
-        return [
-            {
-                "server": srv,
-                "scope": "resolv.conf",
-                "search": " ".join(searches) or None,
-                "interface": None,
-                "raw_json": json.dumps({"nameserver": srv}),
-            }
-            for srv in servers
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        stripped = (line.strip() for line in text.splitlines())
+        live = [line.split() for line in stripped if line and not line.startswith("#")]
+        servers = [
+            words[1]
+            for words in live
+            if words[0].startswith("nameserver") and len(words) > 1
         ]
+        searches = [
+            word
+            for words in live
+            if words[0].startswith(("search", "domain"))
+            for word in words[1:]
+        ]
+        return [self._row(server, searches) for server in servers]
+
+    def _row(self, server: str, searches: list[str]) -> dict[str, Any]:
+        return {
+            "server": server,
+            "scope": "resolv.conf",
+            "search": " ".join(searches) or None,
+            "interface": None,
+            "raw_json": json.dumps({"nameserver": server}),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -333,65 +350,59 @@ class ResolvConfParser:
 class PsNeighborParser:
     """``Get-NetNeighbor ... | ConvertTo-Json`` objects."""
 
-    def __init__(self, state_key: str):
+    def __init__(self, state_key: str) -> None:
         self._state_key = state_key
 
-    def parse(self, text: str) -> list[dict]:
-        rows = []
-        for o in _load_ps_json(text):
-            if not isinstance(o, dict):
-                continue
-            rows.append(
-                {
-                    "ip": o.get("IPAddress"),
-                    "mac": o.get("LinkLayerAddress") or None,
-                    "interface": o.get("InterfaceAlias"),
-                    self._state_key: str(o.get("State")),
-                    "raw_json": json.dumps(o),
-                }
-            )
-        return rows
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "ip": neighbor.get("IPAddress"),
+                "mac": neighbor.get("LinkLayerAddress") or None,
+                "interface": neighbor.get("InterfaceAlias"),
+                self._state_key: str(neighbor.get("State")),
+                "raw_json": json.dumps(neighbor),
+            }
+            for neighbor in PsJson().parse(text)
+        ]
 
 
 class PsRouteParser:
     """``Get-NetRoute | ConvertTo-Json``. Keep default + real next-hop."""
 
-    def parse(self, text: str) -> list[dict]:
-        rows = []
-        for o in _load_ps_json(text):
-            if not isinstance(o, dict):
-                continue
-            dest = o.get("DestinationPrefix")
-            nh = o.get("NextHop")
-            if dest in ("0.0.0.0/0", "::/0") or (nh and nh not in ("0.0.0.0", "::")):
-                rows.append(
-                    {
-                        "destination": dest,
-                        "gateway": nh,
-                        "interface": o.get("InterfaceAlias"),
-                        "flags": str(o.get("RouteMetric")),
-                        "raw_json": json.dumps(o),
-                    }
-                )
-        return rows
+    DEFAULT_ROUTES = ("0.0.0.0/0", "::/0")
+    UNSPECIFIED = ("0.0.0.0", "::")
+
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "destination": route.get("DestinationPrefix"),
+                "gateway": route.get("NextHop"),
+                "interface": route.get("InterfaceAlias"),
+                "flags": str(route.get("RouteMetric")),
+                "raw_json": json.dumps(route),
+            }
+            for route in PsJson().parse(text)
+            if self._kept(route)
+        ]
+
+    def _kept(self, route: dict[str, Any]) -> bool:
+        next_hop = route.get("NextHop")
+        real_hop = bool(next_hop) and next_hop not in self.UNSPECIFIED
+        return route.get("DestinationPrefix") in self.DEFAULT_ROUTES or real_hop
 
 
 class PsDnsParser:
-    """``Get-DnsClientServerAddress | ConvertTo-Json`` — one row per server."""
+    """``Get-DnsClientServerAddress | ConvertTo-Json``: one row per server."""
 
-    def parse(self, text: str) -> list[dict]:
-        rows = []
-        for o in _load_ps_json(text):
-            if not isinstance(o, dict):
-                continue
-            for srv in o.get("ServerAddresses") or []:
-                rows.append(
-                    {
-                        "server": srv,
-                        "scope": "dns-client",
-                        "search": None,
-                        "interface": o.get("InterfaceAlias"),
-                        "raw_json": json.dumps(o),
-                    }
-                )
-        return rows
+    def parse(self, text: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "server": server,
+                "scope": "dns-client",
+                "search": None,
+                "interface": client.get("InterfaceAlias"),
+                "raw_json": json.dumps(client),
+            }
+            for client in PsJson().parse(text)
+            for server in client.get("ServerAddresses") or []
+        ]

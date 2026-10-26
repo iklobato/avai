@@ -8,10 +8,10 @@ from avai.host_monitor.hosts.linux import LinuxHost
 from avai.host_monitor.hosts.macos import MacOSHost
 from avai.host_monitor.hosts.windows import WindowsHost
 from avai.host_monitor.persistence_collectors import (
+    KnownHostsParser,
     EnvValueParser,
     LdSoPreloadParser,
     ProcModulesParser,
-    SshKnownHostsCollector,
     WindowsAppInitParser,
     WindowsDriverParser,
 )
@@ -83,7 +83,7 @@ class TestKnownHostsParser:
             "@cert-authority *.corp ssh-rsa AAAAB3NzaC1yc2E\n"
             "192.168.1.5 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5\n"
         )
-        rows = SshKnownHostsCollector._parse_known_hosts(text, "/h/.ssh/known_hosts")
+        rows = KnownHostsParser().rows(text, "/h/.ssh/known_hosts")
         hosts = [r["host"] for r in rows]
         assert hosts == ["github.com", "*.corp", "192.168.1.5"]
         assert rows[0]["key_type"] == "ssh-ed25519"
@@ -91,10 +91,7 @@ class TestKnownHostsParser:
         assert rows[1]["host"] == "*.corp"  # @cert-authority marker stripped
 
     def test_blank_and_unknown_keytype_skipped(self):
-        assert (
-            SshKnownHostsCollector._parse_known_hosts("\nhost notakey blob\n", "/p")
-            == []
-        )
+        assert KnownHostsParser().rows("\nhost notakey blob\n", "/p") == []
 
 
 class TestWiring:

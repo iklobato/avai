@@ -60,5 +60,5 @@ class AccountCollectors:
             PrivilegeConfigCollector(
                 self._fs, self._accounts, hint("privilege_config")
             ),
-            SshKnownHostsCollector(judge_hints=hint("ssh_known_hosts"), fs=self._fs),
+            SshKnownHostsCollector(self._fs, hint("ssh_known_hosts")),
         ]
