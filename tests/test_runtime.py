@@ -102,23 +102,23 @@ class TestDigest:
         p.write_bytes(b"hello")
         import hashlib
 
-        assert Digest.sha256_file(p) == hashlib.sha256(b"hello").hexdigest()
+        assert Digest().sha256_file(p) == hashlib.sha256(b"hello").hexdigest()
 
     def test_sha256_file_missing_is_none(self, tmp_path):
-        assert Digest.sha256_file(tmp_path / "nope") is None
+        assert Digest().sha256_file(tmp_path / "nope") is None
 
     def test_of_row_is_field_scoped_and_order_independent(self):
-        a = Digest.of_row({"name": "x", "extra": 1}, ("name",))
-        b = Digest.of_row({"extra": 999, "name": "x"}, ("name",))
+        a = Digest().of_row({"name": "x", "extra": 1}, ("name",))
+        b = Digest().of_row({"extra": 999, "name": "x"}, ("name",))
         assert a == b  # only declared field participates
 
     def test_of_row_distinguishes_values(self):
-        assert Digest.of_row({"name": "x"}, ("name",)) != Digest.of_row(
+        assert Digest().of_row({"name": "x"}, ("name",)) != Digest().of_row(
             {"name": "y"}, ("name",)
         )
 
     def test_of_row_no_fields_is_none(self):
-        assert Digest.of_row({"name": "x"}, ()) is None
+        assert Digest().of_row({"name": "x"}, ()) is None
 
     def test_ssh_fingerprint_known_shape(self):
         import base64
@@ -129,10 +129,10 @@ class TestDigest:
         expected = "SHA256:" + base64.b64encode(
             hashlib.sha256(raw).digest()
         ).decode().rstrip("=")
-        assert Digest.ssh_fingerprint(b64) == expected
+        assert Digest().ssh_fingerprint(b64) == expected
 
     def test_ssh_fingerprint_bad_input_is_none(self):
-        assert Digest.ssh_fingerprint("!!!not base64!!!") is None
+        assert Digest().ssh_fingerprint("!!!not base64!!!") is None
 
 
 class TestExternalSqliteReader:
@@ -154,9 +154,9 @@ class TestHostPaths:
         # A GitHub macOS runner ships a system LaunchAgent like this.
         bad = tmp_path / "bad.plist"
         bad.write_bytes(b"<?xml version=1.0?>\n<plist/>")
-        assert HostPaths.read_plist(bad) is None
+        assert HostPaths().read_plist(bad) is None
 
     def test_read_plist_reads_a_dict(self, tmp_path):
         good = tmp_path / "good.plist"
         good.write_bytes(plistlib.dumps({"Label": "com.example"}))
-        assert HostPaths.read_plist(good) == {"Label": "com.example"}
+        assert HostPaths().read_plist(good) == {"Label": "com.example"}

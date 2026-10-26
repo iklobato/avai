@@ -296,7 +296,7 @@ def _write(sink, model, rows, fields, ts, run_id):
     for r in rows:
         r["run_id"] = run_id
         r["collected_at"] = ts
-        r["content_hash"] = Digest.of_row(r, fields)
+        r["content_hash"] = Digest().of_row(r, fields)
     sink.write(model, rows)
 
 

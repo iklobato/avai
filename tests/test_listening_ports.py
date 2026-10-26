@@ -17,13 +17,12 @@ from sqlalchemy.orm import Session
 
 from avai.dashboard.app import create_app
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.queries import listening_ports
+from avai.dashboard.queries import RowFilter, listening_ports
 from avai.dashboard.queries.ports import _addr_scope
-from avai.dashboard.queries import RowFilter
-from avai.host_monitor.runtime import Digest
 from avai.host_monitor.enums import ThreatCategory, Verdict
 from avai.host_monitor.judge import Judgment
 from avai.host_monitor.models import ListeningPortRow, NetworkConnectionRow, ProcessRow
+from avai.host_monitor.runtime import Digest
 from avai.host_monitor.sink import Sink
 
 LP_FIELDS = ("process_name", "family", "type", "laddr_ip", "laddr_port")
@@ -88,7 +87,7 @@ def seeded(tmp_path):
     for p in ports:
         p["run_id"] = run_id
         p["collected_at"] = ts
-        p["content_hash"] = Digest.of_row(p, LP_FIELDS)
+        p["content_hash"] = Digest().of_row(p, LP_FIELDS)
     sink.write(ListeningPortRow, ports)
 
     sink.write(

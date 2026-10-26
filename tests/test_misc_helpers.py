@@ -145,10 +145,10 @@ class TestSinkUnjudgedAll:
         ts = Clock().now_iso()
 
         # Write two rows: one judged, one unjudged.
-        h_judged = Digest.of_row(
+        h_judged = Digest().of_row(
             {"event_type": "login_ok", "event_message": "alice"}, _S.judge_fields
         )
-        h_unjudged = Digest.of_row(
+        h_unjudged = Digest().of_row(
             {"event_type": "login_fail", "event_message": "bob"}, _S.judge_fields
         )
         sink.write(

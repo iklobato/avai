@@ -10,17 +10,9 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from .. import constants, slices
-from ..constants import (
-    APP_INFO_KEYS,
-    BROWSER_PROFILES,
-)
+from ..constants import APP_INFO_KEYS, BROWSER_PROFILES
 from ..enums import Browser
-from ..runtime import (
-    Coerce,
-    CommandRunner,
-    ExternalSqliteReader,
-    HostPaths,
-)
+from ..runtime import Coerce, CommandRunner, ExternalSqliteReader, HostPaths
 from .base import SnapshotCollector
 
 
@@ -113,7 +105,7 @@ class QuarantineCollector(SnapshotCollector):
     }
 
     def collect(self):
-        path = HostPaths.expand(
+        path = HostPaths().expand(
             "~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
         )
         if not path.exists():
@@ -152,7 +144,7 @@ class BrowserExtensionsCollector(SnapshotCollector):
         for browser, profiles in self.profiles.items():
             reader = self.readers.get(browser, self.default_reader)
             for base_str in profiles:
-                base = HostPaths.expand(base_str)
+                base = HostPaths().expand(base_str)
                 if not base.is_dir():
                     continue
                 yield from reader.read(base, browser)
@@ -163,7 +155,7 @@ class InstalledAppsCollector(SnapshotCollector):
     judge_fields = ("bundle_id", "name", "path")
 
     def collect(self):
-        for app_dir in (Path("/Applications"), HostPaths.expand("~/Applications")):
+        for app_dir in (Path("/Applications"), HostPaths().expand("~/Applications")):
             if not app_dir.is_dir():
                 continue
             try:
@@ -171,14 +163,14 @@ class InstalledAppsCollector(SnapshotCollector):
             except PermissionError:
                 continue
             for app in apps:
-                info = HostPaths.read_plist(app / "Contents" / "Info.plist") or {}
+                info = HostPaths().read_plist(app / "Contents" / "Info.plist") or {}
                 yield {
                     "path": str(app),
                     "bundle_id": info.get("CFBundleIdentifier"),
                     "name": info.get("CFBundleName") or info.get("CFBundleDisplayName"),
                     "version": info.get("CFBundleShortVersionString"),
                     "raw_json": json.dumps(
-                        Coerce.jsonable(
+                        Coerce().jsonable(
                             {
                                 k: info.get(k)
                                 for k in APP_INFO_KEYS
@@ -230,7 +222,7 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
         cmd = ["dpkg-query", "-W", "-f", fmt]
         # When containerised, --admindir points dpkg-query at the host's
         # package database rather than the container's.
-        host_admindir = HostPaths.translate("/var/lib/dpkg")
+        host_admindir = HostPaths().translate("/var/lib/dpkg")
         if constants.HOST_PREFIX and host_admindir.is_dir():
             cmd[1:1] = ["--admindir", str(host_admindir)]
         for line in self._runner.text(cmd, timeout=30).splitlines():
@@ -266,13 +258,13 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
         # handles them. We extract [Desktop Entry] Name / Exec /
         # Comment / Categories.
         roots: list[Path] = [
-            HostPaths.translate("/usr/share/applications"),
-            HostPaths.translate("/usr/local/share/applications"),
-            HostPaths.translate("/var/lib/flatpak/exports/share/applications"),
+            HostPaths().translate("/usr/share/applications"),
+            HostPaths().translate("/usr/local/share/applications"),
+            HostPaths().translate("/var/lib/flatpak/exports/share/applications"),
         ]
-        roots.extend(HostPaths.for_home("~/.local/share/applications"))
+        roots.extend(HostPaths().for_home("~/.local/share/applications"))
         roots.extend(
-            HostPaths.for_home("~/.local/share/flatpak/exports/share/applications")
+            HostPaths().for_home("~/.local/share/flatpak/exports/share/applications")
         )
         for root in roots:
             if not root.is_dir():
@@ -355,7 +347,7 @@ class MdmProfilesCollector(SnapshotCollector):
                 "install_date": entry.get("spconfigprofile_install_date"),
                 "profile_scope": entry.get("spconfigprofile_profile_scope"),
                 "is_supervised": None,
-                "raw_json": json.dumps(Coerce.jsonable(entry)),
+                "raw_json": json.dumps(Coerce().jsonable(entry)),
             }
 
     @classmethod
@@ -414,7 +406,7 @@ class KernelExtensionsCollector(SnapshotCollector):
                 "team_id": None,
                 "signing_id": kext.get("spext_signed_by"),
                 "raw_json": json.dumps(
-                    Coerce.jsonable(
+                    Coerce().jsonable(
                         {
                             k: v
                             for k, v in kext.items()
@@ -454,7 +446,7 @@ class SystemExtensionsCollector(SnapshotCollector):
 
     def collect(self):
         db = Path("/Library/SystemExtensions/db.plist")
-        data = HostPaths.read_plist(db)
+        data = HostPaths().read_plist(db)
         if not data:
             return
         # The plist is a top-level dict with 'extensions' as the list
@@ -478,5 +470,5 @@ class SystemExtensionsCollector(SnapshotCollector):
                 "version": version,
                 "state": ext.get("state"),
                 "categories": ",".join(categories) if categories else None,
-                "raw_json": json.dumps(Coerce.jsonable(ext)),
+                "raw_json": json.dumps(Coerce().jsonable(ext)),
             }

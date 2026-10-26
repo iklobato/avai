@@ -1,42 +1,32 @@
-"""Host filesystem access, with container-path translation.
-
-Groups the path-building and low-level file reads the collectors need:
-``HOST_PREFIX`` translation (so a containerised monitor reads the host's
-bind-mounted tree), ``~`` expansion, and the sysfs/plist readers. Pure
-filesystem access with no subprocess — exposed as static methods so it
-has one cohesive home instead of scattered module functions.
-"""
-
 from __future__ import annotations
 
 import os
 import plistlib
 from pathlib import Path
+from typing import Any
 from xml.parsers.expat import ExpatError
-from typing import Optional
 
 from .. import constants
+
+HOME_PREFIX = "~/"
 
 
 class HostPaths:
     """Path resolution + low-level reads under container translation."""
 
-    @staticmethod
-    def translate(p) -> Path:
-        """Translate an absolute host path to its in-container location
-        when HOST_PREFIX is set. Relative paths and the empty-prefix case
-        are passthroughs."""
-        p = p if isinstance(p, Path) else Path(p)
-        if not constants.HOST_PREFIX or not p.is_absolute():
-            return p
-        return Path(constants.HOST_PREFIX + str(p))
+    def translate(self, raw: Any) -> Path:
+        """Translate an absolute host path (a ``str`` or ``Path``) to its
+        in-container location when HOST_PREFIX is set. Relative paths and
+        the empty-prefix case are passthroughs."""
+        path = Path(raw)
+        if not constants.HOST_PREFIX or not path.is_absolute():
+            return path
+        return Path(constants.HOST_PREFIX + str(path))
 
-    @staticmethod
-    def expand(p: str) -> Path:
-        return Path(os.path.expanduser(p))
+    def expand(self, raw: str) -> Path:
+        return Path(os.path.expanduser(raw))
 
-    @staticmethod
-    def for_home(template: str) -> list[Path]:
+    def for_home(self, template: str) -> list[Path]:
         """Expand a ``~/<rest>`` template into actual paths.
 
         Without HOST_PREFIX: ``~/<rest>`` → ``[expanduser(template)]``.
@@ -45,40 +35,42 @@ class HostPaths:
         Absolute paths pass through :meth:`translate` (always one path) so
         callers can flatten freely.
         """
-        if not template.startswith("~/"):
-            return [HostPaths.translate(template)]
-        rest = template[2:]
+        if not template.startswith(HOME_PREFIX):
+            return [self.translate(template)]
         if not constants.HOST_PREFIX:
-            return [Path(os.path.expanduser(template))]
-        out: list[Path] = []
-        home_root = Path(constants.HOST_PREFIX) / "home"
-        if home_root.is_dir():
-            try:
-                for user_dir in home_root.iterdir():
-                    if user_dir.is_dir():
-                        out.append(user_dir / rest)
-            except OSError:
-                pass
-        root_home = Path(constants.HOST_PREFIX) / "root"
-        if root_home.is_dir():
-            out.append(root_home / rest)
-        return out
+            return [self.expand(template)]
+        rest = template.removeprefix(HOME_PREFIX)
+        homes = self._container_homes()
+        return [home / rest for home in homes]
 
-    @staticmethod
-    def read_sysfs(path: Path, encoding: str = "utf-8") -> Optional[str]:
+    def read_sysfs(self, path: Path) -> str | None:
         """Read a sysfs/procfs attribute file. Returns the stripped string
         or None if unreadable. Doesn't raise on permission errors."""
         try:
-            return path.read_text(encoding=encoding, errors="replace").strip()
+            return path.read_text(encoding="utf-8", errors="replace").strip()
         except (OSError, UnicodeError):
             return None
 
-    @staticmethod
-    def read_plist(path: Path) -> Optional[dict]:
+    def read_plist(self, path: Path) -> dict[str, Any] | None:
         """Parse a binary/XML plist; None if unreadable or not a dict."""
         try:
-            with open(path, "rb") as f:
-                data = plistlib.load(f)
+            with open(path, "rb") as stream:
+                parsed = plistlib.load(stream)
         except (OSError, plistlib.InvalidFileException, ValueError, ExpatError):
             return None
-        return data if isinstance(data, dict) else None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _container_homes(self) -> list[Path]:
+        homes = self._user_homes(Path(constants.HOST_PREFIX) / "home")
+        root_home = Path(constants.HOST_PREFIX) / "root"
+        if root_home.is_dir():
+            homes.append(root_home)
+        return homes
+
+    def _user_homes(self, home_root: Path) -> list[Path]:
+        if not home_root.is_dir():
+            return []
+        try:
+            return [user_dir for user_dir in home_root.iterdir() if user_dir.is_dir()]
+        except OSError:
+            return []

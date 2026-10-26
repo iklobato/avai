@@ -7,13 +7,8 @@ import threading
 from datetime import datetime, timezone
 
 from .. import constants, slices
-from ..constants import (
-    AUTH_LOG_PREDICATE,
-)
-from ..runtime import (
-    HostPaths,
-    JsonLineStreamSource,
-)
+from ..constants import AUTH_LOG_PREDICATE
+from ..runtime import HostPaths, JsonLineStreamSource
 from .base import StreamingCollector
 
 
@@ -107,8 +102,8 @@ class LinuxAuthEventsCollector(StreamingCollector):
         # without this fallback auth_events would silently collect nothing.
         if constants.HOST_PREFIX:
             for host_journal in (
-                HostPaths.translate("/var/log/journal"),
-                HostPaths.translate("/run/log/journal"),
+                HostPaths().translate("/var/log/journal"),
+                HostPaths().translate("/run/log/journal"),
             ):
                 if host_journal.is_dir():
                     cmd.extend(["--directory", str(host_journal)])
@@ -235,7 +230,7 @@ class LinuxProcessExecCollector(StreamingCollector):
     def _cmd(self) -> list[str]:
         cmd = ["journalctl", "-f", "--output=json", "--no-pager"]
         if constants.HOST_PREFIX:
-            host_journal = HostPaths.translate("/var/log/journal")
+            host_journal = HostPaths().translate("/var/log/journal")
             if host_journal.is_dir():
                 cmd.extend(["--directory", str(host_journal)])
         cmd.extend(["_AUDIT_TYPE_NAME=EXECVE", "+", "_AUDIT_TYPE_NAME=SYSCALL"])

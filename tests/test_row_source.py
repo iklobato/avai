@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from avai.host_monitor.runtime import CommandSnapshot, FileSnapshot
+from avai.host_monitor.runtime.row_source import SNAPSHOT_TIMEOUT_S
 
 
 class _FakeRunner:
@@ -41,10 +42,10 @@ class TestCommandSnapshot:
             list(CommandSnapshot(runner, ["nope"], _UpperParser()).rows())
         assert "nope" in str(exc.value)
 
-    def test_passes_timeout(self):
+    def test_passes_the_snapshot_timeout(self) -> None:
         runner = _FakeRunner(text="")
-        list(CommandSnapshot(runner, ["x"], _UpperParser(), timeout=99).rows())
-        assert runner.called_with[1] == 99
+        list(CommandSnapshot(runner, ["x"], _UpperParser()).rows())
+        assert runner.called_with[1] == SNAPSHOT_TIMEOUT_S
 
 
 class TestFileSnapshot:

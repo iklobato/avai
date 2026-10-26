@@ -230,7 +230,7 @@ def seeded(tmp_path):
     for r in rows:
         r["run_id"] = run_id
         r["collected_at"] = ts
-        r["content_hash"] = Digest.of_row(r, fields)
+        r["content_hash"] = Digest().of_row(r, fields)
     sink.write(NetworkFlowRow, rows)
     sink.write_judgments(
         [
@@ -326,7 +326,7 @@ class TestTrafficVolume:
             "run_id": run_id,
             "collected_at": ts,
         }
-        row["content_hash"] = Digest.of_row(row, fields)
+        row["content_hash"] = Digest().of_row(row, fields)
         sink.write(NetworkFlowRow, [row])
         return engine, run_id
 
@@ -479,7 +479,7 @@ class TestGeolocationColumn:
             "run_id": run_id,
             "collected_at": ts,
         }
-        row["content_hash"] = Digest.of_row(row, fields)
+        row["content_hash"] = Digest().of_row(row, fields)
         sink.write(NetworkFlowRow, [row])
         _seed_geo(
             engine,
@@ -562,7 +562,7 @@ class TestGeolocationColumn:
             "run_id": run_id,
             "collected_at": ts,
         }
-        row["content_hash"] = Digest.of_row(row, fields)
+        row["content_hash"] = Digest().of_row(row, fields)
         sink.write(NetworkFlowRow, [row])
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE enrichment_evidence"))

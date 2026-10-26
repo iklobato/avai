@@ -211,12 +211,12 @@ class LlmJudge(Judge):
             yield Judgment(
                 content_hash=batch[idx]["content_hash"],
                 collector=collector,
-                verdict=Coerce.enum(
+                verdict=Coerce().enum(
                     str(item.get("verdict") or "").strip().lower(),
                     Verdict,
                     Verdict.UNKNOWN,
                 ),
-                category=Coerce.enum(
+                category=Coerce().enum(
                     str(item.get("category") or "").strip().lower(),
                     ThreatCategory,
                     ThreatCategory.NONE,

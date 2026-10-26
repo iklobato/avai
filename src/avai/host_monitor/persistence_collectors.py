@@ -93,7 +93,7 @@ class SshKnownHostsCollector(SnapshotCollector):
                 {
                     "host": parts[0],
                     "key_type": parts[1],
-                    "fingerprint": Digest.ssh_fingerprint(parts[2]),
+                    "fingerprint": Digest().ssh_fingerprint(parts[2]),
                     "source_path": path,
                     "raw_json": json.dumps({"host": parts[0], "key_type": parts[1]}),
                 }

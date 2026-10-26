@@ -139,7 +139,7 @@ class CollectionCycle:
         for r in rows:
             r["run_id"] = run_id
             r["collected_at"] = started
-            r["content_hash"] = Digest.of_row(r, c.judge_fields)
+            r["content_hash"] = Digest().of_row(r, c.judge_fields)
         sink.write(c.model, rows)
         collected_ms = int((time.monotonic() - t0) * 1000)
 

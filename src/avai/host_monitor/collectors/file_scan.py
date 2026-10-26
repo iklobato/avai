@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from pathlib import Path
 from itertools import islice
+from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional
 
 if TYPE_CHECKING:
@@ -19,10 +19,7 @@ except ImportError:  # pragma: no cover - Windows has no pwd module
     pwd = None
 
 from .. import constants, slices
-from ..runtime import (
-    Clock,
-    Digest,
-)
+from ..runtime import Clock, Digest
 from .base import SnapshotCollector
 
 
@@ -384,7 +381,7 @@ class FileScanCollector(SnapshotCollector):
             return
         if not matches:
             return
-        sha = Digest.sha256_file(path)
+        sha = Digest().sha256_file(path)
         for m in matches:
             yield {
                 "path": str(path),

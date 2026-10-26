@@ -7,10 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .. import constants, slices
-from ..runtime import (
-    CommandRunner,
-    HostPaths,
-)
+from ..runtime import CommandRunner, HostPaths
 from .base import SnapshotCollector
 
 # syslog severity number -> name (RFC 5424 / journald PRIORITY).
@@ -112,7 +109,7 @@ class LogTailCollector(SnapshotCollector):
             "-n",
             str(self.MAX_JOURNAL_LINES),
         ]
-        host_journal = HostPaths.translate("/var/log/journal")
+        host_journal = HostPaths().translate("/var/log/journal")
         if constants.HOST_PREFIX and host_journal.is_dir():
             cmd.extend(["--directory", str(host_journal)])
         try:
@@ -157,7 +154,7 @@ class LogTailCollector(SnapshotCollector):
         }
 
     def _tail_file(self, path_str: str):
-        path = HostPaths.translate(path_str)
+        path = HostPaths().translate(path_str)
         try:
             with open(path, "rb") as handle:
                 handle.seek(0, 2)

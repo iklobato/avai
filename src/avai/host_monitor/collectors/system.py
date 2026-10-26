@@ -7,12 +7,8 @@ import json
 from datetime import datetime
 from typing import Optional
 
-from .. import slices
-from ..runtime import (
-    Clock,
-    DiskMetrics,
-    SystemMetrics,
-)
+from .. import constants, slices
+from ..runtime import Clock, DiskMetrics, SystemMetrics
 from .base import SnapshotCollector
 
 
@@ -181,7 +177,7 @@ class DiskUsageCollector(SnapshotCollector):
 
     def __init__(self, metrics: Optional[DiskMetrics] = None, judge_hints: str = ""):
         super().__init__(judge_hints=judge_hints)
-        self._metrics = metrics or DiskMetrics()
+        self._metrics = metrics or DiskMetrics(constants.LOG)
 
     def collect(self):
         io = self._metrics.io_counters()
@@ -234,7 +230,7 @@ class MountsCollector(SnapshotCollector):
 
     def __init__(self, judge_hints: str = "", disks: Optional[DiskMetrics] = None):
         super().__init__(judge_hints)
-        self._disks = disks or DiskMetrics()
+        self._disks = disks or DiskMetrics(constants.LOG)
 
     def collect(self):
         for p in self._disks.mount_table():

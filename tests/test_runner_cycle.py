@@ -76,7 +76,7 @@ def _runner(sink, snapshot=(), streaming=(), judge=None, **options) -> Runner:
 
 
 def _proc_hash(name: str) -> str:
-    return Digest.of_row({"name": name, "exe": f"/bin/{name}"}, PROC_FIELDS)
+    return Digest().of_row({"name": name, "exe": f"/bin/{name}"}, PROC_FIELDS)
 
 
 class _Procs:
@@ -412,7 +412,7 @@ def _stream_row(process, message):
         **row,
         "run_id": "stream-session",
         "collected_at": "2026-01-01T00:00:00Z",
-        "content_hash": Digest.of_row(row, AUTH_FIELDS),
+        "content_hash": Digest().of_row(row, AUTH_FIELDS),
     }
 
 

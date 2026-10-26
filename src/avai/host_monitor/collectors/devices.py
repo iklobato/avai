@@ -7,11 +7,7 @@ import json
 from typing import Optional
 
 from .. import slices
-from ..runtime import (
-    Coerce,
-    CommandRunner,
-    HostPaths,
-)
+from ..runtime import Coerce, CommandRunner, HostPaths
 from .base import SnapshotCollector
 
 
@@ -44,7 +40,7 @@ class UsbDevicesCollector(SnapshotCollector):
                 "location_id": loc,
                 "speed": item.get("device_speed"),
                 "raw_json": json.dumps(
-                    {k: Coerce.jsonable(v) for k, v in item.items() if k != "_items"}
+                    {k: Coerce().jsonable(v) for k, v in item.items() if k != "_items"}
                 ),
             }
             yield from self._walk(item.get("_items"), loc)
@@ -90,7 +86,7 @@ class BluetoothCollector(SnapshotCollector):
                             "connected": int(group == "device_connected"),
                             "paired": int(group in self._PAIRED_GROUPS),
                             "minor_type": dev.get("device_minorType"),
-                            "raw_json": json.dumps(Coerce.jsonable(dev)),
+                            "raw_json": json.dumps(Coerce().jsonable(dev)),
                         }
 
 
@@ -123,7 +119,7 @@ class WifiCollector(SnapshotCollector):
                     "bssid": cur.get("spairport_network_bssid"),
                     "channel": str(channel) if channel is not None else None,
                     "security": cur.get("spairport_security_mode"),
-                    "raw_json": json.dumps(Coerce.jsonable(cur)),
+                    "raw_json": json.dumps(Coerce().jsonable(cur)),
                 }
 
 
@@ -156,7 +152,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
     )
 
     def collect(self):
-        root = HostPaths.translate("/sys/bus/usb/devices")
+        root = HostPaths().translate("/sys/bus/usb/devices")
         if not root.is_dir():
             return
         try:
@@ -171,7 +167,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
                 continue
             if not dev.is_dir():
                 continue
-            attrs = {a: HostPaths.read_sysfs(dev / a) for a in self._ATTRS}
+            attrs = {a: HostPaths().read_sysfs(dev / a) for a in self._ATTRS}
             attrs = {k: v for k, v in attrs.items() if v is not None}
             if not attrs.get("idVendor") and not attrs.get("product"):
                 # Empty entry (e.g. root hubs without descriptors).
@@ -206,7 +202,7 @@ class LinuxBluetoothCollector(SnapshotCollector):
     judge_fields = ("name", "address", "minor_type")
 
     def collect(self):
-        root = HostPaths.translate("/var/lib/bluetooth")
+        root = HostPaths().translate("/var/lib/bluetooth")
         if not root.is_dir():
             return
         try:
@@ -278,7 +274,7 @@ class LinuxWifiCollector(SnapshotCollector):
         # sysfs discovery via HOST_PREFIX; iw queries via netlink which
         # the host-network namespace (network_mode: host) already
         # exposes to the container.
-        net = HostPaths.translate("/sys/class/net")
+        net = HostPaths().translate("/sys/class/net")
         if not net.is_dir():
             return
         try:

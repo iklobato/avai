@@ -4,6 +4,7 @@ prompt loader, and the Sink repository.
 Sink tests run against ``sqlite:///:memory:`` so the suite needs no
 on-disk DB and no platform-specific collectors.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,47 +12,47 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine
 
-from avai.host_monitor.runtime import Clock, Coerce, Digest
 from avai.host_monitor.enums import ThreatCategory, Verdict
-from avai.host_monitor.judge import NullJudge
+from avai.host_monitor.judge import Judgment, NullJudge
 from avai.host_monitor.models import Base, CollectionRun, Judgement, ProcessRow
 from avai.host_monitor.prompts import Prompts
+from avai.host_monitor.runtime import Clock, Coerce, Digest
 from avai.host_monitor.sink import Sink
-
 
 # ---------------------------------------------------------------------------
 # content_hash — stable dedup over judge_fields
 # ---------------------------------------------------------------------------
 
+
 class TestContentHash:
     def test_returns_none_for_empty_fields(self):
-        assert Digest.of_row({"a": 1}, []) is None
+        assert Digest().of_row({"a": 1}, []) is None
 
     def test_deterministic_for_same_inputs(self):
         row = {"name": "foo", "exe": "/bin/foo", "pid": 42}
-        h1 = Digest.of_row(row, ["name", "exe"])
-        h2 = Digest.of_row(row, ["name", "exe"])
+        h1 = Digest().of_row(row, ["name", "exe"])
+        h2 = Digest().of_row(row, ["name", "exe"])
         assert h1 == h2
 
     def test_changes_when_a_judged_field_changes(self):
-        a = Digest.of_row({"name": "foo", "exe": "/bin/foo"}, ["name", "exe"])
-        b = Digest.of_row({"name": "foo", "exe": "/bin/bar"}, ["name", "exe"])
+        a = Digest().of_row({"name": "foo", "exe": "/bin/foo"}, ["name", "exe"])
+        b = Digest().of_row({"name": "foo", "exe": "/bin/bar"}, ["name", "exe"])
         assert a != b
 
     def test_ignores_non_judge_field_changes(self):
-        a = Digest.of_row({"name": "foo", "pid": 1}, ["name"])
-        b = Digest.of_row({"name": "foo", "pid": 99}, ["name"])
+        a = Digest().of_row({"name": "foo", "pid": 1}, ["name"])
+        b = Digest().of_row({"name": "foo", "pid": 99}, ["name"])
         assert a == b
 
     def test_missing_field_treated_as_null(self):
         """A row missing one of the judge_fields hashes as if the
         field were present-but-None — *not* an exception."""
-        a = Digest.of_row({"name": "foo"}, ["name", "missing"])
-        b = Digest.of_row({"name": "foo", "missing": None}, ["name", "missing"])
+        a = Digest().of_row({"name": "foo"}, ["name", "missing"])
+        b = Digest().of_row({"name": "foo", "missing": None}, ["name", "missing"])
         assert a == b
 
     def test_output_is_a_hex_sha256(self):
-        h = Digest.of_row({"x": 1}, ["x"])
+        h = Digest().of_row({"x": 1}, ["x"])
         assert isinstance(h, str)
         assert len(h) == 64
         assert all(c in "0123456789abcdef" for c in h)
@@ -61,21 +62,25 @@ class TestContentHash:
 # coerce_enum — defensive conversion at boundaries
 # ---------------------------------------------------------------------------
 
+
 class TestCoerceEnum:
     def test_returns_enum_for_valid_string(self):
-        assert Coerce.enum("malicious", Verdict, Verdict.UNKNOWN) is Verdict.MALICIOUS
+        assert Coerce().enum("malicious", Verdict, Verdict.UNKNOWN) is Verdict.MALICIOUS
 
     def test_returns_default_for_unknown_string(self):
-        assert Coerce.enum("not-a-verdict", Verdict, Verdict.UNKNOWN) is Verdict.UNKNOWN
+        assert (
+            Coerce().enum("not-a-verdict", Verdict, Verdict.UNKNOWN) is Verdict.UNKNOWN
+        )
 
     def test_returns_default_for_wrong_type(self):
-        assert Coerce.enum(None, Verdict, Verdict.UNKNOWN) is Verdict.UNKNOWN
-        assert Coerce.enum(42, Verdict, Verdict.BENIGN) is Verdict.BENIGN
+        assert Coerce().enum(None, Verdict, Verdict.UNKNOWN) is Verdict.UNKNOWN
+        assert Coerce().enum(42, Verdict, Verdict.BENIGN) is Verdict.BENIGN
 
 
 # ---------------------------------------------------------------------------
 # utcnow — ISO-8601 UTC stamp
 # ---------------------------------------------------------------------------
+
 
 class TestUtcnow:
     def test_returns_iso_with_utc_offset_or_z(self):
@@ -89,6 +94,7 @@ class TestUtcnow:
 # Prompts — TOML load + Template substitution
 # ---------------------------------------------------------------------------
 
+
 class TestPromptsLoad:
     def _write(self, tmp_path, body: str) -> Path:
         p = tmp_path / "prompts.toml"
@@ -96,14 +102,17 @@ class TestPromptsLoad:
         return p
 
     def test_load_substitutes_verdicts_and_categories(self, tmp_path):
-        p = self._write(tmp_path, '''
+        p = self._write(
+            tmp_path,
+            """
 [judge]
 system = "Verdicts: $verdicts; Categories: $categories"
 user_template = "x"
 
 [collector_hints]
 processes = "hint"
-''')
+""",
+        )
         prompts = Prompts.load(p)
         # Every Verdict enum value should be present in the rendered system.
         for v in Verdict:
@@ -112,11 +121,14 @@ processes = "hint"
             assert str(c) in prompts.system
 
     def test_load_keeps_user_template_as_template(self, tmp_path):
-        p = self._write(tmp_path, '''
+        p = self._write(
+            tmp_path,
+            """
 [judge]
 system = "ok"
 user_template = "$collector | $hints | $entries"
-''')
+""",
+        )
         prompts = Prompts.load(p)
         # User template is *not* substituted at load time — must keep
         # the placeholders so the judge can fill them per-call.
@@ -125,7 +137,9 @@ user_template = "$collector | $hints | $entries"
         assert "$entries" in prompts.user_template
 
     def test_load_preserves_collector_hints(self, tmp_path):
-        p = self._write(tmp_path, '''
+        p = self._write(
+            tmp_path,
+            """
 [judge]
 system = "ok"
 user_template = "x"
@@ -133,7 +147,8 @@ user_template = "x"
 [collector_hints]
 processes = "process hint"
 launch_items = "launch hint"
-''')
+""",
+        )
         prompts = Prompts.load(p)
         assert prompts.collector_hints["processes"] == "process hint"
         assert prompts.collector_hints["launch_items"] == "launch hint"
@@ -147,13 +162,16 @@ launch_items = "launch hint"
         assert prompts.collector_hints == {}
 
     def test_hint_for_returns_empty_string_when_missing(self, tmp_path):
-        p = self._write(tmp_path, '''
+        p = self._write(
+            tmp_path,
+            """
 [judge]
 system = "ok"
 user_template = "x"
 [collector_hints]
 processes = "hint"
-''')
+""",
+        )
         prompts = Prompts.load(p)
         assert prompts.hint_for("processes") == "hint"
         assert prompts.hint_for("not_a_collector") == ""
@@ -166,9 +184,16 @@ processes = "hint"
         assert "verdict" in prompts.system.lower()
         assert prompts.user_template  # non-empty
         # The eight LLM-judged Linux collectors must have hints.
-        for c in ("processes", "launch_items", "browser_extensions",
-                  "system_integrity", "file_integrity", "installed_apps",
-                  "mounts", "setuid_files"):
+        for c in (
+            "processes",
+            "launch_items",
+            "browser_extensions",
+            "system_integrity",
+            "file_integrity",
+            "installed_apps",
+            "mounts",
+            "setuid_files",
+        ):
             assert prompts.hint_for(c), f"missing hint for {c}"
 
 
@@ -176,21 +201,23 @@ processes = "hint"
 # NullJudge — opt-out judge
 # ---------------------------------------------------------------------------
 
+
 class TestNullJudge:
     def test_returns_empty_list_regardless_of_input(self):
         j = NullJudge()
         assert j.judge("processes", "hint", []) == []
-        assert j.judge("processes", "hint",
-                       [{"content_hash": "a", "name": "x"}]) == []
+        assert j.judge("processes", "hint", [{"content_hash": "a", "name": "x"}]) == []
 
 
 # ---------------------------------------------------------------------------
 # Sink — repository over the SQLAlchemy schema
 # ---------------------------------------------------------------------------
 
+
 class _StubCollector:
     """Minimal stand-in for Collector — Sink only reads ``name``,
     ``model``, ``judge_enabled``, ``judge_fields``."""
+
     def __init__(self, name, model, judge_fields=()):
         self.name = name
         self.model = model
@@ -201,8 +228,9 @@ class _StubCollector:
 
 @pytest.fixture
 def sink():
-    engine = create_engine("sqlite:///:memory:",
-                           connect_args={"check_same_thread": False})
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+    )
     s = Sink(engine)
     s.setup()
     return s
@@ -213,9 +241,14 @@ class TestSinkLifecycle:
         # Sample of tables that must exist after setup() — covers
         # every category and the enrichment_evidence table.
         expected = {
-            "collection_runs", "collector_errors", "judgements",
-            "processes", "network_connections", "launch_items",
-            "browser_extensions", "system_integrity",
+            "collection_runs",
+            "collector_errors",
+            "judgements",
+            "processes",
+            "network_connections",
+            "launch_items",
+            "browser_extensions",
+            "system_integrity",
             "enrichment_evidence",
         }
         actual = set(Base.metadata.tables.keys())
@@ -229,9 +262,11 @@ class TestSinkLifecycle:
         # Run row should exist and carry both timestamps.
         from sqlalchemy import select
         from sqlalchemy.orm import Session
+
         with Session(sink.engine) as s:
-            row = s.execute(select(CollectionRun).where(
-                CollectionRun.run_id == run_id)).scalar_one()
+            row = s.execute(
+                select(CollectionRun).where(CollectionRun.run_id == run_id)
+            ).scalar_one()
         assert row.hostname == "host-x"
         assert row.lookback_min == 5
         assert row.finished_at  # populated by end_run
@@ -242,23 +277,45 @@ class TestSinkLifecycle:
 class TestSinkUnjudged:
     def test_returns_one_entry_per_distinct_content_hash(self, sink):
         run_id, _ = sink.start_run("h", 5)
-        collector = _StubCollector("processes", ProcessRow,
-                                   judge_fields=("name", "exe"))
+        collector = _StubCollector(
+            "processes", ProcessRow, judge_fields=("name", "exe")
+        )
         rows = [
-            {"name": "a", "exe": "/x", "pid": 1, "username": "u",
-             "run_id": run_id, "collected_at": Clock().now_iso(),
-             "content_hash": Digest.of_row({"name": "a", "exe": "/x"},
-                                          collector.judge_fields)},
+            {
+                "name": "a",
+                "exe": "/x",
+                "pid": 1,
+                "username": "u",
+                "run_id": run_id,
+                "collected_at": Clock().now_iso(),
+                "content_hash": Digest().of_row(
+                    {"name": "a", "exe": "/x"}, collector.judge_fields
+                ),
+            },
             # Same judge_fields → same hash → should dedup.
-            {"name": "a", "exe": "/x", "pid": 2, "username": "u",
-             "run_id": run_id, "collected_at": Clock().now_iso(),
-             "content_hash": Digest.of_row({"name": "a", "exe": "/x"},
-                                          collector.judge_fields)},
+            {
+                "name": "a",
+                "exe": "/x",
+                "pid": 2,
+                "username": "u",
+                "run_id": run_id,
+                "collected_at": Clock().now_iso(),
+                "content_hash": Digest().of_row(
+                    {"name": "a", "exe": "/x"}, collector.judge_fields
+                ),
+            },
             # Different exe → distinct hash.
-            {"name": "b", "exe": "/y", "pid": 3, "username": "u",
-             "run_id": run_id, "collected_at": Clock().now_iso(),
-             "content_hash": Digest.of_row({"name": "b", "exe": "/y"},
-                                          collector.judge_fields)},
+            {
+                "name": "b",
+                "exe": "/y",
+                "pid": 3,
+                "username": "u",
+                "run_id": run_id,
+                "collected_at": Clock().now_iso(),
+                "content_hash": Digest().of_row(
+                    {"name": "b", "exe": "/y"}, collector.judge_fields
+                ),
+            },
         ]
         sink.write(ProcessRow, rows)
 
@@ -269,22 +326,15 @@ class TestSinkUnjudged:
 
     def test_skips_entries_already_judged(self, sink):
         run_id, _ = sink.start_run("h", 5)
-        collector = _StubCollector("processes", ProcessRow,
-                                   judge_fields=("name", "exe"))
-        h = Digest.of_row({"name": "a", "exe": "/x"}, collector.judge_fields)
-        sink.write(ProcessRow, [{
-            "name": "a", "exe": "/x", "pid": 1, "username": "u",
-            "run_id": run_id, "collected_at": Clock().now_iso(),
-            "content_hash": h,
-        }])
+        collector = _StubCollector(
+            "processes", ProcessRow, judge_fields=("name", "exe")
+        )
+        h = Digest().of_row({"name": "a", "exe": "/x"}, collector.judge_fields)
+        row = {"name": "a", "exe": "/x", "pid": 1, "username": "u"}
+        stamp = {"run_id": run_id, "collected_at": Clock().now_iso()}
+        sink.write(ProcessRow, [{**row, **stamp, "content_hash": h}])
         # Pre-seed the judgement so this hash is "already judged".
-        from avai.host_monitor.judge import Judgment
-        sink.write_judgments([Judgment(
-            content_hash=h, collector="processes",
-            verdict=Verdict.BENIGN, category=ThreatCategory.NONE,
-            confidence=0.99, reasoning="r", remediation="",
-            model="test", created_at=Clock().now_iso(),
-        )])
+        sink.write_judgments([TestSinkWriteJudgments().benign_judgment(h)])
         unjudged = sink.unjudged(collector)
         assert unjudged == []
 
@@ -296,19 +346,29 @@ class TestSinkUnjudged:
 
 
 class TestSinkWriteJudgments:
-    def test_write_is_idempotent_on_pk_conflict(self, sink):
-        from avai.host_monitor.judge import Judgment
-        j = Judgment(
-            content_hash="aa" * 32, collector="processes",
-            verdict=Verdict.BENIGN, category=ThreatCategory.NONE,
-            confidence=0.5, reasoning="r", remediation="",
-            model="m", created_at=Clock().now_iso(),
+    CONFIDENCE = 0.5
+
+    def benign_judgment(self, content_hash: str) -> Judgment:
+        return Judgment(
+            content_hash=content_hash,
+            collector="processes",
+            verdict=Verdict.BENIGN,
+            category=ThreatCategory.NONE,
+            confidence=self.CONFIDENCE,
+            reasoning="r",
+            remediation="",
+            model="m",
+            created_at=Clock().now_iso(),
         )
+
+    def test_write_is_idempotent_on_pk_conflict(self, sink):
+        j = self.benign_judgment("aa" * 32)
         sink.write_judgments([j])
         sink.write_judgments([j])  # should not raise / not duplicate
 
-        from sqlalchemy import select, func
+        from sqlalchemy import func, select
         from sqlalchemy.orm import Session
+
         with Session(sink.engine) as s:
             n = s.execute(select(func.count()).select_from(Judgement)).scalar()
         assert n == 1
@@ -324,7 +384,9 @@ class TestSinkWriteJudgments:
 
         from sqlalchemy import select
         from sqlalchemy.orm import Session
+
         from avai.host_monitor.models import CollectorErrorRow
+
         with Session(sink.engine) as s:
             row = s.execute(select(CollectorErrorRow)).scalar_one()
         assert row.collector == "processes"
@@ -335,6 +397,7 @@ class TestSinkWriteJudgments:
 # ---------------------------------------------------------------------------
 # DB-rotation accounting
 # ---------------------------------------------------------------------------
+
 
 class TestSinkDatabaseSize:
     def test_size_bytes_is_zero_for_in_memory_url(self, sink):

@@ -9,7 +9,7 @@ A :class:`SecurityControl` answers two questions about one topic:
   "webcam-in-use" signal — a live session).
 
 Each control composes small injected capabilities (a
-:class:`ServiceManager`, :class:`PortInspector`, :class:`ProcessInspector`)
+:class:`ServiceSupervisor`, :class:`PortInspector`, :class:`ProcessInspector`)
 rather than shelling out itself, so the OS differences live entirely in the
 injected strategy and the same control class works on macOS / Linux /
 Windows. Topics are assembled per OS at the composition root (the host
@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
-from .runtime import PortInspector, ProcessInspector, ServiceManager, tri_or
+from .runtime import PortInspector, ProcessInspector, ServiceSupervisor, TriState
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ class NetworkServiceControl:
     def __init__(
         self,
         spec: ServiceSpec,
-        services: ServiceManager,
+        services: ServiceSupervisor,
         ports: PortInspector,
         processes: ProcessInspector,
     ) -> None:
@@ -88,13 +88,12 @@ class NetworkServiceControl:
 
     def inspect(self) -> IntegrityFinding:
         spec = self._spec
-        enabled = tri_or(
-            self._services.enabled(spec.unit),
-            self._ports.listening(spec.port),
+        signals = TriState()
+        enabled = signals.any_on(
+            (self._services.enabled(spec.unit), self._ports.listening(spec.port))
         )
-        active = tri_or(
-            self._processes.running(spec.process),
-            self._ports.established(spec.port),
+        active = signals.any_on(
+            (self._processes.running(spec.process), self._ports.established(spec.port))
         )
         return IntegrityFinding(
             topic=spec.topic,

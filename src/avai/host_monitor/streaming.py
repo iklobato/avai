@@ -194,7 +194,7 @@ class StreamingWorker:
             for row in self.collector.stream(self.stop_event):
                 row["run_id"] = self.run_id
                 row["collected_at"] = Clock().now_iso()
-                row["content_hash"] = Digest.of_row(row, self.collector.judge_fields)
+                row["content_hash"] = Digest().of_row(row, self.collector.judge_fields)
                 buffer.append(row)
                 now = time.monotonic()
                 if len(buffer) >= self.policy.batch_size or (

@@ -10,22 +10,21 @@ if TYPE_CHECKING:
     from ..hosts.capabilities import FilesystemLayout
 
 from .. import slices
-from ..constants import (
-    WATCHED_FILES,
-)
+from ..constants import WATCHED_FILES
 from ..runtime import (
     Coerce,
     CommandRunner,
     Digest,
     HostPaths,
-    LaunchdServiceManager,
+    LaunchdServiceSupervisor,
     PortInspector,
     ProcessInspector,
+    PsutilConnections,
     PsutilPortInspector,
     PsutilProcessInspector,
-    ServiceManager,
-    SystemdServiceManager,
-    tri_or,
+    ServiceSupervisor,
+    SystemdServiceSupervisor,
+    TriState,
 )
 from ..security_controls import NetworkServiceControl, ServiceSpec
 from .base import SnapshotCollector
@@ -59,15 +58,15 @@ class SystemIntegrityCollector(SnapshotCollector):
     def __init__(
         self,
         judge_hints: str = "",
-        services: Optional[ServiceManager] = None,
+        services: Optional[ServiceSupervisor] = None,
         ports: Optional[PortInspector] = None,
         processes: Optional[ProcessInspector] = None,
         runner: Optional[CommandRunner] = None,
     ) -> None:
         super().__init__(judge_hints=judge_hints)
         self._runner = runner or CommandRunner()
-        svc = services or LaunchdServiceManager()
-        ports = ports or PsutilPortInspector()
+        svc = services or LaunchdServiceSupervisor(self._runner)
+        ports = ports or PsutilPortInspector(PsutilConnections())
         processes = processes or PsutilProcessInspector()
         self._controls = {
             s.topic: NetworkServiceControl(s, svc, ports, processes)
@@ -77,7 +76,8 @@ class SystemIntegrityCollector(SnapshotCollector):
     def collect(self):
         fv = self._runner.exit_code(["fdesetup", "isactive"])
         alf = (
-            HostPaths.read_plist(Path("/Library/Preferences/com.apple.alf.plist")) or {}
+            HostPaths().read_plist(Path("/Library/Preferences/com.apple.alf.plist"))
+            or {}
         )
         gk = self._gatekeeper_state()
         # Posture (enabled) + behaviour (active) for the network services,
@@ -95,7 +95,7 @@ class SystemIntegrityCollector(SnapshotCollector):
             "remote_management_enabled": svc["remote_management"].enabled,
             "raw_json": json.dumps(
                 {
-                    "alf": Coerce.jsonable(alf),
+                    "alf": Coerce().jsonable(alf),
                     "services": {
                         t: {"enabled": f.enabled, "active": f.active}
                         for t, f in svc.items()
@@ -128,7 +128,7 @@ class FileIntegrityCollector(SnapshotCollector):
 
     def collect(self):
         for path_str in self.watched:
-            p = HostPaths.expand(path_str)
+            p = HostPaths().expand(path_str)
             try:
                 st = p.lstat()
             except FileNotFoundError:
@@ -138,7 +138,7 @@ class FileIntegrityCollector(SnapshotCollector):
                 continue
             yield {
                 "path": str(p),
-                "sha256": Digest.sha256_file(p) if p.is_file() else None,
+                "sha256": Digest().sha256_file(p) if p.is_file() else None,
                 "size": st.st_size,
                 "mtime": st.st_mtime,
                 "mode": st.st_mode,
@@ -204,17 +204,17 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     def __init__(
         self,
         judge_hints: str = "",
-        services: Optional[ServiceManager] = None,
+        services: Optional[ServiceSupervisor] = None,
         ports: Optional[PortInspector] = None,
         processes: Optional[ProcessInspector] = None,
         runner: Optional[CommandRunner] = None,
     ) -> None:
         super().__init__(judge_hints=judge_hints)
         self._runner = runner or CommandRunner()
-        self._ports = ports or PsutilPortInspector()
+        self._ports = ports or PsutilPortInspector(PsutilConnections())
         self._ssh = NetworkServiceControl(
             self._SSH,
-            services or SystemdServiceManager(),
+            services or SystemdServiceSupervisor(CommandRunner()),
             self._ports,
             processes or PsutilProcessInspector(),
         )
@@ -232,8 +232,12 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
         luks_n = self._luks_count()
 
         ssh = self._ssh.inspect()
-        vnc_enabled = tri_or(int(vnc), self._ports.listening(self._VNC_PORT))
-        vnc_active = tri_or(int(vnc), self._ports.established(self._VNC_PORT))
+        vnc_enabled = TriState().any_on(
+            (int(vnc), self._ports.listening(self._VNC_PORT))
+        )
+        vnc_active = TriState().any_on(
+            (int(vnc), self._ports.established(self._VNC_PORT))
+        )
 
         raw = {
             "selinux": selinux,
@@ -271,15 +275,15 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     @staticmethod
     def _selinux_state() -> Optional[str]:
         """Returns 'Enforcing' / 'Permissive' / None (not present)."""
-        flag = HostPaths.read_sysfs(HostPaths.translate("/sys/fs/selinux/enforce"))
+        flag = HostPaths().read_sysfs(HostPaths().translate("/sys/fs/selinux/enforce"))
         if flag is None:
             return None
         return {"0": "Permissive", "1": "Enforcing"}.get(flag, "Unknown")
 
     @staticmethod
     def _apparmor_state() -> dict:
-        enabled = HostPaths.read_sysfs(
-            HostPaths.translate("/sys/module/apparmor/parameters/enabled")
+        enabled = HostPaths().read_sysfs(
+            HostPaths().translate("/sys/module/apparmor/parameters/enabled")
         )
         return (
             {"enabled": enabled == "Y"} if enabled is not None else {"enabled": False}
@@ -288,7 +292,7 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     @staticmethod
     def _ufw_active() -> bool:
         # /etc/ufw/ufw.conf is the canonical persistent state.
-        conf = HostPaths.read_sysfs(HostPaths.translate("/etc/ufw/ufw.conf"))
+        conf = HostPaths().read_sysfs(HostPaths().translate("/etc/ufw/ufw.conf"))
         if conf is None:
             return False
         for line in conf.splitlines():
@@ -358,7 +362,7 @@ class SetuidFilesCollector(SnapshotCollector):
                     "gid": st.st_gid,
                     "size": st.st_size,
                     "mtime": st.st_mtime,
-                    "sha256": Digest.sha256_file(path),
+                    "sha256": Digest().sha256_file(path),
                     "setuid": int(setuid),
                     "setgid": int(setgid),
                     "raw_json": json.dumps(

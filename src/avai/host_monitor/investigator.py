@@ -90,12 +90,12 @@ class UnknownFindingInvestigator:
         except (TypeError, ValueError):
             confidence = 0.0
         return {
-            "verdict": Coerce.enum(
+            "verdict": Coerce().enum(
                 str(parsed.get("verdict") or "").strip().lower(),
                 Verdict,
                 Verdict.UNKNOWN,
             ),
-            "category": Coerce.enum(
+            "category": Coerce().enum(
                 str(parsed.get("category") or "").strip().lower(),
                 ThreatCategory,
                 ThreatCategory.NONE,

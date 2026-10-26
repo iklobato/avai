@@ -10,17 +10,17 @@ from __future__ import annotations
 
 import pytest
 
-from avai.host_monitor.runtime import tri_or
+from avai.host_monitor.runtime import TriState
 from avai.host_monitor.security_controls import NetworkServiceControl, ServiceSpec
 
 SSH = ServiceSpec("remote_login", "com.openssh.sshd", 22, "sshd")
 
 
-class FakeServiceManager:
-    def __init__(self, enabled=None):
+class FakeServiceSupervisor:
+    def __init__(self, enabled: int | None = None) -> None:
         self._enabled = enabled
 
-    def enabled(self, unit):
+    def enabled(self, unit: str) -> int | None:
         return self._enabled
 
 
@@ -47,7 +47,7 @@ class FakeProcessInspector:
 def _control(svc=None, listening=None, established=None, running=None):
     return NetworkServiceControl(
         SSH,
-        FakeServiceManager(svc),
+        FakeServiceSupervisor(svc),
         FakePortInspector(listening=listening, established=established),
         FakeProcessInspector(running=running),
     )
@@ -68,7 +68,7 @@ def _control(svc=None, listening=None, established=None, running=None):
     ],
 )
 def test_tri_or(values, expected):
-    assert tri_or(*values) == expected
+    assert TriState().any_on(values) == expected
 
 
 # ---- NetworkServiceControl ---------------------------------------------
@@ -126,7 +126,7 @@ def test_macos_collector_maps_enabled_idle_service_to_on():
     from avai.host_monitor.collectors import SystemIntegrityCollector
 
     col = SystemIntegrityCollector(
-        services=FakeServiceManager(1),
+        services=FakeServiceSupervisor(1),
         ports=FakePortInspector(listening=0, established=0),
         processes=FakeProcessInspector(running=0),
     )

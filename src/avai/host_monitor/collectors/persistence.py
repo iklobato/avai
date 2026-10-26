@@ -13,15 +13,9 @@ if TYPE_CHECKING:
     from ..hosts.capabilities import FilesystemLayout, PrivilegedAccounts
 
 from .. import slices
-from ..constants import (
-    LAUNCH_DIRS,
-)
+from ..constants import LAUNCH_DIRS
 from ..enums import LaunchScope
-from ..runtime import (
-    Coerce,
-    Digest,
-    HostPaths,
-)
+from ..runtime import Coerce, Digest, HostPaths
 from .base import SnapshotCollector
 
 
@@ -39,7 +33,7 @@ class LaunchItemsCollector(SnapshotCollector):
 
     def collect(self):
         for scope, dir_str in LAUNCH_DIRS:
-            d = HostPaths.expand(dir_str)
+            d = HostPaths().expand(dir_str)
             if not d.is_dir():
                 continue
             try:
@@ -53,7 +47,7 @@ class LaunchItemsCollector(SnapshotCollector):
 
     @staticmethod
     def _row(scope: LaunchScope, path: Path):
-        data = HostPaths.read_plist(path)
+        data = HostPaths().read_plist(path)
         if data is None:
             return None
         try:
@@ -67,19 +61,19 @@ class LaunchItemsCollector(SnapshotCollector):
             "label": data.get("Label"),
             "program": data.get("Program"),
             "program_arguments_json": json.dumps(
-                Coerce.jsonable(data.get("ProgramArguments") or [])
+                Coerce().jsonable(data.get("ProgramArguments") or [])
             ),
             "run_at_load": int(bool(data.get("RunAtLoad"))),
             "keep_alive": int(bool(data.get("KeepAlive"))),
             "start_interval": data.get("StartInterval"),
             "start_calendar_interval_json": (
-                json.dumps(Coerce.jsonable(sci)) if sci is not None else None
+                json.dumps(Coerce().jsonable(sci)) if sci is not None else None
             ),
             "user_name": data.get("UserName"),
             "group_name": data.get("GroupName"),
-            "sha256": Digest.sha256_file(path),
+            "sha256": Digest().sha256_file(path),
             "mtime": mtime,
-            "raw_json": json.dumps(Coerce.jsonable(data)),
+            "raw_json": json.dumps(Coerce().jsonable(data)),
         }
 
 
@@ -168,12 +162,12 @@ class SystemdUnitReader:
 
     @staticmethod
     def _unit_files(dir_str: str, pattern: str) -> Iterable[Path]:
-        # HostPaths.for_home expands a ~/... template into 0..N real dirs
+        # HostPaths().for_home expands a ~/... template into 0..N real dirs
         # (one per user home in container mode), or exactly one for an
         # absolute path. It can return [] (container mode with no
         # /host/home and no /host/root mounted), so iterate rather than
         # index [0], which raised IndexError and killed the collector.
-        for d in HostPaths.for_home(dir_str):
+        for d in HostPaths().for_home(dir_str):
             if not d.is_dir():
                 continue
             try:
@@ -236,7 +230,7 @@ class SystemdUnitReader:
             ),
             "user_name": service_sec.get("User"),
             "group_name": service_sec.get("Group"),
-            "sha256": Digest.sha256_file(path),
+            "sha256": Digest().sha256_file(path),
             "mtime": mtime,
             "raw_json": json.dumps(
                 {
@@ -264,15 +258,15 @@ class CrontabReader:
 
     def rows(self) -> Iterable[dict]:
         scope, crontab = self._CRON_FILE
-        crontab = HostPaths.translate(crontab)
+        crontab = HostPaths().translate(crontab)
         if crontab.is_file():
             yield from self.file_rows(scope, crontab)
         for scope, d in self._CRON_DROP_INS:
-            for f in _visible_files(HostPaths.translate(d)):
+            for f in _visible_files(HostPaths().translate(d)):
                 yield from self.file_rows(scope, f)
         # Per-user crontabs: the filename IS the username.
         for scope, d in self._USER_CRONS:
-            for f in _visible_files(HostPaths.translate(d)):
+            for f in _visible_files(HostPaths().translate(d)):
                 yield from self.file_rows(scope, f, owner=f.name)
 
     @staticmethod
@@ -288,7 +282,7 @@ class CrontabReader:
             mtime = path.stat().st_mtime
         except OSError:
             mtime = None
-        digest = Digest.sha256_file(path)
+        digest = Digest().sha256_file(path)
         for lineno, raw in enumerate(text.splitlines(), 1):
             job = CronJob.parse(raw, owner)
             if job is None:
@@ -429,7 +423,7 @@ class SshAuthorizedKeysCollector(SnapshotCollector):
                     "path": path,
                     "owner": owner,
                     "key_type": parts[idx],
-                    "fingerprint": Digest.ssh_fingerprint(parts[idx + 1]),
+                    "fingerprint": Digest().ssh_fingerprint(parts[idx + 1]),
                     "comment": " ".join(parts[idx + 2 :]) or None,
                     "options": " ".join(parts[:idx]) or None,
                 }

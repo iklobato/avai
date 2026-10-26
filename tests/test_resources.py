@@ -20,9 +20,8 @@ from avai.dashboard.config import DashboardConfig
 from avai.dashboard.queries import disk_usage, host_resources, resource_trend
 from avai.host_monitor.collectors import DiskUsageCollector, HostResourcesCollector
 from avai.host_monitor.models import DiskUsageRow, HostResourceRow
-from avai.host_monitor.runtime import FrozenClock
+from avai.host_monitor.runtime import Digest, FrozenClock
 from avai.host_monitor.sink import Sink
-from avai.host_monitor.runtime import Digest
 
 # psutil-shaped fakes ---------------------------------------------------------
 
@@ -200,7 +199,7 @@ def _write(sink, model, rows, ts, run_id):
     for r in rows:
         r["run_id"] = run_id
         r["collected_at"] = ts
-        r["content_hash"] = Digest.of_row(r, ())
+        r["content_hash"] = Digest().of_row(r, ())
     sink.write(model, rows)
 
 

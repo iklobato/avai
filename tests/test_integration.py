@@ -151,10 +151,10 @@ class TestContentHashStability:
         # The same logical row built with keys in a different order must
         # hash identically — otherwise the same artifact dedups as two,
         # and the judge re-bills it every cycle.
-        a = Digest.of_row(
+        a = Digest().of_row(
             {"name": "x", "exe": "/bin/x", "user": "root"}, ["name", "exe", "user"]
         )
-        b = Digest.of_row(
+        b = Digest().of_row(
             {"user": "root", "exe": "/bin/x", "name": "x"}, ["name", "exe", "user"]
         )
         assert a == b
@@ -163,13 +163,13 @@ class TestContentHashStability:
         # The judge_fields tuple defines the canonical order. Reordering
         # *it* is a deliberate schema change and SHOULD change the hash
         # (documents that judge_fields order is part of the contract).
-        a = Digest.of_row({"a": 1, "b": 2}, ["a", "b"])
-        b = Digest.of_row({"a": 1, "b": 2}, ["b", "a"])
+        a = Digest().of_row({"a": 1, "b": 2}, ["a", "b"])
+        b = Digest().of_row({"a": 1, "b": 2}, ["b", "a"])
         assert a != b
 
     def test_extra_unjudged_keys_do_not_affect_hash(self):
-        base = Digest.of_row({"name": "x"}, ["name"])
-        noisy = Digest.of_row({"name": "x", "pid": 4321, "cpu": 0.5}, ["name"])
+        base = Digest().of_row({"name": "x"}, ["name"])
+        noisy = Digest().of_row({"name": "x", "pid": 4321, "cpu": 0.5}, ["name"])
         assert base == noisy
 
 

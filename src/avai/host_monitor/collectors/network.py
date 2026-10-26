@@ -7,12 +7,7 @@ import socket
 from typing import Optional
 
 from .. import slices
-from ..runtime import (
-    Clock,
-    CommandRunner,
-    PsutilConnections,
-    SystemMetrics,
-)
+from ..runtime import Clock, CommandRunner, PsutilConnections, SystemMetrics
 from .base import SnapshotCollector
 
 
@@ -27,7 +22,7 @@ class NetworkConnectionsCollector(SnapshotCollector):
     judge_fields = ("raddr_ip", "raddr_port", "status")
 
     def collect(self):
-        for c in PsutilConnections.inet():
+        for c in PsutilConnections().inet():
             yield {
                 "pid": c.pid,
                 "family": c.family.name,
