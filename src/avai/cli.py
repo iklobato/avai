@@ -48,9 +48,10 @@ def _print_usage(stream=None) -> None:
 def _cmd_rules(rules_dir: Path, do_list: bool) -> int:
     """Compile the file-scanner ruleset and report what loaded — the
     user-facing answer to 'which rules are available?'. Read-only; no DB."""
+    from .host_monitor import constants
     from .host_monitor.collectors import YaraRulesetCompiler
 
-    rules, _stats = YaraRulesetCompiler(rules_dir).compile()
+    rules, _stats = YaraRulesetCompiler(rules_dir, constants.LOG).compile()
     if rules is None:
         print(f"avai: no compilable YARA rules under {rules_dir}", file=sys.stderr)
         return 1

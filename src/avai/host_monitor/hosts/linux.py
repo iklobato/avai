@@ -40,6 +40,7 @@ from ..collectors import (
     SshAuthorizedKeysCollector,
     StreamingCollector,
     TcpdumpCapture,
+    YaraRulesetCompiler,
 )
 from ..constants import BROWSER_PROFILES_LINUX, WATCHED_FILES_LINUX
 from ..enums import Browser
@@ -261,7 +262,11 @@ class LinuxHost:
                 self._runner, judge_hints=h("system_integrity")
             ),
             FileIntegrityCollector(judge_hints=h("file_integrity"), watched=watched),
-            FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),
+            FileScanCollector.create(
+                self._fs,
+                YaraRulesetCompiler(constants.YARA_RULES_DIR, constants.LOG),
+                judge_hints=h("file_scan"),
+            ),
             LinuxInstalledAppsCollector(
                 judge_hints=h("installed_apps"), runner=self._runner
             ),

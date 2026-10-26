@@ -10,7 +10,13 @@ from .devices import (
     UsbDevicesCollector,
     WifiCollector,
 )
-from .file_scan import FileScanCollector, YaraRulesetCompiler, _crypto_hint, _file_type
+from .file_scan import (
+    CryptoHint,
+    FileMagic,
+    FileScanCollector,
+    ScanTargets,
+    YaraRulesetCompiler,
+)
 from .integrity import (
     FileIntegrityCollector,
     LinuxSystemIntegrityCollector,
@@ -122,8 +128,9 @@ __all__ = [
     "UsbDevicesCollector",
     "WifiCollector",
     "YaraRulesetCompiler",
-    "_crypto_hint",
-    "_file_type",
+    "CryptoHint",
+    "FileMagic",
+    "ScanTargets",
     "CapturedPackets",
     "DnsQuestion",
     "FlowTable",

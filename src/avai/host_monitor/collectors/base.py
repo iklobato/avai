@@ -24,7 +24,7 @@ class Collector(ABC):
     judge_enabled: ClassVar[bool] = True
     judge_fields: ClassVar[tuple[str, ...]] = ()
 
-    def __init__(self, judge_hints: str = ""):
+    def __init__(self, judge_hints: str = "") -> None:
         self.judge_hints = judge_hints
 
     @property

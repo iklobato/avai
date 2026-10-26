@@ -39,6 +39,7 @@ from ..collectors import (
     TcpdumpCapture,
     UsbDevicesCollector,
     WifiCollector,
+    YaraRulesetCompiler,
 )
 from ..constants import BROWSER_PROFILES
 from ..exposure_collectors import (
@@ -223,7 +224,11 @@ class MacOSHost:
                 self._runner, judge_hints=h("system_integrity")
             ),
             FileIntegrityCollector(judge_hints=h("file_integrity")),
-            FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),
+            FileScanCollector.create(
+                self._fs,
+                YaraRulesetCompiler(constants.YARA_RULES_DIR, constants.LOG),
+                judge_hints=h("file_scan"),
+            ),
             InstalledAppsCollector(judge_hints=h("installed_apps")),
             MountsCollector(DiskMetrics(constants.LOG), judge_hints=h("mounts")),
             SetuidFilesCollector(judge_hints=h("setuid_files"), fs=self._fs),
