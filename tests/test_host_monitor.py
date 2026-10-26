@@ -231,7 +231,7 @@ def sink():
     engine = create_engine(
         "sqlite:///:memory:", connect_args={"check_same_thread": False}
     )
-    s = Sink(engine)
+    s = Sink.create(engine)
     s.setup()
     return s
 

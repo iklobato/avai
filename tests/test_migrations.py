@@ -53,7 +53,7 @@ def _version(db: str) -> str | None:
 
 def test_sink_setup_applies_migrations(tmp_path):
     db = str(tmp_path / "a.db")
-    Sink(create_engine(f"sqlite:///{db}")).setup()
+    Sink.create(create_engine(f"sqlite:///{db}")).setup()
     assert set(_IDX) <= _indexes(db)
     assert "control_state" in _tables(db)
     assert _version(db) == "0012_log_entries"
@@ -73,7 +73,7 @@ def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path, monkeypat
     monkeypatch.setattr(db_migrate, "upgrade_to_head", _readonly)
     db = str(tmp_path / "ro.db")
     with pytest.raises(RuntimeError, match="migration to head failed"):
-        Sink(create_engine(f"sqlite:///{db}")).setup()
+        Sink.create(create_engine(f"sqlite:///{db}")).setup()
 
 
 def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
@@ -101,7 +101,7 @@ def test_downgrade_then_upgrade_roundtrip(tmp_path):
     from alembic import command
 
     db = str(tmp_path / "c.db")
-    Sink(create_engine(f"sqlite:///{db}")).setup()
+    Sink.create(create_engine(f"sqlite:///{db}")).setup()
     assert set(_IDX) <= _indexes(db)
 
     command.downgrade(_config(f"sqlite:///{db}"), "0001_baseline")

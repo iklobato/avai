@@ -44,6 +44,7 @@ from avai.host_monitor.models import (
 from avai.host_monitor.runner import Runner, RunnerConfig
 from avai.host_monitor.runtime import Digest
 from avai.host_monitor.sink import Sink
+from avai.host_monitor.sink_admin import ControlSeed
 
 PROC_FIELDS = ("name", "exe")
 AUTH_FIELDS = ("process", "event_message")
@@ -57,7 +58,7 @@ def sink():
         # One shared connection, so streaming worker threads see the same db.
         poolclass=StaticPool,
     )
-    s = Sink(engine)
+    s = Sink.create(engine)
     s.setup()
     return s
 
@@ -286,7 +287,7 @@ def _judgements(sink) -> dict[str, Judgement]:
 def _set_control(sink, **values):
     from sqlalchemy import update
 
-    sink.ensure_control_row(interval=300, judge_enabled=True, enrich_enabled=True)
+    sink.ensure_control_row(ControlSeed(300, True, True))
     with Session(sink.engine) as s:
         s.execute(update(ControlState).where(ControlState.id == 1).values(**values))
         s.commit()

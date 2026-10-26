@@ -140,7 +140,7 @@ class TestSinkUnjudgedAll:
         engine = create_engine(
             f"sqlite:///{db}", connect_args={"check_same_thread": False}
         )
-        sink = Sink(engine)
+        sink = Sink.create(engine)
         sink.setup()
         ts = Clock().now_iso()
 
@@ -217,6 +217,6 @@ class TestSinkUnjudgedAll:
         engine = create_engine(
             f"sqlite:///{db}", connect_args={"check_same_thread": False}
         )
-        sink = Sink(engine)
+        sink = Sink.create(engine)
         sink.setup()
         assert sink.unjudged_all(_S()) == []

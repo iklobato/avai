@@ -54,7 +54,7 @@ def seeded(tmp_path):
     Plus a processes snapshot and one established connection on :22."""
     db = tmp_path / "lp.db"
     engine = create_engine(f"sqlite:///{db}", connect_args={"check_same_thread": False})
-    sink = Sink(engine)
+    sink = Sink.create(engine)
     sink.setup()
     run_id, ts = sink.start_run("h", 5)
 
@@ -256,7 +256,7 @@ class TestMissingTableGraceful:
         engine = create_engine(
             f"sqlite:///{db}", connect_args={"check_same_thread": False}
         )
-        sink = Sink(engine)
+        sink = Sink.create(engine)
         sink.setup()
         sink.start_run("h", 5)
         sink.end_run(ok=1, failed=0)

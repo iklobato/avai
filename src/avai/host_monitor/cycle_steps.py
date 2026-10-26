@@ -17,6 +17,7 @@ from .risk import RiskCounts, RiskScorer
 from .runtime import Clock
 from .step_io import StepIO
 
+
 class CycleStep(Protocol):
     def report(self, run_id: str, started: str) -> None: ...
 

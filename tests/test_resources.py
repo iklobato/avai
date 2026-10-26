@@ -189,7 +189,7 @@ def db(tmp_path):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'r.db'}", connect_args={"check_same_thread": False}
     )
-    sink = Sink(engine)
+    sink = Sink.create(engine)
     sink.setup()
     run_id, ts = sink.start_run("h", 5)
     return engine, sink, run_id, ts, tmp_path
@@ -311,7 +311,7 @@ class TestRoutes:
 
     def test_fragment_200_on_db_without_tables(self, tmp_path):
         engine = create_engine(f"sqlite:///{tmp_path / 'e.db'}")
-        Sink(engine).setup()
+        Sink.create(engine).setup()
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE host_resources"))
             conn.execute(text("DROP TABLE disk_usage"))

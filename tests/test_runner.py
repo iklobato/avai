@@ -60,6 +60,7 @@ from avai.host_monitor.models import Base, CollectionRun, FileScanRow, ProcessRo
 from avai.host_monitor.runner import Runner, RunnerConfig
 from avai.host_monitor.runtime import Clock, Digest, FrozenClock
 from avai.host_monitor.sink import Sink
+from avai.host_monitor.sink_admin import ControlSeed
 
 
 class _StubCollector:
@@ -129,7 +130,7 @@ def sink():
     engine = create_engine(
         "sqlite:///:memory:", connect_args={"check_same_thread": False}
     )
-    s = Sink(engine)
+    s = Sink.create(engine)
     s.setup()
     return s
 
@@ -334,7 +335,7 @@ class TestProgressHeartbeat:
     def test_touch_heartbeat_refreshes_only_last_seen_at(self, sink, monkeypatch):
         import avai.host_monitor.sink as sink_mod
 
-        sink.ensure_control_row(interval=300, judge_enabled=False, enrich_enabled=False)
+        sink.ensure_control_row(ControlSeed(300, False, False))
         start = "2026-06-23T23:07:51+00:00"
         monkeypatch.setattr(sink_mod, "Clock", lambda: FrozenClock(start))
         sink.write_heartbeat(pid=42, status="scanning", current_interval=300)
@@ -359,7 +360,7 @@ class TestProgressHeartbeat:
         # Zero the throttle so each collector boundary writes; the test scan
         # is far shorter than the real interval.
         monkeypatch.setattr(control_loop_mod, "MONITOR_PROGRESS_HEARTBEAT_S", 0)
-        sink.ensure_control_row(interval=300, judge_enabled=False, enrich_enabled=False)
+        sink.ensure_control_row(ControlSeed(300, False, False))
 
         beats = {"n": 0}
         real_touch = sink.touch_heartbeat
@@ -1316,7 +1317,7 @@ def _set_control(sink, **vals):
 
     from avai.host_monitor.models import ControlState
 
-    sink.ensure_control_row(interval=300, judge_enabled=True, enrich_enabled=True)
+    sink.ensure_control_row(ControlSeed(300, True, True))
     with Session(sink.engine) as s:
         s.execute(update(ControlState).where(ControlState.id == 1).values(**vals))
         s.commit()
@@ -1324,7 +1325,7 @@ def _set_control(sink, **vals):
 
 class TestControlSink:
     def test_round_trip_and_acks(self, sink):
-        sink.ensure_control_row(interval=120, judge_enabled=True, enrich_enabled=False)
+        sink.ensure_control_row(ControlSeed(120, True, False))
         c = sink.read_control()
         assert c["interval_override"] == 120
         assert c["judge_enabled"] == 1 and c["enrich_enabled"] == 0
@@ -1338,9 +1339,9 @@ class TestControlSink:
         assert c["command_applied"] == 3 and c["command_result"] == "ok"
 
     def test_ensure_is_idempotent(self, sink):
-        sink.ensure_control_row(interval=100, judge_enabled=True, enrich_enabled=True)
+        sink.ensure_control_row(ControlSeed(100, True, True))
         _set_control(sink, paused=1)
-        sink.ensure_control_row(interval=999, judge_enabled=False, enrich_enabled=False)
+        sink.ensure_control_row(ControlSeed(999, False, False))
         c = sink.read_control()
         assert c["paused"] == 1 and c["interval_override"] == 100  # not clobbered
 

@@ -21,6 +21,7 @@ from .failures import HOST_FAILURES
 from .investigator import UnknownFindingInvestigator
 from .judge import Judge, Judgment
 from .sink import Sink
+from .sink_stores import CorrelationWindow
 from .slices import Slices
 from .step_io import StepIO
 from .verifier import MaliciousVerdictVerifier
@@ -441,7 +442,9 @@ class CorrelationStage:
             return
         context = self._io.read(
             f"correlation: context({name})",
-            lambda: self._io.sink.correlation_context(pids, names, since),
+            lambda: self._io.sink.correlation_context(
+                pids, names, CorrelationWindow(since)
+            ),
         )
         if context is None:
             return
@@ -598,7 +601,7 @@ class InvestigationBundle:
         pids, names = links.all_pids(), links.all_names()
         history = io.read(
             "investigate: full-history context",
-            lambda: io.sink.correlation_context(pids, names, None),
+            lambda: io.sink.correlation_context(pids, names, CorrelationWindow(None)),
         )
         host_findings = io.read(
             "investigate: host context",

@@ -53,7 +53,7 @@ class TestEnsureDbExists:
         from avai.host_monitor.sink import Sink
 
         db = tmp_path / "old.db"
-        Sink(create_engine(f"sqlite:///{db}")).setup()  # full current schema
+        Sink.create(create_engine(f"sqlite:///{db}")).setup()  # full current schema
         with Session(_engine_rw(str(db))) as s:  # seed real data
             s.add(
                 CollectionRun(
@@ -455,7 +455,7 @@ class TestDashboardEndpoints:
         from avai.host_monitor.models import CollectionRun, FileScanRow, Judgement
         from avai.host_monitor.sink import Sink
 
-        Sink(_engine_rw(db_path)).write_yara_status(
+        Sink.create(_engine_rw(db_path)).write_yara_status(
             {
                 "rules_loaded": 5292,
                 "files_loaded": 656,
@@ -1106,7 +1106,7 @@ class TestRowCountsDelta:
             f"sqlite:///{tmp_path / 'rc.db'}",
             connect_args={"check_same_thread": False},
         )
-        sink = Sink(eng)
+        sink = Sink.create(eng)
         sink.setup()
         prev, cur = "2026-05-30T11:00:00Z", "2026-05-30T12:00:00Z"
         sink.write(
@@ -1193,7 +1193,7 @@ class TestSystemIntegrityPlatform:
         engine = create_engine(
             f"sqlite:///{db}", connect_args={"check_same_thread": False}
         )
-        s = Sink(engine)
+        s = Sink.create(engine)
         s.setup()
         return s
 
@@ -1347,7 +1347,7 @@ class TestLatestRunFallback:
         engine = create_engine(
             f"sqlite:///{tmp_path / 'r.db'}", connect_args={"check_same_thread": False}
         )
-        s = Sink(engine)
+        s = Sink.create(engine)
         s.setup()
         return s
 
@@ -1363,7 +1363,6 @@ class TestLatestRunFallback:
         sink = self._sink(tmp_path)
         done_id, _ = sink.start_run("h", 5)
         sink.end_run(ok=3, failed=0)  # completed (older)
-        sink.run_id = None
         sink.start_run("h", 5)  # newer, in-progress
         with Session(sink.engine) as s:
             run = latest_run(s)

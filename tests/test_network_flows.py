@@ -204,7 +204,7 @@ class TestFlowIndicators:
 def seeded(tmp_path):
     db = tmp_path / "nf.db"
     engine = create_engine(f"sqlite:///{db}", connect_args={"check_same_thread": False})
-    sink = Sink(engine)
+    sink = Sink.create(engine)
     sink.setup()
     run_id, ts = sink.start_run("h", 5)
     from avai.host_monitor.enums import ThreatCategory, Verdict
@@ -325,7 +325,7 @@ class TestTrafficVolume:
             f"sqlite:///{tmp_path / 'v.db'}",
             connect_args={"check_same_thread": False},
         )
-        sink = Sink(engine)
+        sink = Sink.create(engine)
         sink.setup()
         run_id, ts = sink.start_run("h", 5)
         fields = ("iface", "proto", "dst_ip", "dst_port")
@@ -479,7 +479,7 @@ class TestGeolocationColumn:
         engine = create_engine(
             f"sqlite:///{db}", connect_args={"check_same_thread": False}
         )
-        sink = Sink(engine)
+        sink = Sink.create(engine)
         sink.setup()
         run_id, ts = sink.start_run("h", 5)
         from avai.host_monitor.runtime import Digest
@@ -562,7 +562,7 @@ class TestGeolocationColumn:
         engine = create_engine(
             f"sqlite:///{db}", connect_args={"check_same_thread": False}
         )
-        sink = Sink(engine)
+        sink = Sink.create(engine)
         sink.setup()
         run_id, ts = sink.start_run("h", 5)
         from avai.host_monitor.runtime import Digest
@@ -708,7 +708,7 @@ class TestMissingTableGraceful:
         engine = create_engine(
             f"sqlite:///{db}", connect_args={"check_same_thread": False}
         )
-        sink = Sink(engine)
+        sink = Sink.create(engine)
         sink.setup()
         sink.start_run("h", 5)
         sink.end_run(ok=1, failed=0)
@@ -754,7 +754,7 @@ class TestMissingColumnGraceful:
         engine = create_engine(
             f"sqlite:///{db}", connect_args={"check_same_thread": False}
         )
-        sink = Sink(engine)
+        sink = Sink.create(engine)
         sink.setup()
         run_id, ts = sink.start_run("h", 5)
         # simulate the pre-iface schema: drop the column

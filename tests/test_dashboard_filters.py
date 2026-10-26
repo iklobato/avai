@@ -86,7 +86,7 @@ def judged(tmp_path):
     """Two suspicious findings: one seen in the latest run, one last seen
     long before it (resolved)."""
     engine = create_engine(f"sqlite:///{tmp_path / 'f.db'}")
-    sink = Sink(engine)
+    sink = Sink.create(engine)
     sink.setup()
     _, started = sink.start_run("h", 5)
     sink.end_run(ok=1, failed=0)

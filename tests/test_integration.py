@@ -184,7 +184,7 @@ def seeded_dashboard(tmp_path):
     db = tmp_path / "seeded.db"
     _ensure_db_exists(str(db))
     engine = create_engine(f"sqlite:///{db}")
-    sink = Sink(engine)
+    sink = Sink.create(engine)
     sink.setup()
 
     run_id, started = sink.start_run("host", 5)

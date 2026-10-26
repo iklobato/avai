@@ -82,7 +82,7 @@ def sink(tmp_path):
     # DBs are private per-connection.
     db = tmp_path / "stream.db"
     engine = create_engine(f"sqlite:///{db}", connect_args={"check_same_thread": False})
-    s = Sink(engine)
+    s = Sink.create(engine)
     s.setup()
     return s
 

@@ -298,7 +298,7 @@ def db(tmp_path):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'n.db'}", connect_args={"check_same_thread": False}
     )
-    sink = Sink(engine)
+    sink = Sink.create(engine)
     sink.setup()
     run_id, ts = sink.start_run("h", 5)
     return engine, sink, run_id, ts

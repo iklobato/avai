@@ -166,7 +166,7 @@ def _ensure_db_exists(db_path: str) -> None:
     db_file.parent.mkdir(parents=True, exist_ok=True)
     write_engine = create_engine(f"sqlite:///{db_path}")
     try:
-        Sink(write_engine).setup()
+        Sink.create(write_engine).setup()
     finally:
         write_engine.dispose()
 

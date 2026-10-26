@@ -225,7 +225,7 @@ def main() -> None:
     engine = create_engine(
         f"sqlite:///{args.db}", connect_args={"check_same_thread": False}
     )
-    sink = Sink(engine)
+    sink = Sink.create(engine)
     sink.setup()  # create_all + register enrichment model + migrate
     EVID = register_schema(Base)
 

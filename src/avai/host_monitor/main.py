@@ -39,6 +39,7 @@ from .narrator import IncidentNarrator
 from .prompts import Prompts
 from .runner import Runner, RunnerConfig
 from .sink import Sink
+from .sink_admin import ControlSeed
 from .verifier import MaliciousVerdictVerifier
 
 # The first SIGINT/SIGTERM stops gracefully; this many force-quits.
@@ -295,7 +296,7 @@ def build_runner(args) -> "tuple[Runner, object]":
         connect_args={"check_same_thread": False},
     )
     try:
-        sink = Sink(engine)
+        sink = Sink.create(engine)
         host = HostFactory(LOG).create()
         snapshot_collectors = host.snapshot_collectors(prompts)
         streaming_collectors = (
@@ -336,9 +337,7 @@ def build_runner(args) -> "tuple[Runner, object]":
         # Seed the cooperative control row with this run's settings so the
         # dashboard reflects reality (no-op if it already exists).
         sink.ensure_control_row(
-            interval=args.interval,
-            judge_enabled=not args.no_judge,
-            enrich_enabled=not args.no_enrich,
+            ControlSeed(args.interval, not args.no_judge, not args.no_enrich)
         )
         return runner, engine
     except Exception:

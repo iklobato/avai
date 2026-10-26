@@ -23,7 +23,7 @@ from avai.host_monitor.models import (
     StreamingSession,
 )
 from avai.host_monitor.runtime import Clock
-from avai.host_monitor.sink import _BUSY_TIMEOUT_MS
+from avai.host_monitor.db_bootstrap import SqlitePragmas
 
 
 class TestConnectionPragmas:
@@ -35,8 +35,11 @@ class TestConnectionPragmas:
 
     def test_busy_timeout_is_generous(self, file_sink):
         with file_sink.engine.connect() as c:
-            assert c.execute(text("PRAGMA busy_timeout")).scalar() == _BUSY_TIMEOUT_MS
-        assert _BUSY_TIMEOUT_MS >= 30_000
+            assert (
+                c.execute(text("PRAGMA busy_timeout")).scalar()
+                == SqlitePragmas.BUSY_TIMEOUT_MS
+            )
+        assert SqlitePragmas.BUSY_TIMEOUT_MS >= 30_000
 
     def test_wal_mode_enabled(self, file_sink):
         with file_sink.engine.connect() as c:
@@ -53,7 +56,7 @@ def file_sink(tmp_path):
     """An on-disk Sink so size measurements actually mean something."""
     db = tmp_path / "test.db"
     engine = create_engine(f"sqlite:///{db}", connect_args={"check_same_thread": False})
-    s = Sink(engine)
+    s = Sink.create(engine)
     s.setup()
     return s
 

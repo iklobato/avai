@@ -7,7 +7,6 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import create_engine
 
-from avai.host_monitor.sink import Sink
 from avai.host_monitor.models import (
     DnsQueryRow,
     ListeningPortRow,
@@ -15,6 +14,8 @@ from avai.host_monitor.models import (
     NetworkFlowRow,
     ProcessExecRow,
 )
+from avai.host_monitor.sink import Sink
+from avai.host_monitor.sink_stores import CorrelationWindow
 
 _OLD = "2026-01-01T00:00:00+00:00"
 _NEW = "2026-01-02T00:00:00+00:00"
@@ -22,7 +23,7 @@ _NEW = "2026-01-02T00:00:00+00:00"
 
 @pytest.fixture
 def sink():
-    s = Sink(create_engine("sqlite:///:memory:"))
+    s = Sink.create(create_engine("sqlite:///:memory:"))
     s.setup()
     return s
 
@@ -90,7 +91,7 @@ class TestSignals:
             sink, DnsQueryRow, [{"process": "sshd", "qname": "a.example", "qtype": "A"}]
         )
 
-        ctx = sink.correlation_context([7], ["sshd"], None)
+        ctx = sink.correlation_context([7], ["sshd"], CorrelationWindow(None))
 
         assert ctx == {
             "ports": {7: ["0.0.0.0:22"]},
@@ -106,7 +107,7 @@ class TestSignals:
             sink, DnsQueryRow, [{"process": "curl", "qname": "a.example", "qtype": "A"}]
         )
 
-        ctx = sink.correlation_context([7], ["sshd"], None)
+        ctx = sink.correlation_context([7], ["sshd"], CorrelationWindow(None))
 
         assert ctx["ports"] == {} and ctx["dns"] == {}
 
@@ -117,7 +118,7 @@ class TestSignals:
             [{"pid": 7, "raddr_ip": None, "raddr_port": None, "status": "LISTEN"}],
         )
 
-        assert sink.correlation_context([7], [], None)["conns"] == {}
+        assert sink.correlation_context([7], [], CorrelationWindow(None))["conns"] == {}
 
     def test_flows_are_ordered_busiest_first(self, sink):
         _write(
@@ -141,7 +142,7 @@ class TestSignals:
             ],
         )
 
-        flows = sink.correlation_context([7], [], None)["flows"][7]
+        flows = sink.correlation_context([7], [], CorrelationWindow(None))["flows"][7]
 
         assert [f["packets"] for f in flows] == [50, 1]
 
@@ -163,7 +164,8 @@ class TestSignals:
             ],
         )
 
-        assert sink.correlation_context([7], [], None)["exec"][7]["exe"] == "/new"
+        context = sink.correlation_context([7], [], CorrelationWindow(None))
+        assert context["exec"][7]["exe"] == "/new"
 
 
 class TestBounds:
@@ -174,7 +176,7 @@ class TestBounds:
             sink, DnsQueryRow, [{"process": "p", "qname": "old", "qtype": "A"}], _OLD
         )
 
-        ctx = sink.correlation_context([7], ["p"], _NEW)
+        ctx = sink.correlation_context([7], ["p"], CorrelationWindow(_NEW))
 
         assert ctx["ports"] == {7: ["0.0.0.0:80"]}
         assert ctx["dns"] == {}
@@ -182,12 +184,16 @@ class TestBounds:
     def test_since_none_reads_the_full_history(self, sink):
         _write(sink, ListeningPortRow, [_port(7, 22)], collected_at=_OLD)
 
-        assert sink.correlation_context([7], [], None)["ports"] == {7: ["0.0.0.0:22"]}
+        assert sink.correlation_context([7], [], CorrelationWindow(None))["ports"] == {
+            7: ["0.0.0.0:22"]
+        }
 
     def test_per_pid_lists_are_capped(self, sink):
         _write(sink, ListeningPortRow, [_port(7, p) for p in range(1, 6)])
 
-        ports = sink.correlation_context([7], [], None, per_pid_cap=3)["ports"][7]
+        ports = sink.correlation_context([7], [], CorrelationWindow(None, 3))["ports"][
+            7
+        ]
 
         assert len(ports) == 3
 
@@ -198,7 +204,9 @@ class TestBounds:
             [{"process": "p", "qname": f"q{i}", "qtype": "A"} for i in range(20)],
         )
 
-        dns = sink.correlation_context([], ["p"], None, per_pid_cap=3)["dns"]["p"]
+        dns = sink.correlation_context([], ["p"], CorrelationWindow(None, 3))["dns"][
+            "p"
+        ]
 
         assert len(dns) == 8
 
@@ -208,7 +216,7 @@ class TestEmptyInput:
     def test_no_usable_pid_or_name_returns_empty_signals(self, sink, pids, names):
         _write(sink, ListeningPortRow, [_port(None, 22)])
 
-        ctx = sink.correlation_context(pids, names, None)
+        ctx = sink.correlation_context(pids, names, CorrelationWindow(None))
 
         assert ctx == {"ports": {}, "flows": {}, "conns": {}, "dns": {}, "exec": {}}
 
@@ -216,6 +224,6 @@ class TestEmptyInput:
         _write(sink, ListeningPortRow, [_port(7, 22)])
         _write(sink, DnsQueryRow, [{"process": "p", "qname": "q", "qtype": "A"}])
 
-        ctx = sink.correlation_context([None], ["p"], None)
+        ctx = sink.correlation_context([None], ["p"], CorrelationWindow(None))
 
         assert ctx["dns"] == {"p": ["q (A)"]} and ctx["ports"] == {}
