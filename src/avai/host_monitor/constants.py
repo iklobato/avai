@@ -10,7 +10,9 @@ from types import MappingProxyType
 
 from .enums import Browser, LaunchScope
 
-LOG = logging.getLogger("host_monitor")
+# The logger every host_monitor component writes to.
+LOGGER_NAME = "host_monitor"
+LOG = logging.getLogger(LOGGER_NAME)
 
 
 _PKG_DIR = Path(__file__).resolve().parent.parent

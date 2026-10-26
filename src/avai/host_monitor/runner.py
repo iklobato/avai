@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from avai.enrichers import EnrichmentChain, IndicatorExtraction
 
 from .collectors import SnapshotCollector, StreamingCollector
-from .constants import DEFAULT_BASELINE_MIN_RUNS, LOG
+from .constants import DEFAULT_BASELINE_MIN_RUNS, LOGGER_NAME
 from .control_loop import ControlLoop, ControlSettings, ProgressHeartbeat
 from .coverage import YaraCoverageAssessor
 from .cycle_steps import (
@@ -19,6 +22,7 @@ from .cycle_steps import (
     CycleStep,
     NarrativeStep,
     RiskScoreStep,
+    StepIO,
     YaraStatusStep,
 )
 from .finding_stages import (
@@ -44,7 +48,29 @@ from .sink import Sink
 from .streaming import StreamingSupervisor, SupervisionPolicy
 from .verifier import MaliciousVerdictVerifier
 
-_BYTES_PER_MB = 1024 * 1024
+BYTES_PER_MB = 1024 * 1024
+MS_PER_SECOND = 1000
+ERROR_EXCERPT_CHARS = 200
+# What one collector, or one judging pass, can raise: tool and command
+# errors, parse errors, LLM call errors (RuntimeError) and database errors.
+# The cycle records the failure and moves on to the next collector.
+COLLECT_FAILURES = (
+    OSError,
+    RuntimeError,
+    ValueError,
+    LookupError,
+    TypeError,
+    AttributeError,
+    SQLAlchemyError,
+)
+
+
+class HostMonitorLog:
+    """Builds the logger every host_monitor component writes to."""
+
+    @classmethod
+    def logger(cls) -> logging.Logger:
+        return logging.getLogger(LOGGER_NAME)
 
 
 @dataclass(frozen=True)
@@ -64,117 +90,156 @@ class RunnerConfig:
     coverage: Optional[YaraCoverageAssessor] = None
     verifier: Optional[MaliciousVerdictVerifier] = None
     investigator: Optional[UnknownFindingInvestigator] = None
+    logger: logging.Logger = field(default_factory=HostMonitorLog.logger)
 
 
-@dataclass
+@dataclass(frozen=True)
+class CycleStamp:
+    """What every collector in one cycle shares."""
+
+    run_id: str
+    started: str
+    baseline: HostBaseline
+
+
+@dataclass(frozen=True)
+class CyclePlan:
+    """The judging pipelines and end-of-cycle reports one cycle runs."""
+
+    snapshot_pipeline: FindingPipeline
+    streaming_pipeline: FindingPipeline
+    steps: tuple[CycleStep, ...]
+
+
+@dataclass(frozen=True)
+class CycleControls:
+    settings: ControlSettings
+    heartbeat: ProgressHeartbeat
+    shutdown_event: threading.Event
+
+
+@dataclass(frozen=True)
 class CollectionCycle:
     """One scan: collect every snapshot collector, judge what's new
     (snapshot and streaming), then write the end-of-cycle reports."""
 
     config: RunnerConfig
-    settings: ControlSettings
-    heartbeat: ProgressHeartbeat
-    snapshot_pipeline: FindingPipeline
-    streaming_pipeline: FindingPipeline
-    steps: list[CycleStep]
-    shutdown_event: threading.Event
+    controls: CycleControls
+    plan: CyclePlan
 
-    def run(self) -> tuple[str, int, int]:
+    @property
+    def _log(self) -> logging.Logger:
+        return self.config.logger
+
+    def scan(self) -> tuple[str, int, int]:
         sink = self.config.sink
-        # Refresh the control cache so --once and the daemon loop both honour
-        # disabled-collector / judge / enrich toggles set from the dashboard.
-        self.settings.refresh()
-        # Apply operator corrections before judging so this cycle's narrative
-        # and risk reflect the fixed verdicts.
+        # Refresh toggles set from the dashboard, then apply operator
+        # corrections so this cycle's narrative and risk see fixed verdicts.
+        self.controls.settings.refresh()
         self._apply_feedback()
         run_id, started = sink.start_run(socket.gethostname(), self.config.lookback_min)
-        self.heartbeat.reset()
-        # Measured once: it can't change mid-cycle (the current run isn't
-        # completed yet), and every collector shares the same cutoff.
+        self.controls.heartbeat.reset()
+        # Measured once: it can't change mid-cycle, and every collector shares
+        # the same cutoff.
         baseline = HostBaseline.measure(sink, self.config.baseline_min_runs)
-        ok, failed = self._collect_all(run_id, started, baseline)
+        stamp = CycleStamp(run_id, started, baseline)
+        ok, failed = self._collect_all(stamp)
         # No point starting a fresh round of LLM calls on the way out.
-        if not self.shutdown_event.is_set():
-            self._judge_streaming(baseline)
-            for step in self.steps:
-                step.run(run_id, started)
+        if not self.controls.shutdown_event.is_set():
+            self._report(stamp)
         sink.end_run(ok, failed)
         self._rotate()
         return run_id, ok, failed
 
-    def _collect_all(
-        self, run_id: str, started: str, baseline: HostBaseline
-    ) -> tuple[int, int]:
-        disabled = self.settings.disabled_collectors()
+    def _report(self, stamp: CycleStamp) -> None:
+        self._judge_streaming(stamp.baseline)
+        for step in self.plan.steps:
+            step.report(stamp.run_id, stamp.started)
+
+    def _collect_all(self, stamp: CycleStamp) -> tuple[int, int]:
+        disabled = self.controls.settings.disabled_collectors()
         ok = failed = 0
-        for c in self.config.snapshot_collectors:
+        for collector in self.config.snapshot_collectors:
             # The first cycle judges every collector via the LLM, which can
             # take minutes; checking here lets Ctrl-C take effect mid-cycle.
-            if self.shutdown_event.is_set():
-                LOG.info("shutdown requested, stopping collector loop early")
+            if self.controls.shutdown_event.is_set():
+                self._log.info("shutdown requested, stopping collector loop early")
                 break
-            if c.name in disabled:
+            if collector.name in disabled:
                 continue
-            self.heartbeat.beat()
-            try:
-                self._collect(c, run_id, started, baseline)
-                ok += 1
-            except Exception as exc:
-                failed += 1
-                self.config.sink.write_error(c.name, exc)
-                LOG.warning(
-                    "collector=%s status=failed error=%s message=%s",
-                    c.name,
-                    type(exc).__name__,
-                    str(exc)[:200],
-                )
+            self.controls.heartbeat.beat()
+            succeeded = self._collect_guarded(collector, stamp)
+            ok, failed = ok + int(succeeded), failed + int(not succeeded)
         return ok, failed
 
-    def _collect(
-        self, c: SnapshotCollector, run_id: str, started: str, baseline: HostBaseline
-    ) -> None:
-        sink = self.config.sink
-        t0 = time.monotonic()
-        rows = list(c.collect())
-        for r in rows:
-            r["run_id"] = run_id
-            r["collected_at"] = started
-            r["content_hash"] = Digest().of_row(r, c.judge_fields)
-        sink.write(c.model, rows)
-        collected_ms = int((time.monotonic() - t0) * 1000)
+    def _collect_guarded(self, collector: SnapshotCollector, stamp: CycleStamp) -> bool:
+        try:
+            self._collect(collector, stamp)
+        except COLLECT_FAILURES as exc:
+            self.config.sink.write_error(collector.name, exc)
+            self._log.warning(
+                "collector=%s status=failed error=%s message=%s",
+                collector.name,
+                type(exc).__name__,
+                str(exc)[:ERROR_EXCERPT_CHARS],
+            )
+            return False
+        return True
 
-        judged = enriched = 0
-        if c.judge_enabled and c.judge_fields:
-            judged, enriched = self._judge_snapshot(c, rows, run_id, baseline)
-            # Runs even with judging off, so already-recorded findings keep
-            # an accurate status: the dashboard derives active/resolved by
-            # comparing last_seen_at to the latest run.
-            observed = [r["content_hash"] for r in rows if r.get("content_hash")]
-            if observed:
-                sink.touch_judgments(c.name, observed, started)
-
-        LOG.info(
+    def _collect(self, collector: SnapshotCollector, stamp: CycleStamp) -> None:
+        started_at = time.monotonic()
+        rows = self._stamped_rows(collector, stamp)
+        self.config.sink.write(collector.model, rows)
+        collected_ms = int((time.monotonic() - started_at) * MS_PER_SECOND)
+        judged, enriched = self._judge_rows(collector, rows, stamp)
+        self._log.info(
             "collector=%s rows=%d duration_ms=%d judged=%d enriched=%d",
-            c.name,
+            collector.name,
             len(rows),
             collected_ms,
             judged,
             enriched,
         )
 
-    def _judge_snapshot(
+    def _stamped_rows(
+        self, collector: SnapshotCollector, stamp: CycleStamp
+    ) -> list[dict[str, Any]]:
+        rows = list(collector.collect())
+        for row in rows:
+            row["run_id"] = stamp.run_id
+            row["collected_at"] = stamp.started
+            row["content_hash"] = Digest().of_row(row, collector.judge_fields)
+        return rows
+
+    def _judge_rows(
         self,
-        c: SnapshotCollector,
-        rows: list[dict],
-        run_id: str,
-        baseline: HostBaseline,
+        collector: SnapshotCollector,
+        rows: list[dict[str, Any]],
+        stamp: CycleStamp,
     ) -> tuple[int, int]:
         """Returns (judgments written, indicators looked up)."""
-        unjudged = self.config.sink.unjudged(c)
-        if not unjudged or not self.settings.judge_on():
+        if not (collector.judge_enabled and collector.judge_fields):
             return 0, 0
-        batch = FindingBatch(c, unjudged, rows, run_id, baseline)
-        self.snapshot_pipeline.run(batch)
+        counts = self._judge_snapshot(collector, rows, stamp)
+        # Runs even with judging off, so already-recorded findings keep an
+        # accurate status: the dashboard derives active/resolved by comparing
+        # last_seen_at to the latest run.
+        observed = [row["content_hash"] for row in rows if row.get("content_hash")]
+        if observed:
+            self.config.sink.touch_judgments(collector.name, observed, stamp.started)
+        return counts
+
+    def _judge_snapshot(
+        self,
+        collector: SnapshotCollector,
+        rows: list[dict[str, Any]],
+        stamp: CycleStamp,
+    ) -> tuple[int, int]:
+        unjudged = self.config.sink.unjudged(collector)
+        if not unjudged or not self.controls.settings.judge_on():
+            return 0, 0
+        batch = FindingBatch(collector, unjudged, rows, stamp.run_id, stamp.baseline)
+        self.plan.snapshot_pipeline.run(batch)
         self.config.sink.write_judgments(batch.judgments, context=batch.context())
         return len(batch.judgments), batch.indicators_looked_up
 
@@ -182,40 +247,55 @@ class CollectionCycle:
         """Classify the content_hashes streaming collectors produced since the
         previous cycle. Streaming rows aren't tied to a CollectionRun, so
         ``unjudged_all`` finds them."""
-        if not self.settings.judge_on():
+        if not self.controls.settings.judge_on():
             return
+        for collector in self._judged_streams():
+            unjudged = self._unjudged_stream(collector)
+            if unjudged:
+                batch = FindingBatch(collector, unjudged, [], None, baseline)
+                self._judge_stream(batch)
+
+    def _judged_streams(self) -> list[StreamingCollector]:
         # A disabled streaming collector keeps its worker running (workers
         # start once at boot) but is no longer judged.
-        disabled = self.settings.disabled_collectors()
-        for c in self.config.streaming_collectors:
-            if not (c.judge_enabled and c.judge_fields) or c.name in disabled:
-                continue
-            try:
-                unjudged = self.config.sink.unjudged_all(c)
-            except Exception as exc:
-                LOG.warning("streaming-judge: unjudged_all(%s) failed: %s", c.name, exc)
-                continue
-            if unjudged:
-                self._judge_stream(FindingBatch(c, unjudged, [], None, baseline))
+        disabled = self.controls.settings.disabled_collectors()
+        return [
+            collector
+            for collector in self.config.streaming_collectors
+            if collector.judge_enabled
+            and collector.judge_fields
+            and collector.name not in disabled
+        ]
+
+    def _unjudged_stream(self, collector: StreamingCollector) -> list[dict[str, Any]]:
+        try:
+            return self.config.sink.unjudged_all(collector)
+        except COLLECT_FAILURES as exc:
+            self._log.warning(
+                "streaming-judge: unjudged_all(%s) failed: %s", collector.name, exc
+            )
+            return []
 
     def _judge_stream(self, batch: FindingBatch) -> None:
         name = batch.collector.name
         try:
-            self.streaming_pipeline.run(batch)
+            self.plan.streaming_pipeline.run(batch)
             self.config.sink.write_judgments(batch.judgments, context=batch.context())
-        except Exception:
-            LOG.exception("streaming-judge failed for %s", name)
+        except COLLECT_FAILURES:
+            self._log.exception("streaming-judge failed for %s", name)
             return
-        LOG.info("streaming-judge collector=%s judged=%d", name, len(batch.judgments))
+        self._log.info(
+            "streaming-judge collector=%s judged=%d", name, len(batch.judgments)
+        )
 
     def _apply_feedback(self) -> None:
         try:
             applied = self.config.sink.apply_feedback()
-        except Exception:
-            LOG.exception("apply_feedback failed")
+        except COLLECT_FAILURES:
+            self._log.exception("apply_feedback failed")
             return
         if applied:
-            LOG.info("applied %d operator feedback correction(s)", applied)
+            self._log.info("applied %d operator feedback correction(s)", applied)
 
     def _rotate(self) -> None:
         """Keep the DB under the size cap by pruning the oldest completed
@@ -225,51 +305,115 @@ class CollectionCycle:
             return
         stats = self.config.sink.prune_to_size(cap)
         if stats["runs_pruned"] or stats["events_pruned"]:
-            LOG.info(
+            self._log.info(
                 "db_rotation: pruned runs=%d streaming_events=%d  "
                 "%.1fMB → %.1fMB (cap %.0fMB)",
                 stats["runs_pruned"],
                 stats["events_pruned"],
-                stats["bytes_before"] / _BYTES_PER_MB,
-                stats["bytes_after"] / _BYTES_PER_MB,
-                cap / _BYTES_PER_MB,
+                stats["bytes_before"] / BYTES_PER_MB,
+                stats["bytes_after"] / BYTES_PER_MB,
+                cap / BYTES_PER_MB,
             )
+
+
+class CyclePlanner:
+    """Assembles the finding stages and cycle steps the config turns on."""
+
+    def __init__(self, config: RunnerConfig) -> None:
+        self._config = config
+
+    def plan(
+        self, settings: ControlSettings, heartbeat: ProgressHeartbeat
+    ) -> CyclePlan:
+        return CyclePlan(
+            FindingPipeline(self._snapshot_stages(settings, heartbeat)),
+            FindingPipeline(self._streaming_stages()),
+            tuple(self._cycle_steps()),
+        )
+
+    def _snapshot_stages(
+        self, settings: ControlSettings, heartbeat: ProgressHeartbeat
+    ) -> list[FindingStage]:
+        config = self._config
+        behavior = ProcessBehavior(config.sink)
+        stages: list[FindingStage] = []
+        if config.enrichment_chain is not None:
+            intel = ThreatIntel(config.enrichment_chain, IndicatorExtraction.default())
+            stages.append(EvidenceStage(intel, settings, heartbeat))
+        stages += [
+            BaselineStage(config.sink),
+            CorrelationStage(config.sink, behavior),
+            YaraContextStage(),
+            JudgeStage(config.judge, config.sink),
+        ]
+        if config.verifier is not None:
+            stages.append(VerifyStage(config.verifier))
+        if config.investigator is not None:
+            stages.append(InvestigateStage(config.investigator, config.sink, behavior))
+        return stages
+
+    def _streaming_stages(self) -> list[FindingStage]:
+        config = self._config
+        stages: list[FindingStage] = [
+            BaselineStage(config.sink),
+            JudgeStage(config.judge, config.sink),
+        ]
+        if config.verifier is not None:
+            stages.append(VerifyStage(config.verifier))
+        return stages
+
+    def _cycle_steps(self) -> list[CycleStep]:
+        config = self._config
+        io = StepIO(config.sink, config.logger)
+        steps: list[CycleStep] = []
+        # Runs after touch_judgments, so the active-finding set is current.
+        if config.narrator is not None:
+            steps.append(NarrativeStep(io, config.narrator))
+        steps += [RiskScoreStep(io), YaraStatusStep(io, config.snapshot_collectors)]
+        if config.coverage is not None:
+            steps.append(CoverageStep(io, config.coverage))
+        return steps
+
+
+@dataclass(frozen=True)
+class RunnerParts:
+    cycle: CollectionCycle
+    control: ControlLoop
+    streaming: StreamingSupervisor
 
 
 class Runner:
     """Coordinates the collection cycle, the control loop and the streaming
     workers. ``desktop.py`` and ``main.py`` only call the public methods."""
 
-    def __init__(self, config: RunnerConfig):
+    def __init__(self, config: RunnerConfig, parts: RunnerParts) -> None:
         self.config = config
-        self.shutdown_event = threading.Event()
+        self._parts = parts
+
+    @classmethod
+    def create(cls, config: RunnerConfig) -> Runner:
+        sink = config.sink
         settings = ControlSettings(
-            config.sink,
+            sink,
             judge_default=not isinstance(config.judge, NullJudge),
             enrich_default=config.enrichment_chain is not None,
         )
-        heartbeat = ProgressHeartbeat(config.sink)
-        self._cycle = CollectionCycle(
-            config=config,
-            settings=settings,
-            heartbeat=heartbeat,
-            snapshot_pipeline=FindingPipeline(
-                _snapshot_stages(config, settings, heartbeat)
-            ),
-            streaming_pipeline=FindingPipeline(_streaming_stages(config)),
-            steps=_cycle_steps(config),
-            shutdown_event=self.shutdown_event,
+        heartbeat = ProgressHeartbeat(sink)
+        controls = CycleControls(settings, heartbeat, threading.Event())
+        cycle = CollectionCycle(
+            config, controls, CyclePlanner(config).plan(settings, heartbeat)
         )
-        self._control = ControlLoop(
-            config.sink,
-            settings,
-            self.run_once,
-            config.max_db_bytes,
-            self.shutdown_event,
+        control = ControlLoop(
+            sink, settings, cycle.scan, config.max_db_bytes, controls.shutdown_event
         )
-        self._streaming = StreamingSupervisor(
-            config.sink, config.streaming_collectors, SupervisionPolicy.standard(LOG)
+        streaming = StreamingSupervisor(
+            sink, config.streaming_collectors, SupervisionPolicy.standard(config.logger)
         )
+        return cls(config, RunnerParts(cycle, control, streaming))
+
+    @property
+    def shutdown_event(self) -> threading.Event:
+        return self._parts.cycle.controls.shutdown_event
 
     def request_shutdown(self) -> None:
         """Idempotent: safe to call from a signal handler."""
@@ -279,57 +423,13 @@ class Runner:
         self.config.sink.setup()
 
     def start_streaming(self) -> None:
-        self._streaming.start()
+        self._parts.streaming.start()
 
     def stop_streaming(self) -> None:
-        self._streaming.stop()
+        self._parts.streaming.stop()
 
     def run_once(self) -> tuple[str, int, int]:
-        return self._cycle.run()
+        return self._parts.cycle.scan()
 
     def run_forever(self, interval: int) -> None:
-        self._control.run_forever(interval)
-
-
-def _snapshot_stages(
-    config: RunnerConfig, settings: ControlSettings, heartbeat: ProgressHeartbeat
-) -> list[FindingStage]:
-    sink = config.sink
-    behavior = ProcessBehavior(sink)
-    stages: list[FindingStage] = []
-    if config.enrichment_chain is not None:
-        intel = ThreatIntel(config.enrichment_chain, IndicatorExtraction.default())
-        stages.append(EvidenceStage(intel, settings, heartbeat))
-    stages += [
-        BaselineStage(sink),
-        CorrelationStage(sink, behavior),
-        YaraContextStage(),
-        JudgeStage(config.judge, sink),
-    ]
-    if config.verifier is not None:
-        stages.append(VerifyStage(config.verifier))
-    if config.investigator is not None:
-        stages.append(InvestigateStage(config.investigator, sink, behavior))
-    return stages
-
-
-def _streaming_stages(config: RunnerConfig) -> list[FindingStage]:
-    stages: list[FindingStage] = [
-        BaselineStage(config.sink),
-        JudgeStage(config.judge, config.sink),
-    ]
-    if config.verifier is not None:
-        stages.append(VerifyStage(config.verifier))
-    return stages
-
-
-def _cycle_steps(config: RunnerConfig) -> list[CycleStep]:
-    sink = config.sink
-    steps: list[CycleStep] = []
-    # Runs after touch_judgments, so the active-finding set is current.
-    if config.narrator is not None:
-        steps.append(NarrativeStep(sink, config.narrator))
-    steps += [RiskScoreStep(sink), YaraStatusStep(sink, config.snapshot_collectors)]
-    if config.coverage is not None:
-        steps.append(CoverageStep(sink, config.coverage))
-    return steps
+        self._parts.control.run_forever(interval)

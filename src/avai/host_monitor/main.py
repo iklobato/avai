@@ -316,7 +316,7 @@ def build_runner(args) -> "tuple[Runner, object]":
                 EvidenceCache.on_base(engine, Base),
                 ChainRequest(dict(os.environ), enable),
             )
-        runner = Runner(
+        runner = Runner.create(
             RunnerConfig(
                 sink,
                 snapshot_collectors,

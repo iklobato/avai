@@ -34,7 +34,7 @@ class CommandRunner:
     def json(self, cmd: list[str], timeout: int = JSON_TIMEOUT_S) -> Any:
         """Run *cmd* and parse stdout as a single JSON document.
 
-        Raises ``CommandFailedError`` on a non-zero exit (carrying a stderr
+        Raises ``CommandFailedError`` on a timeout or a non-zero exit (carrying a stderr
         excerpt). Returns ``None`` when stdout is empty.
         """
         completed = self._checked(cmd, timeout)
@@ -99,9 +99,12 @@ class CommandRunner:
     def _checked(
         self, cmd: list[str], timeout: int
     ) -> subprocess.CompletedProcess[bytes]:
-        completed = subprocess.run(
-            cmd, capture_output=True, timeout=timeout, check=False
-        )
+        try:
+            completed = subprocess.run(
+                cmd, capture_output=True, timeout=timeout, check=False
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CommandFailedError(f"{cmd[0]} timed out after {timeout}s") from exc
         if completed.returncode != 0:
             stderr = completed.stderr.decode(errors="replace")
             raise CommandFailedError(

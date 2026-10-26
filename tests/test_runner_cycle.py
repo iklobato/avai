@@ -63,7 +63,7 @@ def sink():
 
 
 def _runner(sink, snapshot=(), streaming=(), judge=None, **options) -> Runner:
-    return Runner(
+    return Runner.create(
         RunnerConfig(
             sink,
             list(snapshot),

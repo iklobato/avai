@@ -32,7 +32,12 @@ from avai.host_monitor.control_loop import (
     MaintenanceCommand,
     ProgressHeartbeat,
 )
-from avai.host_monitor.cycle_steps import CoverageStep, NarrativeStep, RiskScoreStep
+from avai.host_monitor.cycle_steps import (
+    CoverageStep,
+    NarrativeStep,
+    RiskExplanation,
+    StepIO,
+)
 from avai.host_monitor.finding_stages import (
     BaselineStage,
     CorrelationStage,
@@ -80,7 +85,7 @@ def _batch(collector, entries, rows=(), run_id="run", baseline=_NO_BASELINE):
 
 
 def _runner(sink, snapshot=(), judge=None, **options):
-    return Runner(
+    return Runner.create(
         RunnerConfig(sink, list(snapshot), [], judge or NullJudge(), 5, **options)
     )
 
@@ -883,14 +888,14 @@ class TestActiveFindings:
 class TestNarrativeStep:
     def test_no_active_findings_no_narrative(self, sink):
         nar = _FakeNarrator()
-        NarrativeStep(sink, nar).run(_TS[1], _TS[1])
+        NarrativeStep(StepIO(sink, logging.getLogger("test")), nar).report(_TS[1], _TS[1])
         assert nar.calls == []
         assert sink.latest_narrative_finding_hashes() is None
 
     def test_active_findings_generate_and_store(self, sink):
         _add_judgement(sink, "h_mal", "malicious", last_seen=_TS[1])
         nar = _FakeNarrator()
-        NarrativeStep(sink, nar).run("run-1", _TS[1])
+        NarrativeStep(StepIO(sink, logging.getLogger("test")), nar).report("run-1", _TS[1])
         assert len(nar.calls) == 1
         import json as _json
 
@@ -905,18 +910,18 @@ class TestNarrativeStep:
     def test_unchanged_findings_are_not_regenerated(self, sink):
         _add_judgement(sink, "h_mal", "malicious", last_seen=_TS[1])
         nar = _FakeNarrator()
-        step = NarrativeStep(sink, nar)
-        step.run("run-1", _TS[1])
-        step.run("run-1", _TS[1])  # same finding-set
+        step = NarrativeStep(StepIO(sink, logging.getLogger("test")), nar)
+        step.report("run-1", _TS[1])
+        step.report("run-1", _TS[1])  # same finding-set
         assert len(nar.calls) == 1  # second call skipped by hash compare
 
     def test_changed_findings_regenerate(self, sink):
         _add_judgement(sink, "h_mal", "malicious", last_seen=_TS[1])
         nar = _FakeNarrator()
-        step = NarrativeStep(sink, nar)
-        step.run("run-1", _TS[1])
+        step = NarrativeStep(StepIO(sink, logging.getLogger("test")), nar)
+        step.report("run-1", _TS[1])
         _add_judgement(sink, "h_sus", "suspicious", last_seen=_TS[1])  # new finding
-        step.run("run-2", _TS[1])
+        step.report("run-2", _TS[1])
         assert len(nar.calls) == 2
 
 
@@ -1138,14 +1143,14 @@ class TestComputeRiskScore:
 
 class TestRiskExplanation:
     def test_initial_score(self):
-        assert "Initial" in RiskScoreStep.explain({"score": 90, "drivers": []}, None)
+        assert "Initial" in RiskExplanation().explain({"score": 90, "drivers": []}, None)
 
     def test_resolved_driver_raises_score(self):
         class _Prev:
             score = 80
             drivers_json = '[{"label":"Firewall off","points":15}]'
 
-        e = RiskScoreStep.explain({"score": 95, "drivers": []}, _Prev)
+        e = RiskExplanation().explain({"score": 95, "drivers": []}, _Prev)
         assert "up 15" in e and "Resolved" in e and "Firewall off" in e
 
     def test_new_driver_lowers_score(self):
@@ -1153,7 +1158,7 @@ class TestRiskExplanation:
             score = 100
             drivers_json = "[]"
 
-        e = RiskScoreStep.explain(
+        e = RiskExplanation().explain(
             {"score": 85, "drivers": [{"label": "Firewall off", "points": 15}]}, _Prev
         )
         assert "down 15" in e and "New" in e and "Firewall off" in e
@@ -1573,20 +1578,20 @@ def _latest_coverage_row(sink):
 class TestCoverageStep:
     def test_no_ruleset_no_assessment(self, sink):
         a = _FakeAssessor()
-        CoverageStep(sink, a).run("run-1", _TS[1])
+        CoverageStep(StepIO(sink, logging.getLogger("test")), a).report("run-1", _TS[1])
         assert a.calls == []
         assert sink.latest_yara_coverage_fingerprint() is None
 
     def test_zero_rules_no_assessment(self, sink):
         _seed_yara_status(sink, rules_loaded=0)
         a = _FakeAssessor()
-        CoverageStep(sink, a).run("run-1", _TS[1])
+        CoverageStep(StepIO(sink, logging.getLogger("test")), a).report("run-1", _TS[1])
         assert a.calls == []
 
     def test_assessment_generated_and_stored(self, sink):
         _seed_yara_status(sink)
         a = _FakeAssessor()
-        CoverageStep(sink, a).run("run-1", _TS[1])
+        CoverageStep(StepIO(sink, logging.getLogger("test")), a).report("run-1", _TS[1])
         assert len(a.calls) == 1
         # The host profile passed carries the platform + inventory counts.
         _ruleset, host = a.calls[0]
@@ -1600,18 +1605,18 @@ class TestCoverageStep:
     def test_unchanged_ruleset_not_regenerated(self, sink):
         _seed_yara_status(sink)
         a = _FakeAssessor()
-        step = CoverageStep(sink, a)
-        step.run("run-1", _TS[1])
-        step.run("run-2", _TS[1])
+        step = CoverageStep(StepIO(sink, logging.getLogger("test")), a)
+        step.report("run-1", _TS[1])
+        step.report("run-2", _TS[1])
         assert len(a.calls) == 1  # same ruleset fingerprint → skipped
 
     def test_changed_ruleset_regenerates(self, sink):
         _seed_yara_status(sink, rules_loaded=10)
         a = _FakeAssessor()
-        step = CoverageStep(sink, a)
-        step.run("run-1", _TS[1])
+        step = CoverageStep(StepIO(sink, logging.getLogger("test")), a)
+        step.report("run-1", _TS[1])
         _seed_yara_status(sink, rules_loaded=99)  # ruleset changed
-        step.run("run-2", _TS[1])
+        step.report("run-2", _TS[1])
         assert len(a.calls) == 2
 
 
