@@ -23,133 +23,223 @@ import sys
 import tarfile
 import urllib.request
 import zipfile
+from dataclasses import dataclass
+from enum import Enum
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import Protocol, TextIO
 
-_RULES_DIR = Path(__file__).resolve().parent.parent / "src" / "avai" / "rules"
-_VENDOR_DIR = _RULES_DIR / "vendor"
-_RULE_SUFFIXES = (".yar", ".yara")
-_ATTRIBUTION_STEMS = ("license", "notice", "readme")  # lowercased stem match
+RULES_DIR = Path(__file__).resolve().parent.parent / "src" / "avai" / "rules"
+VENDOR_DIR = RULES_DIR / "vendor"
+RULE_SUFFIXES = (".yar", ".yara")
+ATTRIBUTION_STEMS = ("license", "notice", "readme")  # lowercased stem match
+ATTRIBUTION_SUFFIXES = ("", ".txt", ".md")
+DEFAULT_SOURCE = "signature-base"
+
+
+class UnsafeMemberError(ValueError):
+    """An archive member name would escape the destination directory."""
+
+
+class ArchiveKind(Enum):
+    ZIP = "zip"
+    TAR_GZ = "tar.gz"
+
+
+class MemberFilter(Protocol):
+    def keep(self, name: str) -> bool:
+        """Whether this archive member belongs in the vendored pack."""
+        ...
+
+
+class SignatureBaseMembers:
+    """Keep yara/*.yar|*.yara rules and the top-level LICENSE for attribution."""
+
+    def keep(self, name: str) -> bool:
+        member = Path(name)
+        suffix = member.suffix.lower()
+        if "/yara/" in name and suffix in RULE_SUFFIXES:
+            return True
+        stem = member.stem.lower()
+        return stem in ATTRIBUTION_STEMS and suffix in ATTRIBUTION_SUFFIXES
+
+
+class YaraForgeMembers:
+    def keep(self, name: str) -> bool:
+        member = Path(name)
+        is_rule = member.suffix.lower() in RULE_SUFFIXES
+        return is_rule or member.stem.lower() in ATTRIBUTION_STEMS
 
 
 # Each source pins an exact upstream ref for reproducibility. Bump a pin
 # deliberately (and re-check attribution) rather than tracking "latest".
-class _Source:
-    def __init__(self, name, url, archive, ref, member_filter):
-        self.name = name
-        self.url = url  # may contain {ref}
-        self.archive = archive  # "zip" | "tar.gz"
-        self.ref = ref
-        self.member_filter = member_filter  # (member_name) -> bool
+@dataclass(frozen=True)
+class RuleSource:
+    name: str
+    url: str  # may contain {ref}
+    archive: ArchiveKind
+    ref: str
+    members: MemberFilter
 
 
-def _signature_base_member(name: str) -> bool:
-    # Keep yara/*.yar|*.yara rules and the top-level LICENSE for attribution.
-    p = Path(name)
-    if "/yara/" in name and p.suffix.lower() in _RULE_SUFFIXES:
-        return True
-    return p.stem.lower() in _ATTRIBUTION_STEMS and p.suffix.lower() in (
-        "",
-        ".txt",
-        ".md",
-    )
+class RuleSources:
+    def by_name(self) -> dict[str, RuleSource]:
+        sources = (self._signature_base(), self._yara_forge())
+        return {source.name: source for source in sources}
+
+    def _signature_base(self) -> RuleSource:
+        """Florian Roth's signature-base: individual .yar files, DRL 1.1
+        (permits MIT bundling with attribution). Fetched as a tarball at a
+        pinned commit."""
+        return RuleSource(
+            name="signature-base",
+            url="https://github.com/Neo23x0/signature-base/archive/{ref}.tar.gz",
+            archive=ArchiveKind.TAR_GZ,
+            ref="3b78d4102c12e6059ff71a6157909f1e4d3e3450",  # 2026-06-15
+            members=SignatureBaseMembers(),
+        )
+
+    def _yara_forge(self) -> RuleSource:
+        """YARA-Forge "core": one consolidated .yar, mixed-license (needs a
+        sign-off before committing). Released as a date-stamped zip."""
+        return RuleSource(
+            name="yara-forge",
+            url="https://github.com/YARAHQ/yara-forge/releases/download/{ref}/yara-forge-rules-core.zip",
+            archive=ArchiveKind.ZIP,
+            ref="20260614",
+            members=YaraForgeMembers(),
+        )
 
 
-def _yara_forge_member(name: str) -> bool:
-    p = Path(name)
-    return p.suffix.lower() in _RULE_SUFFIXES or p.stem.lower() in _ATTRIBUTION_STEMS
-
-
-SOURCES = {
-    # Florian Roth's signature-base — individual .yar files, DRL 1.1 (permits
-    # MIT bundling with attribution). Fetched as a tarball at a pinned commit.
-    "signature-base": _Source(
-        name="signature-base",
-        url="https://github.com/Neo23x0/signature-base/archive/{ref}.tar.gz",
-        archive="tar.gz",
-        ref="3b78d4102c12e6059ff71a6157909f1e4d3e3450",  # 2026-06-15
-        member_filter=_signature_base_member,
-    ),
-    # YARA-Forge "core" — one consolidated .yar, mixed-license (needs a
-    # sign-off before committing). Released as a date-stamped zip.
-    "yara-forge": _Source(
-        name="yara-forge",
-        url="https://github.com/YARAHQ/yara-forge/releases/download/{ref}/yara-forge-rules-core.zip",
-        archive="zip",
-        ref="20260614",
-        member_filter=_yara_forge_member,
-    ),
-}
-
-
-def _download(url: str) -> bytes:
-    print(f"fetching {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": "avai-update-rules"})
-    with urllib.request.urlopen(req, timeout=180) as resp:  # noqa: S310 (pinned host)
-        return resp.read()
-
-
-def _safe_target(dest: Path, member_name: str) -> Path:
-    """Flatten a member to ``dest/<basename>``, refusing empty / traversal
+class FlatTarget:
+    """Flattens a member to ``dest/<basename>``, refusing empty / traversal
     names (zip-slip / tar-slip)."""
-    base = Path(member_name).name
-    if not base or base in (".", ".."):
-        raise ValueError(f"unsafe member name: {member_name!r}")
-    return dest / base
 
+    def __init__(self, dest: Path) -> None:
+        self._dest = dest
 
-def _extract_zip(blob: bytes, dest: Path, keep) -> int:
-    written = 0
-    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        for name in zf.namelist():
-            if name.endswith("/") or not keep(name):
-                continue
-            _safe_target(dest, name).write_bytes(zf.read(name))
+    def write_all(self, members: Iterable[tuple[str, bytes]]) -> int:
+        written = 0
+        for name, content in members:
+            self._write(name, content)
             written += 1
-    return written
+        return written
+
+    def _write(self, member_name: str, content: bytes) -> None:
+        base = Path(member_name).name
+        if not base or base in (".", ".."):
+            raise UnsafeMemberError(f"unsafe member name: {member_name!r}")
+        (self._dest / base).write_bytes(content)
 
 
-def _extract_tar_gz(blob: bytes, dest: Path, keep) -> int:
-    written = 0
-    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
-        for member in tf.getmembers():
-            if not member.isfile() or not keep(member.name):
+class Extractor(Protocol):
+    def extract(self, blob: bytes) -> int:
+        """Write the kept members of the archive; return how many."""
+        ...
+
+
+class ZipExtractor:
+    def __init__(self, members: MemberFilter, target: FlatTarget) -> None:
+        self._members = members
+        self._target = target
+
+    def extract(self, blob: bytes) -> int:
+        with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+            return self._target.write_all(self._kept(archive))
+
+    def _kept(self, archive: zipfile.ZipFile) -> Iterator[tuple[str, bytes]]:
+        for name in archive.namelist():
+            if name.endswith("/") or not self._members.keep(name):
                 continue
-            src = tf.extractfile(member)
-            if src is None:
+            yield name, archive.read(name)
+
+
+class TarGzExtractor:
+    def __init__(self, members: MemberFilter, target: FlatTarget) -> None:
+        self._members = members
+        self._target = target
+
+    def extract(self, blob: bytes) -> int:
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as archive:
+            return self._target.write_all(self._kept(archive))
+
+    def _kept(self, archive: tarfile.TarFile) -> Iterator[tuple[str, bytes]]:
+        for member in archive.getmembers():
+            content = self._content(archive, member)
+            if content is None:
                 continue
-            _safe_target(dest, member.name).write_bytes(src.read())
-            written += 1
-    return written
+            yield member.name, content
+
+    def _content(
+        self, archive: tarfile.TarFile, member: tarfile.TarInfo
+    ) -> bytes | None:
+        if not member.isfile() or not self._members.keep(member.name):
+            return None
+        source = archive.extractfile(member)
+        return None if source is None else source.read()
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--source",
-        choices=sorted(SOURCES),
-        default="signature-base",
-        help="which rule pack to fetch (default: signature-base)",
-    )
-    parser.add_argument("--ref", help="override the pinned commit/tag")
-    args = parser.parse_args()
+class RuleDownloader:
+    TIMEOUT_S = 180
+    USER_AGENT = "avai-update-rules"
 
-    source = SOURCES[args.source]
-    ref = args.ref or source.ref
-    dest = _VENDOR_DIR / source.name
-    dest.mkdir(parents=True, exist_ok=True)
+    def __init__(self, out: TextIO) -> None:
+        self._out = out
 
-    try:
-        blob = _download(source.url.format(ref=ref))
-    except OSError as exc:
-        print(f"download failed: {exc}", file=sys.stderr)
-        return 1
+    def fetch(self, url: str) -> bytes:
+        self._out.write(f"fetching {url}\n")
+        request = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
+        opened = urllib.request.urlopen(  # noqa: S310 (pinned host)
+            request, timeout=self.TIMEOUT_S
+        )
+        with opened as response:
+            return response.read()
 
-    extractor = _extract_tar_gz if source.archive == "tar.gz" else _extract_zip
-    count = extractor(blob, dest, source.member_filter)
-    print(f"wrote {count} file(s) to {dest}")
-    print("Opt-in pack: not committed, not shipped. See src/avai/rules/NOTICE.")
-    return 0
+
+class UpdateRulesCli:
+    def __init__(self, out: TextIO, err: TextIO) -> None:
+        self._out = out
+        self._err = err
+
+    @classmethod
+    def main(cls) -> int:
+        return cls(sys.stdout, sys.stderr).update(sys.argv[1:])
+
+    def update(self, argv: list[str]) -> int:
+        sources = RuleSources().by_name()
+        args = self._parser(sorted(sources)).parse_args(argv)
+        source = sources[args.source]
+        dest = VENDOR_DIR / source.name
+        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            blob = RuleDownloader(self._out).fetch(
+                source.url.format(ref=args.ref or source.ref)
+            )
+        except OSError as exc:
+            self._err.write(f"download failed: {exc}\n")
+            return 1
+        count = self._extractor(source, FlatTarget(dest)).extract(blob)
+        self._out.write(f"wrote {count} file(s) to {dest}\n")
+        self._out.write(
+            "Opt-in pack: not committed, not shipped. See src/avai/rules/NOTICE.\n"
+        )
+        return 0
+
+    def _extractor(self, source: RuleSource, target: FlatTarget) -> Extractor:
+        extractors = {ArchiveKind.ZIP: ZipExtractor, ArchiveKind.TAR_GZ: TarGzExtractor}
+        return extractors[source.archive](source.members, target)
+
+    def _parser(self, names: list[str]) -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument(
+            "--source",
+            choices=names,
+            default=DEFAULT_SOURCE,
+            help="which rule pack to fetch (default: signature-base)",
+        )
+        parser.add_argument("--ref", help="override the pinned commit/tag")
+        return parser
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(UpdateRulesCli.main())
