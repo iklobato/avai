@@ -15,6 +15,7 @@ was in `HostPaths().for_home()` returning [] and the caller doing
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from avai.host_monitor.collectors import (
     LinuxLaunchItemsCollector,
 )
 from avai.host_monitor.collectors.persistence import CrontabReader, SystemdUnitReader
-from avai.host_monitor.runtime import HostPaths
+from avai.host_monitor.runtime import CommandRunner, HostPaths
 
 # HOST_PREFIX path translation, the Linux launch_items collector, and the
 # journald-dir probe all assume POSIX path semantics and a Linux filesystem
@@ -314,7 +315,7 @@ class TestLinuxAuthEventsJournalDir:
 
     def test_no_directory_flag_without_prefix(self, monkeypatch):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
-        cmd = LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector().command()
         assert "--directory" not in cmd
 
     def test_prefers_persistent_journal(self, monkeypatch, tmp_path):
@@ -323,7 +324,7 @@ class TestLinuxAuthEventsJournalDir:
         runtime = tmp_path / "run" / "log" / "journal"
         persistent.mkdir(parents=True)
         runtime.mkdir(parents=True)
-        cmd = LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector().command()
         assert self._directory_arg(cmd) == str(persistent)
 
     def test_falls_back_to_runtime_journal(self, monkeypatch, tmp_path):
@@ -331,14 +332,14 @@ class TestLinuxAuthEventsJournalDir:
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         runtime = tmp_path / "run" / "log" / "journal"
         runtime.mkdir(parents=True)
-        cmd = LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector().command()
         assert self._directory_arg(cmd) == str(runtime)
 
     def test_no_directory_flag_when_no_host_journal_present(
         self, monkeypatch, tmp_path
     ):
         monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
-        cmd = LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector().command()
         assert "--directory" not in cmd
 
 
@@ -347,13 +348,13 @@ class TestLogTailCollector:
     testable without journalctl or a real /var/log."""
 
     def test_parse_journal_maps_fields(self):
-        from avai.host_monitor.collectors import LogTailCollector
+        from avai.host_monitor.collectors import JournalLine
 
-        row = LogTailCollector._parse_journal(
+        row = JournalLine(
             '{"MESSAGE":"Accepted password","PRIORITY":"6",'
             '"_SYSTEMD_UNIT":"ssh.service","_PID":"42",'
             '"__REALTIME_TIMESTAMP":"1700000000000000"}'
-        )
+        ).row()
         assert row["source"] == "journald"
         assert row["unit"] == "ssh.service"
         assert row["level"] == "info"
@@ -362,50 +363,51 @@ class TestLogTailCollector:
         assert row["event_timestamp"].startswith("2023-11-14T")
 
     def test_parse_journal_decodes_binary_message_array(self):
-        from avai.host_monitor.collectors import LogTailCollector
+        from avai.host_monitor.collectors import JournalLine
 
         # journald encodes a non-UTF-8 MESSAGE as an array of byte values.
-        row = LogTailCollector._parse_journal('{"MESSAGE":[104,105],"PRIORITY":"3"}')
+        row = JournalLine('{"MESSAGE":[104,105],"PRIORITY":"3"}').row()
         assert row["message"] == "hi"
         assert row["level"] == "err"
 
     def test_parse_journal_bad_line_is_none(self):
-        from avai.host_monitor.collectors import LogTailCollector
+        from avai.host_monitor.collectors import JournalLine
 
-        assert LogTailCollector._parse_journal("not json") is None
+        assert JournalLine("not json").row() is None
 
     def test_parse_journal_unknown_priority_has_no_level(self):
-        from avai.host_monitor.collectors import LogTailCollector
+        from avai.host_monitor.collectors import JournalLine
 
-        assert LogTailCollector._parse_journal('{"MESSAGE":"x"}')["level"] is None
+        assert JournalLine('{"MESSAGE":"x"}').row()["level"] is None
 
     def test_sniff_text_level(self):
-        from avai.host_monitor.collectors import _sniff_text_level
+        from avai.host_monitor.collectors import TextLevel
 
-        assert _sniff_text_level("dpkg: ERROR failed to configure") == "err"
-        assert _sniff_text_level("a warning was issued") == "warning"
-        assert _sniff_text_level("FATAL: disk full") == "crit"
-        assert _sniff_text_level("status installed openssl") is None
+        sniff = TextLevel().sniff
+        assert sniff("dpkg: ERROR failed to configure") == "err"
+        assert sniff("a warning was issued") == "warning"
+        assert sniff("FATAL: disk full") == "crit"
+        assert sniff("status installed openssl") is None
         # Regression: "error" inside an identifier is NOT an error — a dpkg
         # line about the libgpg-error-dev package used to be mis-tagged err,
         # which then dominated the log-summary "most errors" ranking.
-        assert _sniff_text_level("status unpacked libgpg-error-dev:amd64") is None
+        assert sniff("status unpacked libgpg-error-dev:amd64") is None
 
     def test_tail_file_yields_last_lines_in_order(self, tmp_path):
-        from avai.host_monitor.collectors import LogTailCollector
+        from avai.host_monitor.collectors import LogFileTail
 
         f = tmp_path / "agent.log"
         f.write_text("\n".join(f"line {i}" for i in range(10)) + "\n")
-        rows = list(LogTailCollector(files=[str(f)])._tail_file(str(f)))
+        rows = list(LogFileTail.on_host(str(f)).rows())
         assert [r["unit"] for r in rows] == ["agent.log"] * 10
         assert rows[0]["source"] == str(f)
         assert rows[0]["message"] == "line 0"
         assert rows[-1]["message"] == "line 9"
 
     def test_missing_file_is_skipped_silently(self):
-        from avai.host_monitor.collectors import LogTailCollector
+        from avai.host_monitor.collectors import LogFileTail
 
-        assert list(LogTailCollector()._tail_file("/no/such/path.log")) == []
+        assert list(LogFileTail.on_host("/no/such/path.log").rows()) == []
 
     def test_collect_without_journalctl_reads_configured_files(
         self, tmp_path, monkeypatch
@@ -417,7 +419,8 @@ class TestLogTailCollector:
         f = tmp_path / "x.log"
         f.write_text("boom ERROR happened\n")
         monkeypatch.setattr(shutil, "which", lambda _b: None)  # no journalctl
-        c = col.LogTailCollector(files=[str(f)])
+        journal = col.JournalReader(CommandRunner(), logging.getLogger("test"))
+        c = col.LogTailCollector("", journal, (str(f),))
         rows = list(c.collect())
         assert len(rows) == 1
         assert rows[0]["level"] == "err"

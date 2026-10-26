@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
+from .. import constants
 from ..collectors import (
     AuthEventsCollector,
     BluetoothCollector,
@@ -65,7 +66,7 @@ from ..persistence_collectors import (
     SshKnownHostsCollector,
 )
 from ..prompts import Prompts
-from ..runtime import CommandRunner, CommandSnapshot
+from ..runtime import Clock, CommandRunner, CommandSnapshot, DiskMetrics, SystemMetrics
 
 
 class MacOSFilesystemLayout:
@@ -183,7 +184,7 @@ class MacOSHost:
         h = prompts.hint_for
         iface = self._fs.tcpdump_interface_args()
         return [
-            ProcessCollector(judge_hints=h("processes")),
+            ProcessCollector(SystemMetrics(), judge_hints=h("processes")),
             NetworkConnectionsCollector(judge_hints=h("network_connections")),
             ListeningPortsCollector(judge_hints=h("listening_ports")),
             NetworkFlowsCollector(
@@ -193,8 +194,10 @@ class MacOSHost:
                 judge_hints=h("dns_queries"), iface_args=iface, runner=self._runner
             ),
             NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
-            HostResourcesCollector(judge_hints=h("host_resources")),
-            DiskUsageCollector(judge_hints=h("disk_usage")),
+            HostResourcesCollector(
+                SystemMetrics(), Clock(), judge_hints=h("host_resources")
+            ),
+            DiskUsageCollector(DiskMetrics(constants.LOG), judge_hints=h("disk_usage")),
             UsbDevicesCollector(judge_hints=h("usb_devices"), runner=self._runner),
             BluetoothCollector(judge_hints=h("bluetooth_devices"), runner=self._runner),
             WifiCollector(judge_hints=h("wifi_state"), runner=self._runner),
@@ -207,7 +210,7 @@ class MacOSHost:
             FileIntegrityCollector(judge_hints=h("file_integrity")),
             FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),
             InstalledAppsCollector(judge_hints=h("installed_apps")),
-            MountsCollector(judge_hints=h("mounts")),
+            MountsCollector(DiskMetrics(constants.LOG), judge_hints=h("mounts")),
             SetuidFilesCollector(judge_hints=h("setuid_files"), fs=self._fs),
             MdmProfilesCollector(judge_hints=h("mdm_profiles"), runner=self._runner),
             KernelExtensionsCollector(

@@ -7,6 +7,7 @@ collectors move between modules."""
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import sqlite3
 import subprocess
@@ -35,7 +36,6 @@ from avai.host_monitor.collectors import (
     LinuxUsbDevicesCollector,
     LinuxWifiCollector,
     ListeningPortsCollector,
-    LogTailCollector,
     MdmProfilesCollector,
     MountsCollector,
     NetworkFlowsCollector,
@@ -51,9 +51,14 @@ from avai.host_monitor.collectors import (
     UsbDevicesCollector,
     WifiCollector,
 )
+from avai.host_monitor.collectors.logs import TAIL_BYTES, JournalReader, LogFileTail
 from avai.host_monitor.enums import Browser
-from avai.host_monitor.runtime import HostPaths
-
+from avai.host_monitor.runtime import (
+    CommandRunner,
+    DiskMetrics,
+    HostPaths,
+    SystemMetrics,
+)
 
 # These classes drive the macOS and Linux collectors over a fake POSIX
 # layout (forward-slash joins, a sysfs name with a colon). Those collectors
@@ -161,7 +166,7 @@ class TestProcessCollector:
                 SimpleNamespace(info=bare),
             ],
         )
-        full, empty = list(ProcessCollector().collect())
+        full, empty = list(ProcessCollector(SystemMetrics()).collect())
         assert full["uid"] == 0
         assert full["memory_rss"] == 4096
         assert full["cmdline_json"] == '["sshd", "-D"]'
@@ -282,7 +287,7 @@ class TestMountsCollector:
             device="/dev/disk1s1", mountpoint="/", fstype="apfs", opts="rw"
         )
         monkeypatch.setattr(psutil, "disk_partitions", lambda all=True: [part])
-        (row,) = MountsCollector().collect()
+        (row,) = MountsCollector(DiskMetrics(logging.getLogger("test"))).collect()
         assert (row["device"], row["mountpoint"]) == ("/dev/disk1s1", "/")
         assert json.loads(row["raw_json"])["maxfile"] is None
 
@@ -291,7 +296,8 @@ class TestMountsCollector:
             raise psutil.AccessDenied()
 
         monkeypatch.setattr(psutil, "disk_partitions", denied)
-        assert list(MountsCollector().collect()) == []
+        disks = DiskMetrics(logging.getLogger("test"))
+        assert list(MountsCollector(disks).collect()) == []
 
 
 # ---- tcpdump capture ----------------------------------------------------
@@ -968,15 +974,15 @@ class TestLinuxSystemIntegrity:
 class TestLinuxStreamCommands:
     def test_auth_events_fall_back_to_the_runtime_journal(self, host_root):
         (host_root / "run" / "log" / "journal").mkdir(parents=True)
-        cmd = LinuxAuthEventsCollector(priority="warning")._cmd()
-        assert "--priority=warning" in cmd
+        cmd = LinuxAuthEventsCollector().command()
+        assert "--priority=info" in cmd
         i = cmd.index("--directory")
         assert cmd[i + 1] == str(host_root / "run/log/journal")
-        assert cmd.count("+") == len(LinuxAuthEventsCollector._MATCH_GROUPS) - 1
+        assert cmd.count("+") == len(LinuxAuthEventsCollector.MATCH_GROUPS) - 1
 
     def test_process_exec_reads_the_host_journal(self, host_root):
         (host_root / "var" / "log" / "journal").mkdir(parents=True)
-        cmd = LinuxProcessExecCollector()._cmd()
+        cmd = LinuxProcessExecCollector().command()
         assert cmd[-3:] == ["_AUDIT_TYPE_NAME=EXECVE", "+", "_AUDIT_TYPE_NAME=SYSCALL"]
         assert cmd[cmd.index("--directory") + 1] == str(host_root / "var/log/journal")
 
@@ -1000,7 +1006,7 @@ class TestLogTailJournald:
             ]
         )
         run = _fake_run(monkeypatch, lambda cmd: (lines, 1, ""))
-        rows = list(LogTailCollector(files=[])._journald())
+        rows = list(JournalReader(CommandRunner(), logging.getLogger("test")).rows())
         assert [(r["unit"], r["message"], r["pid"]) for r in rows] == [
             ("ssh.service", "Accepted key", 42),
             ("kernel", "hi", None),
@@ -1011,11 +1017,12 @@ class TestLogTailJournald:
     def test_journal_timeout_is_logged_and_skipped(self, monkeypatch, caplog):
         _on_path(monkeypatch, "journalctl")
         _fake_run(monkeypatch, lambda cmd: subprocess.TimeoutExpired(cmd, 10))
-        assert list(LogTailCollector(files=[])._journald()) == []
+        journal = JournalReader(CommandRunner(), logging.getLogger("avai.test"))
+        assert list(journal.rows()) == []
         assert "journalctl read failed" in caplog.text
 
     def test_tail_drops_the_partial_first_line_of_a_big_file(self, tmp_path):
         big = tmp_path / "syslog"
-        big.write_text("x" * (LogTailCollector._TAIL_BYTES + 10) + "\nlast line\n")
-        rows = list(LogTailCollector(files=[])._tail_file(str(big)))
+        big.write_text("x" * (TAIL_BYTES + 10) + "\nlast line\n")
+        rows = list(LogFileTail.on_host(str(big)).rows())
         assert [r["message"] for r in rows] == ["last line"]

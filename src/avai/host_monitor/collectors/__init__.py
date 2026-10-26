@@ -10,19 +10,14 @@ from .devices import (
     UsbDevicesCollector,
     WifiCollector,
 )
-from .file_scan import (
-    FileScanCollector,
-    YaraRulesetCompiler,
-    _crypto_hint,
-    _file_type,
-)
+from .file_scan import FileScanCollector, YaraRulesetCompiler, _crypto_hint, _file_type
 from .integrity import (
     FileIntegrityCollector,
     LinuxSystemIntegrityCollector,
     SetuidFilesCollector,
     SystemIntegrityCollector,
 )
-from .logs import LogTailCollector, _sniff_text_level
+from .logs import JournalLine, JournalReader, LogFileTail, LogTailCollector, TextLevel
 from .network import (
     DnsQueriesCollector,
     ListeningPortsCollector,
@@ -121,5 +116,8 @@ __all__ = [
     "_crypto_hint",
     "_file_type",
     "_payload_bytes",
-    "_sniff_text_level",
+    "JournalLine",
+    "JournalReader",
+    "LogFileTail",
+    "TextLevel",
 ]

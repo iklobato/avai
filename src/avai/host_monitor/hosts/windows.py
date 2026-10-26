@@ -30,7 +30,7 @@ import threading
 from pathlib import Path
 from typing import Iterable, Optional
 
-from .. import slices
+from .. import constants, slices
 from ..collectors import (
     DiskUsageCollector,
     HostResourcesCollector,
@@ -72,7 +72,14 @@ from ..persistence_collectors import (
     WindowsDriverParser,
 )
 from ..prompts import Prompts
-from ..runtime import CommandRunner, CommandSnapshot, JsonLineStreamSource
+from ..runtime import (
+    Clock,
+    CommandRunner,
+    CommandSnapshot,
+    DiskMetrics,
+    JsonLineStreamSource,
+    SystemMetrics,
+)
 
 # A path guaranteed not to exist, handed to collectors that read a file
 # Windows doesn't have (e.g. sudoers) so their shared parser yields nothing
@@ -777,13 +784,15 @@ class WindowsHost:
     def snapshot_collectors(self, prompts: Prompts) -> list[SnapshotCollector]:
         h = prompts.hint_for
         return [
-            ProcessCollector(judge_hints=h("processes")),
+            ProcessCollector(SystemMetrics(), judge_hints=h("processes")),
             NetworkConnectionsCollector(judge_hints=h("network_connections")),
             ListeningPortsCollector(judge_hints=h("listening_ports")),
             NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
-            HostResourcesCollector(judge_hints=h("host_resources")),
-            DiskUsageCollector(judge_hints=h("disk_usage")),
-            MountsCollector(judge_hints=h("mounts")),
+            HostResourcesCollector(
+                SystemMetrics(), Clock(), judge_hints=h("host_resources")
+            ),
+            DiskUsageCollector(DiskMetrics(constants.LOG), judge_hints=h("disk_usage")),
+            MountsCollector(DiskMetrics(constants.LOG), judge_hints=h("mounts")),
             WindowsInstalledAppsCollector(
                 self._runner, judge_hints=h("installed_apps")
             ),

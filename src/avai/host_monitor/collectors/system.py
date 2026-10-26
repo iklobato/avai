@@ -1,21 +1,42 @@
-"""Processes and host resources: the process table, CPU and memory meters,
-disks and mounts."""
-
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Mapping
 from datetime import datetime
-from typing import Optional
+from typing import Any
 
-from .. import constants, slices
+from .. import slices
 from ..runtime import Clock, DiskMetrics, SystemMetrics
 from .base import SnapshotCollector
+
+PERCENT = 100.0
+PERCENT_DIGITS = 1
+NO_CPU_TIME = 0.0
+MEMORY_FIELDS = (
+    "total",
+    "available",
+    "used",
+    "free",
+    "percent",
+    "active",
+    "inactive",
+    "buffers",
+    "cached",
+    "wired",
+)
+SWAP_FIELDS = ("total", "used", "free", "percent")
+LOAD_COLUMNS = ("load_1", "load_5", "load_15")
+CPU_MEAN_COLUMNS = ("cpu_percent", "cpu_user", "cpu_system", "cpu_idle", "cpu_iowait")
+PART_FIELDS = ("device", "mountpoint", "fstype", "opts")
+USAGE_FIELDS = ("total", "used", "free", "percent")
+IO_FIELDS = ("read_bytes", "write_bytes", "read_count", "write_count")
+MOUNT_LIMIT_FIELDS = ("maxfile", "maxpath")
 
 
 class ProcessCollector(SnapshotCollector):
     slice = slices.PROCESSES
     judge_fields = ("name", "exe", "cmdline_json", "username")
-    _ATTRS = [
+    ATTRS = [
         "pid",
         "ppid",
         "name",
@@ -31,30 +52,63 @@ class ProcessCollector(SnapshotCollector):
         "num_threads",
     ]
 
-    def __init__(
-        self, judge_hints: str = "", metrics: Optional[SystemMetrics] = None
-    ) -> None:
+    def __init__(self, metrics: SystemMetrics, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._metrics = metrics or SystemMetrics()
+        self._metrics = metrics
 
-    def collect(self):
-        for info in self._metrics.process_table(self._ATTRS):
-            mem, uids = info.get("memory_info"), info.get("uids")
+    def collect(self) -> Iterator[dict[str, Any]]:
+        for proc in self._metrics.process_table(self.ATTRS):
+            mem, uids = proc.get("memory_info"), proc.get("uids")
             yield {
-                "pid": info.get("pid"),
-                "ppid": info.get("ppid"),
-                "name": info.get("name"),
-                "exe": info.get("exe"),
-                "cmdline_json": json.dumps(info.get("cmdline") or []),
-                "username": info.get("username"),
+                "pid": proc.get("pid"),
+                "ppid": proc.get("ppid"),
+                "name": proc.get("name"),
+                "exe": proc.get("exe"),
+                "cmdline_json": json.dumps(proc.get("cmdline") or []),
+                "username": proc.get("username"),
                 "uid": uids[0] if uids else None,
-                "status": info.get("status"),
-                "create_time": info.get("create_time"),
-                "cpu_percent": info.get("cpu_percent"),
+                "status": proc.get("status"),
+                "create_time": proc.get("create_time"),
+                "cpu_percent": proc.get("cpu_percent"),
                 "memory_rss": mem.rss if mem else None,
-                "num_fds": info.get("num_fds"),
-                "num_threads": info.get("num_threads"),
+                "num_fds": proc.get("num_fds"),
+                "num_threads": proc.get("num_threads"),
             }
+
+
+class CpuSample:
+    """One per-core times-percent sample: overall busy% + user/system/idle/
+    iowait means + per-core busy%. ``iowait`` is None on platforms
+    (macOS/Windows) where psutil doesn't report it."""
+
+    def __init__(self, cores: list[Any]) -> None:
+        self._cores = cores
+
+    def columns(self) -> dict[str, Any]:
+        if not self._cores:
+            return {**dict.fromkeys(CPU_MEAN_COLUMNS), "cpu_per_core_json": "[]"}
+        idle = self._mean("idle")
+        has_iowait = any(hasattr(core, "iowait") for core in self._cores)
+        return {
+            "cpu_percent": round(PERCENT - idle, PERCENT_DIGITS),
+            "cpu_user": round(self._mean("user"), PERCENT_DIGITS),
+            "cpu_system": round(self._mean("system"), PERCENT_DIGITS),
+            "cpu_idle": round(idle, PERCENT_DIGITS),
+            "cpu_iowait": (
+                round(self._mean("iowait"), PERCENT_DIGITS) if has_iowait else None
+            ),
+            "cpu_per_core_json": json.dumps(self._per_core()),
+        }
+
+    def _mean(self, attr: str) -> float:
+        total = sum(getattr(core, attr, NO_CPU_TIME) for core in self._cores)
+        return total / len(self._cores)
+
+    def _per_core(self) -> list[float]:
+        return [
+            round(PERCENT - getattr(core, "idle", NO_CPU_TIME), PERCENT_DIGITS)
+            for core in self._cores
+        ]
 
 
 class HostResourcesCollector(SnapshotCollector):
@@ -80,90 +134,46 @@ class HostResourcesCollector(SnapshotCollector):
     CPU_INTERVAL = 0.15
 
     def __init__(
-        self,
-        metrics: Optional[SystemMetrics] = None,
-        clock: Optional[Clock] = None,
-        judge_hints: str = "",
-    ):
+        self, metrics: SystemMetrics, clock: Clock, judge_hints: str = ""
+    ) -> None:
         super().__init__(judge_hints=judge_hints)
-        self._metrics = metrics or SystemMetrics()
-        self._clock = clock or Clock()
+        self._metrics = metrics
+        self._clock = clock
 
-    def collect(self):
-        vm = self._metrics.virtual_memory()
-        sm = self._metrics.swap_memory()
-        sample = self._metrics.cpu_sample(self.CPU_INTERVAL)
-        load = self._metrics.load_average()
-        phys, logical = self._metrics.cpu_count()
+    def collect(self) -> Iterator[dict[str, Any]]:
+        physical, logical = self._metrics.cpu_count()
         boot = self._metrics.boot_time()
         tasks = self._metrics.task_counts()
-
-        cpu = self._cpu_aggregate(sample)
-        now = datetime.fromisoformat(self._clock.now_iso()).timestamp()
-        uptime = int(now - boot) if boot else None
-
         yield {
-            "mem_total": getattr(vm, "total", None),
-            "mem_available": getattr(vm, "available", None),
-            "mem_used": getattr(vm, "used", None),
-            "mem_free": getattr(vm, "free", None),
-            "mem_percent": getattr(vm, "percent", None),
-            "mem_active": getattr(vm, "active", None),
-            "mem_inactive": getattr(vm, "inactive", None),
-            "mem_buffers": getattr(vm, "buffers", None),
-            "mem_cached": getattr(vm, "cached", None),
-            "mem_wired": getattr(vm, "wired", None),
-            "swap_total": getattr(sm, "total", None),
-            "swap_used": getattr(sm, "used", None),
-            "swap_free": getattr(sm, "free", None),
-            "swap_percent": getattr(sm, "percent", None),
-            "cpu_percent": cpu["percent"],
-            "cpu_user": cpu["user"],
-            "cpu_system": cpu["system"],
-            "cpu_idle": cpu["idle"],
-            "cpu_iowait": cpu["iowait"],
-            "cpu_per_core_json": json.dumps(cpu["per_core"]),
-            "cpu_count_physical": phys,
+            **self._memory(),
+            **CpuSample(self._metrics.cpu_sample(self.CPU_INTERVAL)).columns(),
+            **self._load(),
+            "cpu_count_physical": physical,
             "cpu_count_logical": logical,
-            "load_1": load[0] if load else None,
-            "load_5": load[1] if load else None,
-            "load_15": load[2] if load else None,
             "boot_time": boot,
-            "uptime_seconds": uptime,
+            "uptime_seconds": self._uptime(boot),
             "tasks_total": tasks.get("total"),
             "tasks_running": tasks.get("running"),
             "threads_total": tasks.get("threads"),
         }
 
-    @staticmethod
-    def _cpu_aggregate(sample: list) -> dict:
-        """Derive overall busy% + user/system/idle/iowait means + per-core
-        busy% from one per-core times-percent sample. ``iowait`` is None on
-        platforms (macOS/Windows) where psutil doesn't report it."""
-        if not sample:
-            return {
-                "percent": None,
-                "user": None,
-                "system": None,
-                "idle": None,
-                "iowait": None,
-                "per_core": [],
-            }
-        n = len(sample)
-
-        def mean(attr):
-            return sum(getattr(c, attr, 0.0) for c in sample) / n
-
-        has_iowait = any(hasattr(c, "iowait") for c in sample)
-        idle = mean("idle")
+    def _memory(self) -> dict[str, Any]:
+        memory = self._metrics.virtual_memory()
+        swap = self._metrics.swap_memory()
         return {
-            "percent": round(100.0 - idle, 1),
-            "user": round(mean("user"), 1),
-            "system": round(mean("system"), 1),
-            "idle": round(idle, 1),
-            "iowait": round(mean("iowait"), 1) if has_iowait else None,
-            "per_core": [round(100.0 - getattr(c, "idle", 0.0), 1) for c in sample],
+            **{f"mem_{field}": getattr(memory, field, None) for field in MEMORY_FIELDS},
+            **{f"swap_{field}": getattr(swap, field, None) for field in SWAP_FIELDS},
         }
+
+    def _load(self) -> dict[str, float | None]:
+        load = self._metrics.load_average() or (None, None, None)
+        return dict(zip(LOAD_COLUMNS, load))
+
+    def _uptime(self, boot: float) -> int | None:
+        if not boot:
+            return None
+        now = datetime.fromisoformat(self._clock.now_iso()).timestamp()
+        return int(now - boot)
 
 
 class DiskUsageCollector(SnapshotCollector):
@@ -175,11 +185,11 @@ class DiskUsageCollector(SnapshotCollector):
     slice = slices.DISK_USAGE
     judge_enabled = False
 
-    def __init__(self, metrics: Optional[DiskMetrics] = None, judge_hints: str = ""):
+    def __init__(self, metrics: DiskMetrics, judge_hints: str = "") -> None:
         super().__init__(judge_hints=judge_hints)
-        self._metrics = metrics or DiskMetrics(constants.LOG)
+        self._metrics = metrics
 
-    def collect(self):
+    def collect(self) -> Iterator[dict[str, Any]]:
         io = self._metrics.io_counters()
         for part in self._metrics.partitions():
             try:
@@ -189,24 +199,16 @@ class DiskUsageCollector(SnapshotCollector):
                 # share) — a visible gap is the empty row's absence, not a
                 # crash that kills the whole collector.
                 continue
-            counters = self._io_for(io, part.device)
+            counters = self.io_for(io, part.device)
             yield {
-                "device": part.device,
-                "mountpoint": part.mountpoint,
-                "fstype": part.fstype,
-                "opts": part.opts,
-                "total": usage.total,
-                "used": usage.used,
-                "free": usage.free,
-                "percent": usage.percent,
-                "io_read_bytes": getattr(counters, "read_bytes", None),
-                "io_write_bytes": getattr(counters, "write_bytes", None),
-                "io_read_count": getattr(counters, "read_count", None),
-                "io_write_count": getattr(counters, "write_count", None),
+                **{field: getattr(part, field) for field in PART_FIELDS},
+                **{field: getattr(usage, field) for field in USAGE_FIELDS},
+                **{
+                    f"io_{field}": getattr(counters, field, None) for field in IO_FIELDS
+                },
             }
 
-    @staticmethod
-    def _io_for(io: dict, device: Optional[str]):
+    def io_for(self, io: Mapping[str, object], device: str | None) -> object | None:
         """Match a partition's device (``/dev/sda1``) to its per-disk I/O
         counters, which psutil keys by bare disk name (``sda1`` / ``disk0``).
         Returns None when there's no match (e.g. network/pseudo FS)."""
@@ -228,25 +230,17 @@ class MountsCollector(SnapshotCollector):
     slice = slices.MOUNTS
     judge_fields = ("device", "mountpoint", "fstype", "opts")
 
-    def __init__(self, judge_hints: str = "", disks: Optional[DiskMetrics] = None):
+    def __init__(self, disks: DiskMetrics, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._disks = disks or DiskMetrics(constants.LOG)
+        self._disks = disks
 
-    def collect(self):
-        for p in self._disks.mount_table():
-            yield {
-                "device": p.device,
-                "mountpoint": p.mountpoint,
-                "fstype": p.fstype,
-                "opts": p.opts,
-                "raw_json": json.dumps(
-                    {
-                        "device": p.device,
-                        "mountpoint": p.mountpoint,
-                        "fstype": p.fstype,
-                        "opts": p.opts,
-                        "maxfile": getattr(p, "maxfile", None),
-                        "maxpath": getattr(p, "maxpath", None),
-                    }
-                ),
+    def collect(self) -> Iterator[dict[str, Any]]:
+        for part in self._disks.mount_table():
+            mount = {
+                "device": part.device,
+                "mountpoint": part.mountpoint,
+                "fstype": part.fstype,
+                "opts": part.opts,
             }
+            limits = {field: getattr(part, field, None) for field in MOUNT_LIMIT_FIELDS}
+            yield {**mount, "raw_json": json.dumps({**mount, **limits})}

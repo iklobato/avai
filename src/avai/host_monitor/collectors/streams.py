@@ -1,21 +1,68 @@
-"""Streaming collectors: auth events and process execs, tailed from the OS log."""
-
 from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
+from typing import Any
 
 from .. import constants, slices
 from ..constants import AUTH_LOG_PREDICATE
 from ..runtime import HostPaths, JsonLineStreamSource
 from .base import StreamingCollector
 
+MICROSECONDS_PER_SECOND = 1_000_000
+JOURNAL_PRIORITY = "info"
+HOST_JOURNALS = ("/var/log/journal", "/run/log/journal")
+
+
+class JournalEvent:
+    """One ``journalctl --output=json`` event and its typed fields."""
+
+    def __init__(self, event: Mapping[str, Any]) -> None:
+        self._event = event
+
+    def timestamp(self) -> str | None:
+        """``__REALTIME_TIMESTAMP`` (microseconds since the epoch, as a
+        string) as an ISO-8601 UTC timestamp."""
+        raw = self._event.get("__REALTIME_TIMESTAMP")
+        if not raw:
+            return None
+        try:
+            seconds = int(raw) / MICROSECONDS_PER_SECOND
+        except (TypeError, ValueError):
+            return None
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat(
+            timespec="seconds"
+        )
+
+    def int_field(self, name: str) -> int | None:
+        try:
+            return int(self._event[name]) if self._event.get(name) else None
+        except (TypeError, ValueError):
+            return None
+
+
+class HostJournal:
+    """Journal directory flags for journalctl in container mode."""
+
+    def directory_args(self, candidates: tuple[str, ...]) -> list[str]:
+        """In container mode, point journalctl at the host's journal
+        directory rather than the container's empty one: the first
+        candidate that exists wins."""
+        if not constants.HOST_PREFIX:
+            return []
+        paths = HostPaths()
+        found = next(
+            (path for path in map(paths.translate, candidates) if path.is_dir()), None
+        )
+        return ["--directory", str(found)] if found else []
+
 
 class UnifiedLogAuthParser:
     """Strategy: macOS ``log stream --style ndjson`` event → auth row."""
 
-    def parse(self, event: dict) -> dict:
+    def parse(self, event: dict[str, Any]) -> dict[str, Any]:
         return {
             "event_timestamp": event.get("timestamp"),
             "process": event.get("processImagePath"),
@@ -35,23 +82,14 @@ class AuthEventsCollector(StreamingCollector):
     slice = slices.AUTH_EVENTS
     judge_enabled = True
     judge_fields = ("process", "subsystem", "event_message")
+    predicate = AUTH_LOG_PREDICATE
 
-    def __init__(self, predicate: str = AUTH_LOG_PREDICATE, judge_hints: str = ""):
-        super().__init__(judge_hints=judge_hints)
-        self.predicate = predicate
-
-    def stream(self, stop_event: threading.Event):
-        cmd = [
-            "log",
-            "stream",
-            "--style",
-            "ndjson",
-            "--info",
-            "--predicate",
-            self.predicate,
-        ]
+    def stream(self, stop_event: threading.Event) -> Iterator[dict[str, Any]]:
+        cmd = ["log", "stream", "--style", "ndjson", "--info"]
         source = JsonLineStreamSource(
-            cmd, UnifiedLogAuthParser(), killer_name="log-stream-killer"
+            [*cmd, "--predicate", self.predicate],
+            UnifiedLogAuthParser(),
+            "log-stream-killer",
         )
         yield from source.stream(stop_event)
 
@@ -72,84 +110,55 @@ class LinuxAuthEventsCollector(StreamingCollector):
     judge_enabled = True
     judge_fields = ("process", "subsystem", "event_message")
 
-    _MATCH_GROUPS = [
-        ["SYSLOG_FACILITY=4", "SYSLOG_FACILITY=10"],  # auth + authpriv
-        ["_SYSTEMD_UNIT=sshd.service"],
-        ["_SYSTEMD_UNIT=systemd-logind.service"],
-        ["_COMM=sudo"],
-        ["_COMM=su"],
-        ["_COMM=polkitd"],
-        ["_COMM=login"],
-    ]
+    MATCH_GROUPS = (
+        ("SYSLOG_FACILITY=4", "SYSLOG_FACILITY=10"),  # auth + authpriv
+        ("_SYSTEMD_UNIT=sshd.service",),
+        ("_SYSTEMD_UNIT=systemd-logind.service",),
+        ("_COMM=sudo",),
+        ("_COMM=su",),
+        ("_COMM=polkitd",),
+        ("_COMM=login",),
+    )
 
-    def __init__(self, judge_hints: str = "", priority: str = "info"):
-        super().__init__(judge_hints=judge_hints)
-        self.priority = priority
-
-    def _cmd(self) -> list[str]:
-        cmd = [
-            "journalctl",
-            "-f",
-            "--output=json",
-            "--no-pager",
-            f"--priority={self.priority}",
-        ]
-        # In container mode, point journalctl at the host's journal
-        # directory rather than the container's empty one. Prefer the
-        # persistent journal, but fall back to the runtime (volatile)
-        # journal — hosts with systemd Storage=volatile/auto and no
-        # persistent storage keep logs only under /run/log/journal, so
+    def command(self) -> list[str]:
+        cmd = ["journalctl", "-f", "--output=json", "--no-pager"]
+        cmd.append(f"--priority={JOURNAL_PRIORITY}")
+        # Prefer the persistent journal, but fall back to the runtime
+        # (volatile) journal — hosts with systemd Storage=volatile/auto and
+        # no persistent storage keep logs only under /run/log/journal, so
         # without this fallback auth_events would silently collect nothing.
-        if constants.HOST_PREFIX:
-            for host_journal in (
-                HostPaths().translate("/var/log/journal"),
-                HostPaths().translate("/run/log/journal"),
-            ):
-                if host_journal.is_dir():
-                    cmd.extend(["--directory", str(host_journal)])
-                    break
-        for i, group in enumerate(self._MATCH_GROUPS):
-            if i > 0:
-                cmd.append("+")
-            cmd.extend(group)
+        cmd.extend(HostJournal().directory_args(HOST_JOURNALS))
+        cmd.extend(self._matchers())
         return cmd
 
-    def stream(self, stop_event: threading.Event):
+    def stream(self, stop_event: threading.Event) -> Iterator[dict[str, Any]]:
         source = JsonLineStreamSource(
-            self._cmd(), JournalAuthParser(), killer_name="journalctl-killer"
+            self.command(), JournalAuthParser(), "journalctl-killer"
         )
         yield from source.stream(stop_event)
+
+    def _matchers(self) -> list[str]:
+        matchers: list[str] = []
+        for group in self.MATCH_GROUPS:
+            if matchers:
+                matchers.append("+")
+            matchers.extend(group)
+        return matchers
 
 
 class JournalAuthParser:
     """Strategy: ``journalctl --output=json`` event → auth row."""
 
-    def parse(self, event: dict) -> dict:
-        # journalctl --output=json gives __REALTIME_TIMESTAMP in
-        # microseconds since the epoch (as a string).
-        ts_us = event.get("__REALTIME_TIMESTAMP")
-        ts = None
-        if ts_us:
-            try:
-                ts = datetime.fromtimestamp(
-                    int(ts_us) / 1_000_000, tz=timezone.utc
-                ).isoformat(timespec="seconds")
-            except (TypeError, ValueError):
-                pass
-
-        try:
-            pid = int(event["_PID"]) if event.get("_PID") else None
-        except (TypeError, ValueError):
-            pid = None
-
+    def parse(self, event: dict[str, Any]) -> dict[str, Any]:
+        journal = JournalEvent(event)
         return {
-            "event_timestamp": ts,
+            "event_timestamp": journal.timestamp(),
             "process": event.get("_EXE") or event.get("_COMM"),
             "subsystem": event.get("_SYSTEMD_UNIT") or "syslog",
             "category": str(event.get("SYSLOG_FACILITY") or ""),
             "event_type": f"priority={event.get('PRIORITY', '?')}",
             "event_message": event.get("MESSAGE"),
-            "pid": pid,
+            "pid": journal.int_field("_PID"),
             "raw_json": json.dumps(event),
         }
 
@@ -170,41 +179,36 @@ class MacosProcessExecCollector(StreamingCollector):
     judge_enabled = True
     judge_fields = ("exe_path", "exe_args_json", "uid", "parent_path")
 
-    _EVENTS = ("exec",)
+    EVENTS = ("exec",)
 
-    def stream(self, stop_event: threading.Event):
-        cmd = ["eslogger", *self._EVENTS]
+    def stream(self, stop_event: threading.Event) -> Iterator[dict[str, Any]]:
         source = JsonLineStreamSource(
-            cmd, EsloggerExecParser(), killer_name="eslogger-killer"
+            ["eslogger", *self.EVENTS], EsloggerExecParser(), "eslogger-killer"
         )
         yield from source.stream(stop_event)
 
 
 class EsloggerExecParser:
-    """Strategy: macOS ``eslogger exec`` Endpoint-Security event → exec row."""
+    """Strategy: macOS ``eslogger exec`` Endpoint-Security event → exec row.
 
-    def parse(self, event: dict) -> dict:
-        # eslogger emits ES events: { time, action_type, event,
-        # process, ... } where event.exec.{target, args, ...}
-        event_obj = event.get("event") or {}
-        exec_evt = event_obj.get("exec") or {}
-        target = exec_evt.get("target") or {}
-        target_exe = (target.get("executable") or {}).get("path")
-        args = exec_evt.get("args") or []
+    eslogger emits ES events: { time, action_type, event, process, ... }
+    where event.exec.{target, args, ...}."""
+
+    def parse(self, event: dict[str, Any]) -> dict[str, Any]:
+        exec_event = (event.get("event") or {}).get("exec") or {}
+        target = exec_event.get("target") or {}
         parent = event.get("process") or {}
-        parent_path = (parent.get("executable") or {}).get("path")
         target_token = target.get("audit_token") or {}
-        parent_token = parent.get("audit_token") or {}
         return {
             "event_timestamp": event.get("time"),
             "event_type": "exec",
             "pid": target_token.get("pid"),
-            "ppid": parent_token.get("pid"),
+            "ppid": (parent.get("audit_token") or {}).get("pid"),
             "uid": target_token.get("ruid"),
             "username": None,
-            "exe_path": target_exe,
-            "exe_args_json": json.dumps(args),
-            "parent_path": parent_path,
+            "exe_path": (target.get("executable") or {}).get("path"),
+            "exe_args_json": json.dumps(exec_event.get("args") or []),
+            "parent_path": (parent.get("executable") or {}).get("path"),
             "signing_id": target.get("signing_id"),
             "raw_json": json.dumps(event),
         }
@@ -227,55 +231,36 @@ class LinuxProcessExecCollector(StreamingCollector):
     judge_enabled = True
     judge_fields = ("exe_path", "exe_args_json", "uid", "parent_path")
 
-    def _cmd(self) -> list[str]:
+    def command(self) -> list[str]:
         cmd = ["journalctl", "-f", "--output=json", "--no-pager"]
-        if constants.HOST_PREFIX:
-            host_journal = HostPaths().translate("/var/log/journal")
-            if host_journal.is_dir():
-                cmd.extend(["--directory", str(host_journal)])
+        cmd.extend(HostJournal().directory_args(HOST_JOURNALS[:1]))
         cmd.extend(["_AUDIT_TYPE_NAME=EXECVE", "+", "_AUDIT_TYPE_NAME=SYSCALL"])
         return cmd
 
-    def stream(self, stop_event: threading.Event):
+    def stream(self, stop_event: threading.Event) -> Iterator[dict[str, Any]]:
         source = JsonLineStreamSource(
-            self._cmd(), AuditExecParser(), killer_name="journalctl-audit-killer"
+            self.command(), AuditExecParser(), "journalctl-audit-killer"
         )
         yield from source.stream(stop_event)
 
 
 class AuditExecParser:
-    """Strategy: Linux audit ``journalctl --output=json`` event → exec row."""
+    """Strategy: Linux audit ``journalctl --output=json`` event → exec row.
 
-    def parse(self, event: dict) -> dict:
-        ts_us = event.get("__REALTIME_TIMESTAMP")
-        ts = None
-        if ts_us:
-            try:
-                ts = datetime.fromtimestamp(
-                    int(ts_us) / 1_000_000, tz=timezone.utc
-                ).isoformat(timespec="seconds")
-            except (TypeError, ValueError):
-                pass
-        try:
-            pid = int(event["_PID"]) if event.get("_PID") else None
-        except (TypeError, ValueError):
-            pid = None
-        try:
-            uid = int(event["_UID"]) if event.get("_UID") else None
-        except (TypeError, ValueError):
-            uid = None
-        # audit EXECVE messages carry the args as separate fields a0,
-        # a1, ... in the structured message; SYSCALL records have
-        # the exe= path and comm= name. The combined-record view is
-        # typically captured under MESSAGE; we surface what's
-        # available and dump the full event into raw_json so the
-        # judge sees everything.
+    Audit EXECVE messages carry the args as separate fields a0, a1, ... in
+    the structured message; SYSCALL records have the exe= path and comm=
+    name. The combined-record view is typically captured under MESSAGE; we
+    surface what's available and dump the full event into raw_json so the
+    judge sees everything."""
+
+    def parse(self, event: dict[str, Any]) -> dict[str, Any]:
+        journal = JournalEvent(event)
         return {
-            "event_timestamp": ts,
+            "event_timestamp": journal.timestamp(),
             "event_type": event.get("_AUDIT_TYPE_NAME") or "AUDIT",
-            "pid": pid,
+            "pid": journal.int_field("_PID"),
             "ppid": None,
-            "uid": uid,
+            "uid": journal.int_field("_UID"),
             "username": None,
             "exe_path": event.get("EXE") or event.get("_EXE"),
             "exe_args_json": None,

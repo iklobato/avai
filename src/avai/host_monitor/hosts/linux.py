@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
+from .. import constants
 from ..collectors import (
     BrowserExtensionsCollector,
     DiskUsageCollector,
@@ -69,7 +70,15 @@ from ..persistence_collectors import (
     SshKnownHostsCollector,
 )
 from ..prompts import Prompts
-from ..runtime import CommandRunner, CommandSnapshot, FileSnapshot, HostPaths
+from ..runtime import (
+    Clock,
+    CommandRunner,
+    CommandSnapshot,
+    DiskMetrics,
+    FileSnapshot,
+    HostPaths,
+    SystemMetrics,
+)
 
 # name:password:gid:members
 _GROUP_FIELDS = 4
@@ -220,7 +229,7 @@ class LinuxHost:
             expanded_browser_profiles[browser] = out
 
         return [
-            ProcessCollector(judge_hints=h("processes")),
+            ProcessCollector(SystemMetrics(), judge_hints=h("processes")),
             NetworkConnectionsCollector(judge_hints=h("network_connections")),
             ListeningPortsCollector(judge_hints=h("listening_ports")),
             NetworkFlowsCollector(
@@ -230,9 +239,11 @@ class LinuxHost:
                 judge_hints=h("dns_queries"), iface_args=iface, runner=self._runner
             ),
             NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
-            HostResourcesCollector(judge_hints=h("host_resources")),
-            DiskUsageCollector(judge_hints=h("disk_usage")),
-            LogTailCollector(judge_hints=h("log_entries"), runner=self._runner),
+            HostResourcesCollector(
+                SystemMetrics(), Clock(), judge_hints=h("host_resources")
+            ),
+            DiskUsageCollector(DiskMetrics(constants.LOG), judge_hints=h("disk_usage")),
+            LogTailCollector.create(h("log_entries"), self._runner, constants.LOG),
             LinuxUsbDevicesCollector(judge_hints=h("usb_devices")),
             LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),
             LinuxWifiCollector(judge_hints=h("wifi_state"), runner=self._runner),
@@ -249,7 +260,7 @@ class LinuxHost:
             LinuxInstalledAppsCollector(
                 judge_hints=h("installed_apps"), runner=self._runner
             ),
-            MountsCollector(judge_hints=h("mounts")),
+            MountsCollector(DiskMetrics(constants.LOG), judge_hints=h("mounts")),
             SetuidFilesCollector(judge_hints=h("setuid_files"), fs=self._fs),
             SshAuthorizedKeysCollector(
                 judge_hints=h("ssh_authorized_keys"), fs=self._fs
