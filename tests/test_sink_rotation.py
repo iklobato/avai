@@ -9,6 +9,8 @@ deletes. Use a real on-disk SQLite so size measurements are real.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from sqlalchemy import create_engine, select, text
@@ -24,6 +26,7 @@ from avai.host_monitor.models import (
 )
 from avai.host_monitor.runtime import Clock
 from avai.host_monitor.db_bootstrap import SqlitePragmas
+from avai.host_monitor.sink_admin import DatabaseFile
 
 
 class TestConnectionPragmas:
@@ -394,3 +397,42 @@ class TestTouchJudgments:
 
     def test_empty_hash_list_is_noop(self, file_sink):
         file_sink.touch_judgments("processes", [], Clock().now_iso())  # no crash
+
+
+class _PercentEncodedSqliteUrl:
+    """A sqlite url the way SQLAlchemy 2.1 prints it: the path is
+    percent-encoded in str(), while .database keeps the real path."""
+
+    def __init__(self, database: str) -> None:
+        self.database = database
+
+    def __str__(self) -> str:
+        return "sqlite:///" + quote(self.database)
+
+    def get_backend_name(self) -> str:
+        return "sqlite"
+
+
+class _EngineAt:
+    def __init__(self, url: _PercentEncodedSqliteUrl) -> None:
+        self.url = url
+
+
+class TestDatabaseFileSize:
+    DB_BYTES = 10
+    WAL_BYTES = 5
+
+    def test_reads_the_real_path_when_the_url_is_percent_encoded(
+        self, tmp_path: Path
+    ) -> None:
+        db = tmp_path / "a#b.db"
+        db.write_bytes(b"x" * self.DB_BYTES)
+        (tmp_path / "a#b.db-wal").write_bytes(b"x" * self.WAL_BYTES)
+        engine = _EngineAt(_PercentEncodedSqliteUrl(str(db)))
+
+        assert DatabaseFile(engine).size_bytes() == self.DB_BYTES + self.WAL_BYTES
+
+    def test_in_memory_database_has_no_size(self) -> None:
+        engine = create_engine("sqlite://")
+
+        assert DatabaseFile(engine).size_bytes() == 0

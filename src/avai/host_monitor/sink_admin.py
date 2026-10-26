@@ -206,7 +206,7 @@ class PruneStats:
 class DatabaseFile:
     """Sizes of the SQLite database behind an engine."""
 
-    SQLITE_PREFIX = "sqlite:///"
+    SQLITE_BACKEND = "sqlite"
     SIDECARS = ("", "-wal", "-shm")
 
     def __init__(self, engine: Engine) -> None:
@@ -214,11 +214,13 @@ class DatabaseFile:
 
     def size_bytes(self) -> int:
         """Total on-disk bytes including the SQLite WAL/SHM sidecars."""
-        url = str(self._engine.url)
-        if not url.startswith(self.SQLITE_PREFIX):
+        # url.database is the real path; str(url) percent-encodes it on
+        # SQLAlchemy 2.1 (C%3A%5C... on Windows).
+        url = self._engine.url
+        if url.get_backend_name() != self.SQLITE_BACKEND or not url.database:
             return 0
-        base = url[len(self.SQLITE_PREFIX) :]
-        return sum(self._size(Path(base + suffix)) for suffix in self.SIDECARS)
+        paths = (Path(url.database + suffix) for suffix in self.SIDECARS)
+        return sum(self._size(path) for path in paths)
 
     def live_bytes(self) -> int:
         """Post-VACUUM size estimated from SQLite pragmas. Deletes only mark
