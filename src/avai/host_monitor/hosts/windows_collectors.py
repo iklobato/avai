@@ -20,7 +20,7 @@ import threading
 from itertools import takewhile
 from typing import Any, Iterator
 
-from .. import slices
+from ..slices import Slices
 from ..collectors import SnapshotCollector, StreamingCollector
 from ..net_collectors import PsJson
 from ..runtime import CommandRunner, CommandSnapshot, JsonLineStreamSource, RowParser
@@ -270,7 +270,7 @@ class NetshWlanParser:
 class WindowsInstalledAppsCollector(SnapshotCollector):
     """Installed programs from the registry Uninstall keys."""
 
-    slice = slices.INSTALLED_APPS
+    slice = Slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
     SCRIPT = (
@@ -296,7 +296,7 @@ class WindowsLaunchItemsCollector(SnapshotCollector):
     """Autostart persistence: registry Run keys (HKLM + HKCU) plus
     scheduled tasks."""
 
-    slice = slices.LAUNCH_ITEMS
+    slice = Slices.LAUNCH_ITEMS
     judge_fields = (
         "scope",
         "label",
@@ -350,7 +350,7 @@ class WindowsSystemIntegrityCollector(SnapshotCollector):
     Raw posture is kept in ``raw_json`` for the judge.
     """
 
-    slice = slices.SYSTEM_INTEGRITY
+    slice = Slices.SYSTEM_INTEGRITY
     judge_fields = (
         "filevault_active",
         "firewall_global_state",
@@ -390,7 +390,7 @@ class WindowsUsbDevicesCollector(SnapshotCollector):
     """Present USB devices via ``Get-PnpDevice -Class USB``, filling the
     columns :class:`LinuxUsbDevicesCollector` reads from sysfs."""
 
-    slice = slices.USB_DEVICES
+    slice = Slices.USB_DEVICES
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
     SCRIPT = (
@@ -410,7 +410,7 @@ class WindowsUsbDevicesCollector(SnapshotCollector):
 class WindowsBluetoothCollector(SnapshotCollector):
     """Present Bluetooth devices via ``Get-PnpDevice -Class Bluetooth``."""
 
-    slice = slices.BLUETOOTH_DEVICES
+    slice = Slices.BLUETOOTH_DEVICES
     judge_fields = ("name", "address", "minor_type")
 
     SCRIPT = (
@@ -430,7 +430,7 @@ class WindowsWifiCollector(SnapshotCollector):
     """Wireless interface state via ``netsh wlan show interfaces`` (text;
     netsh has no JSON mode), in :class:`LinuxWifiCollector`'s columns."""
 
-    slice = slices.WIFI_STATE
+    slice = Slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
     NETSH_TIMEOUT_S = 15
@@ -522,7 +522,7 @@ class WindowsAuthEventsCollector(StreamingCollector):
     consumes. Needs the Security-log audit policy that records these IDs.
     """
 
-    slice = slices.AUTH_EVENTS
+    slice = Slices.AUTH_EVENTS
     judge_enabled = True
     judge_fields = ("process", "subsystem", "event_message")
 
@@ -566,7 +566,7 @@ class WindowsProcessExecCollector(StreamingCollector):
     ``RecordId``-keyed poll loop as :class:`WindowsAuthEventsCollector`.
     """
 
-    slice = slices.PROCESS_EXEC_EVENTS
+    slice = Slices.PROCESS_EXEC_EVENTS
     judge_enabled = True
     judge_fields = ("exe_path", "exe_args_json", "parent_path", "username")
 

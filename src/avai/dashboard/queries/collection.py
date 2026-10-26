@@ -17,8 +17,8 @@ from avai.host_monitor import (
     IncidentNarrativeRow,
     Judgement,
     RiskScoreRow,
-    slices,
 )
+from avai.host_monitor.slices import Slices
 
 from .common import COLLECTOR_MODELS, VERDICTS, _existing_tables, _row_and_artifact
 
@@ -146,7 +146,7 @@ def cost_since(session: Session, since: str) -> float:
     )
 
 
-_STREAMING_COLLECTORS = {s.name for s in slices.ALL if s.streaming}
+_STREAMING_COLLECTORS = {s.name for s in Slices.ALL if s.streaming}
 
 
 def row_counts(

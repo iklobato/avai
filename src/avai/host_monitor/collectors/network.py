@@ -5,7 +5,7 @@ import socket
 from collections.abc import Iterator, Mapping
 from typing import Any, NamedTuple
 
-from .. import slices
+from ..slices import Slices
 from ..runtime import Clock, CommandRunner, PsutilConnections, SystemMetrics
 from ..runtime.row_source import MissingToolError
 from .base import SnapshotCollector
@@ -339,7 +339,7 @@ class QueryTable:
 
 
 class NetworkConnectionsCollector(SnapshotCollector):
-    slice = slices.NETWORK_CONNECTIONS
+    slice = Slices.NETWORK_CONNECTIONS
     # Judged on the remote-endpoint identity. Dedup over (remote ip, port,
     # status) collapses the many sockets to one verdict per peer (judged once
     # ever via content_hash), and threat-intel for the remote IP is attached
@@ -367,7 +367,7 @@ class NetworkConnectionsCollector(SnapshotCollector):
 
 
 class ListeningPortsCollector(SnapshotCollector):
-    slice = slices.LISTENING_PORTS
+    slice = Slices.LISTENING_PORTS
     judge_fields = ("process_name", "family", "type", "laddr_ip", "laddr_port")
 
     def __init__(self, connections: PsutilConnections, judge_hints: str = "") -> None:
@@ -408,7 +408,7 @@ class NetworkFlowsCollector(SnapshotCollector):
     the monitor already runs as root.
     """
 
-    slice = slices.NETWORK_FLOWS
+    slice = Slices.NETWORK_FLOWS
     judge_fields = ("iface", "proto", "dst_ip", "dst_port")
 
     CAPTURE_SECONDS = 8  # wall-clock cap per cycle
@@ -462,7 +462,7 @@ class DnsQueriesCollector(SnapshotCollector):
     ``… 1234+ A? example.com. (29)``. Requires root to capture.
     """
 
-    slice = slices.DNS_QUERIES
+    slice = Slices.DNS_QUERIES
     judge_fields = ("qname", "qtype", "server_ip")
 
     CAPTURE_SECONDS = 8
@@ -521,7 +521,7 @@ class DnsQueriesCollector(SnapshotCollector):
 
 
 class NetworkInterfacesCollector(SnapshotCollector):
-    slice = slices.NETWORK_INTERFACES
+    slice = Slices.NETWORK_INTERFACES
     judge_enabled = False  # counters need behavioural analysis
 
     def __init__(self, metrics: SystemMetrics, judge_hints: str = "") -> None:

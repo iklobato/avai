@@ -19,7 +19,7 @@ import re
 from collections.abc import Iterator
 from typing import Any
 
-from . import slices
+from .slices import Slices
 from .collectors import SnapshotCollector
 from .runtime import RowSource
 
@@ -75,22 +75,22 @@ class SourceSnapshotCollector(SnapshotCollector):
 
 
 class ArpTableCollector(SourceSnapshotCollector):
-    slice = slices.ARP_TABLE
+    slice = Slices.ARP_TABLE
     judge_fields = ("ip", "mac", "interface", "flags")
 
 
 class NdpNeighborsCollector(SourceSnapshotCollector):
-    slice = slices.NDP_NEIGHBORS
+    slice = Slices.NDP_NEIGHBORS
     judge_fields = ("ip", "mac", "interface", "state")
 
 
 class RoutesCollector(SourceSnapshotCollector):
-    slice = slices.ROUTES
+    slice = Slices.ROUTES
     judge_fields = ("destination", "gateway", "interface", "flags")
 
 
 class DnsResolversCollector(SourceSnapshotCollector):
-    slice = slices.DNS_RESOLVERS
+    slice = Slices.DNS_RESOLVERS
     judge_fields = ("server", "scope", "search", "interface")
 
 

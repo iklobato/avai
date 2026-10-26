@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..hosts.capabilities import FilesystemLayout
 
-from .. import slices
+from ..slices import Slices
 from ..constants import WATCHED_FILES
 from ..runtime import (
     Coerce,
@@ -36,7 +36,7 @@ FILE_STAT_FIELDS = ("size", "mtime", "mode", "uid", "gid")
 
 
 class SystemIntegrityCollector(SnapshotCollector):
-    slice = slices.SYSTEM_INTEGRITY
+    slice = Slices.SYSTEM_INTEGRITY
     judge_fields = (
         "filevault_active",
         "firewall_global_state",
@@ -130,7 +130,7 @@ class SystemIntegrityCollector(SnapshotCollector):
 
 
 class FileIntegrityCollector(SnapshotCollector):
-    slice = slices.FILE_INTEGRITY
+    slice = Slices.FILE_INTEGRITY
     judge_fields = ("path", "sha256", "exists_flag")
 
     def __init__(
@@ -241,7 +241,7 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     vnc systemd status) live in ``raw_json`` for the LLM judge.
     """
 
-    slice = slices.SYSTEM_INTEGRITY
+    slice = Slices.SYSTEM_INTEGRITY
     judge_fields = (
         "filevault_active",
         "firewall_global_state",
@@ -335,7 +335,7 @@ class SetuidFilesCollector(SnapshotCollector):
     host's ``/usr/bin`` rather than its own.
     """
 
-    slice = slices.SETUID_FILES
+    slice = Slices.SETUID_FILES
     judge_fields = ("path", "uid", "setuid", "setgid")
 
     def __init__(self, fs: FilesystemLayout, judge_hints: str = "") -> None:

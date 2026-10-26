@@ -6,7 +6,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
-from .. import slices
+from ..slices import Slices
 from ..runtime import Coerce, CommandRunner, HostPaths
 from .base import SnapshotCollector
 
@@ -31,7 +31,7 @@ class SystemProfiler:
 
 
 class UsbDevicesCollector(SnapshotCollector):
-    slice = slices.USB_DEVICES
+    slice = Slices.USB_DEVICES
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
     def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
@@ -63,7 +63,7 @@ class UsbDevicesCollector(SnapshotCollector):
 
 
 class BluetoothCollector(SnapshotCollector):
-    slice = slices.BLUETOOTH_DEVICES
+    slice = Slices.BLUETOOTH_DEVICES
     judge_fields = ("name", "address", "minor_type")
     GROUPS = (
         "device_connected",
@@ -104,7 +104,7 @@ class BluetoothCollector(SnapshotCollector):
 
 
 class WifiCollector(SnapshotCollector):
-    slice = slices.WIFI_STATE
+    slice = Slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
     def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
@@ -157,7 +157,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
     only want device-level entries.
     """
 
-    slice = slices.USB_DEVICES
+    slice = Slices.USB_DEVICES
     judge_fields = ("name", "vendor_id", "product_id", "manufacturer")
 
     ATTRS = (
@@ -261,7 +261,7 @@ class LinuxBluetoothCollector(SnapshotCollector):
     root-only — the monitor container runs as root.
     """
 
-    slice = slices.BLUETOOTH_DEVICES
+    slice = Slices.BLUETOOTH_DEVICES
     judge_fields = ("name", "address", "minor_type")
 
     def collect(self) -> Iterator[dict[str, Any]]:
@@ -311,7 +311,7 @@ class LinuxWifiCollector(SnapshotCollector):
     exists.
     """
 
-    slice = slices.WIFI_STATE
+    slice = Slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
     def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:

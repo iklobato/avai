@@ -5,7 +5,7 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime
 from typing import Any
 
-from .. import slices
+from ..slices import Slices
 from ..runtime import Clock, DiskMetrics, SystemMetrics
 from .base import SnapshotCollector
 
@@ -34,7 +34,7 @@ MOUNT_LIMIT_FIELDS = ("maxfile", "maxpath")
 
 
 class ProcessCollector(SnapshotCollector):
-    slice = slices.PROCESSES
+    slice = Slices.PROCESSES
     judge_fields = ("name", "exe", "cmdline_json", "username")
     ATTRS = [
         "pid",
@@ -125,7 +125,7 @@ class HostResourcesCollector(SnapshotCollector):
     the dashboard trends it instead of asking the LLM to classify it.
     """
 
-    slice = slices.HOST_RESOURCES
+    slice = Slices.HOST_RESOURCES
     judge_enabled = False
 
     # Blocking CPU sample window (seconds). The monitor cycles every few
@@ -182,7 +182,7 @@ class DiskUsageCollector(SnapshotCollector):
     :class:`DiskMetrics` seam. Continuous metric → ``judge_enabled=False``.
     """
 
-    slice = slices.DISK_USAGE
+    slice = Slices.DISK_USAGE
     judge_enabled = False
 
     def __init__(self, metrics: DiskMetrics, judge_hints: str = "") -> None:
@@ -227,7 +227,7 @@ class MountsCollector(SnapshotCollector):
     those are exactly what we want to watch for surprises.
     """
 
-    slice = slices.MOUNTS
+    slice = Slices.MOUNTS
     judge_fields = ("device", "mountpoint", "fstype", "opts")
 
     def __init__(self, disks: DiskMetrics, judge_hints: str = "") -> None:

@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .. import constants, slices
+from .. import constants
+from ..slices import Slices
 from ..constants import APP_INFO_KEYS
 from ..enums import Browser
 from ..runtime import Coerce, CommandRunner, ExternalSqliteReader, HostPaths
@@ -162,7 +163,7 @@ class FirefoxExtensionReader(BrowserExtensionReader):
 
 
 class QuarantineCollector(SnapshotCollector):
-    slice = slices.QUARANTINE_EVENTS
+    slice = Slices.QUARANTINE_EVENTS
     judge_fields = ("agent_bundle_id", "agent_name", "origin_url", "data_url")
     COLUMN_MAP = (
         ("LSQuarantineEventIdentifier", "event_id"),
@@ -205,7 +206,7 @@ class ExtensionReaders:
 
 
 class BrowserExtensionsCollector(SnapshotCollector):
-    slice = slices.BROWSER_EXTENSIONS
+    slice = Slices.BROWSER_EXTENSIONS
     judge_fields = (
         "browser",
         "extension_id",
@@ -242,7 +243,7 @@ class BrowserExtensionsCollector(SnapshotCollector):
 
 
 class InstalledAppsCollector(SnapshotCollector):
-    slice = slices.INSTALLED_APPS
+    slice = Slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
     def collect(self) -> Iterator[dict[str, Any]]:
@@ -388,7 +389,7 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
     stable identifier in either case.
     """
 
-    slice = slices.INSTALLED_APPS
+    slice = Slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
     def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
@@ -408,7 +409,7 @@ class MdmProfilesCollector(SnapshotCollector):
     SPConfigurationProfileDataType`` gives us a structured (JSON)
     view of every installed profile."""
 
-    slice = slices.MDM_PROFILES
+    slice = Slices.MDM_PROFILES
     judge_fields = ("identifier", "display_name", "organization", "profile_scope")
 
     def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
@@ -453,7 +454,7 @@ class KernelExtensionsCollector(SnapshotCollector):
     ones via the prompt hints.
     """
 
-    slice = slices.KERNEL_EXTENSIONS
+    slice = Slices.KERNEL_EXTENSIONS
     judge_fields = ("bundle_id", "name", "team_id")
 
     def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
@@ -494,7 +495,7 @@ class SystemExtensionsCollector(SnapshotCollector):
     identifiers (network_extension, endpoint_security, …).
     """
 
-    slice = slices.SYSTEM_EXTENSIONS
+    slice = Slices.SYSTEM_EXTENSIONS
     judge_fields = ("bundle_id", "team_id")
 
     def collect(self) -> Iterator[dict[str, Any]]:

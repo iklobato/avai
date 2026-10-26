@@ -24,7 +24,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from . import slices
+from .slices import Slices
 from .constants import LOG
 from .enums import FeedbackLabel, Verdict
 from .judge import Judgment
@@ -79,7 +79,7 @@ _DB_FILE_MODE = 0o664  # rw-rw-r--
 # finding. Keyed by the raw string so lookup on a stored label is exact.
 # Streaming events carry a StreamingSession run_id, never a CollectionRun's,
 # so pruning trims them by collected_at instead of by run.
-_STREAMING_MODELS = tuple(s.model for s in slices.ALL if s.streaming)
+_STREAMING_MODELS = tuple(s.model for s in Slices.ALL if s.streaming)
 _SNAPSHOT_MODELS = tuple(
     m for m in _RowBase.__subclasses__() if m not in _STREAMING_MODELS
 )

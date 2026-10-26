@@ -6,7 +6,8 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from .. import constants, slices
+from .. import constants
+from ..slices import Slices
 from ..constants import AUTH_LOG_PREDICATE
 from ..runtime import HostPaths, JsonLineStreamSource
 from .base import StreamingCollector
@@ -79,7 +80,7 @@ class AuthEventsCollector(StreamingCollector):
     """Tails the macOS unified log forever via ``log stream``. Each
     matching event is yielded as it arrives — no polling gaps."""
 
-    slice = slices.AUTH_EVENTS
+    slice = Slices.AUTH_EVENTS
     judge_enabled = True
     judge_fields = ("process", "subsystem", "event_message")
     predicate = AUTH_LOG_PREDICATE
@@ -106,7 +107,7 @@ class LinuxAuthEventsCollector(StreamingCollector):
     group OR by default.
     """
 
-    slice = slices.AUTH_EVENTS
+    slice = Slices.AUTH_EVENTS
     judge_enabled = True
     judge_fields = ("process", "subsystem", "event_message")
 
@@ -175,7 +176,7 @@ class MacosProcessExecCollector(StreamingCollector):
     calls, not O(every-exec).
     """
 
-    slice = slices.PROCESS_EXEC_EVENTS
+    slice = Slices.PROCESS_EXEC_EVENTS
     judge_enabled = True
     judge_fields = ("exe_path", "exe_args_json", "uid", "parent_path")
 
@@ -227,7 +228,7 @@ class LinuxProcessExecCollector(StreamingCollector):
     PAM events; the execve rule is the additional configuration.)
     """
 
-    slice = slices.PROCESS_EXEC_EVENTS
+    slice = Slices.PROCESS_EXEC_EVENTS
     judge_enabled = True
     judge_fields = ("exe_path", "exe_args_json", "uid", "parent_path")
 

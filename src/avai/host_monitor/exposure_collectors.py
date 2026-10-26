@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from . import slices
+from .slices import Slices
 from .net_collectors import PsJson, SourceSnapshotCollector
 
 NET_FILESYSTEMS = frozenset({"smbfs", "nfs", "nfs4", "afpfs", "webdav", "cifs", "ftp"})
@@ -23,27 +23,27 @@ NET_FILESYSTEMS = frozenset({"smbfs", "nfs", "nfs4", "afpfs", "webdav", "cifs", 
 
 
 class ProxyConfigCollector(SourceSnapshotCollector):
-    slice = slices.PROXY_CONFIG
+    slice = Slices.PROXY_CONFIG
     judge_fields = ("scope", "host", "port", "pac_url")
 
 
 class LoginSessionsCollector(SourceSnapshotCollector):
-    slice = slices.LOGIN_SESSIONS
+    slice = Slices.LOGIN_SESSIONS
     judge_fields = ("user", "tty", "source")
 
 
 class NetworkSharesCollector(SourceSnapshotCollector):
-    slice = slices.NETWORK_SHARES
+    slice = Slices.NETWORK_SHARES
     judge_fields = ("remote", "mountpoint", "fstype")
 
 
 class PromiscuousInterfacesCollector(SourceSnapshotCollector):
-    slice = slices.PROMISCUOUS_IFACES
+    slice = Slices.PROMISCUOUS_IFACES
     judge_fields = ("interface", "promiscuous", "flags")
 
 
 class TrustedRootsCollector(SourceSnapshotCollector):
-    slice = slices.TRUSTED_ROOTS
+    slice = Slices.TRUSTED_ROOTS
     judge_fields = ("subject", "fingerprint")
 
 

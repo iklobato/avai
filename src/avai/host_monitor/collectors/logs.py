@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import constants, slices
+from .. import constants
+from ..slices import Slices
 from ..runtime import CommandRunner, HostPaths
 from .base import SnapshotCollector
 
@@ -198,7 +199,7 @@ class LogTailCollector(SnapshotCollector):
     shown for the latest run only, like the other snapshot collectors.
     """
 
-    slice = slices.LOG_ENTRIES
+    slice = Slices.LOG_ENTRIES
     judge_enabled = False
 
     def __init__(

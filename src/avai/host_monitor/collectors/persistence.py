@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 if TYPE_CHECKING:
     from ..hosts.capabilities import FilesystemLayout, PrivilegedAccounts
 
-from .. import slices
+from ..slices import Slices
 from ..constants import LAUNCH_DIRS
 from ..enums import LaunchScope
 from ..runtime import Coerce, Digest, HostPaths
@@ -147,7 +147,7 @@ class LaunchPlist:
 
 
 class LaunchItemsCollector(SnapshotCollector):
-    slice = slices.LAUNCH_ITEMS
+    slice = Slices.LAUNCH_ITEMS
     judge_fields = LAUNCH_JUDGE_FIELDS
 
     def collect(self) -> Iterator[dict[str, Any]]:
@@ -192,7 +192,7 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
     ``user_crontab``.
     """
 
-    slice = slices.LAUNCH_ITEMS
+    slice = Slices.LAUNCH_ITEMS
     judge_fields = LAUNCH_JUDGE_FIELDS
 
     def collect(self) -> Iterator[dict[str, Any]]:
@@ -445,7 +445,7 @@ class SshAuthorizedKeysCollector(SnapshotCollector):
     classic, quiet persistence backdoor invisible to process/network
     collectors."""
 
-    slice = slices.SSH_AUTHORIZED_KEYS
+    slice = Slices.SSH_AUTHORIZED_KEYS
     judge_fields = ("path", "owner", "key_type", "fingerprint")
 
     def __init__(self, fs: FilesystemLayout, judge_hints: str = "") -> None:
@@ -484,7 +484,7 @@ class HostsFileCollector(SnapshotCollector):
     attacker IP (phishing / update hijack) or sinkholes a security domain
     to 0.0.0.0 is a cheap, high-impact tamper that nothing else catches."""
 
-    slice = slices.HOSTS_FILE
+    slice = Slices.HOSTS_FILE
     judge_fields = ("ip", "hostnames")
 
     def __init__(self, fs: FilesystemLayout, judge_hints: str = "") -> None:
@@ -523,7 +523,7 @@ class PrivilegeConfigCollector(SnapshotCollector):
     rules, members of the admin/wheel/sudo groups, and UID-0 accounts.
     New entries here are privilege-escalation persistence."""
 
-    slice = slices.PRIVILEGE_CONFIG
+    slice = Slices.PRIVILEGE_CONFIG
     judge_fields = ("kind", "subject", "detail")
 
     def __init__(

@@ -18,10 +18,10 @@ from sqlalchemy.orm import Session
 
 from avai.host_monitor import (
     Judgement,
-    slices,
 )
+from avai.host_monitor.slices import Slices
 
-COLLECTOR_MODELS = {s.name: s.model for s in slices.ALL}
+COLLECTOR_MODELS = {s.name: s.model for s in Slices.ALL}
 
 
 DISPLAY_FIELDS: dict[str, tuple[str, ...]] = {

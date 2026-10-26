@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, NamedTuple
 
 import yara
 
-from .. import constants, slices
+from .. import constants
+from ..slices import Slices
 from ..runtime import Clock, Digest
 from .base import SnapshotCollector
 
@@ -392,7 +393,7 @@ class FileScanCollector(SnapshotCollector):
     enriched). avai stays observe-only: nothing is quarantined or killed.
     """
 
-    slice = slices.FILE_SCAN
+    slice = Slices.FILE_SCAN
     judge_fields = ("path", "sha256", "rule", "namespace", "tags_json")
 
     def __init__(
