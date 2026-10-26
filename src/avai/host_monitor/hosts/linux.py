@@ -254,9 +254,8 @@ class LinuxHost:
             LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),
             LinuxWifiCollector(judge_hints=h("wifi_state"), runner=self._runner),
             LinuxLaunchItemsCollector(judge_hints=h("launch_items")),
-            BrowserExtensionsCollector(
-                judge_hints=h("browser_extensions"),
-                profiles=expanded_browser_profiles,
+            BrowserExtensionsCollector.create(
+                expanded_browser_profiles, judge_hints=h("browser_extensions")
             ),
             LinuxSystemIntegrityCollector(
                 judge_hints=h("system_integrity"), runner=self._runner

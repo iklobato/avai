@@ -40,6 +40,7 @@ from ..collectors import (
     UsbDevicesCollector,
     WifiCollector,
 )
+from ..constants import BROWSER_PROFILES
 from ..exposure_collectors import (
     LoginSessionsCollector,
     MacosCertParser,
@@ -215,7 +216,9 @@ class MacOSHost:
             WifiCollector(judge_hints=h("wifi_state"), runner=self._runner),
             LaunchItemsCollector(judge_hints=h("launch_items")),
             QuarantineCollector(judge_hints=h("quarantine_events")),
-            BrowserExtensionsCollector(judge_hints=h("browser_extensions")),
+            BrowserExtensionsCollector.create(
+                BROWSER_PROFILES, judge_hints=h("browser_extensions")
+            ),
             SystemIntegrityCollector(
                 judge_hints=h("system_integrity"), runner=self._runner
             ),

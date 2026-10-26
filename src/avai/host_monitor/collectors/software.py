@@ -1,119 +1,207 @@
-"""Installed software: apps and packages, browser extensions, downloads,
-profiles and extensions."""
-
 from __future__ import annotations
 
 import configparser
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any
 
 from .. import constants, slices
-from ..constants import APP_INFO_KEYS, BROWSER_PROFILES
+from ..constants import APP_INFO_KEYS
 from ..enums import Browser
 from ..runtime import Coerce, CommandRunner, ExternalSqliteReader, HostPaths
 from .base import SnapshotCollector
 
+PROFILER_TIMEOUT_S = 30
+KEXT_PROFILER_TIMEOUT_S = 60
+DPKG_TIMEOUT_S = 30
+DPKG_FIELDS = ("Status", "Package", "Version", "Architecture", "Description")
+DPKG_FORMAT = (
+    "${db:Status-Status}\t${Package}\t${Version}\t${Architecture}\t${binary:Summary}\n"
+)
+DESKTOP_ROOTS = (
+    "/usr/share/applications",
+    "/usr/local/share/applications",
+    "/var/lib/flatpak/exports/share/applications",
+)
+DESKTOP_HOME_ROOTS = (
+    "~/.local/share/applications",
+    "~/.local/share/flatpak/exports/share/applications",
+)
+DESKTOP_SECTION = "Desktop Entry"
+KEXT_DETAIL_KEYS = frozenset(
+    {
+        "_name",
+        "spext_bundleid",
+        "spext_version",
+        "spext_path",
+        "spext_signed_by",
+        "spext_obtained_from",
+        "spext_notarized",
+        "spext_loaded",
+        "spext_loadable",
+        "spext_lastModified",
+        "spext_hasAllDependencies",
+    }
+)
+PROFILE_ID_KEY = "spconfigprofile_profile_identifier"
+
+
+class JsonFile:
+    """A JSON document on disk; None when unreadable or malformed."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def load(self) -> Any | None:
+        try:
+            return json.loads(self._path.read_text(encoding="utf-8", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+
+class ProfilerReport:
+    """The entries of one ``system_profiler -json <DataType>`` report; []
+    when the tool fails or prints something unexpected."""
+
+    def __init__(self, runner: CommandRunner, data_type: str) -> None:
+        self._runner = runner
+        self._data_type = data_type
+
+    def entries(self, timeout: int) -> list[Any]:
+        command = ["system_profiler", "-json", self._data_type]
+        try:
+            report = self._runner.json(command, timeout=timeout)
+        except (RuntimeError, json.JSONDecodeError):
+            return []
+        if not isinstance(report, dict):
+            return []
+        return report.get(self._data_type, []) or []
+
 
 class BrowserExtensionReader(ABC):
     @abstractmethod
-    def read(self, base: Path, browser: Browser) -> Iterable[dict]: ...
+    def read(self, base: Path, browser: Browser) -> Iterable[dict[str, Any]]: ...
 
 
 class ChromiumExtensionReader(BrowserExtensionReader):
-    def read(self, base, browser):
+    def read(self, base: Path, browser: Browser) -> Iterator[dict[str, Any]]:
         try:
             profile_dirs = list(base.iterdir())
         except OSError:
             return
-        for profile_dir in profile_dirs:
-            ext_root = profile_dir / "Extensions"
-            if not ext_root.is_dir():
-                continue
-            for ext_id_dir in ext_root.iterdir():
-                if not ext_id_dir.is_dir():
-                    continue
-                for version_dir in ext_id_dir.iterdir():
-                    manifest = version_dir / "manifest.json"
-                    if not manifest.is_file():
-                        continue
-                    try:
-                        m = json.loads(
-                            manifest.read_text(encoding="utf-8", errors="replace")
-                        )
-                    except (json.JSONDecodeError, OSError):
-                        continue
-                    yield {
-                        "browser": str(browser),
-                        "profile": profile_dir.name,
-                        "extension_id": ext_id_dir.name,
-                        "name": m.get("name"),
-                        "version": m.get("version"),
-                        "permissions_json": json.dumps(m.get("permissions") or []),
-                        "host_permissions_json": json.dumps(
-                            m.get("host_permissions") or m.get("matches") or []
-                        ),
-                        "path": str(version_dir),
-                        "manifest_json": json.dumps(m),
-                    }
+        rows = (
+            self._row(browser, profile_dir, version_dir)
+            for profile_dir in profile_dirs
+            for version_dir in self._version_dirs(profile_dir / "Extensions")
+        )
+        yield from (row for row in rows if row is not None)
+
+    def _version_dirs(self, ext_root: Path) -> list[Path]:
+        if not ext_root.is_dir():
+            return []
+        return [
+            version_dir
+            for ext_id_dir in ext_root.iterdir()
+            if ext_id_dir.is_dir()
+            for version_dir in ext_id_dir.iterdir()
+        ]
+
+    def _row(
+        self, browser: Browser, profile_dir: Path, version_dir: Path
+    ) -> dict[str, Any] | None:
+        manifest_path = version_dir / "manifest.json"
+        manifest = JsonFile(manifest_path).load() if manifest_path.is_file() else None
+        if manifest is None:
+            return None
+        return {
+            "browser": str(browser),
+            "profile": profile_dir.name,
+            "extension_id": version_dir.parent.name,
+            "name": manifest.get("name"),
+            "version": manifest.get("version"),
+            "permissions_json": json.dumps(manifest.get("permissions") or []),
+            "host_permissions_json": json.dumps(
+                manifest.get("host_permissions") or manifest.get("matches") or []
+            ),
+            "path": str(version_dir),
+            "manifest_json": json.dumps(manifest),
+        }
 
 
 class FirefoxExtensionReader(BrowserExtensionReader):
-    def read(self, base, browser):
+    def read(self, base: Path, browser: Browser) -> Iterator[dict[str, Any]]:
         profiles_dir = base / "Profiles"
         if not profiles_dir.is_dir():
             return
         for profile_dir in profiles_dir.iterdir():
             ext_file = profile_dir / "extensions.json"
-            if not ext_file.is_file():
+            extensions = JsonFile(ext_file).load() if ext_file.is_file() else None
+            if extensions is None:
                 continue
-            try:
-                data = json.loads(
-                    ext_file.read_text(encoding="utf-8", errors="replace")
-                )
-            except (json.JSONDecodeError, OSError):
-                continue
-            for addon in data.get("addons", []) or []:
-                up = addon.get("userPermissions") or {}
-                dl = addon.get("defaultLocale") or {}
-                yield {
-                    "browser": str(browser),
-                    "profile": profile_dir.name,
-                    "extension_id": addon.get("id"),
-                    "name": dl.get("name"),
-                    "version": addon.get("version"),
-                    "permissions_json": json.dumps(up.get("permissions") or []),
-                    "host_permissions_json": json.dumps(up.get("origins") or []),
-                    "path": addon.get("path"),
-                    "manifest_json": json.dumps(addon),
-                }
+            for addon in extensions.get("addons", []) or []:
+                yield self._row(browser, profile_dir.name, addon)
+
+    def _row(
+        self, browser: Browser, profile: str, addon: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        permissions = addon.get("userPermissions") or {}
+        return {
+            "browser": str(browser),
+            "profile": profile,
+            "extension_id": addon.get("id"),
+            "name": (addon.get("defaultLocale") or {}).get("name"),
+            "version": addon.get("version"),
+            "permissions_json": json.dumps(permissions.get("permissions") or []),
+            "host_permissions_json": json.dumps(permissions.get("origins") or []),
+            "path": addon.get("path"),
+            "manifest_json": json.dumps(addon),
+        }
 
 
 class QuarantineCollector(SnapshotCollector):
     slice = slices.QUARANTINE_EVENTS
     judge_fields = ("agent_bundle_id", "agent_name", "origin_url", "data_url")
-    _COLUMN_MAP = {
-        "LSQuarantineEventIdentifier": "event_id",
-        "LSQuarantineTimeStamp": "timestamp",
-        "LSQuarantineAgentBundleIdentifier": "agent_bundle_id",
-        "LSQuarantineAgentName": "agent_name",
-        "LSQuarantineOriginURLString": "origin_url",
-        "LSQuarantineDataURLString": "data_url",
-        "LSQuarantineSenderName": "sender_name",
-        "LSQuarantineTypeNumber": "type_number",
-    }
+    COLUMN_MAP = (
+        ("LSQuarantineEventIdentifier", "event_id"),
+        ("LSQuarantineTimeStamp", "timestamp"),
+        ("LSQuarantineAgentBundleIdentifier", "agent_bundle_id"),
+        ("LSQuarantineAgentName", "agent_name"),
+        ("LSQuarantineOriginURLString", "origin_url"),
+        ("LSQuarantineDataURLString", "data_url"),
+        ("LSQuarantineSenderName", "sender_name"),
+        ("LSQuarantineTypeNumber", "type_number"),
+    )
 
-    def collect(self):
+    def collect(self) -> Iterator[dict[str, Any]]:
         path = HostPaths().expand(
             "~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
         )
         if not path.exists():
             return
-        for row in ExternalSqliteReader().rows(
-            path, "LSQuarantineEvent", list(self._COLUMN_MAP.keys())
-        ):
-            yield {self._COLUMN_MAP[k]: v for k, v in row.items()}
+        columns = dict(self.COLUMN_MAP)
+        rows = ExternalSqliteReader().rows(path, "LSQuarantineEvent", list(columns))
+        for row in rows:
+            yield {columns[key]: value for key, value in row.items()}
+
+
+@dataclass(frozen=True)
+class ExtensionReaders:
+    """The reader for each browser family; ``default`` reads the rest."""
+
+    default: BrowserExtensionReader
+    by_browser: Mapping[Browser, BrowserExtensionReader] = field(default_factory=dict)
+
+    @classmethod
+    def standard(cls) -> ExtensionReaders:
+        return cls(
+            ChromiumExtensionReader(), {Browser.FIREFOX: FirefoxExtensionReader()}
+        )
+
+    def for_browser(self, browser: Browser) -> BrowserExtensionReader:
+        return self.by_browser.get(browser, self.default)
 
 
 class BrowserExtensionsCollector(SnapshotCollector):
@@ -128,25 +216,28 @@ class BrowserExtensionsCollector(SnapshotCollector):
 
     def __init__(
         self,
-        readers: Optional[dict[Browser, BrowserExtensionReader]] = None,
-        default_reader: Optional[BrowserExtensionReader] = None,
+        readers: ExtensionReaders,
+        profiles: Mapping[Browser, Iterable[str]],
         judge_hints: str = "",
-        profiles: Optional[dict[Browser, list[str]]] = None,
-    ):
+    ) -> None:
         super().__init__(judge_hints=judge_hints)
-        self.readers = readers or {Browser.FIREFOX: FirefoxExtensionReader()}
-        self.default_reader = default_reader or ChromiumExtensionReader()
-        # Per-platform search roots — caller supplies BROWSER_PROFILES
-        # or BROWSER_PROFILES_LINUX. Defaults to the macOS layout.
-        self.profiles = profiles or BROWSER_PROFILES
+        self._readers = readers
+        # Per-platform search roots — the host supplies BROWSER_PROFILES or
+        # BROWSER_PROFILES_LINUX.
+        self._profiles = profiles
 
-    def collect(self):
-        for browser, profiles in self.profiles.items():
-            reader = self.readers.get(browser, self.default_reader)
-            for base_str in profiles:
-                base = HostPaths().expand(base_str)
-                if not base.is_dir():
-                    continue
+    @classmethod
+    def create(
+        cls, profiles: Mapping[Browser, Iterable[str]], judge_hints: str = ""
+    ) -> BrowserExtensionsCollector:
+        return cls(ExtensionReaders.standard(), profiles, judge_hints)
+
+    def collect(self) -> Iterator[dict[str, Any]]:
+        paths = HostPaths()
+        for browser, profiles in self._profiles.items():
+            reader = self._readers.for_browser(browser)
+            bases = [paths.expand(base_str) for base_str in profiles]
+            for base in (base for base in bases if base.is_dir()):
                 yield from reader.read(base, browser)
 
 
@@ -154,31 +245,134 @@ class InstalledAppsCollector(SnapshotCollector):
     slice = slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
-    def collect(self):
-        for app_dir in (Path("/Applications"), HostPaths().expand("~/Applications")):
-            if not app_dir.is_dir():
-                continue
-            try:
-                apps = list(app_dir.glob("*.app"))
-            except PermissionError:
-                continue
-            for app in apps:
-                info = HostPaths().read_plist(app / "Contents" / "Info.plist") or {}
-                yield {
-                    "path": str(app),
-                    "bundle_id": info.get("CFBundleIdentifier"),
-                    "name": info.get("CFBundleName") or info.get("CFBundleDisplayName"),
-                    "version": info.get("CFBundleShortVersionString"),
-                    "raw_json": json.dumps(
-                        Coerce().jsonable(
-                            {
-                                k: info.get(k)
-                                for k in APP_INFO_KEYS
-                                if info.get(k) is not None
-                            }
-                        )
-                    ),
+    def collect(self) -> Iterator[dict[str, Any]]:
+        app_dirs = (Path("/Applications"), HostPaths().expand("~/Applications"))
+        for app in (app for app_dir in app_dirs for app in self._apps(app_dir)):
+            bundle = HostPaths().read_plist(app / "Contents" / "Info.plist") or {}
+            details = {key: bundle.get(key) for key in APP_INFO_KEYS}
+            yield {
+                "path": str(app),
+                "bundle_id": bundle.get("CFBundleIdentifier"),
+                "name": bundle.get("CFBundleName") or bundle.get("CFBundleDisplayName"),
+                "version": bundle.get("CFBundleShortVersionString"),
+                "raw_json": json.dumps(
+                    Coerce().jsonable(
+                        {
+                            key: value
+                            for key, value in details.items()
+                            if value is not None
+                        }
+                    )
+                ),
+            }
+
+    def _apps(self, app_dir: Path) -> list[Path]:
+        if not app_dir.is_dir():
+            return []
+        try:
+            return list(app_dir.glob("*.app"))
+        except PermissionError:
+            return []
+
+
+class DpkgPackages:
+    """Installed Debian packages, from ``dpkg-query``'s tab-separated output
+    (no parsing of dpkg -l's column-aligned text)."""
+
+    def __init__(self, runner: CommandRunner) -> None:
+        self._runner = runner
+
+    def rows(self) -> Iterator[dict[str, Any]]:
+        if not self._runner.exists("dpkg-query"):
+            return
+        output = self._runner.text(self._command(), timeout=DPKG_TIMEOUT_S)
+        fields = (line.split("\t") for line in output.splitlines())
+        for parts in (parts for parts in fields if len(parts) >= len(DPKG_FIELDS)):
+            if parts[0] == "installed":
+                yield self._row(parts)
+
+    def _row(self, parts: list[str]) -> dict[str, Any]:
+        status, name, version, arch, summary, *_rest = parts
+        details = {"status": status, "architecture": arch, "summary": summary}
+        return {
+            "path": f"dpkg:{name}",
+            "bundle_id": name,
+            "name": name,
+            "version": version,
+            "raw_json": json.dumps({"source": "dpkg", **details}),
+        }
+
+    def _command(self) -> list[str]:
+        # When containerised, --admindir points dpkg-query at the host's
+        # package database rather than the container's.
+        host_admindir = HostPaths().translate("/var/lib/dpkg")
+        admindir = (
+            ["--admindir", str(host_admindir)]
+            if constants.HOST_PREFIX and host_admindir.is_dir()
+            else []
+        )
+        return ["dpkg-query", *admindir, "-W", "-f", DPKG_FORMAT]
+
+
+class DesktopEntry:
+    """One XDG ``.desktop`` file (a simple INI document) as an app row."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def row(self) -> dict[str, Any] | None:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        # .desktop keys are CamelCase (Name, Exec, Version, Type). Preserve
+        # case — the default lowercasing made every lookup miss.
+        parser.optionxform = str
+        try:
+            parser.read(self._path, encoding="utf-8")
+        except (configparser.Error, OSError):
+            return None
+        if DESKTOP_SECTION not in parser:
+            return None
+        return self._from_section(parser[DESKTOP_SECTION])
+
+    def _from_section(self, section: Mapping[str, str]) -> dict[str, Any]:
+        return {
+            "path": str(self._path),
+            "bundle_id": self._path.stem,
+            "name": section.get("Name"),
+            "version": section.get("Version"),
+            "raw_json": json.dumps(
+                {
+                    "source": "desktop",
+                    "exec": section.get("Exec"),
+                    "comment": section.get("Comment"),
+                    "categories": section.get("Categories"),
+                    "type": section.get("Type"),
+                    "no_display": section.get("NoDisplay") == "true",
                 }
+            ),
+        }
+
+
+class DesktopEntries:
+    """GUI app menu entries from the system and per-user XDG directories."""
+
+    def rows(self) -> Iterator[dict[str, Any]]:
+        paths = HostPaths()
+        roots = [paths.translate(root) for root in DESKTOP_ROOTS]
+        roots += [
+            home for template in DESKTOP_HOME_ROOTS for home in paths.for_home(template)
+        ]
+        for entry in (entry for root in roots for entry in self._entries(root)):
+            row = DesktopEntry(entry).row()
+            if row is not None:
+                yield row
+
+    def _entries(self, root: Path) -> list[Path]:
+        if not root.is_dir():
+            return []
+        try:
+            return list(root.glob("*.desktop"))
+        except PermissionError:
+            return []
 
 
 class LinuxInstalledAppsCollector(SnapshotCollector):
@@ -197,114 +391,13 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
     slice = slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
-    _DPKG_FIELDS = ("Status", "Package", "Version", "Architecture", "Description")
-
-    def __init__(
-        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
-    ) -> None:
+    def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._runner = runner or CommandRunner()
+        self._runner = runner
 
-    def collect(self):
-        yield from self._dpkg_rows()
-        yield from self._desktop_rows()
-
-    def _dpkg_rows(self):
-        if not self._runner.exists("dpkg-query"):
-            return
-        # Tab-separated fixed-field output: no parsing of dpkg -l's
-        # column-aligned text. dpkg-query -W -f gives us structured
-        # output with a chosen delimiter.
-        fmt = (
-            "${db:Status-Status}\t${Package}\t${Version}\t"
-            "${Architecture}\t${binary:Summary}\n"
-        )
-        cmd = ["dpkg-query", "-W", "-f", fmt]
-        # When containerised, --admindir points dpkg-query at the host's
-        # package database rather than the container's.
-        host_admindir = HostPaths().translate("/var/lib/dpkg")
-        if constants.HOST_PREFIX and host_admindir.is_dir():
-            cmd[1:1] = ["--admindir", str(host_admindir)]
-        for line in self._runner.text(cmd, timeout=30).splitlines():
-            parts = line.split("\t")
-            if len(parts) < len(self._DPKG_FIELDS):
-                continue
-            status, name, version, arch, summary = (
-                parts[0],
-                parts[1],
-                parts[2],
-                parts[3],
-                parts[4],
-            )
-            if status != "installed":
-                continue
-            yield {
-                "path": f"dpkg:{name}",
-                "bundle_id": name,
-                "name": name,
-                "version": version,
-                "raw_json": json.dumps(
-                    {
-                        "source": "dpkg",
-                        "status": status,
-                        "architecture": arch,
-                        "summary": summary,
-                    }
-                ),
-            }
-
-    def _desktop_rows(self):
-        # XDG desktop entries are simple INI files; configparser
-        # handles them. We extract [Desktop Entry] Name / Exec /
-        # Comment / Categories.
-        roots: list[Path] = [
-            HostPaths().translate("/usr/share/applications"),
-            HostPaths().translate("/usr/local/share/applications"),
-            HostPaths().translate("/var/lib/flatpak/exports/share/applications"),
-        ]
-        roots.extend(HostPaths().for_home("~/.local/share/applications"))
-        roots.extend(
-            HostPaths().for_home("~/.local/share/flatpak/exports/share/applications")
-        )
-        for root in roots:
-            if not root.is_dir():
-                continue
-            try:
-                entries = list(root.glob("*.desktop"))
-            except PermissionError:
-                continue
-            for entry in entries:
-                cp = configparser.ConfigParser(
-                    interpolation=None,
-                    strict=False,
-                )
-                # .desktop keys are CamelCase (Name, Exec, Version,
-                # Type). Preserve case — the default lowercasing made
-                # every sec.get("Name")/("Exec") miss.
-                cp.optionxform = str
-                try:
-                    cp.read(entry, encoding="utf-8")
-                except (configparser.Error, OSError):
-                    continue
-                if "Desktop Entry" not in cp:
-                    continue
-                sec = cp["Desktop Entry"]
-                yield {
-                    "path": str(entry),
-                    "bundle_id": entry.stem,
-                    "name": sec.get("Name"),
-                    "version": sec.get("Version"),
-                    "raw_json": json.dumps(
-                        {
-                            "source": "desktop",
-                            "exec": sec.get("Exec"),
-                            "comment": sec.get("Comment"),
-                            "categories": sec.get("Categories"),
-                            "type": sec.get("Type"),
-                            "no_display": sec.get("NoDisplay") == "true",
-                        }
-                    ),
-                }
+    def collect(self) -> Iterator[dict[str, Any]]:
+        yield from DpkgPackages(self._runner).rows()
+        yield from DesktopEntries().rows()
 
 
 class MdmProfilesCollector(SnapshotCollector):
@@ -318,28 +411,15 @@ class MdmProfilesCollector(SnapshotCollector):
     slice = slices.MDM_PROFILES
     judge_fields = ("identifier", "display_name", "organization", "profile_scope")
 
-    def __init__(
-        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
-    ) -> None:
+    def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._runner = runner or CommandRunner()
+        self._runner = runner
 
-    def collect(self):
-        try:
-            data = self._runner.json(
-                ["system_profiler", "-json", "SPConfigurationProfileDataType"],
-                timeout=30,
-            )
-        except (RuntimeError, json.JSONDecodeError):
-            return
-        if not isinstance(data, dict):
-            return
-        profiles = data.get("SPConfigurationProfileDataType", []) or []
-        # The output structure is "list of nested groups, with profile
-        # records under either _items or directly at the top level."
-        for entry in self._walk(profiles):
+    def collect(self) -> Iterator[dict[str, Any]]:
+        report = ProfilerReport(self._runner, "SPConfigurationProfileDataType")
+        for entry in self.profiles(report.entries(PROFILER_TIMEOUT_S)):
             yield {
-                "identifier": entry.get("spconfigprofile_profile_identifier"),
+                "identifier": entry.get(PROFILE_ID_KEY),
                 "display_name": entry.get("_name")
                 or entry.get("spconfigprofile_profile_display_name"),
                 "organization": entry.get("spconfigprofile_profile_organization"),
@@ -350,17 +430,14 @@ class MdmProfilesCollector(SnapshotCollector):
                 "raw_json": json.dumps(Coerce().jsonable(entry)),
             }
 
-    @classmethod
-    def _walk(cls, items):
-        for item in items or []:
-            if not isinstance(item, dict):
-                continue
-            # A node is a profile if it has an identifier field, else
-            # descend into _items.
-            if item.get("spconfigprofile_profile_identifier"):
+    def profiles(self, items: Iterable[Any] | None) -> Iterator[dict[str, Any]]:
+        """The output is a list of nested groups, with profile records under
+        either _items or directly at the top level: a node is a profile if
+        it has an identifier field, and its _items are walked too."""
+        for item in (item for item in items or [] if isinstance(item, dict)):
+            if item.get(PROFILE_ID_KEY):
                 yield item
-            if "_items" in item:
-                yield from cls._walk(item.get("_items"))
+            yield from self.profiles(item.get("_items"))
 
 
 class KernelExtensionsCollector(SnapshotCollector):
@@ -379,25 +456,17 @@ class KernelExtensionsCollector(SnapshotCollector):
     slice = slices.KERNEL_EXTENSIONS
     judge_fields = ("bundle_id", "name", "team_id")
 
-    def __init__(
-        self, judge_hints: str = "", runner: Optional[CommandRunner] = None
-    ) -> None:
+    def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._runner = runner or CommandRunner()
+        self._runner = runner
 
-    def collect(self):
-        try:
-            data = self._runner.json(
-                ["system_profiler", "-json", "SPExtensionsDataType"],
-                timeout=60,
-            )
-        except (RuntimeError, json.JSONDecodeError):
-            return
-        if not isinstance(data, dict):
-            return
-        for kext in data.get("SPExtensionsDataType", []) or []:
-            if not isinstance(kext, dict):
-                continue
+    def collect(self) -> Iterator[dict[str, Any]]:
+        report = ProfilerReport(self._runner, "SPExtensionsDataType")
+        kexts = report.entries(KEXT_PROFILER_TIMEOUT_S)
+        for kext in (kext for kext in kexts if isinstance(kext, dict)):
+            details = {
+                key: value for key, value in kext.items() if key in KEXT_DETAIL_KEYS
+            }
             yield {
                 "bundle_id": kext.get("spext_bundleid"),
                 "name": kext.get("_name"),
@@ -405,28 +474,7 @@ class KernelExtensionsCollector(SnapshotCollector):
                 "path": kext.get("spext_path"),
                 "team_id": None,
                 "signing_id": kext.get("spext_signed_by"),
-                "raw_json": json.dumps(
-                    Coerce().jsonable(
-                        {
-                            k: v
-                            for k, v in kext.items()
-                            if k
-                            in (
-                                "_name",
-                                "spext_bundleid",
-                                "spext_version",
-                                "spext_path",
-                                "spext_signed_by",
-                                "spext_obtained_from",
-                                "spext_notarized",
-                                "spext_loaded",
-                                "spext_loadable",
-                                "spext_lastModified",
-                                "spext_hasAllDependencies",
-                            )
-                        }
-                    )
-                ),
+                "raw_json": json.dumps(Coerce().jsonable(details)),
             }
 
 
@@ -438,37 +486,36 @@ class SystemExtensionsCollector(SnapshotCollector):
     Source: ``/Library/SystemExtensions/db.plist`` — the LaunchServices
     plist that records every installed extension and its enabled /
     active state. Parsed via :mod:`plistlib`; no text scraping of
-    ``systemextensionsctl list`` output.
+    ``systemextensionsctl list`` output. The plist is a top-level dict
+    with 'extensions' as the list of every installed System Extension
+    (one entry per ext, regardless of activation state). 'bundleVersion'
+    is a nested dict carrying both CFBundleShortVersionString and
+    CFBundleVersion. 'categories' is a list of extension-point
+    identifiers (network_extension, endpoint_security, …).
     """
 
     slice = slices.SYSTEM_EXTENSIONS
     judge_fields = ("bundle_id", "team_id")
 
-    def collect(self):
-        db = Path("/Library/SystemExtensions/db.plist")
-        data = HostPaths().read_plist(db)
-        if not data:
+    def collect(self) -> Iterator[dict[str, Any]]:
+        db = HostPaths().read_plist(Path("/Library/SystemExtensions/db.plist"))
+        if not db:
             return
-        # The plist is a top-level dict with 'extensions' as the list
-        # of every installed System Extension (one entry per ext,
-        # regardless of activation state). 'bundleVersion' is a
-        # nested dict carrying both CFBundleShortVersionString and
-        # CFBundleVersion. 'categories' is a list of extension-point
-        # identifiers (network_extension, endpoint_security, …).
-        for ext in data.get("extensions", []) or []:
-            if not isinstance(ext, dict):
-                continue
-            version = ext.get("bundleVersion")
-            if isinstance(version, dict):
-                version = version.get("CFBundleShortVersionString") or version.get(
-                    "CFBundleVersion"
-                )
+        extensions = db.get("extensions", []) or []
+        for ext in (ext for ext in extensions if isinstance(ext, dict)):
             categories = ext.get("categories") or []
             yield {
                 "bundle_id": ext.get("identifier"),
                 "team_id": ext.get("teamID"),
-                "version": version,
+                "version": self._version(ext.get("bundleVersion")),
                 "state": ext.get("state"),
                 "categories": ",".join(categories) if categories else None,
                 "raw_json": json.dumps(Coerce().jsonable(ext)),
             }
+
+    def _version(self, version: Any) -> Any:
+        if isinstance(version, dict):
+            return version.get("CFBundleShortVersionString") or version.get(
+                "CFBundleVersion"
+            )
+        return version

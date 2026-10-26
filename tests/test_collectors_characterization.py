@@ -54,6 +54,7 @@ from avai.host_monitor.collectors import (
     WifiCollector,
 )
 from avai.host_monitor.collectors.logs import TAIL_BYTES, JournalReader, LogFileTail
+from avai.host_monitor.collectors.software import ExtensionReaders
 from avai.host_monitor.enums import Browser
 from avai.host_monitor.runtime import (
     CommandRunner,
@@ -497,7 +498,7 @@ class TestSystemProfilerCollectors:
                 ]
             },
         )
-        (row,) = MdmProfilesCollector().collect()
+        (row,) = MdmProfilesCollector(CommandRunner()).collect()
         assert (row["identifier"], row["display_name"], row["profile_scope"]) == (
             "com.corp.vpn",
             "Corp VPN",
@@ -506,7 +507,7 @@ class TestSystemProfilerCollectors:
 
     def test_mdm_profiles_command_failure_yields_nothing(self, monkeypatch):
         _fake_run(monkeypatch, lambda cmd: ("", 1, "boom"))
-        assert list(MdmProfilesCollector().collect()) == []
+        assert list(MdmProfilesCollector(CommandRunner()).collect()) == []
 
     def test_kernel_extensions_keep_listed_fields_only(self, monkeypatch):
         _profiler(
@@ -523,7 +524,7 @@ class TestSystemProfilerCollectors:
                 ]
             },
         )
-        (row,) = KernelExtensionsCollector().collect()
+        (row,) = KernelExtensionsCollector(CommandRunner()).collect()
         assert (row["bundle_id"], row["signing_id"], row["team_id"]) == (
             "com.foo.kext",
             "Developer ID",
@@ -533,7 +534,7 @@ class TestSystemProfilerCollectors:
 
     def test_kernel_extensions_non_dict_output_yields_nothing(self, monkeypatch):
         _fake_run(monkeypatch, lambda cmd: ("[]", 0, ""))
-        assert list(KernelExtensionsCollector().collect()) == []
+        assert list(KernelExtensionsCollector(CommandRunner()).collect()) == []
 
 
 class TestMacSystemIntegrity:
@@ -711,8 +712,8 @@ class TestBrowserExtensionsCollector:
         present = tmp_path / "chrome"
         present.mkdir()
         col = BrowserExtensionsCollector(
-            default_reader=_Reader(),
-            profiles={Browser.CHROME: [str(present), str(tmp_path / "absent")]},
+            ExtensionReaders(_Reader()),
+            {Browser.CHROME: [str(present), str(tmp_path / "absent")]},
         )
         assert list(col.collect()) == [
             {"browser": str(Browser.CHROME), "base": str(present)}
@@ -901,7 +902,7 @@ class TestLinuxInstalledApps:
             host_root / "usr" / "share" / "applications" / "bad.desktop",
             "[Other]\nName=x\n",
         )
-        rows = list(LinuxInstalledAppsCollector().collect())
+        rows = list(LinuxInstalledAppsCollector(CommandRunner()).collect())
         assert [(r["path"], r["name"]) for r in rows] == [
             ("dpkg:curl", "curl"),
             (str(host_root / "usr/share/applications/code.desktop"), "Code"),
@@ -916,12 +917,12 @@ class TestLinuxInstalledApps:
     def test_dpkg_failure_yields_no_package_rows(self, host_root, monkeypatch):
         _on_path(monkeypatch, "dpkg-query")
         _fake_run(monkeypatch, lambda cmd: (self.DPKG, 2, ""))
-        assert list(LinuxInstalledAppsCollector().collect()) == []
+        assert list(LinuxInstalledAppsCollector(CommandRunner()).collect()) == []
 
     def test_dpkg_timeout_yields_no_package_rows(self, host_root, monkeypatch):
         _on_path(monkeypatch, "dpkg-query")
         _fake_run(monkeypatch, lambda cmd: subprocess.TimeoutExpired(cmd, 30))
-        assert list(LinuxInstalledAppsCollector().collect()) == []
+        assert list(LinuxInstalledAppsCollector(CommandRunner()).collect()) == []
 
 
 @_posix_only
