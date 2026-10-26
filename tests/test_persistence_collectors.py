@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from avai.host_monitor.hosts.linux import LinuxHost
 from avai.host_monitor.hosts.macos import MacOSHost
 from avai.host_monitor.hosts.windows import WindowsHost
@@ -97,11 +99,17 @@ class TestKnownHostsParser:
 
 class TestWiring:
     def test_macos_has_injection_and_known_hosts_no_kernel_modules(self):
-        names = {c.name for c in MacOSHost().snapshot_collectors(_P)}
+        names = {
+            c.name
+            for c in MacOSHost.create(logging.getLogger("test")).snapshot_collectors(_P)
+        }
         assert {"injection_env", "ssh_known_hosts"} <= names
         assert "kernel_modules" not in names  # composed out (kexts cover it)
 
     def test_linux_and_windows_have_all_three(self):
-        for host in (LinuxHost(), WindowsHost()):
+        for host in (
+            LinuxHost.create(logging.getLogger("test")),
+            WindowsHost.create(logging.getLogger("test")),
+        ):
             names = {c.name for c in host.snapshot_collectors(_P)}
             assert {"injection_env", "kernel_modules", "ssh_known_hosts"} <= names

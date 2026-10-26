@@ -6,6 +6,8 @@ samples are representative of the documented formats.
 
 from __future__ import annotations
 
+import logging
+
 from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.hosts.linux import LinuxHost
 from avai.host_monitor.hosts.macos import MacOSHost
@@ -226,6 +228,10 @@ class TestDnsResolverEnrichment:
 
 class TestWiring:
     def test_each_host_assembles_tier1(self):
-        for host in (MacOSHost(), LinuxHost(), WindowsHost()):
+        for host in (
+            MacOSHost.create(logging.getLogger("test")),
+            LinuxHost.create(logging.getLogger("test")),
+            WindowsHost.create(logging.getLogger("test")),
+        ):
             names = {c.name for c in host.snapshot_collectors(_P)}
             assert {"arp_table", "ndp_neighbors", "routes", "dns_resolvers"} <= names

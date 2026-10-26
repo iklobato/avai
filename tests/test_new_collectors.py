@@ -237,17 +237,15 @@ class TestPrivilegeParsers:
         assert all(r["kind"] == "sudoers" for r in rows)
 
     def test_groups_only_privileged_with_members(self):
-        rows = LinuxPrivilegedAccounts._parse_groups(
-            "sudo:x:27:alice,bob\nwheel:x:10:\nstaff:x:50:carol\n",
-            "/etc/group",
-            LinuxPrivilegedAccounts._PRIV_GROUPS,
+        rows = LinuxPrivilegedAccounts().group_rows(
+            "sudo:x:27:alice,bob\nwheel:x:10:\nstaff:x:50:carol\n", "/etc/group"
         )
         assert len(rows) == 1
         assert rows[0]["subject"] == "sudo"
         assert rows[0]["detail"] == "alice,bob"
 
     def test_passwd_flags_uid0_only(self):
-        rows = LinuxPrivilegedAccounts._parse_passwd_uid0(
+        rows = LinuxPrivilegedAccounts().uid0_rows(
             "root:x:0:0:root:/root:/bin/bash\n"
             "backdoor:x:0:0::/:/bin/sh\n"
             "bob:x:1000:1000::/home/bob:/bin/bash\n",

@@ -7,16 +7,22 @@ representative command output, exactly as for the macOS/Linux adapters.
 
 from __future__ import annotations
 
+import logging
+
 from avai.host_monitor.hosts import HostFactory
 from avai.host_monitor.hosts.windows import (
-    WindowsBluetoothCollector,
     WindowsHost,
-    WindowsInstalledAppsCollector,
-    WindowsLaunchItemsCollector,
     WindowsPrivilegedAccounts,
-    WindowsSystemIntegrityCollector,
-    WindowsUsbDevicesCollector,
-    WindowsWifiCollector,
+)
+from avai.host_monitor.hosts.windows_collectors import (
+    BluetoothPnpParser,
+    InstalledAppsParser,
+    LocalGroupParser,
+    NetshWlanParser,
+    RunKeysParser,
+    SchtasksParser,
+    SecurityPostureParser,
+    UsbPnpParser,
     WinSecurityAuthParser,
     WinSecurityExecParser,
 )
@@ -48,12 +54,12 @@ The command completed successfully.
 
 class TestLocalGroupParser:
     def test_extracts_members_between_separator_and_footer(self):
-        members = WindowsPrivilegedAccounts._parse_localgroup(_NET_LOCALGROUP)
+        members = LocalGroupParser().members(_NET_LOCALGROUP)
         assert members == ["Administrator", "alice", "Domain Admins"]
 
     def test_empty_or_malformed_is_empty(self):
-        assert WindowsPrivilegedAccounts._parse_localgroup("") == []
-        assert WindowsPrivilegedAccounts._parse_localgroup("no separator here") == []
+        assert LocalGroupParser().members("") == []
+        assert LocalGroupParser().members("no separator here") == []
 
     def test_privileged_group_members_yields_row(self):
         runner = _FakeRunner({("net", "localgroup", "Administrators"): _NET_LOCALGROUP})
@@ -77,19 +83,19 @@ class TestInstalledAppsParser:
             },
             {"DisplayName": "Foo", "DisplayVersion": None, "PSChildName": "{guid}"},
         ]
-        rows = WindowsInstalledAppsCollector._rows_from_json(data)
+        rows = InstalledAppsParser().rows(data)
         assert [r["name"] for r in rows] == ["7-Zip", "Foo"]
         assert rows[0]["path"] == "C:\\Program Files\\7-Zip"
         assert rows[1]["path"] == ""  # missing InstallLocation → empty
 
     def test_single_object_is_normalised_to_one_row(self):
         obj = {"DisplayName": "Solo", "PSChildName": "solo"}
-        rows = WindowsInstalledAppsCollector._rows_from_json(obj)
+        rows = InstalledAppsParser().rows(obj)
         assert len(rows) == 1
         assert rows[0]["bundle_id"] == "solo"
 
     def test_none_is_empty(self):
-        assert WindowsInstalledAppsCollector._rows_from_json(None) == []
+        assert InstalledAppsParser().rows(None) == []
 
 
 class TestLaunchItemsParsers:
@@ -101,7 +107,7 @@ class TestLaunchItemsParsers:
                 "command": "C:\\OneDrive.exe /background",
             }
         ]
-        rows = WindowsLaunchItemsCollector._rows_from_run_keys(data)
+        rows = RunKeysParser().rows(data)
         assert rows[0]["scope"] == "registry_run"
         assert rows[0]["label"] == "OneDrive"
         assert rows[0]["program"] == "C:\\OneDrive.exe /background"
@@ -113,7 +119,7 @@ class TestLaunchItemsParsers:
             '"\\","\\MyTask","Ready","N/A","2026-01-01","Interactive","SYSTEM",'
             '"daily","C:\\evil.exe","x","y"\r\n'
         )
-        rows = WindowsLaunchItemsCollector._rows_from_schtasks(csv_text)
+        rows = SchtasksParser().rows(csv_text)
         assert len(rows) == 1
         assert rows[0]["scope"] == "scheduled_task"
         assert rows[0]["path"] == "\\MyTask"
@@ -124,19 +130,21 @@ class TestLaunchItemsParsers:
         csv_text = (
             'folder,"TaskName","Status",a,b,c,d,e,"Task To Run",x\r\n' "too,short\r\n"
         )
-        assert WindowsLaunchItemsCollector._rows_from_schtasks(csv_text) == []
+        assert SchtasksParser().rows(csv_text) == []
 
     def test_empty_inputs(self):
-        assert WindowsLaunchItemsCollector._rows_from_run_keys(None) == []
-        assert WindowsLaunchItemsCollector._rows_from_schtasks("") == []
+        assert RunKeysParser().rows(None) == []
+        assert SchtasksParser().rows("") == []
 
 
 class TestWindowsHostWiring:
     def test_factory_resolves_windows(self):
-        assert isinstance(HostFactory.create("Windows"), WindowsHost)
+        assert isinstance(
+            HostFactory(logging.getLogger("test")).create("Windows"), WindowsHost
+        )
 
     def test_collector_set_includes_windows_native(self):
-        collectors = WindowsHost().snapshot_collectors(
+        collectors = WindowsHost.create(logging.getLogger("test")).snapshot_collectors(
             Prompts(system="", user_template="")
         )
         names = {c.name for c in collectors}
@@ -153,7 +161,7 @@ class TestWindowsHostWiring:
         assert "quarantine_events" not in names
 
     def test_streaming_collectors_assembled(self):
-        collectors = WindowsHost().streaming_collectors(
+        collectors = WindowsHost.create(logging.getLogger("test")).streaming_collectors(
             Prompts(system="", user_template="")
         )
         names = {c.name for c in collectors}
@@ -177,7 +185,7 @@ class TestSystemIntegrityParser:
             "rdp_deny": 0,
             "winrm": "Running",
         }
-        row = WindowsSystemIntegrityCollector._row_from_status(data)
+        row = SecurityPostureParser().row(data)
         assert row["filevault_active"] == 1  # BitLocker protected
         assert row["firewall_global_state"] == 1  # at least one profile on
         assert row["gatekeeper_assessments_enabled"] == 1  # Defender/SecureBoot
@@ -193,7 +201,7 @@ class TestSystemIntegrityParser:
             "rdp_deny": 1,
             "winrm": "Stopped",
         }
-        row = WindowsSystemIntegrityCollector._row_from_status(data)
+        row = SecurityPostureParser().row(data)
         assert row["filevault_active"] == 0
         assert row["firewall_global_state"] == 0
         assert row["gatekeeper_assessments_enabled"] == 0
@@ -201,7 +209,7 @@ class TestSystemIntegrityParser:
         assert row["remote_management_enabled"] == 0
 
     def test_non_dict_is_none(self):
-        assert WindowsSystemIntegrityCollector._row_from_status(None) is None
+        assert SecurityPostureParser().row(None) is None
 
 
 class TestUsbDevicesParser:
@@ -212,21 +220,21 @@ class TestUsbDevicesParser:
             "Manufacturer": "SanDisk",
             "Status": "OK",
         }
-        rows = WindowsUsbDevicesCollector._rows_from_json(data)
+        rows = UsbPnpParser().rows(data)
         assert len(rows) == 1
         assert rows[0]["vendor_id"] == "0781"
         assert rows[0]["product_id"] == "5583"
         assert rows[0]["name"] == "USB Mass Storage Device"
 
     def test_missing_ids_are_none(self):
-        rows = WindowsUsbDevicesCollector._rows_from_json(
+        rows = UsbPnpParser().rows(
             {"FriendlyName": "Hub", "InstanceId": "USB\\ROOT_HUB30\\4&abc"}
         )
         assert rows[0]["vendor_id"] is None
         assert rows[0]["product_id"] is None
 
     def test_none_is_empty(self):
-        assert WindowsUsbDevicesCollector._rows_from_json(None) == []
+        assert UsbPnpParser().rows(None) == []
 
 
 class TestBluetoothParser:
@@ -236,13 +244,13 @@ class TestBluetoothParser:
             "InstanceId": "BTHENUM\\Dev_AABBCCDDEEFF\\7&x",
             "Status": "OK",
         }
-        rows = WindowsBluetoothCollector._rows_from_json(data)
+        rows = BluetoothPnpParser().rows(data)
         assert rows[0]["address"] == "AABBCCDDEEFF"
         assert rows[0]["connected"] == 1
         assert rows[0]["paired"] == 1
 
     def test_disconnected_present_device(self):
-        rows = WindowsBluetoothCollector._rows_from_json(
+        rows = BluetoothPnpParser().rows(
             {"FriendlyName": "Mouse", "InstanceId": "x", "Status": "Unknown"}
         )
         assert rows[0]["connected"] == 0
@@ -262,7 +270,7 @@ There is 1 interface on the system:
 """
 
     def test_parses_interface_block(self):
-        rows = WindowsWifiCollector._rows_from_netsh(self._NETSH)
+        rows = NetshWlanParser().rows(self._NETSH)
         assert len(rows) == 1
         assert rows[0]["interface"] == "Wi-Fi"
         assert rows[0]["ssid"] == "HomeNet"
@@ -272,10 +280,10 @@ There is 1 interface on the system:
         assert rows[0]["channel"] == "36"
 
     def test_preamble_without_name_is_skipped(self):
-        assert WindowsWifiCollector._rows_from_netsh("There is 0 interfaces\n") == []
+        assert NetshWlanParser().rows("There is 0 interfaces\n") == []
 
     def test_empty_is_empty(self):
-        assert WindowsWifiCollector._rows_from_netsh("") == []
+        assert NetshWlanParser().rows("") == []
 
 
 class TestStreamingParsers:

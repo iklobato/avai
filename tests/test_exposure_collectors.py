@@ -6,6 +6,8 @@ are representative of the documented formats.
 
 from __future__ import annotations
 
+import logging
+
 from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.exposure_collectors import (
     LinuxPromiscParser,
@@ -203,11 +205,19 @@ class TestWiring:
             "promiscuous_ifaces",
             "trusted_roots",
         }
-        for host in (MacOSHost(), LinuxHost()):
+        for host in (
+            MacOSHost.create(logging.getLogger("test")),
+            LinuxHost.create(logging.getLogger("test")),
+        ):
             names = {c.name for c in host.snapshot_collectors(_P)}
             assert want <= names
 
     def test_windows_composes_out_promiscuous(self):
-        names = {c.name for c in WindowsHost().snapshot_collectors(_P)}
+        names = {
+            c.name
+            for c in WindowsHost.create(logging.getLogger("test")).snapshot_collectors(
+                _P
+            )
+        }
         assert {"proxy_config", "trusted_roots", "network_shares"} <= names
         assert "promiscuous_ifaces" not in names

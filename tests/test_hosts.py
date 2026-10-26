@@ -3,6 +3,8 @@ the per-OS capability adapters."""
 
 from __future__ import annotations
 
+import logging
+
 from pathlib import Path
 
 import pytest
@@ -33,23 +35,29 @@ class _FakeRunner:
 
 class TestHostFactory:
     def test_resolves_each_known_platform(self):
-        assert isinstance(HostFactory.create("Darwin"), MacOSHost)
-        assert isinstance(HostFactory.create("Linux"), LinuxHost)
+        assert isinstance(
+            HostFactory(logging.getLogger("test")).create("Darwin"), MacOSHost
+        )
+        assert isinstance(
+            HostFactory(logging.getLogger("test")).create("Linux"), LinuxHost
+        )
 
     def test_resolves_windows(self):
         from avai.host_monitor.hosts.windows import WindowsHost
 
-        assert isinstance(HostFactory.create("Windows"), WindowsHost)
+        assert isinstance(
+            HostFactory(logging.getLogger("test")).create("Windows"), WindowsHost
+        )
 
     def test_unknown_platform_raises_loudly(self):
         with pytest.raises(RuntimeError) as exc:
-            HostFactory.create("Plan9")
+            HostFactory(logging.getLogger("test")).create("Plan9")
         assert "Plan9" in str(exc.value)
 
     def test_default_uses_current_platform(self):
         # Whatever this test host is, it must resolve to *some* Host with
         # the collector-assembly interface — never the silent-macOS default.
-        host = HostFactory.create()
+        host = HostFactory(logging.getLogger("test")).create()
         assert hasattr(host, "snapshot_collectors")
         assert hasattr(host, "streaming_collectors")
 
@@ -118,7 +126,7 @@ class TestLinuxPrivilegedAccountsReadFiles:
 
 class TestHostWiring:
     def test_macos_host_injects_capabilities_into_collectors(self):
-        host = MacOSHost()
+        host = MacOSHost.create(logging.getLogger("test"))
         collectors = host.snapshot_collectors(Prompts(system="", user_template=""))
         by_name = {c.name: c for c in collectors}
         # Quarantine is macOS-only and must be present.
@@ -129,7 +137,7 @@ class TestHostWiring:
         assert by_name["privilege_config"]._accounts is not None
 
     def test_linux_host_drops_macos_only_and_wires_capabilities(self):
-        host = LinuxHost()
+        host = LinuxHost.create(logging.getLogger("test"))
         collectors = host.snapshot_collectors(Prompts(system="", user_template=""))
         names = {c.name for c in collectors}
         # Linux composes OUT the macOS-only quarantine collector — by
@@ -140,13 +148,13 @@ class TestHostWiring:
     def test_streaming_sets_differ_per_os(self):
         mac = {
             c.name
-            for c in MacOSHost().streaming_collectors(
+            for c in MacOSHost.create(logging.getLogger("test")).streaming_collectors(
                 Prompts(system="", user_template="")
             )
         }
         linux = {
             c.name
-            for c in LinuxHost().streaming_collectors(
+            for c in LinuxHost.create(logging.getLogger("test")).streaming_collectors(
                 Prompts(system="", user_template="")
             )
         }

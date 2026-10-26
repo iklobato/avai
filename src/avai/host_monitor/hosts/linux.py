@@ -6,18 +6,16 @@ This host owns the ``HOST_PREFIX`` container-path translation (via
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .. import constants
 from ..collectors import (
     BrowserExtensionsCollector,
-    DiskUsageCollector,
     DnsQueriesCollector,
     FileIntegrityCollector,
     FileScanCollector,
-    HostResourcesCollector,
-    HostsFileCollector,
     LinuxAuthEventsCollector,
     LinuxBluetoothCollector,
     LinuxInstalledAppsCollector,
@@ -26,18 +24,11 @@ from ..collectors import (
     LinuxSystemIntegrityCollector,
     LinuxUsbDevicesCollector,
     LinuxWifiCollector,
-    ListeningPortsCollector,
     LogTailCollector,
-    MountsCollector,
-    NetworkConnectionsCollector,
     NetworkFlowsCollector,
-    NetworkInterfacesCollector,
-    PrivilegeConfigCollector,
-    ProcessCollector,
     ProcessConnectionResolver,
     SetuidFilesCollector,
     SnapshotCollector,
-    SshAuthorizedKeysCollector,
     StreamingCollector,
     TcpdumpCapture,
     YaraRulesetCompiler,
@@ -70,24 +61,21 @@ from ..persistence_collectors import (
     KernelModulesCollector,
     LdSoPreloadParser,
     ProcModulesParser,
-    SshKnownHostsCollector,
 )
 from ..prompts import Prompts
 from ..runtime import (
-    Clock,
     CommandRunner,
     CommandSnapshot,
-    DiskMetrics,
     FileSnapshot,
     HostPaths,
     PsutilConnections,
-    SystemMetrics,
 )
+from .portable import AccountCollectors, PortableCollectors
 
 # name:password:gid:members
-_GROUP_FIELDS = 4
+GROUP_FIELDS = 4
 # name:password:uid:gid:gecos:home:shell
-_PASSWD_FIELDS = 7
+PASSWD_FIELDS = 7
 
 
 class LinuxFilesystemLayout:
@@ -106,7 +94,7 @@ class LinuxFilesystemLayout:
     )
 
     def privileged_bin_dirs(self) -> list[Path]:
-        return [HostPaths().translate(d) for d in self._BIN_DIRS]
+        return [HostPaths().translate(directory) for directory in self._BIN_DIRS]
 
     def app_executables(self) -> list[Path]:
         # No macOS-style app bundles on Linux; /opt is already covered by
@@ -114,17 +102,9 @@ class LinuxFilesystemLayout:
         return []
 
     def home_dirs(self) -> list[Path]:
-        homes: list[Path] = []
-        base = HostPaths().translate("/home")
-        if base.is_dir():
-            try:
-                homes += [d for d in base.iterdir() if d.is_dir()]
-            except OSError:
-                pass
         root = HostPaths().translate("/root")
-        if root.is_dir():
-            homes.append(root)
-        return homes
+        roots = [root] if root.is_dir() else []
+        return self._user_homes(HostPaths().translate("/home")) + roots
 
     def hosts_file(self) -> Path:
         return HostPaths().translate("/etc/hosts")
@@ -139,215 +119,200 @@ class LinuxFilesystemLayout:
         # '-i any' prefixes each line with the interface + direction.
         return ["-i", "any"]
 
+    def _user_homes(self, base: Path) -> list[Path]:
+        try:
+            if not base.is_dir():
+                return []
+            return [entry for entry in base.iterdir() if entry.is_dir()]
+        except OSError:
+            return []
+
 
 class LinuxPrivilegedAccounts:
     """Linux privileged-account state parsed from ``/etc/group`` and
     ``/etc/passwd`` (via ``host_path`` for container mode)."""
 
-    _PRIV_GROUPS = frozenset({"sudo", "wheel", "admin"})
+    PRIVILEGED_GROUPS = frozenset({"sudo", "wheel", "admin"})
 
-    def privileged_group_members(self) -> Iterable[dict]:
+    def privileged_group_members(self) -> Iterable[dict[str, Any]]:
         path = HostPaths().translate("/etc/group")
         try:
             content = path.read_text(errors="replace")
         except (OSError, UnicodeDecodeError):
             return
-        yield from self._parse_groups(content, str(path), self._PRIV_GROUPS)
+        yield from self.group_rows(content, str(path))
 
-    def uid0_accounts(self) -> Iterable[dict]:
+    def uid0_accounts(self) -> Iterable[dict[str, Any]]:
         path = HostPaths().translate("/etc/passwd")
         try:
             content = path.read_text(errors="replace")
         except (OSError, UnicodeDecodeError):
             return
-        yield from self._parse_passwd_uid0(content, str(path))
+        yield from self.uid0_rows(content, str(path))
 
-    @staticmethod
-    def _parse_groups(content: str, path: str, priv_groups) -> list[dict]:
-        """Pure parser for /etc/group: members of privileged groups."""
-        rows = []
-        for line in content.splitlines():
-            parts = line.strip().split(":")
-            if len(parts) < _GROUP_FIELDS:
-                continue
-            gname, members = parts[0], parts[3]
-            if gname in priv_groups and members:
-                rows.append(
-                    {
-                        "kind": "group",
-                        "subject": gname,
-                        "detail": members,
-                        "source_path": path,
-                    }
-                )
-        return rows
+    def group_rows(self, content: str, path: str) -> list[dict[str, Any]]:
+        """Members of privileged groups, from ``/etc/group`` text."""
+        records = self._records(content, GROUP_FIELDS)
+        return [
+            {"kind": "group", "subject": name, "detail": members, "source_path": path}
+            for name, _password, _gid, members in records
+            if name in self.PRIVILEGED_GROUPS and members
+        ]
 
-    @staticmethod
-    def _parse_passwd_uid0(content: str, path: str) -> list[dict]:
-        """Pure parser for /etc/passwd: accounts with uid 0."""
-        rows = []
-        for line in content.splitlines():
-            parts = line.strip().split(":")
-            if len(parts) < _PASSWD_FIELDS:
-                continue
-            user, uid, shell = parts[0], parts[2], parts[6]
-            if uid == "0":
-                rows.append(
-                    {
-                        "kind": "account",
-                        "subject": user,
-                        "detail": f"uid=0 shell={shell}",
-                        "source_path": path,
-                    }
-                )
-        return rows
+    def uid0_rows(self, content: str, path: str) -> list[dict[str, Any]]:
+        """Accounts with uid 0, from ``/etc/passwd`` text."""
+        records = self._records(content, PASSWD_FIELDS)
+        return [
+            {
+                "kind": "account",
+                "subject": user,
+                "detail": f"uid=0 shell={shell}",
+                "source_path": path,
+            }
+            for user, _password, uid, _gid, _gecos, _home, shell in records
+            if uid == "0"
+        ]
+
+    def _records(self, content: str, width: int) -> list[list[str]]:
+        rows = (line.strip().split(":") for line in content.splitlines())
+        return [fields[:width] for fields in rows if len(fields) >= width]
 
 
 class LinuxHost:
     """Composition root for Linux. Drops macOS-only slices (quarantine
     events) by simply not assembling them."""
 
-    def __init__(self) -> None:
-        self._runner = CommandRunner()
-        self._fs = LinuxFilesystemLayout()
-        self._accounts = LinuxPrivilegedAccounts()
+    def __init__(self, runner: CommandRunner, logger: logging.Logger) -> None:
+        self._runner = runner
+        self._logger = logger
+
+    @classmethod
+    def create(cls, logger: logging.Logger) -> LinuxHost:
+        return cls(CommandRunner(), logger)
 
     def snapshot_collectors(self, prompts: Prompts) -> list[SnapshotCollector]:
-        h = prompts.hint_for
-        capture = TcpdumpCapture(self._runner, tuple(self._fs.tcpdump_interface_args()))
-        resolver = ProcessConnectionResolver(PsutilConnections())
-
-        # Expand ~/-prefixed watched-file templates to one path per user
-        # home (under the container's bind-mounted /host/home when set);
-        # absolute /etc paths become /host/etc paths automatically.
-        watched: list[str] = []
-        for tmpl in WATCHED_FILES_LINUX:
-            for p in HostPaths().for_home(tmpl):
-                watched.append(str(p))
-
-        expanded_browser_profiles: dict[Browser, list[str]] = {}
-        for browser, templates in BROWSER_PROFILES_LINUX.items():
-            out: list[str] = []
-            for tmpl in templates:
-                for p in HostPaths().for_home(tmpl):
-                    out.append(str(p))
-            expanded_browser_profiles[browser] = out
-
+        fs = LinuxFilesystemLayout()
+        accounts = LinuxPrivilegedAccounts()
         return [
-            ProcessCollector(SystemMetrics(), judge_hints=h("processes")),
-            NetworkConnectionsCollector(
-                PsutilConnections(), judge_hints=h("network_connections")
-            ),
-            ListeningPortsCollector(
-                PsutilConnections(), judge_hints=h("listening_ports")
-            ),
-            NetworkFlowsCollector(capture, resolver, judge_hints=h("network_flows")),
-            DnsQueriesCollector(capture, resolver, judge_hints=h("dns_queries")),
-            NetworkInterfacesCollector(
-                SystemMetrics(), judge_hints=h("network_interfaces")
-            ),
-            HostResourcesCollector(
-                SystemMetrics(), Clock(), judge_hints=h("host_resources")
-            ),
-            DiskUsageCollector(DiskMetrics(constants.LOG), judge_hints=h("disk_usage")),
-            LogTailCollector.create(h("log_entries"), self._runner, constants.LOG),
-            LinuxUsbDevicesCollector(judge_hints=h("usb_devices")),
-            LinuxBluetoothCollector(judge_hints=h("bluetooth_devices")),
-            LinuxWifiCollector(judge_hints=h("wifi_state"), runner=self._runner),
-            LinuxLaunchItemsCollector(judge_hints=h("launch_items")),
-            BrowserExtensionsCollector.create(
-                expanded_browser_profiles, judge_hints=h("browser_extensions")
-            ),
-            LinuxSystemIntegrityCollector.create(
-                self._runner, judge_hints=h("system_integrity")
-            ),
-            FileIntegrityCollector(judge_hints=h("file_integrity"), watched=watched),
-            FileScanCollector.create(
-                self._fs,
-                YaraRulesetCompiler(constants.YARA_RULES_DIR, constants.LOG),
-                judge_hints=h("file_scan"),
-            ),
-            LinuxInstalledAppsCollector(
-                judge_hints=h("installed_apps"), runner=self._runner
-            ),
-            MountsCollector(DiskMetrics(constants.LOG), judge_hints=h("mounts")),
-            SetuidFilesCollector(judge_hints=h("setuid_files"), fs=self._fs),
-            SshAuthorizedKeysCollector(
-                judge_hints=h("ssh_authorized_keys"), fs=self._fs
-            ),
-            HostsFileCollector(judge_hints=h("hosts_file"), fs=self._fs),
-            PrivilegeConfigCollector(
-                judge_hints=h("privilege_config"),
-                fs=self._fs,
-                accounts=self._accounts,
-            ),
-            # Network neighborhood & topology
-            ArpTableCollector(
-                CommandSnapshot(self._runner, ["ip", "neigh"], IpNeighParser("flags")),
-                judge_hints=h("arp_table"),
-            ),
-            NdpNeighborsCollector(
-                CommandSnapshot(
-                    self._runner, ["ip", "-6", "neigh"], IpNeighParser("state")
-                ),
-                judge_hints=h("ndp_neighbors"),
-            ),
-            RoutesCollector(
-                CommandSnapshot(self._runner, ["ip", "route"], IpRouteParser()),
-                judge_hints=h("routes"),
-            ),
-            DnsResolversCollector(
-                FileSnapshot(
-                    HostPaths().translate("/etc/resolv.conf"), ResolvConfParser()
-                ),
-                judge_hints=h("dns_resolvers"),
-            ),
-            # Exposure & MITM surface
-            ProxyConfigCollector(
-                FileSnapshot(
-                    HostPaths().translate("/etc/environment"), LinuxProxyEnvParser()
-                ),
-                judge_hints=h("proxy_config"),
-            ),
-            LoginSessionsCollector(
-                CommandSnapshot(self._runner, ["who"], WhoParser()),
-                judge_hints=h("login_sessions"),
-            ),
-            NetworkSharesCollector(
-                FileSnapshot(
-                    HostPaths().translate("/proc/mounts"), ProcMountsSharesParser()
-                ),
-                judge_hints=h("network_shares"),
-            ),
-            PromiscuousInterfacesCollector(
-                CommandSnapshot(self._runner, ["ip", "link"], LinuxPromiscParser()),
-                judge_hints=h("promiscuous_ifaces"),
-            ),
-            TrustedRootsCollector(
-                CommandSnapshot(
-                    self._runner, ["trust", "list"], LinuxTrustListParser()
-                ),
-                judge_hints=h("trusted_roots"),
-            ),
-            # Persistence / injection
-            InjectionEnvCollector(
-                FileSnapshot(
-                    HostPaths().translate("/etc/ld.so.preload"), LdSoPreloadParser()
-                ),
-                judge_hints=h("injection_env"),
-            ),
-            KernelModulesCollector(
-                FileSnapshot(
-                    HostPaths().translate("/proc/modules"), ProcModulesParser()
-                ),
-                judge_hints=h("kernel_modules"),
-            ),
-            SshKnownHostsCollector(judge_hints=h("ssh_known_hosts"), fs=self._fs),
+            *PortableCollectors(self._logger).build(prompts),
+            *AccountCollectors(fs, accounts).build(prompts),
+            *self._capture(prompts, fs),
+            *self._devices(prompts),
+            *self._software(prompts),
+            *self._files(prompts, fs),
+            *self._neighborhood(prompts),
+            *self._exposure(prompts),
+            *self._persistence(prompts),
         ]
 
     def streaming_collectors(self, prompts: Prompts) -> list[StreamingCollector]:
-        h = prompts.hint_for
+        hint = prompts.hint_for
         return [
-            LinuxAuthEventsCollector(judge_hints=h("auth_events")),
-            LinuxProcessExecCollector(judge_hints=h("process_exec_events")),
+            LinuxAuthEventsCollector(hint("auth_events")),
+            LinuxProcessExecCollector(hint("process_exec_events")),
         ]
+
+    def _capture(
+        self, prompts: Prompts, fs: LinuxFilesystemLayout
+    ) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        capture = TcpdumpCapture(self._runner, tuple(fs.tcpdump_interface_args()))
+        resolver = ProcessConnectionResolver(PsutilConnections())
+        return [
+            NetworkFlowsCollector(capture, resolver, hint("network_flows")),
+            DnsQueriesCollector(capture, resolver, hint("dns_queries")),
+        ]
+
+    def _devices(self, prompts: Prompts) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        return [
+            LogTailCollector.create(hint("log_entries"), self._runner, self._logger),
+            LinuxUsbDevicesCollector(hint("usb_devices")),
+            LinuxBluetoothCollector(hint("bluetooth_devices")),
+            LinuxWifiCollector(self._runner, hint("wifi_state")),
+            LinuxSystemIntegrityCollector.create(
+                self._runner, hint("system_integrity")
+            ),
+        ]
+
+    def _software(self, prompts: Prompts) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        return [
+            LinuxLaunchItemsCollector(hint("launch_items")),
+            BrowserExtensionsCollector.create(
+                self._browser_profiles(), hint("browser_extensions")
+            ),
+            LinuxInstalledAppsCollector(self._runner, hint("installed_apps")),
+        ]
+
+    def _files(
+        self, prompts: Prompts, fs: LinuxFilesystemLayout
+    ) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        compiler = YaraRulesetCompiler(constants.YARA_RULES_DIR, self._logger)
+        return [
+            FileIntegrityCollector(self._watched_files(), hint("file_integrity")),
+            FileScanCollector.create(fs, compiler, hint("file_scan")),
+            SetuidFilesCollector(fs, hint("setuid_files")),
+        ]
+
+    def _neighborhood(self, prompts: Prompts) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        runner = self._runner
+        arp = CommandSnapshot(runner, ["ip", "neigh"], IpNeighParser("flags"))
+        ndp = CommandSnapshot(runner, ["ip", "-6", "neigh"], IpNeighParser("state"))
+        routes = CommandSnapshot(runner, ["ip", "route"], IpRouteParser())
+        resolv_conf = HostPaths().translate("/etc/resolv.conf")
+        resolvers = FileSnapshot(resolv_conf, ResolvConfParser())
+        return [
+            ArpTableCollector(arp, hint("arp_table")),
+            NdpNeighborsCollector(ndp, hint("ndp_neighbors")),
+            RoutesCollector(routes, hint("routes")),
+            DnsResolversCollector(resolvers, hint("dns_resolvers")),
+        ]
+
+    def _exposure(self, prompts: Prompts) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        paths, runner = HostPaths(), self._runner
+        environment = paths.translate("/etc/environment")
+        proxy = FileSnapshot(environment, LinuxProxyEnvParser())
+        sessions = CommandSnapshot(runner, ["who"], WhoParser())
+        shares = FileSnapshot(paths.translate("/proc/mounts"), ProcMountsSharesParser())
+        promisc = CommandSnapshot(runner, ["ip", "link"], LinuxPromiscParser())
+        roots = CommandSnapshot(runner, ["trust", "list"], LinuxTrustListParser())
+        return [
+            ProxyConfigCollector(proxy, hint("proxy_config")),
+            LoginSessionsCollector(sessions, hint("login_sessions")),
+            NetworkSharesCollector(shares, hint("network_shares")),
+            PromiscuousInterfacesCollector(promisc, hint("promiscuous_ifaces")),
+            TrustedRootsCollector(roots, hint("trusted_roots")),
+        ]
+
+    def _persistence(self, prompts: Prompts) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        preload = HostPaths().translate("/etc/ld.so.preload")
+        modules = HostPaths().translate("/proc/modules")
+        return [
+            InjectionEnvCollector(
+                FileSnapshot(preload, LdSoPreloadParser()), hint("injection_env")
+            ),
+            KernelModulesCollector(
+                FileSnapshot(modules, ProcModulesParser()), hint("kernel_modules")
+            ),
+        ]
+
+    def _watched_files(self) -> list[str]:
+        # ~/-prefixed templates expand to one path per user home (under the
+        # container's bind-mounted /host/home when set); absolute /etc paths
+        # become /host/etc paths automatically.
+        paths = HostPaths()
+        return [
+            str(path) for tmpl in WATCHED_FILES_LINUX for path in paths.for_home(tmpl)
+        ]
+
+    def _browser_profiles(self) -> dict[Browser, list[str]]:
+        paths = HostPaths()
+        return {
+            browser: [str(path) for tmpl in templates for path in paths.for_home(tmpl)]
+            for browser, templates in BROWSER_PROFILES_LINUX.items()
+        }

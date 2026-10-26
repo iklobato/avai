@@ -298,7 +298,7 @@ def build_runner(args) -> "tuple[Runner, object]":
     )
     try:
         sink = Sink(engine)
-        host = HostFactory.create()
+        host = HostFactory(LOG).create()
         snapshot_collectors = host.snapshot_collectors(prompts)
         streaming_collectors = (
             [] if args.no_streaming else host.streaming_collectors(prompts)
