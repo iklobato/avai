@@ -29,6 +29,9 @@ from avai.host_monitor.constants import DEFAULT_BASELINE_MIN_RUNS
 from avai.host_monitor.control_loop import (
     ControlLoop,
     ControlSettings,
+    ControlDefaults,
+    ControlPlane,
+    Maintenance,
     MaintenanceCommand,
     ProgressHeartbeat,
 )
@@ -91,7 +94,7 @@ def _runner(sink, snapshot=(), judge=None, **options):
 
 
 def _settings(sink, judge_on=True, enrich_on=True):
-    return ControlSettings(sink, judge_default=judge_on, enrich_default=enrich_on)
+    return ControlSettings(sink, ControlDefaults(judge_on, enrich_on))
 
 
 class _AlwaysHitEnricher(Enricher):
@@ -144,7 +147,9 @@ def chain(sink):
 def _evidence_stage(sink, chain, enrich_on=True):
     intel = ThreatIntel(chain, IndicatorExtraction.default())
     return EvidenceStage(
-        intel, _settings(sink, enrich_on=enrich_on), ProgressHeartbeat(sink)
+        intel,
+        _settings(sink, enrich_on=enrich_on),
+        ProgressHeartbeat(sink, logging.getLogger("test")),
     )
 
 
@@ -888,14 +893,18 @@ class TestActiveFindings:
 class TestNarrativeStep:
     def test_no_active_findings_no_narrative(self, sink):
         nar = _FakeNarrator()
-        NarrativeStep(StepIO(sink, logging.getLogger("test")), nar).report(_TS[1], _TS[1])
+        NarrativeStep(StepIO(sink, logging.getLogger("test")), nar).report(
+            _TS[1], _TS[1]
+        )
         assert nar.calls == []
         assert sink.latest_narrative_finding_hashes() is None
 
     def test_active_findings_generate_and_store(self, sink):
         _add_judgement(sink, "h_mal", "malicious", last_seen=_TS[1])
         nar = _FakeNarrator()
-        NarrativeStep(StepIO(sink, logging.getLogger("test")), nar).report("run-1", _TS[1])
+        NarrativeStep(StepIO(sink, logging.getLogger("test")), nar).report(
+            "run-1", _TS[1]
+        )
         assert len(nar.calls) == 1
         import json as _json
 
@@ -1143,7 +1152,9 @@ class TestComputeRiskScore:
 
 class TestRiskExplanation:
     def test_initial_score(self):
-        assert "Initial" in RiskExplanation().explain({"score": 90, "drivers": []}, None)
+        assert "Initial" in RiskExplanation().explain(
+            {"score": 90, "drivers": []}, None
+        )
 
     def test_resolved_driver_raises_score(self):
         class _Prev:
@@ -1377,9 +1388,8 @@ def _loop_once(sink, cycle=None, max_db_bytes=0):
             shutdown.set()
 
     sink.write_heartbeat = heartbeat_then_stop
-    loop = ControlLoop(
-        sink, _settings(sink), cycle or fake_cycle, max_db_bytes, shutdown
-    )
+    plane = ControlPlane(sink, shutdown, logging.getLogger("test"), max_db_bytes)
+    loop = ControlLoop(plane, _settings(sink), cycle or fake_cycle)
     loop.run_forever(300)
     return calls
 
@@ -1432,7 +1442,7 @@ class TestControlCommands:
 
         monkeypatch.setattr(sink, "prune_to_size", fake_prune)
 
-        result = MaintenanceCommand.PRUNE.apply(sink, 4096)
+        result = Maintenance(sink, 4096).apply(MaintenanceCommand.PRUNE)
 
         assert caps == [4096]
         assert result == "pruned runs=2 events=5"

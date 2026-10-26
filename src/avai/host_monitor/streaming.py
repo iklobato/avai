@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .collectors import StreamingCollector
 from .constants import STREAM_HEALTHY_RESET_S
+from .failures import HOST_FAILURES
 from .runtime import Clock, Digest
 from .sink import Sink
 from .supervision import (
@@ -28,18 +29,6 @@ from .supervision import (
     SupervisionListener,
 )
 
-# What a live stream can raise: tool and pipe errors, parse errors on a bad
-# event, and database errors while writing. Each ends the session as Crashed
-# so the worker restarts it instead of dying.
-STREAM_FAILURES = (
-    OSError,
-    RuntimeError,
-    ValueError,
-    LookupError,
-    TypeError,
-    AttributeError,
-    SQLAlchemyError,
-)
 WRITE_FAILURES = (SQLAlchemyError, OSError, ValueError, TypeError)
 
 
@@ -249,7 +238,7 @@ class StreamingWorker:
             for row in self.collector.stream(self.stop_event):
                 buffer.append(self._stamped(row))
                 last_flush = self._flush_if_due(buffer, last_flush)
-        except STREAM_FAILURES as exc:  # relayed to the supervisor as Crashed
+        except HOST_FAILURES as exc:  # relayed to the supervisor as Crashed
             return exc
         return None
 

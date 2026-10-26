@@ -9,14 +9,20 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from sqlalchemy.exc import SQLAlchemyError
 
 from avai.enrichers import EnrichmentChain, IndicatorExtraction
 
 from .collectors import SnapshotCollector, StreamingCollector
 from .constants import DEFAULT_BASELINE_MIN_RUNS, LOGGER_NAME
-from .control_loop import ControlLoop, ControlSettings, ProgressHeartbeat
+from .control_loop import (
+    ControlDefaults,
+    ControlLoop,
+    ControlPlane,
+    ControlSettings,
+    ProgressHeartbeat,
+)
 from .coverage import YaraCoverageAssessor
+from .failures import HOST_FAILURES
 from .cycle_steps import (
     CoverageStep,
     CycleStep,
@@ -51,18 +57,6 @@ from .verifier import MaliciousVerdictVerifier
 BYTES_PER_MB = 1024 * 1024
 MS_PER_SECOND = 1000
 ERROR_EXCERPT_CHARS = 200
-# What one collector, or one judging pass, can raise: tool and command
-# errors, parse errors, LLM call errors (RuntimeError) and database errors.
-# The cycle records the failure and moves on to the next collector.
-COLLECT_FAILURES = (
-    OSError,
-    RuntimeError,
-    ValueError,
-    LookupError,
-    TypeError,
-    AttributeError,
-    SQLAlchemyError,
-)
 
 
 class HostMonitorLog:
@@ -175,7 +169,7 @@ class CollectionCycle:
     def _collect_guarded(self, collector: SnapshotCollector, stamp: CycleStamp) -> bool:
         try:
             self._collect(collector, stamp)
-        except COLLECT_FAILURES as exc:
+        except HOST_FAILURES as exc:
             self.config.sink.write_error(collector.name, exc)
             self._log.warning(
                 "collector=%s status=failed error=%s message=%s",
@@ -270,7 +264,7 @@ class CollectionCycle:
     def _unjudged_stream(self, collector: StreamingCollector) -> list[dict[str, Any]]:
         try:
             return self.config.sink.unjudged_all(collector)
-        except COLLECT_FAILURES as exc:
+        except HOST_FAILURES as exc:
             self._log.warning(
                 "streaming-judge: unjudged_all(%s) failed: %s", collector.name, exc
             )
@@ -281,7 +275,7 @@ class CollectionCycle:
         try:
             self.plan.streaming_pipeline.run(batch)
             self.config.sink.write_judgments(batch.judgments, context=batch.context())
-        except COLLECT_FAILURES:
+        except HOST_FAILURES:
             self._log.exception("streaming-judge failed for %s", name)
             return
         self._log.info(
@@ -291,7 +285,7 @@ class CollectionCycle:
     def _apply_feedback(self) -> None:
         try:
             applied = self.config.sink.apply_feedback()
-        except COLLECT_FAILURES:
+        except HOST_FAILURES:
             self._log.exception("apply_feedback failed")
             return
         if applied:
@@ -393,19 +387,20 @@ class Runner:
     @classmethod
     def create(cls, config: RunnerConfig) -> Runner:
         sink = config.sink
-        settings = ControlSettings(
-            sink,
-            judge_default=not isinstance(config.judge, NullJudge),
-            enrich_default=config.enrichment_chain is not None,
+        defaults = ControlDefaults(
+            judge=not isinstance(config.judge, NullJudge),
+            enrich=config.enrichment_chain is not None,
         )
-        heartbeat = ProgressHeartbeat(sink)
+        settings = ControlSettings(sink, defaults)
+        heartbeat = ProgressHeartbeat(sink, config.logger)
         controls = CycleControls(settings, heartbeat, threading.Event())
         cycle = CollectionCycle(
             config, controls, CyclePlanner(config).plan(settings, heartbeat)
         )
-        control = ControlLoop(
-            sink, settings, cycle.scan, config.max_db_bytes, controls.shutdown_event
+        plane = ControlPlane(
+            sink, controls.shutdown_event, config.logger, config.max_db_bytes
         )
+        control = ControlLoop(plane, settings, cycle.scan)
         streaming = StreamingSupervisor(
             sink, config.streaming_collectors, SupervisionPolicy.standard(config.logger)
         )
