@@ -29,13 +29,15 @@ from avai.host_monitor.collectors import (
     CapturedPackets,
     DnsQueriesCollector,
     DnsQuestion,
-    HostsFileCollector,
     NetworkFlowsCollector,
-    PrivilegeConfigCollector,
     ProcessConnectionResolver,
     QueryTable,
-    SshAuthorizedKeysCollector,
     TcpdumpLine,
+)
+from avai.host_monitor.collectors.persistence import (
+    AuthorizedKeysParser,
+    HostsFileParser,
+    SudoersParser,
 )
 from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 from avai.host_monitor.models import (
@@ -168,7 +170,7 @@ _VALID_BLOB = base64.b64encode(b"raw-ed25519-public-key-bytes----").decode()
 
 class TestAuthorizedKeys:
     def test_key_with_options_and_comment(self):
-        rows = SshAuthorizedKeysCollector._parse_authorized_keys(
+        rows = AuthorizedKeysParser().parse(
             'from="10.0.0.0/8",no-pty ssh-ed25519 ' f"{_VALID_BLOB} admin@laptop\n",
             "/Users/x/.ssh/authorized_keys",
             "x",
@@ -182,22 +184,18 @@ class TestAuthorizedKeys:
         assert r["owner"] == "x"
 
     def test_plain_key_no_options(self):
-        rows = SshAuthorizedKeysCollector._parse_authorized_keys(
+        rows = AuthorizedKeysParser().parse(
             f"ssh-rsa {_VALID_BLOB} root\n", "/p", "root"
         )
         assert rows[0]["options"] is None
         assert rows[0]["key_type"] == "ssh-rsa"
 
     def test_comments_and_blanks_skipped(self):
-        rows = SshAuthorizedKeysCollector._parse_authorized_keys(
-            "# a comment\n\n   \n", "/p", "x"
-        )
+        rows = AuthorizedKeysParser().parse("# a comment\n\n   \n", "/p", "x")
         assert rows == []
 
     def test_invalid_base64_yields_no_fingerprint(self):
-        rows = SshAuthorizedKeysCollector._parse_authorized_keys(
-            "ssh-ed25519 not!base64!! c\n", "/p", "x"
-        )
+        rows = AuthorizedKeysParser().parse("ssh-ed25519 not!base64!! c\n", "/p", "x")
         assert rows[0]["fingerprint"] is None
 
 
@@ -208,7 +206,7 @@ class TestAuthorizedKeys:
 
 class TestHostsParse:
     def test_parses_mappings_and_strips_comments(self):
-        rows = HostsFileCollector._parse_hosts(
+        rows = HostsFileParser().parse(
             "127.0.0.1 localhost\n# c\n6.6.6.6 my-bank.com extra # evil\n\n",
             "/etc/hosts",
         )
@@ -218,7 +216,7 @@ class TestHostsParse:
         ]
 
     def test_lone_ip_without_name_skipped(self):
-        assert HostsFileCollector._parse_hosts("1.2.3.4\n", "/etc/hosts") == []
+        assert HostsFileParser().parse("1.2.3.4\n", "/etc/hosts") == []
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +226,7 @@ class TestHostsParse:
 
 class TestPrivilegeParsers:
     def test_sudoers_keeps_rules_drops_defaults(self):
-        rows = PrivilegeConfigCollector._parse_sudoers(
+        rows = SudoersParser().parse(
             "Defaults env_reset\n"
             "# comment\n"
             "%admin ALL=(ALL) ALL\n"

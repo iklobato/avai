@@ -784,7 +784,7 @@ class TestLayoutCollectors:
         ssh = tmp_path / "home" / "alice" / ".ssh"
         _write(ssh / "authorized_keys", "ssh-ed25519 AAAAC3Nza alice@laptop\n")
         _write(ssh / "authorized_keys2", 'from="10.0.0.1" ssh-rsa AAAAB3Nza\n')
-        rows = list(SshAuthorizedKeysCollector(fs=_Fs(tmp_path)).collect())
+        rows = list(SshAuthorizedKeysCollector(_Fs(tmp_path)).collect())
         assert [(r["owner"], r["key_type"], r["options"]) for r in rows] == [
             ("alice", "ssh-ed25519", None),
             ("alice", "ssh-rsa", 'from="10.0.0.1"'),

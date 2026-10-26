@@ -213,19 +213,19 @@ class TestUnitRow:
     def test_parses_restart_always_as_keep_alive(self, tmp_path):
         p = tmp_path / "x.service"
         p.write_text("[Service]\nExecStart=/bin/x\nRestart=always\n")
-        row = SystemdUnitReader.unit_row("system_service", p)
+        row = SystemdUnitReader().unit_row("system_service", p)
         assert row["keep_alive"] == 1
 
     def test_restart_no_is_not_keep_alive(self, tmp_path):
         p = tmp_path / "x.service"
         p.write_text("[Service]\nExecStart=/bin/x\nRestart=no\n")
-        row = SystemdUnitReader.unit_row("system_service", p)
+        row = SystemdUnitReader().unit_row("system_service", p)
         assert row["keep_alive"] == 0
 
     def test_timer_unit_uses_on_calendar_as_program(self, tmp_path):
         p = tmp_path / "x.timer"
         p.write_text("[Timer]\nOnCalendar=daily\n")
-        row = SystemdUnitReader.unit_row("system_timer", p)
+        row = SystemdUnitReader().unit_row("system_timer", p)
         assert row["program"] == "daily"
 
     def test_malformed_unit_file_returns_none(self, tmp_path):
@@ -235,7 +235,7 @@ class TestUnitRow:
         p.write_text("this is not a valid ini file at all\n%%%\n")
         # Either None or a row — but never an exception.
         try:
-            row = SystemdUnitReader.unit_row("system_service", p)
+            row = SystemdUnitReader().unit_row("system_service", p)
         except Exception as exc:  # noqa: BLE001
             pytest.fail(f"unit_row raised on malformed input: {exc!r}")
         assert row is None or isinstance(row, dict)
@@ -250,7 +250,7 @@ class TestCronRows:
     def test_system_crontab_with_user_column(self, tmp_path):
         p = tmp_path / "crontab"
         p.write_text("0 5 * * * root /usr/bin/backup.sh\n")
-        rows = list(CrontabReader.file_rows("system_crontab", p))
+        rows = list(CrontabReader().file_rows("system_crontab", p))
         assert len(rows) == 1
         assert rows[0]["user_name"] == "root"
         assert rows[0]["program"] == "/usr/bin/backup.sh"
@@ -258,14 +258,14 @@ class TestCronRows:
     def test_user_crontab_without_user_column(self, tmp_path):
         p = tmp_path / "alice"
         p.write_text("*/5 * * * * /home/alice/poll.sh\n")
-        rows = list(CrontabReader.file_rows("user_crontab", p, owner="alice"))
+        rows = list(CrontabReader().file_rows("user_crontab", p, owner="alice"))
         assert rows[0]["user_name"] == "alice"
         assert rows[0]["program"] == "/home/alice/poll.sh"
 
     def test_reboot_keyword_sets_run_at_load(self, tmp_path):
         p = tmp_path / "crontab"
         p.write_text("@reboot root /opt/startup\n")
-        rows = list(CrontabReader.file_rows("system_crontab", p))
+        rows = list(CrontabReader().file_rows("system_crontab", p))
         assert rows[0]["run_at_load"] == 1
 
     def test_comments_blanks_and_env_lines_skipped(self, tmp_path):
@@ -277,7 +277,7 @@ class TestCronRows:
             "PATH=/usr/bin:/bin\n"
             "0 0 * * * root /real/job\n"
         )
-        rows = list(CrontabReader.file_rows("system_crontab", p))
+        rows = list(CrontabReader().file_rows("system_crontab", p))
         # Only the one real job — comment, blank, and 2 env lines dropped.
         assert len(rows) == 1
         assert rows[0]["program"] == "/real/job"
@@ -286,17 +286,17 @@ class TestCronRows:
         # Six tokens would pass the field count of a user crontab line.
         p = tmp_path / "alice"
         p.write_text('MAILTO="ops team at example dot com"\n')
-        assert list(CrontabReader.file_rows("user_crontab", p, owner="alice")) == []
+        assert list(CrontabReader().file_rows("user_crontab", p, owner="alice")) == []
 
     def test_truncated_line_is_skipped_not_crashed(self, tmp_path):
         # A line with too few fields must be skipped, not IndexError.
         p = tmp_path / "crontab"
         p.write_text("0 5 *\n")  # only 3 of 5 schedule fields
-        rows = list(CrontabReader.file_rows("system_crontab", p))
+        rows = list(CrontabReader().file_rows("system_crontab", p))
         assert rows == []
 
     def test_nonexistent_file_yields_nothing(self, tmp_path):
-        rows = list(CrontabReader.file_rows("system_crontab", tmp_path / "missing"))
+        rows = list(CrontabReader().file_rows("system_crontab", tmp_path / "missing"))
         assert rows == []
 
 
