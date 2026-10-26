@@ -76,17 +76,6 @@ STREAM_CRASH_ESCALATE_THRESHOLD = 3
 STREAM_HEALTHY_RESET_S = 5.0
 
 
-_CORRELATED_COLLECTOR = "processes"
-
-# Collector whose findings carry YARA rule context (rule meta + matched
-# strings) the Runner attaches to the judge payload for FP triage.
-_FILE_SCAN_COLLECTOR = "file_scan"
-
-# Persistence collector whose entries are correlated with the runtime
-# behaviour of the process their program spawns (program → pid → story).
-_LAUNCH_ITEM_COLLECTOR = "launch_items"
-
-
 DEFAULT_NARRATIVE_MODEL = DEFAULT_JUDGE_MODEL
 
 

@@ -4,14 +4,9 @@ best-effort: a failed report is logged and never fails the cycle."""
 from __future__ import annotations
 
 import json
-import logging
 import platform
 import socket
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar
-
-from sqlalchemy.exc import SQLAlchemyError
+from typing import Any, Protocol
 
 from .collectors import SnapshotCollector
 from .coverage import YaraCoverageAssessor
@@ -20,54 +15,10 @@ from .models import RiskScoreRow
 from .narrator import IncidentNarrator
 from .risk import RiskCounts, RiskScorer
 from .runtime import Clock
-from .sink import Sink
-
-# What reading or writing a report can raise: database errors plus bad
-# values in a stored row. Each is logged and the step skipped.
-REPORT_FAILURES = (
-    SQLAlchemyError,
-    OSError,
-    ValueError,
-    LookupError,
-    TypeError,
-    AttributeError,
-)
-
-Value = TypeVar("Value")
-
+from .step_io import StepIO
 
 class CycleStep(Protocol):
     def report(self, run_id: str, started: str) -> None: ...
-
-
-@dataclass(frozen=True)
-class StepIO:
-    """Where a step reads and writes, and where its failures are logged."""
-
-    sink: Sink
-    logger: logging.Logger
-
-    def read(self, label: str, action: Callable[[], Value]) -> Value | None:
-        try:
-            return action()
-        except REPORT_FAILURES as exc:
-            self.logger.warning("%s failed: %s", label, exc)
-            return None
-
-    def wrote(self, label: str, action: Callable[[], object]) -> bool:
-        try:
-            action()
-        except REPORT_FAILURES as exc:
-            self.logger.warning("%s failed: %s", label, exc)
-            return False
-        return True
-
-    def matches(self, action: Callable[[], object], expected: str) -> bool:
-        """An optimisation check: a failed read means "not the same"."""
-        try:
-            return action() == expected
-        except REPORT_FAILURES:
-            return False
 
 
 class NarrativeStep:

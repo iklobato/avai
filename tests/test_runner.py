@@ -42,6 +42,7 @@ from avai.host_monitor.cycle_steps import (
     StepIO,
 )
 from avai.host_monitor.finding_stages import (
+    BatchOrigin,
     BaselineStage,
     CorrelationStage,
     EvidenceStage,
@@ -84,7 +85,7 @@ _NO_BASELINE = HostBaseline(total_runs=0, established=False, cutoff_at=None)
 
 
 def _batch(collector, entries, rows=(), run_id="run", baseline=_NO_BASELINE):
-    return FindingBatch(collector, entries, list(rows), run_id, baseline)
+    return FindingBatch(collector, entries, BatchOrigin(list(rows), run_id, baseline))
 
 
 def _runner(sink, snapshot=(), judge=None, **options):
@@ -474,6 +475,12 @@ class TestFirstSeenMap:
 
 
 class TestAnnotateBaseline:
+    def _annotate(
+        self, sink: Sink, unjudged: list[dict[str, str]], baseline: HostBaseline
+    ) -> None:
+        stage = BaselineStage(StepIO(sink, logging.getLogger("test")))
+        stage.apply(_batch(_ProcStub(), unjudged, baseline=baseline))
+
     def test_novel_true_for_artifact_first_seen_after_cutoff(self, sink):
         # Establish a baseline of 2 runs; cutoff == 2nd run start (_TS[1]).
         _add_run(sink, _TS[0])
@@ -486,7 +493,7 @@ class TestAnnotateBaseline:
             {"content_hash": h_old, "name": "old"},
             {"content_hash": h_new, "name": "new"},
         ]
-        BaselineStage(sink).apply(_batch(_ProcStub(), unjudged, baseline=bl))
+        self._annotate(sink, unjudged, bl)
 
         old, new = unjudged
         assert old["baseline"]["novel"] is False
@@ -503,7 +510,7 @@ class TestAnnotateBaseline:
         bl = HostBaseline.measure(sink, 5)
 
         unjudged = [{"content_hash": h, "name": "x"}]
-        BaselineStage(sink).apply(_batch(_ProcStub(), unjudged, baseline=bl))
+        self._annotate(sink, unjudged, bl)
 
         assert unjudged[0]["baseline"]["baseline_established"] is False
         assert unjudged[0]["baseline"]["novel"] is False
@@ -513,7 +520,7 @@ class TestAnnotateBaseline:
         _add_run(sink, _TS[1])
         bl = HostBaseline.measure(sink, 2)
         unjudged = [{"content_hash": "never-collected", "name": "ghost"}]
-        BaselineStage(sink).apply(_batch(_ProcStub(), unjudged, baseline=bl))
+        self._annotate(sink, unjudged, bl)
         assert "baseline" not in unjudged[0]
 
     def test_intermittent_flagged_for_flapping_artifact(self, sink):
@@ -533,7 +540,7 @@ class TestAnnotateBaseline:
             {"content_hash": Digest().of_row({"name": n}, ("name",)), "name": n}
             for n in ("steady", "flap", "fresh")
         ]
-        BaselineStage(sink).apply(_batch(_ProcStub(), unjudged, baseline=bl))
+        self._annotate(sink, unjudged, bl)
         steady, flap, fresh = unjudged
         assert flap["baseline"]["intermittent"] is True
         assert steady["baseline"]["intermittent"] is False  # present every run
@@ -550,7 +557,10 @@ def _w(sink, model, **cols):
 
 
 def _correlate(sink, collector, unjudged, rows, run_id):
-    stage = CorrelationStage(sink, ProcessBehavior(sink))
+    stage = CorrelationStage(
+        StepIO(sink, logging.getLogger("test")),
+        ProcessBehavior(StepIO(sink, logging.getLogger("test"))),
+    )
     stage.apply(_batch(collector, unjudged, rows, run_id=run_id))
 
 
@@ -1773,7 +1783,11 @@ class TestVerifyStage:
 
         v = _FakeVerifier(refuted=True)
         j = _mk_judgment("h1", Verdict.MALICIOUS)
-        out = _revise(VerifyStage(v), [j], [{"content_hash": "h1", "name": "x"}])
+        out = _revise(
+            VerifyStage(v, logging.getLogger("test")),
+            [j],
+            [{"content_hash": "h1", "name": "x"}],
+        )
         assert out[0].verdict == Verdict.SUSPICIOUS
         assert "downgraded" in out[0].reasoning
         assert "original reason" in out[0].reasoning  # original preserved
@@ -1784,7 +1798,9 @@ class TestVerifyStage:
 
         v = _FakeVerifier(refuted=False)
         j = _mk_judgment("h1", Verdict.MALICIOUS)
-        out = _revise(VerifyStage(v), [j], [{"content_hash": "h1"}])
+        out = _revise(
+            VerifyStage(v, logging.getLogger("test")), [j], [{"content_hash": "h1"}]
+        )
         assert out[0].verdict == Verdict.MALICIOUS
         assert len(v.calls) == 1
 
@@ -1793,7 +1809,7 @@ class TestVerifyStage:
 
         v = _FakeVerifier(refuted=True)
         j = _mk_judgment("h1", Verdict.SUSPICIOUS)
-        out = _revise(VerifyStage(v), [j], [])
+        out = _revise(VerifyStage(v, logging.getLogger("test")), [j], [])
         assert out[0].verdict == Verdict.SUSPICIOUS
         assert v.calls == []  # skeptic only runs on malicious
 
@@ -1802,7 +1818,7 @@ class TestVerifyStage:
 
         v = _FakeVerifier(refuted=True)
         judgments = [_mk_judgment(f"h{i}", Verdict.MALICIOUS) for i in range(12)]
-        out = _revise(VerifyStage(v), judgments, [])
+        out = _revise(VerifyStage(v, logging.getLogger("test")), judgments, [])
         assert len(v.calls) == 10
         assert [j.verdict for j in out[10:]] == [Verdict.MALICIOUS] * 2
 
@@ -1871,7 +1887,11 @@ class _FakeInvestigator:
 
 
 def _investigate(sink, inv):
-    return InvestigateStage(inv, sink, ProcessBehavior(sink))
+    return InvestigateStage(
+        inv,
+        StepIO(sink, logging.getLogger("test")),
+        ProcessBehavior(StepIO(sink, logging.getLogger("test"))),
+    )
 
 
 class TestInvestigateStage:
@@ -2069,5 +2089,7 @@ def _hints_seen_by_judge(sink, base_hints):
     collector = _ProcStub()
     collector.judge_hints = base_hints
     judge = _RecordingJudge()
-    JudgeStage(judge, sink).apply(_batch(collector, [{"content_hash": "h"}]))
+    JudgeStage(judge, StepIO(sink, logging.getLogger("test"))).apply(
+        _batch(collector, [{"content_hash": "h"}])
+    )
     return judge.calls[0][1]

@@ -28,11 +28,12 @@ from .cycle_steps import (
     CycleStep,
     NarrativeStep,
     RiskScoreStep,
-    StepIO,
     YaraStatusStep,
 )
+from .step_io import StepIO
 from .finding_stages import (
     BaselineStage,
+    BatchOrigin,
     CorrelationStage,
     EvidenceStage,
     FindingBatch,
@@ -232,8 +233,9 @@ class CollectionCycle:
         unjudged = self.config.sink.unjudged(collector)
         if not unjudged or not self.controls.settings.judge_on():
             return 0, 0
-        batch = FindingBatch(collector, unjudged, rows, stamp.run_id, stamp.baseline)
-        self.plan.snapshot_pipeline.run(batch)
+        origin = BatchOrigin(rows, stamp.run_id, stamp.baseline)
+        batch = FindingBatch(collector, unjudged, origin)
+        self.plan.snapshot_pipeline.process(batch)
         self.config.sink.write_judgments(batch.judgments, context=batch.context())
         return len(batch.judgments), batch.indicators_looked_up
 
@@ -246,7 +248,9 @@ class CollectionCycle:
         for collector in self._judged_streams():
             unjudged = self._unjudged_stream(collector)
             if unjudged:
-                batch = FindingBatch(collector, unjudged, [], None, baseline)
+                batch = FindingBatch(
+                    collector, unjudged, BatchOrigin([], None, baseline)
+                )
                 self._judge_stream(batch)
 
     def _judged_streams(self) -> list[StreamingCollector]:
@@ -273,7 +277,7 @@ class CollectionCycle:
     def _judge_stream(self, batch: FindingBatch) -> None:
         name = batch.collector.name
         try:
-            self.plan.streaming_pipeline.run(batch)
+            self.plan.streaming_pipeline.process(batch)
             self.config.sink.write_judgments(batch.judgments, context=batch.context())
         except HOST_FAILURES:
             self._log.exception("streaming-judge failed for %s", name)
@@ -328,37 +332,43 @@ class CyclePlanner:
     def _snapshot_stages(
         self, settings: ControlSettings, heartbeat: ProgressHeartbeat
     ) -> list[FindingStage]:
-        config = self._config
-        behavior = ProcessBehavior(config.sink)
+        config, io = self._config, self._io()
+        behavior = ProcessBehavior(io)
         stages: list[FindingStage] = []
         if config.enrichment_chain is not None:
             intel = ThreatIntel(config.enrichment_chain, IndicatorExtraction.default())
             stages.append(EvidenceStage(intel, settings, heartbeat))
         stages += [
-            BaselineStage(config.sink),
-            CorrelationStage(config.sink, behavior),
+            BaselineStage(io),
+            CorrelationStage(io, behavior),
             YaraContextStage(),
-            JudgeStage(config.judge, config.sink),
+            JudgeStage(config.judge, io),
         ]
-        if config.verifier is not None:
-            stages.append(VerifyStage(config.verifier))
+        stages += self._verify_stages()
         if config.investigator is not None:
-            stages.append(InvestigateStage(config.investigator, config.sink, behavior))
+            stages.append(InvestigateStage(config.investigator, io, behavior))
         return stages
 
     def _streaming_stages(self) -> list[FindingStage]:
-        config = self._config
+        io = self._io()
         stages: list[FindingStage] = [
-            BaselineStage(config.sink),
-            JudgeStage(config.judge, config.sink),
+            BaselineStage(io),
+            JudgeStage(self._config.judge, io),
         ]
-        if config.verifier is not None:
-            stages.append(VerifyStage(config.verifier))
-        return stages
+        return stages + self._verify_stages()
+
+    def _verify_stages(self) -> list[FindingStage]:
+        verifier = self._config.verifier
+        if verifier is None:
+            return []
+        return [VerifyStage(verifier, self._config.logger)]
+
+    def _io(self) -> StepIO:
+        return StepIO(self._config.sink, self._config.logger)
 
     def _cycle_steps(self) -> list[CycleStep]:
         config = self._config
-        io = StepIO(config.sink, config.logger)
+        io = self._io()
         steps: list[CycleStep] = []
         # Runs after touch_judgments, so the active-finding set is current.
         if config.narrator is not None:
