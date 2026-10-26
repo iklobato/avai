@@ -5,10 +5,12 @@ or by ecosystem CVE.
 
 https://osv.dev/docs/
 """
+
 from __future__ import annotations
 
+from collections.abc import Mapping
 from http import HTTPStatus
-from typing import ClassVar, Optional
+from typing import Any, ClassVar
 
 from avai.enrichers.base import (
     Enricher,
@@ -17,84 +19,97 @@ from avai.enrichers.base import (
     IndicatorType,
     VerdictHint,
 )
-from avai.enrichers.http import HttpClient
+from avai.enrichers.http import RequestOptions
 
-_QUERY = "https://api.osv.dev/v1/query"
-_VULN = "https://api.osv.dev/v1/vulns"
+QUERY_URL = "https://api.osv.dev/v1/query"
+VULN_URL = "https://api.osv.dev/v1/vulns"
 # Only the first few advisories are listed in the evidence.
-_MAX_LISTED_VULNS = 5
-
-
-# Heuristic ecosystem mapping. avai's `installed_apps` collector
-# doesn't yet record ecosystem, so we try a sensible default.
-def _ecosystem_for(name: str) -> str:
-    n = name.lower()
-    if n.endswith(".pyz") or n in {"pip", "python"}:
-        return "PyPI"
-    return ""  # unknown ecosystem → OSV does a global search
+MAX_LISTED_VULNS = 5
+ADVISORY_CONFIDENCE = 0.75
+PYPI_NAMES = frozenset({"pip", "python"})
 
 
 class OSVEnricher(Enricher):
-    name           = "osv"
+    name = "osv"
     supports_types = frozenset({IndicatorType.PACKAGE, IndicatorType.CVE})
-    requires_token: ClassVar[Optional[str]] = None
-    ttl_hours      = 24
+    requires_token: ClassVar[str | None] = None
+    ttl_hours = 24
+    rate_host = "api.osv.dev"
+    rate_per_second = 4.0
 
-    def __init__(self, http: Optional[HttpClient] = None):
-        self._http = http or HttpClient()
-        self._http.set_rate("api.osv.dev", 4.0)
-
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
+    def fetch(self, indicator: Indicator) -> Evidence | None:
         if indicator.type is IndicatorType.CVE:
             vulns = self._vuln_by_id(indicator.value)
         else:
             vulns = self._vulns_for_package(indicator.value)
         if not vulns:
             return None
-        listed = vulns[:_MAX_LISTED_VULNS]
-        ids = _advisory_ids(listed)
+        return self._evidence(indicator, vulns)
+
+    def _evidence(self, indicator: Indicator, vulns: list[dict[str, Any]]) -> Evidence:
+        listed = vulns[:MAX_LISTED_VULNS]
+        ids = self.advisory_ids(listed)
         # Treat severity-tagged vulns as suspicious. Without severity
         # data we still report — better signal than silence.
         return Evidence(
-            source       = self.name,
-            indicator    = indicator,
-            verdict_hint = VerdictHint.SUSPICIOUS,
-            confidence   = 0.75,
-            summary      = f"OSV: {len(vulns)} advisory hit(s): {','.join(ids)}",
-            details      = {"vuln_ids": ids,
-                            "summaries": [v.get("summary") for v in listed]},
+            source=self.name,
+            indicator=indicator,
+            verdict_hint=VerdictHint.SUSPICIOUS,
+            confidence=ADVISORY_CONFIDENCE,
+            summary=f"OSV: {len(vulns)} advisory hit(s): {','.join(ids)}",
+            details={
+                "vuln_ids": ids,
+                "summaries": [vuln.get("summary") for vuln in listed],
+            },
         )
 
-    def _vuln_by_id(self, vuln_id: str) -> list[dict]:
+    def advisory_ids(self, vulns: list[Mapping[str, Any]]) -> list[str]:
+        """Each vuln's primary id AND its aliases, deduplicated. OSV's primary
+        id is often a GHSA-/PYSEC-/OSV- id with the CVE only in aliases; the
+        chain forward-enriches CVE-/GHSA- ids (CVSS, KEV), so a CVE buried in
+        aliases must be surfaced or that stage never runs."""
+        ids = (
+            candidate
+            for vuln in vulns
+            for candidate in (vuln.get("id"), *(vuln.get("aliases") or []))
+        )
+        return list(dict.fromkeys(candidate for candidate in ids if candidate))
+
+    def ecosystem_for(self, package_name: str) -> str:
+        """Heuristic ecosystem mapping. avai's `installed_apps` collector
+        doesn't yet record ecosystem, so we try a sensible default; an empty
+        ecosystem makes OSV do a global search."""
+        lowered = package_name.lower()
+        if lowered.endswith(".pyz") or lowered in PYPI_NAMES:
+            return "PyPI"
+        return ""
+
+    def _vuln_by_id(self, vuln_id: str) -> list[dict[str, Any]]:
         # id lookups use GET /v1/vulns/{id}; POST /v1/query rejects a
         # top-level {"id": ...} with HTTP 400 (verified against the API).
-        resp = self._http.get(f"{_VULN}/{vuln_id.upper()}")
-        if resp.status_code != HTTPStatus.OK:
+        response = self._http.get(f"{VULN_URL}/{vuln_id.upper()}")
+        if response.status_code != HTTPStatus.OK:
             return []
-        return [resp.json()]
+        return [response.json()]
 
-    def _vulns_for_package(self, package: str) -> list[dict]:
+    def _vulns_for_package(self, package: str) -> list[dict[str, Any]]:
         # PACKAGE is "<name>@<version>". Either piece may be missing.
-        name, _, version = package.partition("@")
-        if not name:
+        package_name, _, version = package.partition("@")
+        if not package_name:
             return []
-        pkg = {"name": name}
-        ecosystem = _ecosystem_for(name)
+        response = self._http.post(
+            QUERY_URL, RequestOptions(json=self._query(package_name, version))
+        )
+        if response.status_code != HTTPStatus.OK:
+            return []
+        return response.json().get("vulns") or []
+
+    def _query(self, package_name: str, version: str) -> dict[str, Any]:
+        package_spec = {"name": package_name}
+        ecosystem = self.ecosystem_for(package_name)
         if ecosystem:
-            pkg["ecosystem"] = ecosystem
-        payload = {"package": pkg}
+            package_spec["ecosystem"] = ecosystem
+        query: dict[str, Any] = {"package": package_spec}
         if version:
-            payload["version"] = version
-        resp = self._http.post(_QUERY, json=payload)
-        if resp.status_code != HTTPStatus.OK:
-            return []
-        return resp.json().get("vulns") or []
-
-
-def _advisory_ids(vulns: list[dict]) -> list[str]:
-    """Each vuln's primary id AND its aliases, deduplicated. OSV's primary
-    id is often a GHSA-/PYSEC-/OSV- id with the CVE only in aliases; the
-    chain forward-enriches CVE-/GHSA- ids (CVSS, KEV), so a CVE buried in
-    aliases must be surfaced or that stage never runs."""
-    ids = (cand for v in vulns for cand in (v.get("id"), *(v.get("aliases") or [])))
-    return list(dict.fromkeys(cand for cand in ids if cand))
+            query["version"] = version
+        return query

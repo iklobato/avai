@@ -6,7 +6,7 @@ samples are representative of the documented formats.
 
 from __future__ import annotations
 
-from avai.enrichers import IndicatorType, extract_indicators
+from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.hosts.linux import LinuxHost
 from avai.host_monitor.hosts.macos import MacOSHost
 from avai.host_monitor.hosts.windows import WindowsHost
@@ -209,16 +209,19 @@ class TestPsParsers:
 
 
 class TestDnsResolverEnrichment:
+    def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
+        return IndicatorExtraction.default().extract(collector, row)
+
     def test_public_server_emits_indicator(self):
-        inds = extract_indicators("dns_resolvers", {"server": "8.8.8.8"})
+        inds = self.extract("dns_resolvers", {"server": "8.8.8.8"})
         assert inds and inds[0].type == IndicatorType.IPV4
 
     def test_private_server_is_not_enriched(self):
-        assert extract_indicators("dns_resolvers", {"server": "192.168.1.1"}) == []
+        assert self.extract("dns_resolvers", {"server": "192.168.1.1"}) == []
 
     def test_arp_table_has_no_extractor(self):
         # LAN MACs/IPs aren't threat-intel material → NoOp.
-        assert extract_indicators("arp_table", {"ip": "192.168.1.1"}) == []
+        assert self.extract("arp_table", {"ip": "192.168.1.1"}) == []
 
 
 class TestWiring:

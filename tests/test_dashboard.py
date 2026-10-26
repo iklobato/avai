@@ -18,10 +18,9 @@ from sqlalchemy.orm import Session
 
 from avai.dashboard.app import create_app
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.queries import latest_run, system_integrity
-from avai.dashboard.serve import _ensure_db_exists
 from avai.dashboard.db import read_only_engine
-from avai.dashboard.queries import LogFilter, Page
+from avai.dashboard.queries import LogFilter, Page, latest_run, system_integrity
+from avai.dashboard.serve import _ensure_db_exists
 from avai.host_monitor.models import SystemIntegrityRow
 from avai.host_monitor.sink import Sink
 
@@ -691,10 +690,10 @@ class TestDashboardEndpoints:
     def test_vulnerabilities_panel_renders_cves_and_kev(self, client, db_path):
         import json as _json
 
+        from avai.enrichers.cache import EnrichmentSchema
         from avai.host_monitor.models import Base
-        from avai.enrichers.cache import register_schema
 
-        model = register_schema(Base)
+        model = EnrichmentSchema(Base).model()
         with Session(_engine_rw(db_path)) as s:
             s.add(
                 model(
@@ -775,11 +774,10 @@ class TestDashboardEndpoints:
     ):
         import json as _json
 
-        from avai.host_monitor.models import Base
-        from avai.enrichers.cache import register_schema
-        from avai.host_monitor.models import CollectionRun, ListeningPortRow
+        from avai.enrichers.cache import EnrichmentSchema
+        from avai.host_monitor.models import Base, CollectionRun, ListeningPortRow
 
-        model = register_schema(Base)
+        model = EnrichmentSchema(Base).model()
         with Session(_engine_rw(db_path)) as s:
             # A completed run where nginx is listening (exposed on the host).
             s.add(

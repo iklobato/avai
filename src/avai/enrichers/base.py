@@ -8,19 +8,22 @@ know about every enricher.
 
 from __future__ import annotations
 
-import logging
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum, unique
-from typing import Any, ClassVar, Mapping, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Mapping
 
-LOG = logging.getLogger("avai.enrichers")
+if TYPE_CHECKING:
+    from avai.enrichers.http import HttpClient
 
 # CVSS v3 severity bands: critical from 9.0, high from 7.0.
 CVSS_CRITICAL = 9.0
 CVSS_HIGH = 7.0
+DEFAULT_TTL_HOURS = 24
+DEFAULT_SOURCE_RATE_PER_SECOND = 1.0
+# Gate value of a keyless source: non-empty so it always registers.
+KEYLESS_TOKEN = "(no token required)"
 
 
 @unique
@@ -53,6 +56,38 @@ class VerdictHint(StrEnum):
     BENIGN = "benign"  # e.g. NSRL whitelist hit
     UNKNOWN = "unknown"
 
+    @property
+    def severity_rank(self) -> int:
+        return HINT_SEVERITY_ORDER.index(self)
+
+    @classmethod
+    def worst(cls, hints: list[VerdictHint]) -> VerdictHint:
+        """Aggregate multiple evidence hints to the worst-case verdict: a
+        malicious hit on any source wins over a benign hit on another."""
+        if not hints:
+            return cls.UNKNOWN
+        return max(hints, key=lambda hint: hint.severity_rank)
+
+
+HINT_SEVERITY_ORDER = (
+    VerdictHint.BENIGN,
+    VerdictHint.UNKNOWN,
+    VerdictHint.SUSPICIOUS,
+    VerdictHint.MALICIOUS,
+)
+
+LOWERCASED_TYPES = frozenset(
+    {
+        IndicatorType.SHA256,
+        IndicatorType.SHA1,
+        IndicatorType.MD5,
+        IndicatorType.IPV4,
+        IndicatorType.IPV6,
+        IndicatorType.DOMAIN,
+        IndicatorType.CVE,
+    }
+)
+
 
 @dataclass(frozen=True)
 class Indicator:
@@ -66,21 +101,21 @@ class Indicator:
     type: IndicatorType
     value: str
 
-    def __post_init__(self):
-        v = self.value
-        if self.type in (
-            IndicatorType.SHA256,
-            IndicatorType.SHA1,
-            IndicatorType.MD5,
-            IndicatorType.IPV4,
-            IndicatorType.IPV6,
-            IndicatorType.DOMAIN,
-            IndicatorType.CVE,
-        ):
-            v = v.lower()
-        if self.type is IndicatorType.URL and "#" in v:
-            v = v.split("#", 1)[0]
-        object.__setattr__(self, "value", v)
+    def __post_init__(self) -> None:
+        canonical = self.value
+        if self.type in LOWERCASED_TYPES:
+            canonical = canonical.lower()
+        if self.type is IndicatorType.URL and "#" in canonical:
+            canonical = canonical.split("#", 1)[0]
+        object.__setattr__(self, "value", canonical)
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A source's hint plus how much it trusts that hint."""
+
+    hint: VerdictHint
+    confidence: float
 
 
 @dataclass(frozen=True)
@@ -121,11 +156,18 @@ class Enricher(ABC):
 
     name: ClassVar[str]
     supports_types: ClassVar[frozenset[IndicatorType]]
-    requires_token: ClassVar[Optional[str]] = None
-    ttl_hours: ClassVar[int] = 24
+    requires_token: ClassVar[str | None] = None
+    ttl_hours: ClassVar[int] = DEFAULT_TTL_HOURS
+    # Host whose per-host rate limit this source sets on the shared client.
+    rate_host: ClassVar[str | None] = None
+    rate_per_second: ClassVar[float] = DEFAULT_SOURCE_RATE_PER_SECOND
+
+    def __init__(self, http: HttpClient, token: str) -> None:
+        self._http = http
+        self._token = token
 
     @classmethod
-    def env_token(cls) -> Optional[str]:
+    def env_token(cls, env: Mapping[str, str]) -> str | None:
         """Return the gate value for this enricher's registration.
 
         Contract:
@@ -140,24 +182,26 @@ class Enricher(ABC):
             - ``requires_token`` set + env var non-empty → returns it.
         """
         if cls.requires_token is None:
-            return "(no token required)"
-        return os.environ.get(cls.requires_token, "") or None
+            return KEYLESS_TOKEN
+        return env.get(cls.requires_token, "") or None
 
     @classmethod
-    def from_env(cls) -> Optional["Enricher"]:
+    def create(cls, http: HttpClient, env: Mapping[str, str]) -> Enricher | None:
         """Factory: return an instance, or ``None`` if the env-gated
-        token is required but missing. Concrete subclasses override
-        only if they need extra init args."""
-        token = cls.env_token()
+        token is required but missing. Sets this source's rate limit on
+        the shared client."""
+        token = cls.env_token(env)
         if token is None:
             return None
-        return cls()
+        if cls.rate_host is not None:
+            http.set_rate(cls.rate_host, cls.rate_per_second)
+        return cls(http, token)
 
     def supports(self, indicator: Indicator) -> bool:
         return indicator.type in self.supports_types
 
     @abstractmethod
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
+    def fetch(self, indicator: Indicator) -> Evidence | None:
         """Hit the network. Return ``None`` for "no opinion" (e.g.
         404 / explicitly-unknown). Raise ``RateLimitedError`` on 429.
         Raise any other exception for transport / parse errors — the
@@ -166,21 +210,3 @@ class Enricher(ABC):
 
     def freshness_cutoff(self) -> datetime:
         return datetime.now(timezone.utc) - timedelta(hours=self.ttl_hours)
-
-
-# Convenience: the verdict hint priority order. Used by the chain to
-# downgrade conflicting evidence to the worst case (a malicious hit on
-# any source wins over a benign hit on another).
-_HINT_PRIORITY = {
-    VerdictHint.MALICIOUS: 3,
-    VerdictHint.SUSPICIOUS: 2,
-    VerdictHint.UNKNOWN: 1,
-    VerdictHint.BENIGN: 0,
-}
-
-
-def worst_hint(hints: list[VerdictHint]) -> VerdictHint:
-    """Aggregate multiple evidence hints to the worst-case verdict."""
-    if not hints:
-        return VerdictHint.UNKNOWN
-    return max(hints, key=_HINT_PRIORITY.get)

@@ -6,7 +6,7 @@ are representative of the documented formats.
 
 from __future__ import annotations
 
-from avai.enrichers import IndicatorType, extract_indicators
+from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.exposure_collectors import (
     LinuxPromiscParser,
     LinuxProxyEnvParser,
@@ -171,24 +171,27 @@ class TestWindowsSessionParser:
 
 
 class TestEnrichment:
+    def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
+        return IndicatorExtraction.default().extract(collector, row)
+
     def test_proxy_public_host_enriched(self):
-        inds = extract_indicators("proxy_config", {"host": "8.8.8.8"})
+        inds = self.extract("proxy_config", {"host": "8.8.8.8"})
         assert inds and inds[0].type == IndicatorType.IPV4
 
     def test_proxy_private_host_not_enriched(self):
-        assert extract_indicators("proxy_config", {"host": "10.0.0.9"}) == []
+        assert self.extract("proxy_config", {"host": "10.0.0.9"}) == []
 
     def test_share_server_extracted(self):
-        inds = extract_indicators("network_shares", {"remote": "//files.evil.com/x"})
+        inds = self.extract("network_shares", {"remote": "//files.evil.com/x"})
         assert inds and inds[0].type == IndicatorType.DOMAIN
         assert inds[0].value == "files.evil.com"
 
     def test_login_remote_ip_enriched(self):
-        inds = extract_indicators("login_sessions", {"source": "9.9.9.9"})
+        inds = self.extract("login_sessions", {"source": "9.9.9.9"})
         assert inds and inds[0].type == IndicatorType.IPV4
 
     def test_login_local_not_enriched(self):
-        assert extract_indicators("login_sessions", {"source": "local"}) == []
+        assert self.extract("login_sessions", {"source": "local"}) == []
 
 
 class TestWiring:

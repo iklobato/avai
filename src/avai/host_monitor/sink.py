@@ -105,9 +105,9 @@ class Sink:
         # `create_all` provisions its table even when the enrichment
         # chain isn't enabled (the dashboard reads from it regardless).
         try:
-            from avai.enrichers.cache import register_schema
+            from avai.enrichers.cache import EnrichmentSchema
 
-            register_schema(Base)
+            EnrichmentSchema(Base).model()
         except Exception:
             LOG.exception("enrichment schema registration failed")
         # create_all / ALTER are not atomic with respect to a second

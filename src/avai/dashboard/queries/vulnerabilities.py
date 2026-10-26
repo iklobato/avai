@@ -4,16 +4,10 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from sqlalchemy import (
-    select,
-)
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from avai.host_monitor import (
-    Base,
-    ListeningPortRow,
-    ProcessRow,
-)
+from avai.host_monitor import Base, ListeningPortRow, ProcessRow
 
 from .collection import latest_run
 from .common import Page, _existing_tables, _parse_json_obj
@@ -111,9 +105,9 @@ class _Evidence(NamedTuple):
 
 
 def _vuln_evidence(session: Session) -> list[_Evidence]:
-    from avai.enrichers.cache import register_schema
+    from avai.enrichers.cache import EnrichmentSchema
 
-    model = register_schema(Base)
+    model = EnrichmentSchema(Base).model()
     rows = session.execute(
         select(
             model.source,

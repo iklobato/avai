@@ -282,10 +282,3 @@ YARA_DOWNLOADS_RECENT_DAYS = 7
 # of instances; 20 entries at 80 bytes each is enough context to triage.
 YARA_MAX_MATCH_STRINGS = 20
 YARA_MATCH_STRING_MAX_BYTES = 80
-
-# Offline known-bad hash deny-list consumed by LocalHashDenylistEnricher:
-# one hex digest (md5 / sha1 / sha256) per line, '#' comments allowed. An
-# absent file ⇒ the enricher loads empty and simply gives no opinion.
-HASH_DENYLIST_PATH = Path(
-    os.environ.get("AVAI_HASH_DENYLIST", str(_PKG_DIR / "rules" / "hash_denylist.txt"))
-)

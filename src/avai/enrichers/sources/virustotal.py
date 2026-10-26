@@ -3,102 +3,144 @@
 Requires ``VT_API_KEY``. Free tier: 4 req/min, 500/day.
 https://docs.virustotal.com/reference/files
 """
+
 from __future__ import annotations
 
+import base64
+from collections.abc import Mapping
+from dataclasses import dataclass
 from http import HTTPStatus
-from typing import ClassVar, Optional
+from typing import Any, ClassVar
 
 from avai.enrichers.base import (
     Enricher,
     Evidence,
     Indicator,
     IndicatorType,
+    Verdict,
     VerdictHint,
 )
-from avai.enrichers.http import HttpClient
+from avai.enrichers.http import RequestOptions
 
-_BASE = "https://www.virustotal.com/api/v3"
-# Engine-count cut-offs for the hint (see _fetch).
-_MALICIOUS_ENGINES = 5
-_MALICIOUS_RATIO = 0.2
-_SUSPICIOUS_ENGINES = 3
+BASE_URL = "https://www.virustotal.com/api/v3"
+TIMEOUT_S = 12.0
+LISTED_NAMES = 5
+# Engine-count cut-offs for the hint.
+MALICIOUS_ENGINES = 5
+MALICIOUS_RATIO = 0.2
+SUSPICIOUS_ENGINES = 3
 # A clean result only counts as benign when enough engines looked.
-_BENIGN_MIN_ENGINES = 10
+BENIGN_MIN_ENGINES = 10
+MALICIOUS_CONFIDENCE = 0.95
+SUSPICIOUS_CONFIDENCE = 0.7
+BENIGN_CONFIDENCE = 0.6
+UNKNOWN_CONFIDENCE = 0.3
+HASH_TYPES = frozenset({IndicatorType.SHA256, IndicatorType.SHA1, IndicatorType.MD5})
+COLLECTION_BY_TYPE = (
+    (IndicatorType.IPV4, "ip_addresses"),
+    (IndicatorType.DOMAIN, "domains"),
+)
 
 
-def _path_for(indicator: Indicator) -> Optional[str]:
-    if indicator.type in (IndicatorType.SHA256, IndicatorType.SHA1, IndicatorType.MD5):
-        return f"/files/{indicator.value}"
-    if indicator.type is IndicatorType.IPV4:
-        return f"/ip_addresses/{indicator.value}"
-    if indicator.type is IndicatorType.DOMAIN:
-        return f"/domains/{indicator.value}"
-    if indicator.type is IndicatorType.URL:
-        # VT URL endpoint uses base64url-encoded URL as the ID.
-        import base64
-        url_id = base64.urlsafe_b64encode(
-            indicator.value.encode()).rstrip(b"=").decode()
-        return f"/urls/{url_id}"
-    return None
+@dataclass(frozen=True)
+class EngineStats:
+    """How many engines flagged the artifact, out of how many looked."""
+
+    malicious: int
+    suspicious: int
+    total: int
+
+    @classmethod
+    def of(cls, stats: Mapping[str, int]) -> EngineStats:
+        return cls(
+            malicious=stats.get("malicious", 0),
+            suspicious=stats.get("suspicious", 0),
+            total=sum(stats.values()) or 1,
+        )
+
+    @property
+    def flagged_ratio(self) -> float:
+        return (self.malicious + self.suspicious) / self.total
+
+    def verdict(self) -> Verdict:
+        if self.malicious >= MALICIOUS_ENGINES or self.flagged_ratio >= MALICIOUS_RATIO:
+            return Verdict(VerdictHint.MALICIOUS, MALICIOUS_CONFIDENCE)
+        if self.malicious >= 1 or self.suspicious >= SUSPICIOUS_ENGINES:
+            return Verdict(VerdictHint.SUSPICIOUS, SUSPICIOUS_CONFIDENCE)
+        clean = self.malicious == 0 and self.suspicious == 0
+        if self.total >= BENIGN_MIN_ENGINES and clean:
+            return Verdict(VerdictHint.BENIGN, BENIGN_CONFIDENCE)
+        return Verdict(VerdictHint.UNKNOWN, UNKNOWN_CONFIDENCE)
 
 
 class VirusTotalEnricher(Enricher):
-    name           = "virustotal"
-    supports_types = frozenset({
-        IndicatorType.SHA256, IndicatorType.SHA1, IndicatorType.MD5,
-        IndicatorType.IPV4, IndicatorType.DOMAIN, IndicatorType.URL,
-    })
-    requires_token: ClassVar[Optional[str]] = "VT_API_KEY"
-    ttl_hours      = 24
+    name = "virustotal"
+    supports_types = frozenset(
+        {
+            IndicatorType.SHA256,
+            IndicatorType.SHA1,
+            IndicatorType.MD5,
+            IndicatorType.IPV4,
+            IndicatorType.DOMAIN,
+            IndicatorType.URL,
+        }
+    )
+    requires_token: ClassVar[str | None] = "VT_API_KEY"
+    ttl_hours = 24
+    rate_host = "www.virustotal.com"
+    # Free tier: 4 req / minute → ~0.066 rps. Pad to 0.06 for safety.
+    rate_per_second = 0.06
 
-    def __init__(self, http: Optional[HttpClient] = None):
-        self._http = http or HttpClient()
-        # Free tier: 4 req / minute → ~0.066 rps. Pad to 0.06 for safety.
-        self._http.set_rate("www.virustotal.com", 0.06)
-        self._key = self.env_token() or ""
+    def api_path(self, indicator: Indicator) -> str | None:
+        if indicator.type in HASH_TYPES:
+            return f"/files/{indicator.value}"
+        if indicator.type is IndicatorType.URL:
+            # VT URL endpoint uses base64url-encoded URL as the ID.
+            url_id = base64.urlsafe_b64encode(indicator.value.encode()).rstrip(b"=")
+            return f"/urls/{url_id.decode()}"
+        collection = dict(COLLECTION_BY_TYPE).get(indicator.type)
+        return f"/{collection}/{indicator.value}" if collection else None
 
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
-        path = _path_for(indicator)
+    def fetch(self, indicator: Indicator) -> Evidence | None:
+        path = self.api_path(indicator)
         if path is None:
             return None
-        resp = self._http.get(
-            f"{_BASE}{path}",
-            headers={"x-apikey": self._key, "Accept": "application/json"},
-            timeout=12.0,
+        response = self._http.get(
+            f"{BASE_URL}{path}",
+            RequestOptions(
+                headers={"x-apikey": self._token, "Accept": "application/json"},
+                timeout=TIMEOUT_S,
+            ),
         )
-        if resp.status_code in (404, 400):
+        if response.status_code != HTTPStatus.OK:
             return None
-        if resp.status_code != HTTPStatus.OK:
-            return None
-        body = resp.json().get("data", {}).get("attributes", {})
-        stats = body.get("last_analysis_stats") or {}
-        malicious  = stats.get("malicious", 0)
-        suspicious = stats.get("suspicious", 0)
-        total      = sum(stats.values()) or 1
-        ratio      = (malicious + suspicious) / total
-        if malicious >= _MALICIOUS_ENGINES or ratio >= _MALICIOUS_RATIO:
-            hint = VerdictHint.MALICIOUS
-            conf = 0.95
-        elif malicious >= 1 or suspicious >= _SUSPICIOUS_ENGINES:
-            hint = VerdictHint.SUSPICIOUS
-            conf = 0.7
-        elif total >= _BENIGN_MIN_ENGINES and malicious == 0 and suspicious == 0:
-            hint = VerdictHint.BENIGN
-            conf = 0.6
-        else:
-            hint = VerdictHint.UNKNOWN
-            conf = 0.3
+        attributes = response.json().get("data", {}).get("attributes", {})
+        return self._evidence(indicator, attributes)
+
+    def _evidence(
+        self, indicator: Indicator, attributes: Mapping[str, Any]
+    ) -> Evidence:
+        stats = EngineStats.of(attributes.get("last_analysis_stats") or {})
+        verdict = stats.verdict()
         return Evidence(
-            source       = self.name,
-            indicator    = indicator,
-            verdict_hint = hint,
-            confidence   = conf,
-            summary      = (f"VirusTotal: {malicious} malicious + "
-                            f"{suspicious} suspicious / {total} engines"),
-            details      = {"stats": stats,
-                            "reputation": body.get("reputation"),
-                            "names": (body.get("names") or [])[:5],
-                            "type_description": body.get("type_description"),
-                            "popular_threat_classification":
-                                body.get("popular_threat_classification")},
+            source=self.name,
+            indicator=indicator,
+            verdict_hint=verdict.hint,
+            confidence=verdict.confidence,
+            summary=(
+                f"VirusTotal: {stats.malicious} malicious + "
+                f"{stats.suspicious} suspicious / {stats.total} engines"
+            ),
+            details=self._details(attributes),
         )
+
+    def _details(self, attributes: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "stats": attributes.get("last_analysis_stats") or {},
+            "reputation": attributes.get("reputation"),
+            "names": (attributes.get("names") or [])[:LISTED_NAMES],
+            "type_description": attributes.get("type_description"),
+            "popular_threat_classification": attributes.get(
+                "popular_threat_classification"
+            ),
+        }

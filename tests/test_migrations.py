@@ -79,9 +79,9 @@ def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path, monkeypat
 def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
     db = str(tmp_path / "b.db")
     eng = create_engine(f"sqlite:///{db}")
-    from avai.enrichers.cache import register_schema
+    from avai.enrichers.cache import EnrichmentSchema
 
-    register_schema(Base)
+    EnrichmentSchema(Base).model()
     Base.metadata.create_all(eng)  # tables, but emulate an old DB:
     con = sqlite3.connect(db)
     for i in _IDX:

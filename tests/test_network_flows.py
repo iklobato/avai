@@ -15,9 +15,8 @@ from sqlalchemy.orm import Session
 
 from avai.dashboard.app import create_app
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.queries import network_flows
-from avai.dashboard.queries import RowFilter
-from avai.enrichers import IndicatorType, extract_indicators
+from avai.dashboard.queries import RowFilter, network_flows
+from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.collectors import NetworkFlowsCollector
 from avai.host_monitor.models import NetworkFlowRow
 from avai.host_monitor.sink import Sink
@@ -158,17 +157,20 @@ class TestAggregate:
 
 
 class TestFlowIndicators:
+    def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
+        return IndicatorExtraction.default().extract(collector, row)
+
     def test_public_dst_emits_ipv4(self):
-        out = extract_indicators("network_flows", {"dst_ip": "8.8.8.8", "dst_port": 53})
+        out = self.extract("network_flows", {"dst_ip": "8.8.8.8", "dst_port": 53})
         assert [i.value for i in out] == ["8.8.8.8"]
         assert out[0].type is IndicatorType.IPV4
 
     def test_multicast_and_private_skipped(self):
-        assert extract_indicators("network_flows", {"dst_ip": "224.0.0.251"}) == []
-        assert extract_indicators("network_flows", {"dst_ip": "10.0.0.1"}) == []
+        assert self.extract("network_flows", {"dst_ip": "224.0.0.251"}) == []
+        assert self.extract("network_flows", {"dst_ip": "10.0.0.1"}) == []
 
     def test_public_ipv6_emits_ipv6(self):
-        out = extract_indicators(
+        out = self.extract(
             "network_flows", {"dst_ip": "2606:4700:4700::1111", "dst_port": 443}
         )
         assert [(i.type, i.value) for i in out] == [
@@ -176,8 +178,8 @@ class TestFlowIndicators:
         ]
 
     def test_link_local_and_ula_ipv6_skipped(self):
-        assert extract_indicators("network_flows", {"dst_ip": "fe80::1"}) == []
-        assert extract_indicators("network_flows", {"dst_ip": "fd00::1"}) == []
+        assert self.extract("network_flows", {"dst_ip": "fe80::1"}) == []
+        assert self.extract("network_flows", {"dst_ip": "fd00::1"}) == []
 
 
 @pytest.fixture
@@ -357,10 +359,10 @@ def _seed_geo(engine, evidence: list[dict]) -> None:
     geolocation extraction runs over the same path production uses."""
     import json
 
-    from avai.enrichers.cache import register_schema
+    from avai.enrichers.cache import EnrichmentSchema
     from avai.host_monitor.models import Base
 
-    model = register_schema(Base)
+    model = EnrichmentSchema(Base).model()
     with Session(engine) as s:
         for e in evidence:
             s.add(

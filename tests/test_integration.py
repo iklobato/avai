@@ -23,8 +23,8 @@ from sqlalchemy import create_engine
 from avai.host_monitor.enums import ThreatCategory, Verdict
 from avai.host_monitor.judge import Judgment, LlmJudge
 from avai.host_monitor.prompts import Prompts
-from avai.host_monitor.sink import Sink
 from avai.host_monitor.runtime import Digest
+from avai.host_monitor.sink import Sink
 
 # ===========================================================================
 # 1. Enrichment evidence must reach the LLM prompt
@@ -284,25 +284,31 @@ class TestFindingFlowsToDashboard:
 
 
 class TestVirusTotalPathMapping:
+    def _path_for(self, indicator: object) -> str | None:
+        import logging
+
+        from avai.enrichers.http import HttpClient
+        from avai.enrichers.sources.virustotal import VirusTotalEnricher
+
+        http = HttpClient.create(logging.getLogger("test"))
+        return VirusTotalEnricher(http, "").api_path(indicator)
+
     def test_hash_maps_to_files_endpoint(self):
         from avai.enrichers.base import Indicator, IndicatorType
-        from avai.enrichers.sources.virustotal import _path_for
 
-        p = _path_for(Indicator(IndicatorType.SHA256, "a" * 64))
+        p = self._path_for(Indicator(IndicatorType.SHA256, "a" * 64))
         assert p == "/files/" + "a" * 64
 
     def test_ip_maps_to_ip_addresses_endpoint(self):
         from avai.enrichers.base import Indicator, IndicatorType
-        from avai.enrichers.sources.virustotal import _path_for
 
-        p = _path_for(Indicator(IndicatorType.IPV4, "8.8.8.8"))
+        p = self._path_for(Indicator(IndicatorType.IPV4, "8.8.8.8"))
         assert p == "/ip_addresses/8.8.8.8"
 
     def test_domain_maps_to_domains_endpoint(self):
         from avai.enrichers.base import Indicator, IndicatorType
-        from avai.enrichers.sources.virustotal import _path_for
 
-        p = _path_for(Indicator(IndicatorType.DOMAIN, "evil.test"))
+        p = self._path_for(Indicator(IndicatorType.DOMAIN, "evil.test"))
         assert p == "/domains/evil.test"
 
     def test_url_is_base64url_without_padding(self):
@@ -311,10 +317,9 @@ class TestVirusTotalPathMapping:
         import base64
 
         from avai.enrichers.base import Indicator, IndicatorType
-        from avai.enrichers.sources.virustotal import _path_for
 
         url = "https://evil.test/path?x=1"
-        p = _path_for(Indicator(IndicatorType.URL, url))
+        p = self._path_for(Indicator(IndicatorType.URL, url))
         expected = base64.urlsafe_b64encode(url.encode()).rstrip(b"=").decode()
         assert p == f"/urls/{expected}"
         assert "=" not in p  # padding must be stripped

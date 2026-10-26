@@ -16,140 +16,224 @@ import logging
 import random
 import threading
 import time
-from collections import defaultdict
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import StrEnum
 from http import HTTPStatus
-from typing import Any, Mapping, Optional
+from typing import Any
 
 import requests
 
-from avai.enrichers.base import RateLimitedError
+from avai import __version__ as AVAI_VERSION
+from avai.enrichers.base import EnricherError, RateLimitedError
 
-LOG = logging.getLogger("avai.enrichers.http")
-
-from avai import __version__ as _AVAI_VERSION  # noqa: E402  (late: avoid import cycle)
-
-_USER_AGENT = f"avai-monitor/{_AVAI_VERSION} (+https://github.com/iklobato/avai)"
-_DEFAULT_TIMEOUT = 8.0
-_RETRY_STATUS = (500, 502, 503, 504)
-_RETRY_BACKOFFS = (0.4, 1.2, 3.0)  # seconds, jittered ±25%
+USER_AGENT = f"avai-monitor/{AVAI_VERSION} (+https://github.com/iklobato/avai)"
+DEFAULT_TIMEOUT_S = 8.0
+DEFAULT_RATE_PER_SECOND = 4.0
+MIN_RATE_PER_SECOND = 0.01
+RETRY_STATUS = frozenset({500, 502, 503, 504})
+RETRY_BACKOFFS_S = (0.4, 1.2, 3.0)
+# Each backoff is jittered by ±25%: multiplied by a factor in [0.75, 1.25).
+JITTER_FLOOR = 0.75
+JITTER_SPAN = 0.5
 # A 429's Retry-After up to this is waited out; a longer one gives up so
 # the cycle doesn't stall.
-_MAX_RETRY_AFTER_S = 5
+MAX_RETRY_AFTER_S = 5
+NO_WAIT_S = 0.0
+# The bucket starts full: the first take() must never wait. ``0.0`` is
+# wrong because ``time.monotonic()`` counts from an arbitrary epoch
+# (system uptime on Linux) — on a low-uptime host where
+# ``monotonic() < period`` the first call would sleep up to a full period
+# (hours for a slow source). ``-inf`` makes the first wait unconditionally
+# negative, then real pacing kicks in from take().
+BUCKET_START = float("-inf")
 
 
-class _TokenBucket:
+class HttpMethod(StrEnum):
+    GET = "GET"
+    POST = "POST"
+
+
+class RetriesExhaustedError(EnricherError):
+    """Every attempt failed without a transport error to re-raise."""
+
+
+@dataclass(frozen=True)
+class RequestOptions:
+    headers: Mapping[str, str] | None = None
+    params: Mapping[str, Any] | None = None
+    form_body: Any = None
+    json: Any = None
+    timeout: float = DEFAULT_TIMEOUT_S
+
+    def as_kwargs(self) -> dict[str, Any]:
+        sent = {
+            "headers": self.headers,
+            "params": self.params,
+            "data": self.form_body,
+            "json": self.json,
+        }
+        kwargs = {key: value for key, value in sent.items() if value is not None}
+        kwargs["timeout"] = self.timeout
+        return kwargs
+
+
+@dataclass(frozen=True)
+class HttpCall:
+    method: HttpMethod
+    url: str
+    options: RequestOptions
+
+    def __str__(self) -> str:
+        return f"{self.method} {self.url}"
+
+    @property
+    def host(self) -> str:
+        # Sufficient for rate limiting; not validating the URL.
+        try:
+            return self.url.split("://", 1)[1].split("/", 1)[0].lower()
+        except IndexError:
+            return self.url
+
+
+class TokenBucket:
     """Per-host rate limiter. Sleeps the calling thread to stay under
     the configured rate; never returns ``False``. Simple, intentionally
     coarse — we're targeting "don't get banned", not microsecond-level
     pacing."""
 
-    def __init__(self, rate_per_second: float):
-        self._period = 1.0 / max(rate_per_second, 0.01)
-        # The bucket starts full: the first take() must never wait. ``0.0``
-        # is wrong because ``time.monotonic()`` counts from an arbitrary
-        # epoch (system uptime on Linux) — on a low-uptime host where
-        # ``monotonic() < period`` the first call would sleep up to a full
-        # period (hours for a slow source). ``-inf`` makes the first wait
-        # unconditionally negative, then real pacing kicks in from take().
-        self._last = float("-inf")
-        self._lock = threading.Lock()
+    def __init__(self, period_s: float, lock: threading.Lock) -> None:
+        self._period_s = period_s
+        self._lock = lock
+        self._last = BUCKET_START
+
+    @classmethod
+    def for_rate(cls, rate_per_second: float) -> TokenBucket:
+        period_s = 1.0 / max(rate_per_second, MIN_RATE_PER_SECOND)
+        return cls(period_s, threading.Lock())
 
     def take(self) -> None:
         with self._lock:
-            wait = (self._last + self._period) - time.monotonic()
+            wait = (self._last + self._period_s) - time.monotonic()
             if wait > 0:
                 time.sleep(wait)
             self._last = time.monotonic()
+
+
+class HostRateLimits:
+    """One token bucket per host, created on first use at the default rate."""
+
+    def __init__(self, default_rate: float, lock: threading.Lock) -> None:
+        self._default_rate = default_rate
+        self._lock = lock
+        self._buckets: dict[str, TokenBucket] = {}
+
+    def set_rate(self, host: str, rate_per_second: float) -> None:
+        with self._lock:
+            self._buckets[host] = TokenBucket.for_rate(rate_per_second)
+
+    def bucket_for(self, host: str) -> TokenBucket:
+        with self._lock:
+            if host not in self._buckets:
+                self._buckets[host] = TokenBucket.for_rate(self._default_rate)
+            return self._buckets[host]
+
+
+class RetryAfter:
+    """Reads a 429's Retry-After header as the seconds worth waiting out."""
+
+    def __init__(self, response: requests.Response) -> None:
+        self._response = response
+
+    def wait_s(self) -> float:
+        raw = self._response.headers.get("Retry-After")
+        if not raw:
+            return NO_WAIT_S
+        try:
+            return float(raw)
+        except ValueError:
+            return NO_WAIT_S
+
+    def is_worth_waiting(self) -> bool:
+        return 0 < self.wait_s() <= MAX_RETRY_AFTER_S
 
 
 class HttpClient:
     """One per process. Pass to enrichers via constructor; never
     instantiate per-call."""
 
-    def __init__(self, default_rate: float = 4.0):
-        self._session = requests.Session()
-        self._session.headers["User-Agent"] = _USER_AGENT
-        self._buckets: dict[str, _TokenBucket] = defaultdict(
-            lambda: _TokenBucket(default_rate)
-        )
-        self._bucket_lock = threading.Lock()
+    def __init__(
+        self,
+        session: requests.Session,
+        rates: HostRateLimits,
+        logger: logging.Logger,
+    ) -> None:
+        self._session = session
+        self._rates = rates
+        self._logger = logger
+
+    @classmethod
+    def create(
+        cls, logger: logging.Logger, default_rate: float = DEFAULT_RATE_PER_SECOND
+    ) -> HttpClient:
+        session = requests.Session()
+        session.headers["User-Agent"] = USER_AGENT
+        return cls(session, HostRateLimits(default_rate, threading.Lock()), logger)
 
     def set_rate(self, host: str, rate_per_second: float) -> None:
         """Override the per-host rate (call once at registry time)."""
-        with self._bucket_lock:
-            self._buckets[host] = _TokenBucket(rate_per_second)
+        self._rates.set_rate(host, rate_per_second)
 
-    # -- public verbs -----------------------------------------------------
-
-    def get(
-        self,
-        url: str,
-        *,
-        headers: Optional[Mapping[str, str]] = None,
-        params: Optional[Mapping[str, Any]] = None,
-        timeout: float = _DEFAULT_TIMEOUT,
-    ) -> requests.Response:
-        return self._request(
-            "GET", url, headers=headers, params=params, timeout=timeout
-        )
+    def get(self, url: str, options: RequestOptions | None = None) -> requests.Response:
+        return self._request(HttpMethod.GET, url, options or RequestOptions())
 
     def post(
-        self,
-        url: str,
-        *,
-        headers: Optional[Mapping[str, str]] = None,
-        data: Optional[Any] = None,
-        json: Optional[Any] = None,
-        timeout: float = _DEFAULT_TIMEOUT,
+        self, url: str, options: RequestOptions | None = None
     ) -> requests.Response:
-        return self._request(
-            "POST", url, headers=headers, data=data, json=json, timeout=timeout
-        )
+        return self._request(HttpMethod.POST, url, options or RequestOptions())
 
-    # -- internals --------------------------------------------------------
-
-    def _host_of(self, url: str) -> str:
-        # Sufficient for rate limiting; not validating the URL.
-        try:
-            return url.split("://", 1)[1].split("/", 1)[0].lower()
-        except IndexError:
-            return url
-
-    def _request(self, method: str, url: str, **kw) -> requests.Response:
-        host = self._host_of(url)
-        bucket = self._buckets[host]
-        last_exc: Optional[BaseException] = None
-
-        for attempt, backoff in enumerate((0.0, *_RETRY_BACKOFFS)):
-            if backoff:
-                jitter = backoff * (0.75 + random.random() * 0.5)
-                time.sleep(jitter)
+    def _request(
+        self, method: HttpMethod, url: str, options: RequestOptions
+    ) -> requests.Response:
+        call = HttpCall(method, url, options)
+        bucket = self._rates.bucket_for(call.host)
+        last_error: requests.RequestException | None = None
+        for attempt, backoff in enumerate((NO_WAIT_S, *RETRY_BACKOFFS_S)):
+            self._sleep_jittered(backoff)
             bucket.take()
             try:
-                resp = self._session.request(method, url, **kw)
+                return self._attempt(call, attempt)
             except requests.RequestException as exc:
-                last_exc = exc
-                LOG.debug(
-                    "http %s %s attempt %d failed: %s", method, url, attempt + 1, exc
+                last_error = exc
+                self._logger.debug(
+                    "http %s attempt %d failed: %s", call, attempt + 1, exc
                 )
-                continue
-            if resp.status_code == HTTPStatus.TOO_MANY_REQUESTS:
-                # 429 with Retry-After: respect a small one, give up on
-                # large ones so the cycle doesn't stall.
-                retry_after = resp.headers.get("Retry-After")
-                try:
-                    wait_s = float(retry_after) if retry_after else 0
-                except ValueError:
-                    wait_s = 0
-                if 0 < wait_s <= _MAX_RETRY_AFTER_S and attempt < len(_RETRY_BACKOFFS):
-                    time.sleep(wait_s)
-                    continue
-                raise RateLimitedError(f"{host} returned 429")
-            if resp.status_code in _RETRY_STATUS:
-                last_exc = requests.HTTPError(f"{resp.status_code} from {host}")
-                continue
-            return resp
+        raise last_error or RetriesExhaustedError(f"http {call} exhausted retries")
 
-        if last_exc is not None:
-            raise last_exc  # noqa: TRY201
-        raise RuntimeError(f"http {method} {url} exhausted retries")
+    def _attempt(self, call: HttpCall, attempt: int) -> requests.Response:
+        """One request; raises ``HTTPError`` on a status worth retrying."""
+        response = self._session.request(
+            call.method, call.url, **call.options.as_kwargs()
+        )
+        if self._should_retry_rate_limit(response, call.host, attempt):
+            raise requests.HTTPError(f"{response.status_code} from {call.host}")
+        if response.status_code in RETRY_STATUS:
+            raise requests.HTTPError(f"{response.status_code} from {call.host}")
+        return response
+
+    def _sleep_jittered(self, backoff: float) -> None:
+        if backoff:
+            time.sleep(backoff * (JITTER_FLOOR + random.random() * JITTER_SPAN))
+
+    def _should_retry_rate_limit(
+        self, response: requests.Response, host: str, attempt: int
+    ) -> bool:
+        """True when a small Retry-After was waited out; raises on a 429
+        that is not worth waiting for."""
+        if response.status_code != HTTPStatus.TOO_MANY_REQUESTS:
+            return False
+        retry_after = RetryAfter(response)
+        if retry_after.is_worth_waiting() and attempt < len(RETRY_BACKOFFS_S):
+            time.sleep(retry_after.wait_s())
+            return True
+        raise RateLimitedError(f"{host} returned 429")

@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from avai.enrichers import EnrichmentChain
+from avai.enrichers import EnrichmentChain, IndicatorExtraction
 
 from .collectors import SnapshotCollector, StreamingCollector
 from .constants import DEFAULT_BASELINE_MIN_RUNS, LOG
@@ -32,6 +32,7 @@ from .finding_stages import (
     InvestigateStage,
     JudgeStage,
     ProcessBehavior,
+    ThreatIntel,
     VerifyStage,
     YaraContextStage,
 )
@@ -295,7 +296,8 @@ def _snapshot_stages(
     behavior = ProcessBehavior(sink)
     stages: list[FindingStage] = []
     if config.enrichment_chain is not None:
-        stages.append(EvidenceStage(config.enrichment_chain, settings, heartbeat))
+        intel = ThreatIntel(config.enrichment_chain, IndicatorExtraction.default())
+        stages.append(EvidenceStage(intel, settings, heartbeat))
     stages += [
         BaselineStage(sink),
         CorrelationStage(sink, behavior),

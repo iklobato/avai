@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import json
 
-from sqlalchemy import (
-    select,
-)
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from avai.host_monitor import (
-    Base,
-)
+from avai.host_monitor import Base
 
 from .common import _existing_tables
 
@@ -89,9 +85,9 @@ def _attach_ip_enrichment(session: Session, rows: list[dict]) -> None:
     # (idempotent — no-op if the monitor's startup already did it) so we
     # can query the cache through the ORM rather than raw SQL.
     from avai.enrichers import IndicatorType
-    from avai.enrichers.cache import register_schema
+    from avai.enrichers.cache import EnrichmentSchema
 
-    model = register_schema(Base)
+    model = EnrichmentSchema(Base).model()
     stmt = select(
         model.indicator_value,
         model.details_json,

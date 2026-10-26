@@ -24,8 +24,7 @@ from sqlalchemy.orm import Session
 from avai.dashboard.app import create_app
 from avai.dashboard.config import DashboardConfig
 from avai.dashboard.queries import dns_queries, network_flows, persistence_tampering
-from avai.enrichers import IndicatorType, extract_indicators
-from avai.host_monitor.runtime import Digest
+from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.collectors import (
     DnsQueriesCollector,
     HostsFileCollector,
@@ -34,6 +33,7 @@ from avai.host_monitor.collectors import (
     ProcessConnectionResolver,
     SshAuthorizedKeysCollector,
 )
+from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 from avai.host_monitor.models import (
     DnsQueryRow,
     HostsFileRow,
@@ -41,8 +41,8 @@ from avai.host_monitor.models import (
     PrivilegeConfigRow,
     SshAuthorizedKeyRow,
 )
+from avai.host_monitor.runtime import Digest
 from avai.host_monitor.sink import Sink
-from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 
 # ---------------------------------------------------------------------------
 # process -> flow attribution
@@ -248,8 +248,11 @@ class TestPrivilegeParsers:
 
 
 class TestNewExtractors:
+    def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
+        return IndicatorExtraction.default().extract(collector, row)
+
     def test_dns_query_emits_domain(self):
-        out = extract_indicators("dns_queries", {"qname": "evil.example", "qtype": "A"})
+        out = self.extract("dns_queries", {"qname": "evil.example", "qtype": "A"})
         assert [(i.type, i.value) for i in out] == [
             (IndicatorType.DOMAIN, "evil.example")
         ]
@@ -257,12 +260,11 @@ class TestNewExtractors:
     def test_doh_row_not_a_domain(self):
         # qname is a provider label, not a domain → no indicator
         assert (
-            extract_indicators("dns_queries", {"qname": "Cloudflare", "qtype": "DoH"})
-            == []
+            self.extract("dns_queries", {"qname": "Cloudflare", "qtype": "DoH"}) == []
         )
 
     def test_hosts_emits_public_ip_and_domain(self):
-        out = extract_indicators(
+        out = self.extract(
             "hosts_file", {"ip": "6.6.6.6", "hostnames": "my-bank.com localhost"}
         )
         pairs = {(i.type, i.value) for i in out}
@@ -270,9 +272,7 @@ class TestNewExtractors:
         assert (IndicatorType.DOMAIN, "my-bank.com") in pairs
 
     def test_hosts_skips_loopback_ip(self):
-        out = extract_indicators(
-            "hosts_file", {"ip": "127.0.0.1", "hostnames": "localhost"}
-        )
+        out = self.extract("hosts_file", {"ip": "127.0.0.1", "hostnames": "localhost"})
         assert out == []  # private ip + non-domain name
 
 

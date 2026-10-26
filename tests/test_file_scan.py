@@ -11,15 +11,16 @@ broken shipped rule disabling scanning.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
 import yara
 
 import avai.host_monitor.constants as C
+from avai.enrichers import EnricherCatalog
 from avai.enrichers.base import Indicator, IndicatorType, VerdictHint
-from avai.enrichers.indicators import extract_indicators
-from avai.enrichers.registry import discover_enricher_classes
+from avai.enrichers.indicators import IndicatorExtraction
 from avai.enrichers.sources.local_denylist import LocalHashDenylistEnricher
 from avai.host_monitor.collectors import (
     FileScanCollector,
@@ -501,34 +502,35 @@ class TestLocalHashDenylist:
 
     def test_known_hash_is_malicious(self, tmp_path):
         bad = "a" * 64
-        enricher = LocalHashDenylistEnricher(path=self._denylist(tmp_path, bad + "\n"))
-        ev = enricher._fetch(Indicator(IndicatorType.SHA256, bad))
+        enricher = LocalHashDenylistEnricher.from_path(
+            self._denylist(tmp_path, bad + "\n")
+        )
+        ev = enricher.fetch(Indicator(IndicatorType.SHA256, bad))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
         assert ev.source == "local_denylist"
         assert ev.confidence == 1.0
 
     def test_unknown_hash_no_opinion(self, tmp_path):
-        enricher = LocalHashDenylistEnricher(
-            path=self._denylist(tmp_path, "a" * 64 + "\n")
-        )
-        assert enricher._fetch(Indicator(IndicatorType.SHA256, "b" * 64)) is None
+        denylist = self._denylist(tmp_path, "a" * 64 + "\n")
+        enricher = LocalHashDenylistEnricher.from_path(denylist)
+        assert enricher.fetch(Indicator(IndicatorType.SHA256, "b" * 64)) is None
 
     def test_comments_and_case_are_handled(self, tmp_path):
         # Upper-case entry + trailing comment; indicators arrive lowercased.
         body = "# header\n" + ("F" * 32) + "  # a known-bad md5\n"
-        enricher = LocalHashDenylistEnricher(path=self._denylist(tmp_path, body))
-        assert enricher._fetch(Indicator(IndicatorType.MD5, "f" * 32)) is not None
+        enricher = LocalHashDenylistEnricher.from_path(self._denylist(tmp_path, body))
+        assert enricher.fetch(Indicator(IndicatorType.MD5, "f" * 32)) is not None
 
     def test_missing_file_gives_no_opinion(self, tmp_path):
-        enricher = LocalHashDenylistEnricher(path=tmp_path / "absent.txt")
-        assert enricher._fetch(Indicator(IndicatorType.SHA256, "c" * 64)) is None
+        enricher = LocalHashDenylistEnricher.from_path(tmp_path / "absent.txt")
+        assert enricher.fetch(Indicator(IndicatorType.SHA256, "c" * 64)) is None
 
     def test_registered_keyless_in_registry(self):
-        classes = discover_enricher_classes()
+        classes = EnricherCatalog.of_sources(logging.getLogger("test")).classes()
         assert LocalHashDenylistEnricher in classes
         # Keyless ⇒ env_token returns the always-on sentinel (never None).
-        assert LocalHashDenylistEnricher.env_token() is not None
+        assert LocalHashDenylistEnricher.env_token({}) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -537,10 +539,13 @@ class TestLocalHashDenylist:
 
 
 class TestFileScanExtractor:
+    def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
+        return IndicatorExtraction.default().extract(collector, row)
+
     def test_emits_sha256_indicator(self):
-        inds = extract_indicators("file_scan", {"sha256": "a" * 64, "path": "/bin/x"})
+        inds = self.extract("file_scan", {"sha256": "a" * 64, "path": "/bin/x"})
         assert len(inds) == 1
         assert inds[0].type is IndicatorType.SHA256
 
     def test_no_sha_no_indicator(self):
-        assert extract_indicators("file_scan", {"path": "/bin/x"}) == []
+        assert self.extract("file_scan", {"path": "/bin/x"}) == []

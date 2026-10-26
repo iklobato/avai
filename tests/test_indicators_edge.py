@@ -4,235 +4,276 @@ Complements the happy-path tests in :mod:`test_enrichers` — exercises
 malformed JSON, missing fields, private CIDR boundaries, IPv6,
 nonexistent paths, and other "weird input from a real collector" cases.
 """
+
 from __future__ import annotations
 
 import pytest
 
-from avai.enrichers import IndicatorType, extract_indicators
-from avai.enrichers.indicators import _is_private_ip, _is_ipv4, _is_domain
-
+from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
+from avai.enrichers.indicators import HostClassifier
 
 # ---------------------------------------------------------------------------
 # _is_private_ip — RFC1918 + loopback + link-local + multicast + reserved
 # ---------------------------------------------------------------------------
 
-class TestIsPrivateIp:
-    @pytest.mark.parametrize("ip", [
-        "10.0.0.1",        # RFC1918
-        "10.255.255.255",
-        "172.16.0.1",      # RFC1918
-        "172.31.255.255",
-        "192.168.0.1",     # RFC1918
-        "192.168.255.255",
-        "127.0.0.1",       # loopback
-        "127.255.255.255",
-        "169.254.1.1",     # link-local
-        "224.0.0.1",       # multicast
-        "0.0.0.0",         # unspecified
-        "255.255.255.255", # broadcast / reserved
-    ])
-    def test_recognises_non_routable(self, ip):
-        assert _is_private_ip(ip)
 
-    @pytest.mark.parametrize("ip", [
-        "1.1.1.1",
-        "8.8.8.8",
-        "172.32.0.1",     # outside 172.16-31 range
-        "192.169.0.1",    # outside 192.168
-        "11.0.0.1",       # outside 10.0.0.0/8
-    ])
+class TestIsPrivateIp:
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "10.0.0.1",  # RFC1918
+            "10.255.255.255",
+            "172.16.0.1",  # RFC1918
+            "172.31.255.255",
+            "192.168.0.1",  # RFC1918
+            "192.168.255.255",
+            "127.0.0.1",  # loopback
+            "127.255.255.255",
+            "169.254.1.1",  # link-local
+            "224.0.0.1",  # multicast
+            "0.0.0.0",  # unspecified
+            "255.255.255.255",  # broadcast / reserved
+        ],
+    )
+    def test_recognises_non_routable(self, ip):
+        assert HostClassifier().is_private_ip(ip)
+
+    @pytest.mark.parametrize(
+        "ip",
+        [
+            "1.1.1.1",
+            "8.8.8.8",
+            "172.32.0.1",  # outside 172.16-31 range
+            "192.169.0.1",  # outside 192.168
+            "11.0.0.1",  # outside 10.0.0.0/8
+        ],
+    )
     def test_recognises_public(self, ip):
-        assert not _is_private_ip(ip)
+        assert not HostClassifier().is_private_ip(ip)
 
     def test_returns_false_for_garbage(self):
-        assert not _is_private_ip("not-an-ip")
-        assert not _is_private_ip("")
-        assert not _is_private_ip("999.999.999.999")
+        assert not HostClassifier().is_private_ip("not-an-ip")
+        assert not HostClassifier().is_private_ip("")
+        assert not HostClassifier().is_private_ip("999.999.999.999")
 
 
 class TestIsIPv4:
     def test_ipv6_rejected(self):
-        assert not _is_ipv4("::1")
-        assert not _is_ipv4("2001:db8::1")
+        assert not HostClassifier().is_ipv4("::1")
+        assert not HostClassifier().is_ipv4("2001:db8::1")
 
     def test_garbage_rejected(self):
-        assert not _is_ipv4("not.an.ip")
-        assert not _is_ipv4("")
+        assert not HostClassifier().is_ipv4("not.an.ip")
+        assert not HostClassifier().is_ipv4("")
 
 
 class TestIsDomain:
-    @pytest.mark.parametrize("d", [
-        "example.com", "sub.example.com", "x.test", "co.uk",
-    ])
+    @pytest.mark.parametrize(
+        "d",
+        [
+            "example.com",
+            "sub.example.com",
+            "x.test",
+            "co.uk",
+        ],
+    )
     def test_accepts_real_domains(self, d):
-        assert _is_domain(d)
+        assert HostClassifier().is_domain(d)
 
-    @pytest.mark.parametrize("d", [
-        "",                # empty
-        "no-tld",          # no dot
-        "1.2.3.4",         # IPv4 literal — must NOT be classified as a domain
-        ".starts-dot",     # leading dot
-        "ends-dot.",       # trailing dot
-    ])
+    @pytest.mark.parametrize(
+        "d",
+        [
+            "",  # empty
+            "no-tld",  # no dot
+            "1.2.3.4",  # IPv4 literal — must NOT be classified as a domain
+            ".starts-dot",  # leading dot
+            "ends-dot.",  # trailing dot
+        ],
+    )
     def test_rejects_non_domains(self, d):
         # Concrete behaviour: each of these must be rejected. The IPv4
         # case is the load-bearing one (regression for the _is_domain
         # vs _is_ipv4 collision bug).
-        assert _is_domain(d) is False
+        assert HostClassifier().is_domain(d) is False
 
 
 # ---------------------------------------------------------------------------
 # Per-collector extractor edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestExtractIndicatorsEdgeCases:
+    def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
+        return IndicatorExtraction.default().extract(collector, row)
+
     def test_empty_row_returns_empty_list(self):
-        assert extract_indicators("processes", {}) == []
+        assert self.extract("processes", {}) == []
 
     def test_processes_with_nonexistent_exe_returns_empty(self):
-        assert extract_indicators("processes", {"exe": "/no/such/path"}) == []
+        assert self.extract("processes", {"exe": "/no/such/path"}) == []
 
     def test_processes_with_none_exe_returns_empty(self):
-        assert extract_indicators("processes", {"exe": None}) == []
+        assert self.extract("processes", {"exe": None}) == []
 
     def test_processes_with_empty_exe_string_returns_empty(self):
-        assert extract_indicators("processes", {"exe": ""}) == []
+        assert self.extract("processes", {"exe": ""}) == []
 
     def test_network_connections_ipv6_is_skipped(self):
         # avai's IndicatorType.IPV4 is intentional — we don't enrich v6 yet.
-        out = extract_indicators("network_connections", {
-            "raddr": "[2001:db8::1]:443",
-        })
+        out = self.extract(
+            "network_connections",
+            {
+                "raddr": "[2001:db8::1]:443",
+            },
+        )
         assert out == []
 
     def test_network_connections_malformed_raddr_returns_empty(self):
-        out = extract_indicators("network_connections", {"raddr": "no-colon"})
+        out = self.extract("network_connections", {"raddr": "no-colon"})
         assert out == []
 
-    @pytest.mark.parametrize("addr", [
-        "10.0.0.1:443",        # RFC1918
-        "172.16.0.1:80",
-        "192.168.1.1:22",
-        "127.0.0.1:8000",      # loopback
-        "169.254.1.1:80",      # link-local
-        "224.0.0.1:1900",      # multicast (SSDP)
-    ])
+    @pytest.mark.parametrize(
+        "addr",
+        [
+            "10.0.0.1:443",  # RFC1918
+            "172.16.0.1:80",
+            "192.168.1.1:22",
+            "127.0.0.1:8000",  # loopback
+            "169.254.1.1:80",  # link-local
+            "224.0.0.1:1900",  # multicast (SSDP)
+        ],
+    )
     def test_network_connections_private_ip_skipped(self, addr):
-        out = extract_indicators("network_connections", {"raddr": addr})
+        out = self.extract("network_connections", {"raddr": addr})
         assert out == []
 
     def test_listening_ports_public_bind_emits_ip(self):
         # 8.8.8.8 = Google DNS, real public address. (TEST-NET blocks
         # like 203.0.113.0/24 are correctly treated as reserved by
         # ipaddress.is_reserved → they'd be filtered.)
-        out = extract_indicators("listening_ports", {"laddr": "8.8.8.8:8080"})
+        out = self.extract("listening_ports", {"laddr": "8.8.8.8:8080"})
         assert len(out) == 1
         assert out[0].type is IndicatorType.IPV4
         assert out[0].value == "8.8.8.8"
 
     def test_listening_ports_loopback_bind_skipped(self):
-        out = extract_indicators("listening_ports", {"laddr": "127.0.0.1:8000"})
+        out = self.extract("listening_ports", {"laddr": "127.0.0.1:8000"})
         assert out == []
 
     def test_quarantine_with_non_http_url_skipped(self):
-        out = extract_indicators("quarantine_events", {
-            "origin_url": "file:///etc/passwd",
-        })
+        out = self.extract(
+            "quarantine_events",
+            {
+                "origin_url": "file:///etc/passwd",
+            },
+        )
         assert out == []
 
     def test_quarantine_with_ip_host_yields_ipv4(self):
         # Real public IP — must classify as IPv4 (not domain — see
         # _is_domain fix). Regression: the digit-only "labels" of an
         # IPv4 literal match the domain regex.
-        out = extract_indicators("quarantine_events", {
-            "origin_url": "http://8.8.8.8/dl/x.exe",
-        })
+        out = self.extract(
+            "quarantine_events",
+            {
+                "origin_url": "http://8.8.8.8/dl/x.exe",
+            },
+        )
         types = sorted(str(i.type) for i in out)
         assert "url" in types
         assert "ipv4" in types
         assert "domain" not in types
 
     def test_browser_extension_malformed_json_returns_empty(self):
-        out = extract_indicators("browser_extensions", {
-            "host_permissions_json": "not valid {{ json",
-        })
+        out = self.extract(
+            "browser_extensions",
+            {
+                "host_permissions_json": "not valid {{ json",
+            },
+        )
         assert out == []
 
     def test_browser_extension_empty_array_returns_empty(self):
-        out = extract_indicators("browser_extensions", {
-            "host_permissions_json": "[]",
-        })
+        out = self.extract(
+            "browser_extensions",
+            {
+                "host_permissions_json": "[]",
+            },
+        )
         assert out == []
 
     def test_browser_extension_wildcard_all_urls_skipped(self):
         # "<all_urls>" isn't a real domain — the extractor should not
         # emit it as one.
-        out = extract_indicators("browser_extensions", {
-            "host_permissions_json": '["<all_urls>"]',
-        })
+        out = self.extract(
+            "browser_extensions",
+            {
+                "host_permissions_json": '["<all_urls>"]',
+            },
+        )
         assert out == []
 
     def test_installed_apps_without_version_still_emits(self):
-        out = extract_indicators("installed_apps", {"name": "openssl"})
+        out = self.extract("installed_apps", {"name": "openssl"})
         assert len(out) == 1
         assert out[0].value == "openssl"  # no @version suffix
 
     def test_installed_apps_without_name_yields_nothing(self):
-        out = extract_indicators("installed_apps", {"name": ""})
+        out = self.extract("installed_apps", {"name": ""})
         assert out == []
 
     def test_system_integrity_requires_both_product_and_cycle(self):
         # Only os_name → no indicator.
-        assert extract_indicators("system_integrity", {
-            "os_name": "ubuntu",
-        }) == []
+        assert self.extract("system_integrity", {"os_name": "ubuntu"}) == []
         # Only os_version → no indicator.
-        assert extract_indicators("system_integrity", {
-            "os_version": "22.04",
-        }) == []
+        assert self.extract("system_integrity", {"os_version": "22.04"}) == []
         # Both → one indicator.
-        out = extract_indicators("system_integrity", {
-            "os_name": "ubuntu", "os_version": "22.04",
-        })
+        row = {"os_name": "ubuntu", "os_version": "22.04"}
+        out = self.extract("system_integrity", row)
         assert len(out) == 1
         assert out[0].value == "ubuntu@22.04"
 
     def test_file_integrity_uses_recorded_sha256_not_path(self):
         digest = "a" * 64
-        out = extract_indicators("file_integrity", {
-            "path": "/no/such/file", "sha256": digest,
-        })
+        out = self.extract(
+            "file_integrity",
+            {
+                "path": "/no/such/file",
+                "sha256": digest,
+            },
+        )
         assert len(out) == 1
         assert out[0].value == digest
 
     def test_file_integrity_malformed_sha256_skipped(self):
-        out = extract_indicators("file_integrity", {
-            "path": "/x", "sha256": "tooshort",
-        })
+        out = self.extract(
+            "file_integrity",
+            {
+                "path": "/x",
+                "sha256": "tooshort",
+            },
+        )
         assert out == []
 
     def test_unknown_collector_is_silent(self):
         # No exception, no indicators — graceful no-op for collectors
         # that haven't opted in.
-        assert extract_indicators("not_a_collector", {"x": 1}) == []
+        assert self.extract("not_a_collector", {"x": 1}) == []
 
     def test_dedupes_within_a_single_row(self):
         # A weird future extractor could emit the same indicator twice;
         # the dispatcher should dedupe at the call site.
-        from avai.enrichers.indicators import EXTRACTORS, IndicatorExtractor
         from avai.enrichers import Indicator
+        from avai.enrichers.indicators import FileHasher, IndicatorExtractor
 
         class _Dup(IndicatorExtractor):
             def extract(self, row):
                 yield Indicator(IndicatorType.IPV4, "1.2.3.4")
                 yield Indicator(IndicatorType.IPV4, "1.2.3.4")
 
-        EXTRACTORS["_dup"] = _Dup()
-        try:
-            out = extract_indicators("_dup", {})
-            assert len(out) == 1
-        finally:
-            del EXTRACTORS["_dup"]
+        extraction = IndicatorExtraction({"_dup": _Dup(HostClassifier(), FileHasher())})
+        out = extraction.extract("_dup", {})
+        assert len(out) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -317,5 +358,6 @@ HOST_CASES = [
 
 @pytest.mark.parametrize("collector,row,expected", HOST_CASES)
 def test_extractor_classifies_hosts(collector, row, expected):
-    got = [(i.type, i.value) for i in extract_indicators(collector, row)]
+    extraction = IndicatorExtraction.default()
+    got = [(i.type, i.value) for i in extraction.extract(collector, row)]
     assert got == expected

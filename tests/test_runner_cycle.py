@@ -7,6 +7,7 @@ Runner can be split into smaller parts without changing behaviour.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -20,6 +21,7 @@ from avai.enrichers import (
     EnrichmentChain,
     Evidence,
     EvidenceCache,
+    Indicator,
     IndicatorType,
     VerdictHint,
 )
@@ -39,10 +41,9 @@ from avai.host_monitor.models import (
     RiskScoreRow,
     YaraCoverageRow,
 )
-from avai.host_monitor.runner import Runner
-from avai.host_monitor.sink import Sink
-from avai.host_monitor.runner import RunnerConfig
+from avai.host_monitor.runner import Runner, RunnerConfig
 from avai.host_monitor.runtime import Digest
+from avai.host_monitor.sink import Sink
 
 PROC_FIELDS = ("name", "exe")
 AUTH_FIELDS = ("process", "event_message")
@@ -262,13 +263,17 @@ class _HitEnricher(Enricher):
     name = "test_hit"
     supports_types = frozenset({IndicatorType.IPV4})
     requires_token = None
+    CONFIDENCE = 0.9
 
-    def _fetch(self, indicator):
+    def __init__(self) -> None:
+        pass
+
+    def fetch(self, indicator: Indicator) -> Evidence:
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.MALICIOUS,
-            confidence=0.9,
+            confidence=self.CONFIDENCE,
             summary="flagged",
         )
 
@@ -341,7 +346,8 @@ class TestSnapshotCycle:
         assert entries[0]["baseline"]["novel"] is False
 
     def test_judge_sees_threat_intel_evidence(self, sink):
-        chain = EnrichmentChain([_HitEnricher()], EvidenceCache(sink.engine, Base))
+        cache = EvidenceCache.on_base(sink.engine, Base)
+        chain = EnrichmentChain([_HitEnricher()], cache, logging.getLogger("test"))
         judge = _ScriptedJudge()
 
         _runner(sink, [_Conns()], judge=judge, enrichment_chain=chain).run_once()

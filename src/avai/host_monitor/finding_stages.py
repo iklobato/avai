@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Optional, Protocol
 
-from avai.enrichers import EnrichmentChain, extract_indicators
+from avai.enrichers import EnrichmentChain, IndicatorExtraction
 
 from .collectors import Collector
 from .constants import (
@@ -137,6 +137,14 @@ class FindingPipeline:
             stage.apply(batch)
 
 
+@dataclass(frozen=True)
+class ThreatIntel:
+    """Turns a collector row into indicators and looks each one up."""
+
+    chain: EnrichmentChain
+    extraction: IndicatorExtraction
+
+
 class EvidenceStage:
     """Attach external threat-intel evidence to each entry as ``evidence``.
 
@@ -146,11 +154,11 @@ class EvidenceStage:
 
     def __init__(
         self,
-        chain: EnrichmentChain,
+        intel: ThreatIntel,
         settings: ControlSettings,
         heartbeat: ProgressHeartbeat,
     ):
-        self._chain = chain
+        self._intel = intel
         self._settings = settings
         self._heartbeat = heartbeat
 
@@ -172,7 +180,7 @@ class EvidenceStage:
 
     def _evidence(self, batch: FindingBatch, row: dict) -> list[dict]:
         found: list[dict] = []
-        for indicator in extract_indicators(batch.collector.name, row):
+        for indicator in self._intel.extraction.extract(batch.collector.name, row):
             batch.indicators_looked_up += 1
             found.extend(
                 {
@@ -183,7 +191,7 @@ class EvidenceStage:
                     "confidence": round(ev.confidence, 2),
                     "note": ev.summary,
                 }
-                for ev in self._chain.enrich(indicator)
+                for ev in self._intel.chain.enrich(indicator)
             )
         return found
 

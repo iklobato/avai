@@ -14,8 +14,9 @@ burning a VirusTotal lookup.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 from avai.enrichers.base import (
     Enricher,
@@ -24,6 +25,15 @@ from avai.enrichers.base import (
     IndicatorType,
     VerdictHint,
 )
+from avai.enrichers.http import HttpClient
+
+# Offline known-bad hash deny-list: one hex digest (md5 / sha1 / sha256)
+# per line, '#' comments allowed. An absent file ⇒ the enricher loads
+# empty and simply gives no opinion.
+DENYLIST_ENV = "AVAI_HASH_DENYLIST"
+BUNDLED_DENYLIST = Path(__file__).resolve().parents[2] / "rules" / "hash_denylist.txt"
+ONE_YEAR_HOURS = 24 * 365
+MALICIOUS_CONFIDENCE = 1.0
 
 
 class LocalHashDenylistEnricher(Enricher):
@@ -31,32 +41,29 @@ class LocalHashDenylistEnricher(Enricher):
     supports_types = frozenset(
         {IndicatorType.SHA256, IndicatorType.SHA1, IndicatorType.MD5}
     )
-    requires_token: ClassVar[Optional[str]] = None  # keyless, always registered
-    ttl_hours = 24 * 365  # purely local; effectively never re-fetch
+    requires_token: ClassVar[str | None] = None  # keyless, always registered
+    ttl_hours = ONE_YEAR_HOURS  # purely local; effectively never re-fetch
 
-    def __init__(self, path: Optional[Path] = None):
-        # Late import keeps the enrichers package independent of
-        # host_monitor at module-load time (it's imported lazily when the
-        # chain is built, by which point host_monitor is already loaded).
-        from avai.host_monitor import constants
+    def __init__(self, path: Path, hashes: frozenset[str]) -> None:
+        self._path = path
+        self._hashes = hashes
 
-        self._path = Path(path) if path else constants.HASH_DENYLIST_PATH
-        self._hashes = self._load(self._path)
+    @classmethod
+    def create(
+        cls, http: HttpClient, env: Mapping[str, str]
+    ) -> LocalHashDenylistEnricher:
+        return cls.from_path(Path(env.get(DENYLIST_ENV) or BUNDLED_DENYLIST))
 
-    @staticmethod
-    def _load(path: Path) -> frozenset[str]:
+    @classmethod
+    def from_path(cls, path: Path) -> LocalHashDenylistEnricher:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return frozenset()  # missing file ⇒ no opinions
-        out: set[str] = set()
-        for line in text.splitlines():
-            entry = line.split("#", 1)[0].strip().lower()
-            if entry:
-                out.add(entry)
-        return frozenset(out)
+            return cls(path, frozenset())  # missing file ⇒ no opinions
+        entries = (line.split("#", 1)[0].strip().lower() for line in text.splitlines())
+        return cls(path, frozenset(entry for entry in entries if entry))
 
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
+    def fetch(self, indicator: Indicator) -> Evidence | None:
         # Indicator hashes are already lowercased at construction.
         if indicator.value not in self._hashes:
             return None
@@ -64,7 +71,7 @@ class LocalHashDenylistEnricher(Enricher):
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.MALICIOUS,
-            confidence=1.0,
+            confidence=MALICIOUS_CONFIDENCE,
             summary=f"known-bad hash (local deny-list: {self._path.name})",
             details={"denylist": str(self._path)},
         )

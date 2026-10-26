@@ -10,8 +10,9 @@ https://ipwho.is/
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from http import HTTPStatus
-from typing import ClassVar, Optional
+from typing import Any, ClassVar
 
 from avai.enrichers.base import (
     Enricher,
@@ -20,53 +21,56 @@ from avai.enrichers.base import (
     IndicatorType,
     VerdictHint,
 )
-from avai.enrichers.http import HttpClient
 
-_BASE = "https://ipwho.is"
+BASE_URL = "https://ipwho.is"
+ONE_WEEK_HOURS = 24 * 7
+INFORMATIONAL_CONFIDENCE = 0.0
 
 
 class IpwhoisGeoEnricher(Enricher):
     name = "ipwhois_geo"
     supports_types = frozenset({IndicatorType.IPV4, IndicatorType.IPV6})
-    requires_token: ClassVar[Optional[str]] = None
-    ttl_hours = 24 * 7  # geolocation is stable — refresh weekly
+    requires_token: ClassVar[str | None] = None
+    ttl_hours = ONE_WEEK_HOURS  # geolocation is stable — refresh weekly
+    rate_host = "ipwho.is"
+    rate_per_second = 1.0
 
-    def __init__(self, http: Optional[HttpClient] = None):
-        self._http = http or HttpClient()
-        self._http.set_rate("ipwho.is", 1.0)
-
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
-        resp = self._http.get(f"{_BASE}/{indicator.value}")
-        if resp.status_code != HTTPStatus.OK:
+    def fetch(self, indicator: Indicator) -> Evidence | None:
+        response = self._http.get(f"{BASE_URL}/{indicator.value}")
+        if response.status_code != HTTPStatus.OK:
             return None
-        body = resp.json() or {}
+        body = response.json() or {}
         # ipwho.is answers {"success": false, "message": ...} for bogon /
         # reserved / unroutable addresses — treat as "no opinion".
         if not body.get("success"):
             return None
-        conn = body.get("connection") or {}
-        country = body.get("country") or ""
-        city = body.get("city") or ""
-        region = body.get("region") or ""
-        org = conn.get("org") or conn.get("isp") or ""
-        asn = conn.get("asn")
-        where = ", ".join(p for p in (city, region, country) if p)
-        net = f" (AS{asn} {org})".rstrip() if (asn or org) else ""
+        return self._evidence(indicator, body)
+
+    def _evidence(self, indicator: Indicator, body: Mapping[str, Any]) -> Evidence:
+        details = self._details(body)
+        place = (details["city"], details["region"], details["country"])
+        where = ", ".join(part for part in place if part)
+        asn, org = details["asn"], details["org"]
+        network = f" (AS{asn} {org})".rstrip() if (asn or org) else ""
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.UNKNOWN,  # informational, not a threat
-            confidence=0.0,
-            summary=f"Geo: {where or 'unknown'}{net}",
-            details={
-                "country": country,
-                "country_code": body.get("country_code"),
-                "region": region,
-                "city": city,
-                "latitude": body.get("latitude"),
-                "longitude": body.get("longitude"),
-                "asn": asn,
-                "org": org,
-                "isp": conn.get("isp"),
-            },
+            confidence=INFORMATIONAL_CONFIDENCE,
+            summary=f"Geo: {where or 'unknown'}{network}",
+            details=details,
         )
+
+    def _details(self, body: Mapping[str, Any]) -> dict[str, Any]:
+        connection = body.get("connection") or {}
+        return {
+            "country": body.get("country") or "",
+            "country_code": body.get("country_code"),
+            "region": body.get("region") or "",
+            "city": body.get("city") or "",
+            "latitude": body.get("latitude"),
+            "longitude": body.get("longitude"),
+            "asn": connection.get("asn"),
+            "org": connection.get("org") or connection.get("isp") or "",
+            "isp": connection.get("isp"),
+        }

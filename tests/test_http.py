@@ -8,19 +8,22 @@ exhaustion of the retry budget.
 Network-free — every test patches ``requests.Session.request`` with
 fakes that record calls and return canned ``Response`` objects.
 """
+
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
 from avai.enrichers.base import RateLimitedError
-from avai.enrichers.http import HttpClient
+from avai.enrichers.http import HttpCall, HttpClient, HttpMethod, RequestOptions
 
 
-def _resp(status: int, body: str = "ok",
-          headers: dict[str, str] | None = None) -> requests.Response:
+def _resp(
+    status: int, body: str = "ok", headers: dict[str, str] | None = None
+) -> requests.Response:
     r = requests.Response()
     r.status_code = status
     r._content = body.encode() if isinstance(body, str) else body
@@ -32,25 +35,28 @@ def _resp(status: int, body: str = "ok",
 def fast_client(monkeypatch):
     """Client whose retry sleeps are reduced to zero so the suite
     runs fast even when exercising backoff paths."""
-    monkeypatch.setattr("avai.enrichers.http._RETRY_BACKOFFS", (0.0, 0.0, 0.0))
+    monkeypatch.setattr("avai.enrichers.http.RETRY_BACKOFFS_S", (0.0, 0.0, 0.0))
     # Default rate of 1000 rps so rate-limit sleeps don't bite either,
     # except in the tests that explicitly override it.
-    return HttpClient(default_rate=1000.0)
+    return HttpClient.create(logging.getLogger("test"), default_rate=1000.0)
 
 
 class TestHostOf:
-    def test_extracts_host_from_https(self, fast_client):
-        assert fast_client._host_of("https://api.example.com/x/y") == "api.example.com"
+    def host_of(self, url: str) -> str:
+        return HttpCall(HttpMethod.GET, url, RequestOptions()).host
 
-    def test_extracts_host_from_http(self, fast_client):
-        assert fast_client._host_of("http://x.test/") == "x.test"
+    def test_extracts_host_from_https(self):
+        assert self.host_of("https://api.example.com/x/y") == "api.example.com"
 
-    def test_lowercases_host(self, fast_client):
-        assert fast_client._host_of("https://API.Example.COM/") == "api.example.com"
+    def test_extracts_host_from_http(self):
+        assert self.host_of("http://x.test/") == "x.test"
 
-    def test_returns_url_when_no_scheme(self, fast_client):
+    def test_lowercases_host(self):
+        assert self.host_of("https://API.Example.COM/") == "api.example.com"
+
+    def test_returns_url_when_no_scheme(self):
         # Defensive — never raises, even on malformed input.
-        assert fast_client._host_of("not-a-url") == "not-a-url"
+        assert self.host_of("not-a-url") == "not-a-url"
 
 
 class TestUserAgent:
@@ -74,7 +80,7 @@ class TestSuccessPath:
     def test_post_forwards_json(self, fast_client):
         mock = MagicMock(return_value=_resp(200, '{"ok":true}'))
         fast_client._session.request = mock
-        fast_client.post("https://api.test/", json={"a": 1})
+        fast_client.post("https://api.test/", RequestOptions(json={"a": 1}))
         _, kwargs = mock.call_args
         assert kwargs["json"] == {"a": 1}
 
@@ -89,7 +95,8 @@ class TestRateLimited429:
     def test_raises_on_429_with_long_retry_after(self, fast_client):
         # Retry-After=60 is too long; we surface as RateLimited, not block.
         fast_client._session.request = MagicMock(
-            return_value=_resp(429, headers={"Retry-After": "60"}))
+            return_value=_resp(429, headers={"Retry-After": "60"})
+        )
         with pytest.raises(RateLimitedError):
             fast_client.get("https://api.test/")
 
@@ -127,11 +134,13 @@ class TestRetryOnTransient5xx:
 
 class TestNetworkErrors:
     def test_retries_after_connection_error(self, fast_client):
-        mock = MagicMock(side_effect=[
-            requests.ConnectionError("boom"),
-            requests.ConnectionError("boom"),
-            _resp(200, "ok"),
-        ])
+        mock = MagicMock(
+            side_effect=[
+                requests.ConnectionError("boom"),
+                requests.ConnectionError("boom"),
+                _resp(200, "ok"),
+            ]
+        )
         fast_client._session.request = mock
         r = fast_client.get("https://api.test/")
         assert r.status_code == 200
@@ -139,7 +148,8 @@ class TestNetworkErrors:
 
     def test_propagates_after_exhausting(self, fast_client):
         fast_client._session.request = MagicMock(
-            side_effect=requests.ConnectionError("dead"))
+            side_effect=requests.ConnectionError("dead")
+        )
         with pytest.raises(requests.ConnectionError):
             fast_client.get("https://api.test/")
 

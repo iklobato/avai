@@ -3,11 +3,13 @@
 No key. Used to flag installed OSes / runtimes past end-of-support.
 https://endoflife.date/api
 """
+
 from __future__ import annotations
 
-from http import HTTPStatus
+from collections.abc import Mapping
 from datetime import datetime
-from typing import ClassVar, Optional
+from http import HTTPStatus
+from typing import Any, ClassVar
 
 from avai.enrichers.base import (
     Enricher,
@@ -16,52 +18,62 @@ from avai.enrichers.base import (
     IndicatorType,
     VerdictHint,
 )
-from avai.enrichers.http import HttpClient
 
-_BASE = "https://endoflife.date/api"
+BASE_URL = "https://endoflife.date/api"
+ONE_WEEK_HOURS = 24 * 7
+PAST_EOL_CONFIDENCE = 0.8
+DETAIL_FIELDS = (
+    "cycle",
+    "eol",
+    "latest",
+    "support",
+    "releaseDate",
+    "extendedSupport",
+    "lts",
+)
 
 
 class EndOfLifeEnricher(Enricher):
-    name           = "endoflife"
+    name = "endoflife"
     supports_types = frozenset({IndicatorType.OS_VERSION})
-    requires_token: ClassVar[Optional[str]] = None
-    ttl_hours      = 24 * 7
+    requires_token: ClassVar[str | None] = None
+    ttl_hours = ONE_WEEK_HOURS
+    rate_host = "endoflife.date"
+    rate_per_second = 4.0
 
-    def __init__(self, http: Optional[HttpClient] = None):
-        self._http = http or HttpClient()
-        self._http.set_rate("endoflife.date", 4.0)
-
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
+    def fetch(self, indicator: Indicator) -> Evidence | None:
         # value format: "<product>@<cycle>", e.g. "ubuntu@22.04"
         product, _, cycle = indicator.value.partition("@")
         if not (product and cycle):
             return None
-        resp = self._http.get(f"{_BASE}/{product}/{cycle}.json")
-        if resp.status_code != HTTPStatus.OK:
+        response = self._http.get(f"{BASE_URL}/{product}/{cycle}.json")
+        if response.status_code != HTTPStatus.OK:
             return None
-        body = resp.json()
+        body = response.json()
+        if not self._is_past_eol(body.get("eol")):
+            return None
+        return self._evidence(indicator, body)
+
+    def _evidence(self, indicator: Indicator, body: Mapping[str, Any]) -> Evidence:
+        product, _, cycle = indicator.value.partition("@")
         eol = body.get("eol")
-        # `eol` may be a bool ("EOL: false / true") or an ISO date.
-        is_eol = False
-        eol_date_str = ""
-        if isinstance(eol, bool):
-            is_eol = eol
-        elif isinstance(eol, str):
-            eol_date_str = eol
-            try:
-                is_eol = datetime.fromisoformat(eol).date() < datetime.utcnow().date()
-            except ValueError:
-                pass
-        if not is_eol:
-            return None
+        eol_date = eol if isinstance(eol, str) else ""
         return Evidence(
-            source       = self.name,
-            indicator    = indicator,
-            verdict_hint = VerdictHint.SUSPICIOUS,
-            confidence   = 0.8,
-            summary      = f"endoflife.date: {product} {cycle} is past EOL ({eol_date_str})",
-            details      = {k: body.get(k) for k in (
-                "cycle", "eol", "latest", "support", "releaseDate",
-                "extendedSupport", "lts",
-            )},
+            source=self.name,
+            indicator=indicator,
+            verdict_hint=VerdictHint.SUSPICIOUS,
+            confidence=PAST_EOL_CONFIDENCE,
+            summary=f"endoflife.date: {product} {cycle} is past EOL ({eol_date})",
+            details={field: body.get(field) for field in DETAIL_FIELDS},
         )
+
+    def _is_past_eol(self, eol: object) -> bool:
+        """`eol` may be a bool ("EOL: false / true") or an ISO date."""
+        if isinstance(eol, bool):
+            return eol
+        if not isinstance(eol, str):
+            return False
+        try:
+            return datetime.fromisoformat(eol).date() < datetime.utcnow().date()
+        except ValueError:
+            return False

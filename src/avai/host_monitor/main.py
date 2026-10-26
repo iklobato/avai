@@ -14,7 +14,8 @@ from typing import Optional
 
 from sqlalchemy import create_engine
 
-from avai.enrichers import build_default_chain
+from avai.enrichers import ChainBuilder, ChainRequest, EnricherCatalog, EvidenceCache
+from avai.enrichers.http import HttpClient
 
 from .constants import (
     DEFAULT_BASELINE_MIN_RUNS,
@@ -306,10 +307,16 @@ def build_runner(args) -> "tuple[Runner, object]":
         if args.no_enrich:
             LOG.info("enrichment disabled (--no-enrich)")
         else:
-            enrichment_chain = build_default_chain(
-                engine,
-                Base,
-                enable=args.enrich_only,
+            enrichment_logger = logging.getLogger("avai.enrichers")
+            builder = ChainBuilder(
+                EnricherCatalog.of_sources(enrichment_logger),
+                HttpClient.create(enrichment_logger),
+                enrichment_logger,
+            )
+            enable = frozenset(args.enrich_only) if args.enrich_only else None
+            enrichment_chain = builder.build(
+                EvidenceCache.on_base(engine, Base),
+                ChainRequest(dict(os.environ), enable),
             )
         runner = Runner(
             RunnerConfig(

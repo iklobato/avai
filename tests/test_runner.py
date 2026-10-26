@@ -6,7 +6,9 @@ behaviour is pinned in test_runner_cycle.py.
 from __future__ import annotations
 
 import json
+import logging
 import threading
+from typing import NoReturn
 
 import pytest
 from sqlalchemy import create_engine
@@ -18,14 +20,12 @@ from avai.enrichers import (
     Evidence,
     EvidenceCache,
     Indicator,
+    IndicatorExtraction,
     IndicatorType,
     VerdictHint,
 )
+from avai.enrichers.base import EnricherError
 from avai.host_monitor.constants import DEFAULT_BASELINE_MIN_RUNS
-from avai.host_monitor.judge import NullJudge
-from avai.host_monitor.models import Base, CollectionRun, FileScanRow, ProcessRow
-from avai.host_monitor.runner import Runner
-from avai.host_monitor.sink import Sink
 from avai.host_monitor.control_loop import (
     ControlLoop,
     ControlSettings,
@@ -42,11 +42,15 @@ from avai.host_monitor.finding_stages import (
     InvestigateStage,
     JudgeStage,
     ProcessBehavior,
+    ThreatIntel,
     VerifyStage,
     YaraContextStage,
 )
-from avai.host_monitor.runner import RunnerConfig
+from avai.host_monitor.judge import NullJudge
+from avai.host_monitor.models import Base, CollectionRun, FileScanRow, ProcessRow
+from avai.host_monitor.runner import Runner, RunnerConfig
 from avai.host_monitor.runtime import Clock, Digest, FrozenClock
+from avai.host_monitor.sink import Sink
 
 
 class _StubCollector:
@@ -93,13 +97,15 @@ class _AlwaysHitEnricher(Enricher):
     def __init__(self):
         self.calls: list[Indicator] = []
 
-    def _fetch(self, indicator: Indicator):
+    CONFIDENCE = 0.9
+
+    def fetch(self, indicator: Indicator) -> Evidence:
         self.calls.append(indicator)
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.MALICIOUS,
-            confidence=0.9,
+            confidence=self.CONFIDENCE,
             summary=f"test malicious hit for {indicator.value}",
         )
 
@@ -121,7 +127,8 @@ def sink():
 
 @pytest.fixture
 def chain(sink):
-    return EnrichmentChain([_AlwaysHitEnricher()], EvidenceCache(sink.engine, Base))
+    cache = EvidenceCache.on_base(sink.engine, Base)
+    return EnrichmentChain([_AlwaysHitEnricher()], cache, logging.getLogger("test"))
 
 
 # ---------------------------------------------------------------------------
@@ -130,8 +137,9 @@ def chain(sink):
 
 
 def _evidence_stage(sink, chain, enrich_on=True):
+    intel = ThreatIntel(chain, IndicatorExtraction.default())
     return EvidenceStage(
-        chain, _settings(sink, enrich_on=enrich_on), ProgressHeartbeat(sink)
+        intel, _settings(sink, enrich_on=enrich_on), ProgressHeartbeat(sink)
     )
 
 
@@ -180,7 +188,8 @@ class TestEvidenceStage:
 
     def test_enrichment_turned_off_means_no_evidence_no_lookups(self, sink):
         source = _AlwaysHitEnricher()
-        chain = EnrichmentChain([source], EvidenceCache(sink.engine, Base))
+        cache = EvidenceCache.on_base(sink.engine, Base)
+        chain = EnrichmentChain([source], cache, logging.getLogger("test"))
         stage = _evidence_stage(sink, chain, enrich_on=False)
         from avai.host_monitor.models import NetworkConnectionRow
 
@@ -230,11 +239,14 @@ class TestEvidenceStage:
             supports_types = frozenset({IndicatorType.IPV4})
             requires_token = None
 
-            def _fetch(self, indicator):
-                raise RuntimeError("intentional")
+            def __init__(self) -> None:
+                pass
 
-        cache = EvidenceCache(sink.engine, Base)
-        chain = EnrichmentChain([_Broken()], cache)
+            def fetch(self, indicator: Indicator) -> NoReturn:
+                raise EnricherError("intentional")
+
+        cache = EvidenceCache.on_base(sink.engine, Base)
+        chain = EnrichmentChain([_Broken()], cache, logging.getLogger("test"))
         from avai.host_monitor.models import NetworkConnectionRow
 
         collector = _StubCollector()
@@ -1592,8 +1604,8 @@ class TestCoverageStep:
 class TestYaraCoverageAssessor:
     def _assessor(self, payload):
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
-        from avai.host_monitor.prompts import Prompts
         from avai.host_monitor.coverage import YaraCoverageAssessor
+        from avai.host_monitor.prompts import Prompts
 
         class _FakeClient:
             def __init__(self):
@@ -1905,8 +1917,8 @@ class TestInvestigateStage:
 class TestUnknownFindingInvestigator:
     def _inv(self, payload):
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
-        from avai.host_monitor.prompts import Prompts
         from avai.host_monitor.investigator import UnknownFindingInvestigator
+        from avai.host_monitor.prompts import Prompts
 
         class _FakeClient:
             def complete_structured(self, request):

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from avai.enrichers.indicators import EXTRACTORS
+from avai.enrichers.indicators import IndicatorExtraction
 from avai.host_monitor import (
     collectors,
     exposure_collectors,
@@ -89,4 +89,4 @@ def test_every_judged_collector_has_a_prompt_hint():
 
 
 def test_extractor_keys_are_catalogued_slices():
-    assert set(EXTRACTORS) <= SLICE_NAMES
+    assert IndicatorExtraction.default().collectors <= SLICE_NAMES
