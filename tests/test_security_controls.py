@@ -11,7 +11,11 @@ from __future__ import annotations
 import pytest
 
 from avai.host_monitor.runtime import TriState
-from avai.host_monitor.security_controls import NetworkServiceControl, ServiceSpec
+from avai.host_monitor.security_controls import (
+    NetworkServiceControl,
+    ServiceProbes,
+    ServiceSpec,
+)
 
 SSH = ServiceSpec("remote_login", "com.openssh.sshd", 22, "sshd")
 
@@ -45,12 +49,12 @@ class FakeProcessInspector:
 
 
 def _control(svc=None, listening=None, established=None, running=None):
-    return NetworkServiceControl(
-        SSH,
+    probes = ServiceProbes(
         FakeServiceSupervisor(svc),
         FakePortInspector(listening=listening, established=established),
         FakeProcessInspector(running=running),
     )
+    return NetworkServiceControl(SSH, probes)
 
 
 # ---- tri_or -------------------------------------------------------------
@@ -122,7 +126,6 @@ def test_macos_collector_maps_enabled_idle_service_to_on():
     import json
 
     from avai.host_monitor.collectors import SystemIntegrityCollector
-    from avai.host_monitor.collectors.integrity import ServiceProbes
     from avai.host_monitor.runtime import CommandRunner
 
     probes = ServiceProbes(

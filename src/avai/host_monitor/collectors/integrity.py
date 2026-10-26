@@ -4,7 +4,6 @@ import json
 import os
 import stat
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,16 +18,13 @@ from ..runtime import (
     Digest,
     HostPaths,
     LaunchdServiceSupervisor,
-    PortInspector,
-    ProcessInspector,
     PsutilConnections,
     PsutilPortInspector,
     PsutilProcessInspector,
-    ServiceSupervisor,
     SystemdServiceSupervisor,
     TriState,
 )
-from ..security_controls import NetworkServiceControl, ServiceSpec
+from ..security_controls import ServiceProbes, ServiceSpec
 from .base import SnapshotCollector
 
 SPCTL_TIMEOUT_S = 10
@@ -37,19 +33,6 @@ SELINUX_MODES = (("0", "Permissive"), ("1", "Enforcing"))
 VNC_UNITS = ("x11vnc", "vncserver", "xrdp")
 VNC_PORT = 5900
 FILE_STAT_FIELDS = ("size", "mtime", "mode", "uid", "gid")
-
-
-@dataclass(frozen=True)
-class ServiceProbes:
-    """The OS-specific mechanisms a network-service control combines:
-    service enablement, the port table and the process table."""
-
-    services: ServiceSupervisor
-    ports: PortInspector
-    processes: ProcessInspector
-
-    def control(self, spec: ServiceSpec) -> NetworkServiceControl:
-        return NetworkServiceControl(spec, self.services, self.ports, self.processes)
 
 
 class SystemIntegrityCollector(SnapshotCollector):

@@ -22,7 +22,7 @@ the existing ``system_integrity`` columns and probe convention.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Protocol
 
 from .runtime import PortInspector, ProcessInspector, ServiceSupervisor, TriState
 
@@ -32,8 +32,8 @@ class IntegrityFinding:
     """One topic's posture + behaviour, with the signal that decided it."""
 
     topic: str
-    enabled: Optional[int]
-    active: Optional[int]
+    enabled: int | None
+    active: int | None
     source: str
 
 
@@ -42,7 +42,18 @@ class SecurityControl(Protocol):
 
     topic: str
 
-    def inspect(self) -> IntegrityFinding: ...
+    def inspect(self) -> IntegrityFinding:
+        spec, probes = self._spec, self._probes
+        services, ports = probes.services, probes.ports
+        serving = (services.enabled(spec.unit), ports.listening(spec.port))
+        in_use = (probes.processes.running(spec.process), ports.established(spec.port))
+        signals = TriState()
+        return IntegrityFinding(
+            topic=spec.topic,
+            enabled=signals.any_on(serving),
+            active=signals.any_on(in_use),
+            source="service+port+process",
+        )
 
 
 @dataclass(frozen=True)
@@ -58,6 +69,19 @@ class ServiceSpec:
     process: str
 
 
+@dataclass(frozen=True)
+class ServiceProbes:
+    """The OS-specific mechanisms a network-service control combines:
+    service enablement, the port table and the process table."""
+
+    services: ServiceSupervisor
+    ports: PortInspector
+    processes: ProcessInspector
+
+    def control(self, spec: ServiceSpec) -> NetworkServiceControl:
+        return NetworkServiceControl(spec, self)
+
+
 class NetworkServiceControl:
     """Posture + behaviour for a socket-activated network service (SSH,
     Screen Sharing, ARD/RDP), on any OS.
@@ -70,34 +94,23 @@ class NetworkServiceControl:
     and therefore hid idle-but-exposed services.
     """
 
-    def __init__(
-        self,
-        spec: ServiceSpec,
-        services: ServiceSupervisor,
-        ports: PortInspector,
-        processes: ProcessInspector,
-    ) -> None:
+    def __init__(self, spec: ServiceSpec, probes: ServiceProbes) -> None:
         self._spec = spec
-        self._services = services
-        self._ports = ports
-        self._processes = processes
+        self._probes = probes
 
     @property
     def topic(self) -> str:
         return self._spec.topic
 
     def inspect(self) -> IntegrityFinding:
-        spec = self._spec
+        spec, probes = self._spec, self._probes
+        ports = probes.ports
+        serving = (probes.services.enabled(spec.unit), ports.listening(spec.port))
+        in_use = (probes.processes.running(spec.process), ports.established(spec.port))
         signals = TriState()
-        enabled = signals.any_on(
-            (self._services.enabled(spec.unit), self._ports.listening(spec.port))
-        )
-        active = signals.any_on(
-            (self._processes.running(spec.process), self._ports.established(spec.port))
-        )
         return IntegrityFinding(
             topic=spec.topic,
-            enabled=enabled,
-            active=active,
+            enabled=signals.any_on(serving),
+            active=signals.any_on(in_use),
             source="service+port+process",
         )

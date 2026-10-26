@@ -41,7 +41,7 @@ from .judge import Judge, NullJudge
 from .narrator import IncidentNarrator
 from .runtime import Digest
 from .sink import Sink
-from .streaming import StreamingSupervisor
+from .streaming import StreamingSupervisor, SupervisionPolicy
 from .verifier import MaliciousVerdictVerifier
 
 _BYTES_PER_MB = 1024 * 1024
@@ -267,7 +267,9 @@ class Runner:
             config.max_db_bytes,
             self.shutdown_event,
         )
-        self._streaming = StreamingSupervisor(config.sink, config.streaming_collectors)
+        self._streaming = StreamingSupervisor(
+            config.sink, config.streaming_collectors, SupervisionPolicy.standard(LOG)
+        )
 
     def request_shutdown(self) -> None:
         """Idempotent: safe to call from a signal handler."""
