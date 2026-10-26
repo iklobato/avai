@@ -15,13 +15,16 @@ the contract between them could silently break:
 
 from __future__ import annotations
 
+import logging
+
 import json
 
 import pytest
 from sqlalchemy import create_engine
 
 from avai.host_monitor.enums import ThreatCategory, Verdict
-from avai.host_monitor.judge import Judgment, LlmJudge
+from avai.host_monitor.llm import CompletionClient, LlmSession
+from avai.host_monitor.judge import JudgeSettings, Judgment, LlmJudge
 from avai.host_monitor.prompts import Prompts
 from avai.host_monitor.runtime import Digest
 from avai.host_monitor.sink import Sink
@@ -31,7 +34,7 @@ from avai.host_monitor.sink import Sink
 # ===========================================================================
 
 
-class _CapturingClient:
+class _CapturingClient(CompletionClient):
     """Captures the `user` prompt the judge sends; returns no judgments."""
 
     def __init__(self):
@@ -59,12 +62,10 @@ class TestEvidenceReachesPrompt:
 
     def test_evidence_field_is_serialised_into_user_prompt(self, judge_prompts):
         client = _CapturingClient()
-        judge = LlmJudge(
-            prompts=judge_prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            judge_prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 0),
         )
         entry = {
             "content_hash": "a" * 64,
@@ -98,24 +99,20 @@ class TestEvidenceReachesPrompt:
         # content_hash is internal plumbing — sending it to the model
         # wastes tokens and could bias it. _call must drop it.
         client = _CapturingClient()
-        judge = LlmJudge(
-            prompts=judge_prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            judge_prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 0),
         )
         judge.judge("processes", "h", [{"content_hash": "deadbeef" * 8, "name": "x"}])
         assert "deadbeef" not in client.user_prompts[0]
 
     def test_none_valued_fields_are_omitted_from_prompt(self, judge_prompts):
         client = _CapturingClient()
-        judge = LlmJudge(
-            prompts=judge_prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            judge_prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 0),
         )
         judge.judge("processes", "h", [{"content_hash": "a", "name": "x", "exe": None}])
         # The null exe should not appear as `"exe": null` noise.
@@ -125,12 +122,10 @@ class TestEvidenceReachesPrompt:
         # The model maps results back by integer index; every entry in
         # the payload must carry one.
         client = _CapturingClient()
-        judge = LlmJudge(
-            prompts=judge_prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            judge_prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 0),
         )
         judge.judge(
             "processes",

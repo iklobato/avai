@@ -11,10 +11,10 @@ completion client and structured-output path, like the other second stages.
 from __future__ import annotations
 
 import json
-from typing import Optional
+from typing import Any
 
 from .constants import DEFAULT_NARRATIVE_MODEL
-from .llm import CompletionClient, CompletionRequest, StructuredCall
+from .llm import CompletionRequest, LlmSession, ParsedReply, StructuredCall
 from .prompts import Prompts
 
 
@@ -26,7 +26,7 @@ class MaliciousVerdictVerifier:
     MAX_TOKENS = 512
 
     @classmethod
-    def _verification_schema(cls) -> dict:
+    def _verification_schema(cls) -> dict[str, Any]:
         return {
             "type": "object",
             "properties": {
@@ -36,35 +36,41 @@ class MaliciousVerdictVerifier:
             "required": ["refuted", "reasoning"],
         }
 
-    def __init__(
-        self,
-        prompts: Prompts,
-        client: CompletionClient,
-        model: str = DEFAULT_NARRATIVE_MODEL,
-    ):
-        self.model = model
-        self._llm = StructuredCall(
-            "verifier",
-            client,
-            CompletionRequest(
-                model=model,
-                system=prompts.verifier_system,
-                user=prompts.verifier_user_template,
-                schema=self._verification_schema(),
-                schema_name=self.SCHEMA_NAME,
-                max_tokens=self.MAX_TOKENS,
-                temperature=self.TEMPERATURE,
-            ),
-        )
+    REASONING_CHARS = 500
 
-    def verify(self, finding: dict) -> Optional[dict]:
+    def __init__(self, llm: StructuredCall) -> None:
+        self._llm = llm
+
+    @classmethod
+    def create(
+        cls, prompts: Prompts, session: LlmSession, model: str = DEFAULT_NARRATIVE_MODEL
+    ) -> MaliciousVerdictVerifier:
+        request = CompletionRequest(
+            model=model,
+            system=prompts.verifier_system,
+            user=prompts.verifier_user_template,
+            schema=cls._verification_schema(),
+            schema_name=cls.SCHEMA_NAME,
+            max_tokens=cls.MAX_TOKENS,
+            temperature=cls.TEMPERATURE,
+        )
+        return cls(StructuredCall("verifier", session, request))
+
+    @property
+    def model(self) -> str:
+        return self._llm.request.model
+
+    def verify(self, finding: dict[str, Any]) -> dict[str, Any] | None:
         """Return ``{"refuted": bool, "reasoning": str}`` or None on failure.
-        Never raises — a verification failure must leave the original verdict
-        untouched, not abort the cycle."""
-        parsed = self._llm.ask_or_none(finding=json.dumps(finding, ensure_ascii=False))
+        A verification failure leaves the original verdict untouched rather
+        than aborting the cycle."""
+        parsed = self._llm.ask_or_none(
+            {"finding": json.dumps(finding, ensure_ascii=False)}
+        )
         if parsed is None:
             return None
+        reply = ParsedReply(parsed)
         return {
-            "refuted": bool(parsed.get("refuted")),
-            "reasoning": str(parsed.get("reasoning") or "").strip()[:500],
+            "refuted": reply.flag("refuted"),
+            "reasoning": reply.text("reasoning", self.REASONING_CHARS),
         }

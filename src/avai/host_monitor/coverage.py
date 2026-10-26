@@ -10,10 +10,10 @@ structured-output path, exactly like :class:`IncidentNarrator`.
 from __future__ import annotations
 
 import json
-from typing import Optional
+from typing import Any
 
 from .constants import DEFAULT_NARRATIVE_MODEL
-from .llm import CompletionClient, CompletionRequest, StructuredCall
+from .llm import CompletionRequest, LlmSession, ParsedReply, StructuredCall
 from .prompts import Prompts
 
 
@@ -27,7 +27,7 @@ class YaraCoverageAssessor:
     MAX_TOKENS = 1024
 
     @classmethod
-    def _coverage_schema(cls) -> dict:
+    def _coverage_schema(cls) -> dict[str, Any]:
         item = {
             "type": "object",
             "properties": {
@@ -48,71 +48,72 @@ class YaraCoverageAssessor:
             "required": ["posture", "headline", "summary", "gaps", "recommendations"],
         }
 
-    def __init__(
-        self,
-        prompts: Prompts,
-        client: CompletionClient,
-        model: str = DEFAULT_NARRATIVE_MODEL,
-    ):
-        self.model = model
-        self._llm = StructuredCall(
-            "coverage assessor",
-            client,
-            CompletionRequest(
-                model=model,
-                system=prompts.coverage_system,
-                user=prompts.coverage_user_template,
-                schema=self._coverage_schema(),
-                schema_name=self.SCHEMA_NAME,
-                max_tokens=self.MAX_TOKENS,
-                temperature=self.TEMPERATURE,
-            ),
-        )
+    HEADLINE_CHARS = 200
+    SUMMARY_CHARS = 2000
+    LABEL_CHARS = 100
+    DETAIL_CHARS = 300
+    MAX_ITEMS = 12
 
-    def assess(self, ruleset: dict, host: dict) -> Optional[dict]:
+    def __init__(self, llm: StructuredCall) -> None:
+        self._llm = llm
+
+    @classmethod
+    def create(
+        cls, prompts: Prompts, session: LlmSession, model: str = DEFAULT_NARRATIVE_MODEL
+    ) -> YaraCoverageAssessor:
+        request = CompletionRequest(
+            model=model,
+            system=prompts.coverage_system,
+            user=prompts.coverage_user_template,
+            schema=cls._coverage_schema(),
+            schema_name=cls.SCHEMA_NAME,
+            max_tokens=cls.MAX_TOKENS,
+            temperature=cls.TEMPERATURE,
+        )
+        return cls(StructuredCall("coverage assessor", session, request))
+
+    @property
+    def model(self) -> str:
+        return self._llm.request.model
+
+    def assess(
+        self, ruleset: dict[str, Any], host: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Return ``{posture, headline, summary, gaps[], recommendations[]}``
-        or None on failure/empty ruleset. Never raises — a coverage-assessment
-        failure must not abort the cycle."""
+        or None on failure or an empty ruleset."""
         if not ruleset or not ruleset.get("rules_loaded"):
             return None
         parsed = self._llm.ask_or_none(
-            ruleset=json.dumps(ruleset, ensure_ascii=False),
-            host=json.dumps(host, ensure_ascii=False),
+            {
+                "ruleset": json.dumps(ruleset, ensure_ascii=False),
+                "host": json.dumps(host, ensure_ascii=False),
+            }
         )
-        if parsed is None:
-            return None
-        posture = str(parsed.get("posture") or "").lower()
-        if posture not in self.POSTURES:
-            posture = "partial"
-        headline = str(parsed.get("headline") or "").strip()[:200]
-        summary = str(parsed.get("summary") or "").strip()[:2000]
-        gaps = self._clean_items(parsed.get("gaps"), "area")
-        recommendations = self._clean_items(parsed.get("recommendations"), "action")
+        return None if parsed is None else self._assessment(ParsedReply(parsed))
+
+    def _assessment(self, reply: ParsedReply) -> dict[str, Any] | None:
+        headline = reply.text("headline", self.HEADLINE_CHARS)
+        summary = reply.text("summary", self.SUMMARY_CHARS)
+        gaps = self._items(reply, "gaps", "area")
         if not headline or not (summary or gaps):
             return None
         return {
-            "posture": posture,
+            "posture": reply.choice("posture", self.POSTURES, "partial"),
             "headline": headline,
             "summary": summary,
             "gaps": gaps,
-            "recommendations": recommendations,
+            "recommendations": self._items(reply, "recommendations", "action"),
         }
 
-    @staticmethod
-    def _clean_items(raw, label_key: str) -> list[dict]:
-        """Normalise a gaps/recommendations array: keep the entries whose
-        label field (``area`` or ``action``) is non-empty, trim the rest."""
-        out: list[dict] = []
-        for it in raw or []:
-            if not isinstance(it, dict):
-                continue
-            label = str(it.get(label_key) or "").strip()
-            if not label:
-                continue
-            out.append(
-                {
-                    label_key: label[:100],
-                    "detail": str(it.get("detail") or "").strip()[:300],
-                }
-            )
-        return out[:12]
+    def _items(
+        self, reply: ParsedReply, key: str, label_key: str
+    ) -> list[dict[str, str]]:
+        """Keep the gaps/recommendations entries whose label field (``area``
+        or ``action``) is non-empty, trimmed."""
+        return [
+            {
+                label_key: entry.text(label_key, self.LABEL_CHARS),
+                "detail": entry.text("detail", self.DETAIL_CHARS),
+            }
+            for entry in reply.entries(key, label_key)
+        ][: self.MAX_ITEMS]

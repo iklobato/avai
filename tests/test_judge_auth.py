@@ -20,26 +20,27 @@ OPENAI = {"OPENAI_API_KEY": "sk-openai"}
 
 
 @pytest.mark.parametrize(
-    ("env", "has_litellm", "expected_client"),
+    ("env", "expected_client"),
     [
-        pytest.param({}, True, None, id="no-credentials"),
-        pytest.param({"CLAUDE_CODE_OAUTH_TOKEN": ""}, True, None, id="empty-oauth"),
-        pytest.param(OAUTH, False, "oauth", id="oauth-without-litellm"),
-        pytest.param(ANTHROPIC, True, "litellm", id="anthropic-key"),
-        pytest.param(OPENAI, True, "litellm", id="openai-key"),
-        pytest.param(ANTHROPIC, False, None, id="key-without-litellm"),
-        pytest.param({**OAUTH, **ANTHROPIC}, True, "oauth", id="oauth-wins"),
+        pytest.param({}, None, id="no-credentials"),
+        pytest.param({"CLAUDE_CODE_OAUTH_TOKEN": ""}, None, id="empty-oauth"),
+        pytest.param(OAUTH, "oauth", id="oauth"),
+        pytest.param(ANTHROPIC, "litellm", id="anthropic-key"),
+        pytest.param(OPENAI, "litellm", id="openai-key"),
+        pytest.param({**OAUTH, **ANTHROPIC}, "oauth", id="oauth-wins"),
     ],
 )
-def test_credential_rule(monkeypatch, env, has_litellm, expected_client):
-    monkeypatch.setattr(llm, "HAS_LITELLM", has_litellm)
+def test_credential_rule(env, expected_client):
     credentials = LlmCredentials.from_env(env)
 
     with (
         patch.object(llm, "AnthropicOAuthClient") as oauth,
         patch.object(llm, "LitellmClient") as litellm_client,
     ):
-        picked = {oauth.return_value: "oauth", litellm_client.return_value: "litellm"}
+        picked = {
+            oauth.create.return_value: "oauth",
+            litellm_client.create.return_value: "litellm",
+        }
         client = picked[credentials.client()] if credentials.can_call() else None
 
     assert client == expected_client
@@ -49,7 +50,7 @@ def test_oauth_client_is_built_with_the_token():
     with patch.object(llm, "AnthropicOAuthClient") as oauth:
         LlmCredentials.from_env(OAUTH).client()
 
-    oauth.assert_called_once_with("oauth-token")
+    oauth.create.assert_called_once_with("oauth-token")
 
 
 def test_token_stays_out_of_the_repr():

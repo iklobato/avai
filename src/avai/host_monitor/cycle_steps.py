@@ -14,7 +14,7 @@ from .coverage import YaraCoverageAssessor
 from .enums import Verdict
 from .models import RiskScoreRow
 from .narrator import IncidentNarrator
-from .risk import compute_risk_score
+from .risk import RiskCounts, RiskScorer
 from .runtime import Clock
 from .sink import Sink
 
@@ -103,9 +103,8 @@ class RiskScoreStep:
         except Exception as exc:
             LOG.warning("risk: input gather failed: %s", exc)
             return
-        result = compute_risk_score(
-            integrity, malicious, suspicious, nopasswd, extra_uid0
-        )
+        counts = RiskCounts(malicious, suspicious, nopasswd, extra_uid0)
+        result = RiskScorer().score(integrity, counts)
         prev = self._sink.latest_risk_row()
         try:
             self._sink.write_risk_score(

@@ -8,15 +8,22 @@ The completion client is replaced by a fake that returns a canned
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from avai.host_monitor.enums import ThreatCategory, Verdict
-from avai.host_monitor.judge import LlmJudge
-from avai.host_monitor.llm import CompletionRequest
+from avai.host_monitor.judge import JudgeSettings, LlmJudge
+from avai.host_monitor.llm import (
+    CompletionClient,
+    CompletionError,
+    CompletionRequest,
+    LlmSession,
+)
 from avai.host_monitor.prompts import Prompts
 
 
-class _FakeClient:
+class _FakeClient(CompletionClient):
     """Stand-in for CompletionClient. Records every call; returns a
     configured parsed dict (the framework normally receives this from
     JSON-mode or tool_use)."""
@@ -47,15 +54,12 @@ def prompts():
     )
 
 
-def _judge(prompts, client=None, **kwargs):
+def _judge(prompts, client=None):
     """Build an LlmJudge wired to ``client`` — no real LLM, no network."""
-    return LlmJudge(
-        prompts=prompts,
-        model="test-model",
-        batch_size=20,
-        max_per_collector=0,  # no cap
-        client=client or _FakeClient(),
-        **kwargs,
+    return LlmJudge.create(
+        prompts,
+        LlmSession(client or _FakeClient(), logging.getLogger("test")),
+        JudgeSettings("test-model", 20, 0),
     )
 
 
@@ -375,8 +379,10 @@ class TestParsingDefensiveness:
 class TestBatching:
     def test_splits_into_batches_of_batch_size(self, prompts):
         client = _FakeClient(parsed={"judgments": []})
-        judge = LlmJudge(
-            prompts=prompts, model="m", batch_size=3, max_per_collector=0, client=client
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 3, 0),
         )
         entries = [{"content_hash": f"h{i}", "name": str(i)} for i in range(10)]
         judge.judge("processes", "", entries)
@@ -385,12 +391,10 @@ class TestBatching:
 
     def test_caps_entries_to_max_per_collector(self, prompts):
         client = _FakeClient(parsed={"judgments": []})
-        judge = LlmJudge(
-            prompts=prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=3,
-            client=client,
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 3),
         )
         entries = [{"content_hash": f"h{i}"} for i in range(10)]
         judge.judge("processes", "", entries)
@@ -402,8 +406,10 @@ class TestBatching:
         # the _batches generator, escaping the per-batch try/except and
         # breaking the cycle. __init__ now clamps to >=1.
         client = _FakeClient(parsed={"judgments": []})
-        judge = LlmJudge(
-            prompts=prompts, model="m", batch_size=0, max_per_collector=0, client=client
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 0, 0),
         )
         assert judge.batch_size == 1
         entries = [{"content_hash": f"h{i}"} for i in range(3)]
@@ -413,12 +419,10 @@ class TestBatching:
     def test_negative_batch_size_still_judges(self, prompts):
         # Negative used to yield zero batches → silently judged nothing.
         client = _FakeClient(parsed={"judgments": []})
-        judge = LlmJudge(
-            prompts=prompts,
-            model="m",
-            batch_size=-5,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", -5, 0),
         )
         assert judge.batch_size == 1
         judge.judge("processes", "", [{"content_hash": "a"}])
@@ -435,7 +439,7 @@ class TestFailureIsolation:
         # First call raises, second returns one judgment. The judge
         # must keep going past the first failure.
         results_per_call = [
-            Exception("boom"),
+            CompletionError("boom"),
             {
                 "judgments": [
                     {
@@ -458,9 +462,15 @@ class TestFailureIsolation:
                 raise r
             return r
 
-        client = type("C", (), {"complete_structured": staticmethod(fake_complete)})()
-        judge = LlmJudge(
-            prompts=prompts, model="m", batch_size=1, max_per_collector=0, client=client
+        client = type(
+            "C",
+            (CompletionClient,),
+            {"complete_structured": staticmethod(fake_complete)},
+        )()
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 1, 0),
         )
         entries = [{"content_hash": "a"}, {"content_hash": "b"}]
         result = judge.judge("processes", "", entries)

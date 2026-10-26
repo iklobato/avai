@@ -88,42 +88,6 @@ _LAUNCH_ITEM_COLLECTOR = "launch_items"
 DEFAULT_NARRATIVE_MODEL = DEFAULT_JUDGE_MODEL
 
 
-RISK_WEIGHTS: Mapping[str, int] = MappingProxyType(
-    {
-        "filevault_off": 15,
-        "firewall_off": 15,
-        "gatekeeper_off": 12,
-        "stealth_off": 3,
-        "ssh_on": 10,
-        "screen_sharing_on": 8,
-        "remote_mgmt_on": 10,
-        "malicious_each": 20,
-        "malicious_cap": 40,
-        "suspicious_each": 8,
-        "suspicious_cap": 24,
-        "nopasswd_each": 10,
-        "nopasswd_cap": 20,
-        "uid0_each": 15,
-        "uid0_cap": 30,
-    }
-)
-
-
-RISK_GRADES = ((90, "A"), (80, "B"), (70, "C"), (60, "D"), (0, "F"))
-
-
-MODEL_PRICING: Mapping[str, tuple[float, float]] = MappingProxyType(
-    {
-        "haiku": (1.0, 5.0),
-        "sonnet": (3.0, 15.0),
-        "opus": (15.0, 75.0),
-    }
-)
-
-
-DEFAULT_PRICING = (1.0, 5.0)
-
-
 DEFAULT_PROMPTS_PATH = _PKG_DIR / "prompts.toml"
 
 

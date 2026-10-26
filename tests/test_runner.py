@@ -936,6 +936,7 @@ def select_desc_incident(model):
 class TestIncidentNarratorNormalization:
     def _narrator(self, payload):
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
+        from avai.host_monitor.llm import LlmSession
         from avai.host_monitor.narrator import IncidentNarrator
         from avai.host_monitor.prompts import Prompts
 
@@ -947,8 +948,9 @@ class TestIncidentNarratorNormalization:
                 self.calls.append(request)
                 return payload
 
-        return IncidentNarrator(
-            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=_FakeClient()
+        return IncidentNarrator.create(
+            Prompts.load(DEFAULT_PROMPTS_PATH),
+            LlmSession(_FakeClient(), logging.getLogger("test")),
         )
 
     def test_bad_severity_falls_back_to_low(self):
@@ -989,6 +991,7 @@ class TestIncidentNarratorNormalization:
         # window and fail the digest every cycle. narrate() caps to
         # MAX_FINDINGS, keeping the most severe/confident.
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
+        from avai.host_monitor.llm import LlmSession
         from avai.host_monitor.narrator import IncidentNarrator
         from avai.host_monitor.prompts import Prompts
 
@@ -1007,8 +1010,9 @@ class TestIncidentNarratorNormalization:
                 }
 
         client = _FakeClient()
-        nar = IncidentNarrator(
-            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=client
+        nar = IncidentNarrator.create(
+            Prompts.load(DEFAULT_PROMPTS_PATH),
+            LlmSession(client, logging.getLogger("test")),
         )
         cap = IncidentNarrator.MAX_FINDINGS
         findings = [
@@ -1067,42 +1071,44 @@ _HARDENED = {
 
 class TestComputeRiskScore:
     def test_hardened_host_scores_100_grade_a(self):
-        from avai.host_monitor.risk import compute_risk_score
+        from avai.host_monitor.risk import RiskCounts, RiskScorer
 
-        r = compute_risk_score(_HARDENED, 0, 0, 0, 0)
+        r = RiskScorer().score(_HARDENED, RiskCounts(0, 0, 0, 0))
         assert r["score"] == 100 and r["grade"] == "A" and r["drivers"] == []
 
     def test_disabled_protections_deduct(self):
-        from avai.host_monitor.risk import compute_risk_score
+        from avai.host_monitor.risk import RiskCounts, RiskScorer
 
         integ = dict(_HARDENED, filevault_active=0, firewall_global_state=0)
-        r = compute_risk_score(integ, 0, 0, 0, 0)
+        r = RiskScorer().score(integ, RiskCounts(0, 0, 0, 0))
         assert r["score"] == 70 and r["grade"] == "C"  # -15 -15
         labels = {d["label"] for d in r["drivers"]}
         assert any("FileVault" in lbl for lbl in labels)
         assert any("Firewall off" in lbl for lbl in labels)
 
     def test_finding_penalties_are_capped(self):
-        from avai.host_monitor.risk import compute_risk_score
+        from avai.host_monitor.risk import RiskCounts, RiskScorer
 
         # 5 malicious → capped at 40; 5 suspicious → capped at 24 → 100-64=36
-        r = compute_risk_score(None, 5, 5, 0, 0)
+        r = RiskScorer().score(None, RiskCounts(5, 5, 0, 0))
         assert r["score"] == 36 and r["grade"] == "F"
 
     def test_none_integrity_fields_cost_nothing(self):
-        from avai.host_monitor.risk import compute_risk_score
+        from avai.host_monitor.risk import RiskCounts, RiskScorer
 
-        r = compute_risk_score(None, 0, 0, 0, 0)
+        r = RiskScorer().score(None, RiskCounts(0, 0, 0, 0))
         assert r["score"] == 100 and r["grade"] == "A"
 
     def test_privilege_penalties(self):
-        from avai.host_monitor.risk import compute_risk_score
+        from avai.host_monitor.risk import RiskCounts, RiskScorer
 
-        r = compute_risk_score(_HARDENED, 0, 0, 1, 1)  # -10 nopasswd -15 uid0
+        r = RiskScorer().score(
+            _HARDENED, RiskCounts(0, 0, 1, 1)
+        )  # -10 nopasswd -15 uid0
         assert r["score"] == 75 and r["grade"] == "C"
 
     def test_every_driver_with_its_points_in_order(self):
-        from avai.host_monitor.risk import compute_risk_score
+        from avai.host_monitor.risk import RiskCounts, RiskScorer
 
         worst = {
             "filevault_active": 0,
@@ -1113,7 +1119,7 @@ class TestComputeRiskScore:
             "screen_sharing_enabled": 1,
             "remote_management_enabled": 1,
         }
-        r = compute_risk_score(worst, 1, 2, 3, 1)
+        r = RiskScorer().score(worst, RiskCounts(1, 2, 3, 1))
         assert r["score"] == 0 and r["grade"] == "F"
         assert [(d["label"], d["points"]) for d in r["drivers"]] == [
             ("1 active malicious finding(s)", 20),
@@ -1221,24 +1227,32 @@ class TestRiskScoreSink:
 
 class TestEstimateCost:
     def test_haiku_tier_pricing(self):
-        from avai.host_monitor.judge import estimate_cost
+        from avai.host_monitor.judge import ModelPricing
 
         # 1M input @ $1, 1M output @ $5
-        assert estimate_cost("claude-haiku-4-5", 1_000_000, 0) == pytest.approx(1.0)
-        assert estimate_cost("claude-haiku-4-5", 0, 1_000_000) == pytest.approx(5.0)
+        assert ModelPricing().estimate(
+            "claude-haiku-4-5", 1_000_000, 0
+        ) == pytest.approx(1.0)
+        assert ModelPricing().estimate(
+            "claude-haiku-4-5", 0, 1_000_000
+        ) == pytest.approx(5.0)
 
     def test_tier_matched_by_substring(self):
-        from avai.host_monitor.judge import estimate_cost
+        from avai.host_monitor.judge import ModelPricing
 
-        assert estimate_cost("claude-opus-4-8", 1_000_000, 0) == pytest.approx(15.0)
-        assert estimate_cost(
+        assert ModelPricing().estimate(
+            "claude-opus-4-8", 1_000_000, 0
+        ) == pytest.approx(15.0)
+        assert ModelPricing().estimate(
             "anthropic/claude-sonnet-4-6", 0, 1_000_000
         ) == pytest.approx(15.0)
 
     def test_unknown_model_uses_default_tier(self):
-        from avai.host_monitor.judge import estimate_cost
+        from avai.host_monitor.judge import ModelPricing
 
-        assert estimate_cost("mystery-model", 1_000_000, 0) == pytest.approx(1.0)
+        assert ModelPricing().estimate("mystery-model", 1_000_000, 0) == pytest.approx(
+            1.0
+        )
 
 
 class TestJudgmentCostPersistence:
@@ -1605,6 +1619,7 @@ class TestYaraCoverageAssessor:
     def _assessor(self, payload):
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
         from avai.host_monitor.coverage import YaraCoverageAssessor
+        from avai.host_monitor.llm import LlmSession
         from avai.host_monitor.prompts import Prompts
 
         class _FakeClient:
@@ -1615,8 +1630,9 @@ class TestYaraCoverageAssessor:
                 self.calls.append(request)
                 return payload
 
-        return YaraCoverageAssessor(
-            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=_FakeClient()
+        return YaraCoverageAssessor.create(
+            Prompts.load(DEFAULT_PROMPTS_PATH),
+            LlmSession(_FakeClient(), logging.getLogger("test")),
         )
 
     _RULESET = {"rules_loaded": 5, "sources": {"bundled": 5}, "by_category": {"gen": 5}}
@@ -1786,6 +1802,7 @@ class TestMaliciousVerdictVerifier:
     def _verifier(self, payload):
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
         from avai.host_monitor.prompts import Prompts
+        from avai.host_monitor.llm import LlmSession
         from avai.host_monitor.verifier import MaliciousVerdictVerifier
 
         class _FakeClient:
@@ -1796,8 +1813,9 @@ class TestMaliciousVerdictVerifier:
                 self.calls.append(request)
                 return payload
 
-        return MaliciousVerdictVerifier(
-            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=_FakeClient()
+        return MaliciousVerdictVerifier.create(
+            Prompts.load(DEFAULT_PROMPTS_PATH),
+            LlmSession(_FakeClient(), logging.getLogger("test")),
         )
 
     def test_refuted_true_parsed(self):
@@ -1918,14 +1936,16 @@ class TestUnknownFindingInvestigator:
     def _inv(self, payload):
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
         from avai.host_monitor.investigator import UnknownFindingInvestigator
+        from avai.host_monitor.llm import LlmSession
         from avai.host_monitor.prompts import Prompts
 
         class _FakeClient:
             def complete_structured(self, request):
                 return payload
 
-        return UnknownFindingInvestigator(
-            prompts=Prompts.load(DEFAULT_PROMPTS_PATH), client=_FakeClient()
+        return UnknownFindingInvestigator.create(
+            Prompts.load(DEFAULT_PROMPTS_PATH),
+            LlmSession(_FakeClient(), logging.getLogger("test")),
         )
 
     def test_parses_and_clamps(self):

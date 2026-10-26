@@ -32,8 +32,8 @@ from .constants import (
 from .coverage import YaraCoverageAssessor
 from .hosts import HostFactory
 from .investigator import UnknownFindingInvestigator
-from .judge import Judge, LlmJudge, NullJudge
-from .llm import CompletionClient, LlmCredentials
+from .judge import Judge, JudgeSettings, LlmJudge, NullJudge
+from .llm import LlmCredentials, LlmSession
 from .models import Base
 from .narrator import IncidentNarrator
 from .prompts import Prompts
@@ -77,29 +77,30 @@ class LlmStages:
             LOG.warning("LLM client unavailable (%s); LLM stages disabled", exc)
             return cls(judge=NullJudge())
         LOG.info("llm client=%s", type(client).__name__)
+        session = LlmSession(client, LOG)
         return cls(
-            judge=cls._judge(args, prompts, client),
+            judge=cls._judge(args, prompts, session),
             # A digest is only meaningful when judging runs.
             narrator=(
-                IncidentNarrator(prompts, client, args.narrative_model)
+                IncidentNarrator.create(prompts, session, args.narrative_model)
                 if not (args.no_narrative or args.no_judge)
                 and _has_prompt(prompts.narrator_system, "narrator")
                 else None
             ),
             coverage=(
-                YaraCoverageAssessor(prompts, client, args.narrative_model)
+                YaraCoverageAssessor.create(prompts, session, args.narrative_model)
                 if not args.no_coverage
                 and _has_prompt(prompts.coverage_system, "coverage")
                 else None
             ),
             verifier=(
-                MaliciousVerdictVerifier(prompts, client, args.judge_model)
+                MaliciousVerdictVerifier.create(prompts, session, args.judge_model)
                 if not args.no_verify
                 and _has_prompt(prompts.verifier_system, "verifier")
                 else None
             ),
             investigator=(
-                UnknownFindingInvestigator(prompts, client, args.judge_model)
+                UnknownFindingInvestigator.create(prompts, session, args.judge_model)
                 if not args.no_investigate
                 and _has_prompt(prompts.investigator_system, "investigator")
                 else None
@@ -107,17 +108,14 @@ class LlmStages:
         )
 
     @staticmethod
-    def _judge(args, prompts: Prompts, client: CompletionClient) -> Judge:
+    def _judge(args, prompts: Prompts, session: LlmSession) -> Judge:
         if args.no_judge:
             LOG.info("judge disabled (--no-judge)")
             return NullJudge()
-        return LlmJudge(
-            prompts,
-            client,
-            args.judge_model,
-            args.judge_batch_size,
-            args.judge_max_per_collector,
+        settings = JudgeSettings(
+            args.judge_model, args.judge_batch_size, args.judge_max_per_collector
         )
+        return LlmJudge.create(prompts, session, settings)
 
 
 def _build_parser() -> argparse.ArgumentParser:
