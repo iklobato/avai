@@ -6,8 +6,26 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
+from typing import Any
 
 from .enums import ThreatCategory, Verdict
+
+
+class PromptSections:
+    """The tables of a prompts TOML file. ``$verdicts`` and ``$categories``
+    in a system prompt are filled with the enum values the schemas accept."""
+
+    def __init__(self, document: dict[str, Any]) -> None:
+        self._document = document
+
+    def table(self, name: str) -> dict[str, str]:
+        return dict(self._document.get(name) or {})
+
+    def rendered(self, name: str) -> str:
+        return Template(self.table(name).get("system", "")).safe_substitute(
+            verdicts=" | ".join(str(verdict) for verdict in Verdict),
+            categories=", ".join(str(category) for category in ThreatCategory),
+        )
 
 
 @dataclass(frozen=True)
@@ -32,37 +50,23 @@ class Prompts:
     investigator_user_template: str = ""
 
     @classmethod
-    def load(cls, path: Path) -> "Prompts":
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-        judge = data.get("judge") or {}
-        raw_system = judge.get("system", "")
-        system = Template(raw_system).safe_substitute(
-            verdicts=" | ".join(str(v) for v in Verdict),
-            categories=", ".join(str(c) for c in ThreatCategory),
-        )
-        narrator = data.get("narrator") or {}
-        narrator_system = Template(narrator.get("system", "")).safe_substitute(
-            categories=", ".join(str(c) for c in ThreatCategory),
-        )
-        coverage = data.get("yara_coverage") or {}
-        verifier = data.get("verifier") or {}
-        investigator = data.get("investigator") or {}
-        investigator_system = Template(investigator.get("system", "")).safe_substitute(
-            verdicts=" | ".join(str(v) for v in Verdict),
-            categories=", ".join(str(c) for c in ThreatCategory),
-        )
+    def load(cls, path: Path) -> Prompts:
+        with open(path, "rb") as stream:
+            sections = PromptSections(tomllib.load(stream))
+        judge, narrator = sections.table("judge"), sections.table("narrator")
+        coverage, verifier = sections.table("yara_coverage"), sections.table("verifier")
+        investigator = sections.table("investigator")
         return cls(
-            system=system,
+            system=sections.rendered("judge"),
             user_template=judge.get("user_template", ""),
-            collector_hints=dict(data.get("collector_hints") or {}),
-            narrator_system=narrator_system,
+            collector_hints=sections.table("collector_hints"),
+            narrator_system=sections.rendered("narrator"),
             narrator_user_template=narrator.get("user_template", ""),
             coverage_system=coverage.get("system", ""),
             coverage_user_template=coverage.get("user_template", ""),
             verifier_system=verifier.get("system", ""),
             verifier_user_template=verifier.get("user_template", ""),
-            investigator_system=investigator_system,
+            investigator_system=sections.rendered("investigator"),
             investigator_user_template=investigator.get("user_template", ""),
         )
 
