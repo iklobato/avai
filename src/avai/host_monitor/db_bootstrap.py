@@ -171,7 +171,7 @@ class SchemaBootstrap:
         # serving; a failure (e.g. a read-only DB owned by another user) is
         # loud rather than a stale schema that 500s later.
         try:
-            db_migrate.upgrade_to_head(str(self._engine.url))
+            db_migrate.AlembicMigrator(str(self._engine.url)).upgrade_to_head()
         except self.MIGRATION_FAILURES as exc:
             raise SchemaMigrationError(
                 f"database migration to head failed for {self._engine.url}: {exc}. "

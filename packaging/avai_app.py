@@ -3,7 +3,7 @@ in-process desktop app (dashboard + monitor in threads, native window)."""
 
 import sys
 
-from avai.desktop import main
+from avai.desktop import DesktopApp
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(DesktopApp.main())

@@ -16,94 +16,153 @@ import os
 import socket
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import TextIO
 
-from avai.host_monitor.constants import DEFAULT_DB_PATH
+import waitress
+from flask import Flask
 
-CONFIG_PATH = Path(DEFAULT_DB_PATH).expanduser().parent / "config.json"
+from avai.dashboard import DashboardApp, DashboardConfig, DashboardSchema
+from avai.host_monitor.constants import DEFAULT_DB_PATH, LOGGER_NAME
+from avai.host_monitor.main import MonitorArgs, MonitorWiring
+from avai.host_monitor.runner import Runner
 
-
-def _free_port() -> int:
-    # ponytail: bind-then-reuse has a tiny TOCTOU race, fine for a single-user
-    # localhost app. Use a fixed port + a settings screen if that ever matters.
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _load_api_key(path: Path = CONFIG_PATH) -> str | None:
-    """Read the LLM key the settings screen wrote, or None (viz-only)."""
-    try:
-        return json.loads(path.read_text()).get("api_key") or None
-    except (OSError, ValueError):
-        return None
+LOOPBACK_HOST = "127.0.0.1"
+ANY_FREE_PORT = 0
+GUI_MISSING = "avai app needs the GUI extra: pip install 'avai-monitor[app]'"
 
 
-def _start_dashboard(db: str, port: int) -> threading.Thread:
-    """Serve the existing Flask dashboard on a daemon thread. Read-only, so no
-    explicit stop is needed: it dies with the process."""
-    import waitress
-
-    from avai.dashboard import DashboardApp, DashboardConfig, DashboardSchema
-
-    # The window is a single-user loopback webview the user owns, so control
-    # needs no token (the token is only a CSRF defence for a network dashboard).
-    # App mode -> antivirus-style protection home at the top of the dashboard.
-    # Defaults only: a value the user exported still wins.
-    environ = {"AVAI_CONTROL_OPEN": "1", "AVAI_APP_MODE": "1", **os.environ}
-    DashboardSchema().ensure(db)
-    app = DashboardApp(DashboardConfig.from_env(db, environ)).build()
-    thread = threading.Thread(
-        target=lambda: waitress.serve(app, host="127.0.0.1", port=port),
-        daemon=True,
-        name="avai-dashboard",
-    )
-    thread.start()
-    return thread
+class LoopbackPort:
+    def free(self) -> int:
+        # ponytail: bind-then-reuse has a tiny TOCTOU race, fine for a
+        # single-user localhost app. Use a fixed port + a settings screen if
+        # that ever matters.
+        with socket.socket() as probe:
+            probe.bind((LOOPBACK_HOST, ANY_FREE_PORT))
+            return probe.getsockname()[1]
 
 
-def _start_monitor(db: str, api_key: str | None):
-    """Build the monitor in-process and run its loop on a daemon thread.
-    Returns the Runner so the caller can ``request_shutdown()`` on window close
-    (which also terminates the monitor's journalctl -f / eslogger children)."""
-    from avai.host_monitor.constants import LOGGER_NAME
-    from avai.host_monitor.main import MonitorArgs, MonitorWiring
+class DesktopSettings:
+    """The JSON file the settings screen writes next to the DB."""
 
-    if api_key:
-        os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
-    # No key yet -> viz-only (NullJudge); the settings screen enables the judge.
-    argv = ["--db", db] if api_key else ["--db", db, "--no-judge"]
-    args = MonitorArgs().parser().parse_args(argv)
-    runner, engine = MonitorWiring(args, logging.getLogger(LOGGER_NAME)).build()
+    FILE_NAME = "config.json"
 
-    def _run() -> None:
-        runner.start_streaming()
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    @classmethod
+    def default(cls) -> DesktopSettings:
+        return cls(Path(DEFAULT_DB_PATH).expanduser().parent / cls.FILE_NAME)
+
+    def api_key(self) -> str | None:
+        """The LLM key the settings screen wrote, or None (viz-only)."""
         try:
-            runner.run_forever(args.interval)
-        finally:
-            runner.stop_streaming()
-            engine.dispose()
-
-    threading.Thread(target=_run, daemon=True, name="avai-monitor").start()
-    return runner
+            return json.loads(self._path.read_text()).get("api_key") or None
+        except (OSError, ValueError):
+            return None
 
 
-def main() -> int:
-    try:
-        import webview
-    except ImportError:
-        print(
-            "avai app needs the GUI extra: pip install 'avai-monitor[app]'",
-            file=sys.stderr,
+class EmbeddedDashboard:
+    """Serves the existing Flask dashboard on a daemon thread. Read-only, so
+    no explicit stop is needed: it dies with the process."""
+
+    def __init__(self, db: str) -> None:
+        self._db = db
+
+    def start(self, port: int) -> threading.Thread:
+        thread = threading.Thread(
+            target=waitress.serve,
+            args=(self._app(),),
+            kwargs={"host": LOOPBACK_HOST, "port": port},
+            daemon=True,
+            name="avai-dashboard",
         )
-        return 1
+        thread.start()
+        return thread
 
-    db = str(Path(DEFAULT_DB_PATH).expanduser())
-    port = _free_port()
-    _start_dashboard(db, port)
-    runner = _start_monitor(db, _load_api_key())
+    def _app(self) -> Flask:
+        # The window is a single-user loopback webview the user owns, so
+        # control needs no token (the token is only a CSRF defence for a
+        # network dashboard). App mode -> antivirus-style protection home at
+        # the top of the dashboard. Defaults only: a value the user exported
+        # still wins.
+        environ = {"AVAI_CONTROL_OPEN": "1", "AVAI_APP_MODE": "1", **os.environ}
+        DashboardSchema().ensure(self._db)
+        return DashboardApp(DashboardConfig.from_env(self._db, environ)).build()
 
-    webview.create_window("avai", f"http://127.0.0.1:{port}", width=1280, height=860)
-    webview.start()  # blocks on the main thread until the window is closed
-    runner.request_shutdown()
-    return 0
+
+class EmbeddedMonitor:
+    """Builds the monitor in-process and runs its loop on a daemon thread.
+    ``start`` returns the Runner so the caller can ``request_shutdown()`` on
+    window close (which also terminates the monitor's journalctl -f /
+    eslogger children)."""
+
+    def __init__(self, db: str) -> None:
+        self._db = db
+
+    def start(self, api_key: str | None) -> Runner:
+        if api_key:
+            os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+        # No key yet -> viz-only (NullJudge); the settings screen enables the
+        # judge.
+        argv = ["--db", self._db] if api_key else ["--db", self._db, "--no-judge"]
+        args = MonitorArgs().parser().parse_args(argv)
+        runner, engine = MonitorWiring(args, logging.getLogger(LOGGER_NAME)).build()
+        loop = MonitorLoop(runner, engine.dispose)
+        threading.Thread(
+            target=loop.serve_until_shutdown,
+            args=(args.interval,),
+            daemon=True,
+            name="avai-monitor",
+        ).start()
+        return runner
+
+
+class MonitorLoop:
+    def __init__(self, runner: Runner, release: Callable[[], None]) -> None:
+        self._runner = runner
+        self._release = release
+
+    def serve_until_shutdown(self, interval: int) -> None:
+        self._runner.start_streaming()
+        try:
+            self._runner.run_forever(interval)
+        finally:
+            self._runner.stop_streaming()
+            self._release()
+
+
+class DesktopApp:
+    """The dashboard and the monitor behind one native window."""
+
+    WINDOW_TITLE = "avai"
+    WINDOW_WIDTH = 1280
+    WINDOW_HEIGHT = 860
+
+    def __init__(self, db: str, err: TextIO) -> None:
+        self._db = db
+        self._err = err
+
+    @classmethod
+    def main(cls) -> int:
+        return cls(str(Path(DEFAULT_DB_PATH).expanduser()), sys.stderr).launch()
+
+    def launch(self) -> int:
+        try:
+            import webview
+        except ImportError:
+            self._err.write(GUI_MISSING + "\n")
+            return 1
+        port = LoopbackPort().free()
+        EmbeddedDashboard(self._db).start(port)
+        runner = EmbeddedMonitor(self._db).start(DesktopSettings.default().api_key())
+        webview.create_window(
+            self.WINDOW_TITLE,
+            f"http://{LOOPBACK_HOST}:{port}",
+            width=self.WINDOW_WIDTH,
+            height=self.WINDOW_HEIGHT,
+        )
+        webview.start()  # blocks on the main thread until the window is closed
+        runner.request_shutdown()
+        return 0

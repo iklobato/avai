@@ -71,7 +71,7 @@ dependencies = [
     "litellm>=1.0",
     "anthropic>=0.30",
     # Optional error/exception reporting. Inert unless SENTRY_DSN is set in the
-    # environment (see avai.observability.init_sentry), so installs that never
+    # environment (see avai.observability.SentryReporting), so installs that never
     # set it pay no runtime cost and send nothing.
     "sentry-sdk>=2.63.0",
 ]
@@ -89,7 +89,7 @@ dev = [
 ]
 
 [project.scripts]
-avai = "avai.cli:main"
+avai = "avai.cli:AvaiCli.main"
 
 [project.urls]
 Homepage = "https://github.com/iklobato/avai"

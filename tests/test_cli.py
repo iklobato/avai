@@ -14,13 +14,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from avai import __version__
-from avai.cli import main
+from avai.cli import AvaiCli
 
 
 class TestVersionFlag:
     @pytest.mark.parametrize("flag", ["-v", "--version"])
     def test_prints_version_and_exits_zero(self, flag, capsys):
-        rc = main([flag])
+        rc = AvaiCli.main([flag])
         out = capsys.readouterr().out.strip()
         assert rc == 0
         assert out == __version__
@@ -29,7 +29,7 @@ class TestVersionFlag:
 class TestHelpFlag:
     @pytest.mark.parametrize("argv", [[], ["-h"], ["--help"], ["help"]])
     def test_no_args_or_help_shows_usage(self, argv, capsys):
-        rc = main(argv)
+        rc = AvaiCli.main(argv)
         out = capsys.readouterr().out
         assert rc == 0
         assert "avai monitor" in out
@@ -40,14 +40,14 @@ class TestDispatch:
     @pytest.mark.parametrize("alias", ["monitor", "start", "scan"])
     def test_monitor_aliases_route_to_host_monitor(self, alias):
         with patch("avai.host_monitor.main.MonitorApp.main", return_value=0) as m:
-            rc = main([alias, "--once"])
+            rc = AvaiCli.main([alias, "--once"])
         assert rc == 0
         m.assert_called_once_with()
 
     @pytest.mark.parametrize("alias", ["dashboard", "ui", "serve"])
     def test_dashboard_aliases_route_to_dashboard(self, alias):
         with patch("avai.dashboard.serve.DashboardCli.main", return_value=0) as d:
-            rc = main([alias, "--port", "9000"])
+            rc = AvaiCli.main([alias, "--port", "9000"])
         assert rc == 0
         d.assert_called_once_with()
 
@@ -70,7 +70,7 @@ class TestDispatch:
             return 0
 
         with patch(f"{target}.main", side_effect=fake_main):
-            main([cmd, "--once", "--db", "/tmp/x"])
+            AvaiCli.main([cmd, "--once", "--db", "/tmp/x"])
 
         assert captured[0] == f"avai {cmd}"
         assert captured[1:] == ["--once", "--db", "/tmp/x"]
@@ -79,8 +79,8 @@ class TestDispatch:
 class TestAppCommand:
     @pytest.mark.parametrize("alias", ["app", "gui", "desktop"])
     def test_app_aliases_route_to_desktop(self, alias):
-        with patch("avai.desktop.main", return_value=0) as d:
-            rc = main([alias])
+        with patch("avai.desktop.DesktopApp.main", return_value=0) as d:
+            rc = AvaiCli.main([alias])
         assert rc == 0
         d.assert_called_once_with()
 
@@ -96,10 +96,10 @@ class TestInstallHostsCommand:
 
     def _run(self, argv, registrar):
         with patch(
-            "avai.hostsfile.HostsRegistrar.for_current_platform",
+            "avai.cli.HostsRegistrar.for_current_platform",
             return_value=registrar,
         ):
-            return main(["install-hosts", *argv])
+            return AvaiCli.main(["install-hosts", *argv])
 
     def test_install_maps_the_default_hostname(self, capsys):
         registrar = self._registrar("CREATED")
@@ -138,20 +138,21 @@ class TestInstallHostsCommand:
         from avai.hostsfile import HostsError
 
         with patch(
-            "avai.hostsfile.HostsRegistrar.for_current_platform",
+            "avai.cli.HostsRegistrar.for_current_platform",
             side_effect=HostsError("no hosts file here"),
         ):
-            rc = main(["install-hosts"])
+            rc = AvaiCli.main(["install-hosts"])
         assert rc == 1
         assert capsys.readouterr().err.strip() == "avai: no hosts file here"
 
 
 class TestMigrateCommand:
     def test_migrate_upgrades_the_given_db(self, capsys):
-        with patch("avai.db_migrate.upgrade_to_head") as up:
-            rc = main(["migrate", "--db", "/tmp/x.db"])
+        with patch("avai.db_migrate.AlembicMigrator") as migrator:
+            rc = AvaiCli.main(["migrate", "--db", "/tmp/x.db"])
         assert rc == 0
-        up.assert_called_once_with("sqlite:////tmp/x.db")
+        migrator.assert_called_once_with("sqlite:////tmp/x.db")
+        migrator.return_value.upgrade_to_head.assert_called_once_with()
         assert "migrations applied to /tmp/x.db" in capsys.readouterr().out
 
 
@@ -165,13 +166,15 @@ class TestRulesCommand:
         return d
 
     def test_rules_reports_count(self, tmp_path, capsys):
-        rc = main(["rules", "--rules-dir", str(self._rules_dir(tmp_path))])
+        rc = AvaiCli.main(["rules", "--rules-dir", str(self._rules_dir(tmp_path))])
         out = capsys.readouterr().out
         assert rc == 0
         assert "1 YARA rule(s) loaded" in out
 
     def test_rules_list_prints_identifiers(self, tmp_path, capsys):
-        rc = main(["rules", "--rules-dir", str(self._rules_dir(tmp_path)), "--list"])
+        rc = AvaiCli.main(
+            ["rules", "--rules-dir", str(self._rules_dir(tmp_path)), "--list"]
+        )
         out = capsys.readouterr().out
         assert rc == 0
         assert "demo_rule" in out
@@ -180,14 +183,14 @@ class TestRulesCommand:
     def test_rules_empty_dir_returns_1(self, tmp_path, capsys):
         empty = tmp_path / "empty"
         empty.mkdir()
-        rc = main(["rules", "--rules-dir", str(empty)])
+        rc = AvaiCli.main(["rules", "--rules-dir", str(empty)])
         assert rc == 1
         assert "no compilable YARA rules" in capsys.readouterr().err
 
 
 class TestUnknownCommand:
     def test_unknown_returns_exit_2_and_writes_to_stderr(self, capsys):
-        rc = main(["bogus-command"])
+        rc = AvaiCli.main(["bogus-command"])
         err = capsys.readouterr().err
         assert rc == 2
         assert "unknown command" in err

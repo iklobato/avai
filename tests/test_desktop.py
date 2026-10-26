@@ -38,13 +38,12 @@ def test_dashboard_opens_control_and_app_mode_without_touching_env(
 ):
     from unittest.mock import patch
 
-    import waitress
 
     monkeypatch.delenv("AVAI_CONTROL_OPEN", raising=False)
     monkeypatch.delenv("AVAI_APP_MODE", raising=False)
-    monkeypatch.setattr(waitress, "serve", lambda *a, **k: None)
-    with patch("avai.dashboard.DashboardApp") as dashboard_app:
-        desktop._start_dashboard(str(tmp_path / "avai.db"), 0).join(timeout=5)
+    monkeypatch.setattr("avai.desktop.waitress.serve", lambda *a, **k: None)
+    with patch("avai.desktop.DashboardApp") as dashboard_app:
+        desktop.EmbeddedDashboard(str(tmp_path / "avai.db")).start(0).join(timeout=5)
     config = dashboard_app.call_args.args[0]
     assert config.control_open and config.app_mode
     # .get, not `in os.environ`: a failure must not print the whole env.
@@ -54,8 +53,8 @@ def test_dashboard_opens_control_and_app_mode_without_touching_env(
 
 def test_dashboard_serves_in_process(tmp_path):
     db = str(tmp_path / "avai.db")
-    port = desktop._free_port()
-    desktop._start_dashboard(db, port)
+    port = desktop.LoopbackPort().free()
+    desktop.EmbeddedDashboard(db).start(port)
     for _ in range(50):  # wait for waitress to bind
         try:
             resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1)

@@ -13,7 +13,11 @@ from unittest.mock import patch
 import pytest
 
 from avai import __version__
-from avai.observability import _DEFAULT_DSN, init_sentry
+import os
+
+from avai.observability import SentryReporting
+
+_DEFAULT_DSN = SentryReporting.DEFAULT_DSN
 
 
 def _clear_env(monkeypatch):
@@ -25,7 +29,7 @@ class TestInitSentry:
     def test_default_initializes_with_bundled_dsn(self, monkeypatch):
         _clear_env(monkeypatch)
         with patch("sentry_sdk.init") as init:
-            assert init_sentry() is True
+            assert SentryReporting(os.environ).init() is True
         init.assert_called_once()
         kwargs = init.call_args.kwargs
         assert kwargs["dsn"] == _DEFAULT_DSN
@@ -35,7 +39,7 @@ class TestInitSentry:
     def test_warning_level_promoted_to_issues(self, monkeypatch):
         _clear_env(monkeypatch)
         with patch("sentry_sdk.init") as init:
-            init_sentry()
+            SentryReporting(os.environ).init()
         from sentry_sdk.integrations.logging import LoggingIntegration
 
         integrations = init.call_args.kwargs["integrations"]
@@ -49,7 +53,7 @@ class TestInitSentry:
         _clear_env(monkeypatch)
         monkeypatch.setenv("SENTRY_DSN", "https://custom@o0.ingest.us.sentry.io/9")
         with patch("sentry_sdk.init") as init:
-            assert init_sentry() is True
+            assert SentryReporting(os.environ).init() is True
         assert init.call_args.kwargs["dsn"] == "https://custom@o0.ingest.us.sentry.io/9"
 
     @pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
@@ -57,19 +61,19 @@ class TestInitSentry:
         _clear_env(monkeypatch)
         monkeypatch.setenv("AVAI_TELEMETRY", value)
         with patch("sentry_sdk.init") as init:
-            assert init_sentry() is False
+            assert SentryReporting(os.environ).init() is False
         init.assert_not_called()
 
     def test_empty_sentry_dsn_opts_out(self, monkeypatch):
         _clear_env(monkeypatch)
         monkeypatch.setenv("SENTRY_DSN", "")
         with patch("sentry_sdk.init") as init:
-            assert init_sentry() is False
+            assert SentryReporting(os.environ).init() is False
         init.assert_not_called()
 
     def test_telemetry_on_keeps_reporting(self, monkeypatch):
         _clear_env(monkeypatch)
         monkeypatch.setenv("AVAI_TELEMETRY", "1")
         with patch("sentry_sdk.init") as init:
-            assert init_sentry() is True
+            assert SentryReporting(os.environ).init() is True
         init.assert_called_once()

@@ -25,8 +25,8 @@ from avai.hostsfile import (
     HostsTable,
     Outcome,
     UnsupportedPlatformError,
+    PlatformResolver,
     _WindowsPlatform,
-    resolve_platform,
 )
 
 
@@ -105,8 +105,8 @@ def _BLOCK_marker_absent(text: str) -> bool:
 
 class TestPlatformFactory:
     def test_macos_and_linux_use_etc_hosts(self):
-        assert resolve_platform("Darwin").hosts_path() == Path("/etc/hosts")
-        assert resolve_platform("Linux").hosts_path() == Path("/etc/hosts")
+        assert PlatformResolver().resolve("Darwin").hosts_path() == Path("/etc/hosts")
+        assert PlatformResolver().resolve("Linux").hosts_path() == Path("/etc/hosts")
 
     def test_windows_uses_drivers_etc_under_system_root(self, monkeypatch):
         monkeypatch.setenv("SystemRoot", r"C:\Windows")
@@ -116,7 +116,7 @@ class TestPlatformFactory:
 
     def test_unsupported_platform_fails_loudly(self):
         with pytest.raises(UnsupportedPlatformError):
-            resolve_platform("Plan9")
+            PlatformResolver().resolve("Plan9")
 
 
 class TestRegistrar:
@@ -172,7 +172,7 @@ class TestRegistrar:
         def _denied(*_a, **_k):
             raise PermissionError("not the owner")
 
-        monkeypatch.setattr("avai.hostsfile._atomic_write", _denied)
+        monkeypatch.setattr("avai.hostsfile.AtomicFile.write", _denied)
         with pytest.raises(HostsPermissionError) as excinfo:
             registrar.install()
         assert excinfo.value.hint == "use sudo"
@@ -200,7 +200,7 @@ class TestRegistrar:
         def _denied(*_a, **_k):
             raise PermissionError("not the owner")
 
-        monkeypatch.setattr("avai.hostsfile._atomic_write", _denied)
+        monkeypatch.setattr("avai.hostsfile.AtomicFile.write", _denied)
         assert registrar.ensure_reachable() is Outcome.NEEDS_PRIVILEGE
 
 
@@ -216,10 +216,10 @@ class TestCli:
             classmethod(lambda c: hostsfile.HostsRegistrar(FakePlatform(hosts))),
         )
 
-        assert cli.main(["install-hosts"]) == 0
+        assert cli.AvaiCli.main(["install-hosts"]) == 0
         assert "avai.local" in hosts.read_text()
 
-        assert cli.main(["install-hosts", "--remove"]) == 0
+        assert cli.AvaiCli.main(["install-hosts", "--remove"]) == 0
         assert "avai.local" not in hosts.read_text()
 
     def test_install_hosts_command_reports_permission_failure(
@@ -238,16 +238,16 @@ class TestCli:
         def _denied(*_a, **_k):
             raise PermissionError("nope")
 
-        monkeypatch.setattr("avai.hostsfile._atomic_write", _denied)
-        assert cli.main(["install-hosts"]) == 1  # non-zero, no traceback
+        monkeypatch.setattr("avai.hostsfile.AtomicFile.write", _denied)
+        assert cli.AvaiCli.main(["install-hosts"]) == 1  # non-zero, no traceback
 
 
 def test_atomic_write_replaces_content(tmp_path):
-    from avai.hostsfile import _atomic_write
+    from avai.hostsfile import AtomicFile
 
     target = tmp_path / "hosts"
     target.write_text("old\n")
-    _atomic_write(target, "new\n")
+    AtomicFile(target).write("new\n")
     assert target.read_text() == "new\n"
     # no temp files left behind
     assert [p.name for p in tmp_path.iterdir()] == ["hosts"]
@@ -267,6 +267,6 @@ def test_atomic_write_wraps_os_error_and_cleans_up(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "replace", _boom)
     with pytest.raises(hostsfile.HostsError):
-        hostsfile._atomic_write(target, "new\n")
+        hostsfile.AtomicFile(target).write("new\n")
     assert [p.name for p in tmp_path.iterdir()] == ["hosts"]  # temp cleaned up
     assert target.read_text() == "old\n"  # original untouched
