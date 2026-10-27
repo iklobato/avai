@@ -2062,11 +2062,11 @@ class TestLogAggregates:
         return db
 
     def test_group_by_unit_ranks_errors_then_occurrences(self, tmp_path):
-        from avai.dashboard.queries import LogAggregateQuery, LogsPanel
+        from avai.dashboard.queries import LogAggregateQuery, LogDimension, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = LogsPanel(s, "r1").aggregates(LogAggregateQuery(group_by="unit"))
+            res = LogsPanel(s, "r1").aggregates(LogAggregateQuery(group_by=LogDimension.UNIT))
         keys = [(g["key"], g["count"], g["errors"]) for g in res["groups"]]
         # cron (2 err) first, then kernel (1 err), then ssh (0 err) last
         assert keys == [
@@ -2077,11 +2077,11 @@ class TestLogAggregates:
         assert res["summary"] == {"groups": 3, "errors": 3, "warnings": 1, "lines": 10}
 
     def test_group_by_message_collapses_variable_ids(self, tmp_path):
-        from avai.dashboard.queries import LogAggregateQuery, LogsPanel
+        from avai.dashboard.queries import LogAggregateQuery, LogDimension, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = LogsPanel(s, "r1").aggregates(LogAggregateQuery(group_by="message"))
+            res = LogsPanel(s, "r1").aggregates(LogAggregateQuery(group_by=LogDimension.MESSAGE))
         # The 3 ssh logins (varying IP) collapse to one templated group.
         ssh = [g for g in res["groups"] if "Accepted password" in g["key"]]
         assert len(ssh) == 1
@@ -2089,11 +2089,11 @@ class TestLogAggregates:
         assert "#.#.#.#" in ssh[0]["key"]  # ip + port digits normalised
 
     def test_invalid_group_by_falls_back_to_unit(self, tmp_path):
-        from avai.dashboard.queries import LogAggregateQuery, LogsPanel
+        from avai.dashboard.queries import LogAggregateQuery, LogDimension, LogsPanel
 
         db = self._run(tmp_path)
         with Session(_engine_rw(str(db))) as s:
-            res = LogsPanel(s, "r1").aggregates(LogAggregateQuery(group_by="bogus"))
+            res = LogsPanel(s, "r1").aggregates(LogAggregateQuery(group_by=LogDimension.parse("bogus")))
         assert res["group_by"] == "unit"
 
     def test_source_filter_then_aggregate(self, tmp_path):

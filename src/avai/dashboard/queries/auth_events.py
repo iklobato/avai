@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from enum import StrEnum
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -65,15 +66,26 @@ class SubsystemNames:
         return tabs
 
 
+class AuthSort(StrEnum):
+    COUNT = "count"
+    VERDICT = "verdict"
+
+    @classmethod
+    def parse(cls, text: str) -> AuthSort:
+        """Anything but "verdict" sorts by count, as it already did."""
+        return cls.VERDICT if text == cls.VERDICT else cls.COUNT
+
+
 @dataclass(frozen=True)
 class AuthQuery:
     filters: RowFilter = field(default_factory=RowFilter)
     subsystem: str = ""
-    sort: str = "count"
+    sort: AuthSort = AuthSort.COUNT
     page: Page = field(default_factory=Page)
 
     def echoed(self) -> dict[str, Any]:
-        return {**self.filters.fields(), "subsystem": self.subsystem, "sort": self.sort}
+        fields = self.filters.fields()
+        return {**fields, "subsystem": self.subsystem, "sort": self.sort.value}
 
 
 class AuthEventsPanel:
@@ -233,8 +245,8 @@ class AuthEventsPanel:
             return patterns.where(Judgement.verdict == verdict)
         return patterns
 
-    def _order(self, sort: str, count_column: Any) -> tuple[Any, ...]:
-        if sort != "verdict":
+    def _order(self, sort: AuthSort, count_column: Any) -> tuple[Any, ...]:
+        if sort is not AuthSort.VERDICT:
             return (count_column.desc(),)
         ranks = Verdict.ranks()
         severity = case(ranks, value=Judgement.verdict, else_=len(ranks))

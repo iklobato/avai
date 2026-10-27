@@ -1,7 +1,7 @@
 """Read-only DB query layer, one module per dashboard panel. Every panel class
 takes a Session; none touches Flask."""
 
-from .auth_events import AUTH_SUBSYSTEM_OPTIONS, AuthEventsPanel, AuthQuery
+from .auth_events import AUTH_SUBSYSTEM_OPTIONS, AuthEventsPanel, AuthQuery, AuthSort
 from .collection import ReportQueries, RowCounts, RunMark, RunQueries, VerdictQueries
 from .dns import DnsLevel, DnsPanel, DnsQuery
 from .exposure import NetworkPanels
@@ -9,11 +9,13 @@ from .findings import (
     FindingFilter,
     FindingOptions,
     FindingsPanel,
+    FindingSortKey,
     FindingsQuery,
     FindingStatus,
+    SortOrder,
 )
 from .flows import FlowQuery, FlowsPanel
-from .logs import LogAggregateQuery, LogFilter, LogQuery, LogsPanel
+from .logs import LogAggregateQuery, LogDimension, LogFilter, LogQuery, LogsPanel
 from .panel_reads import (
     DEFAULT_PER_PAGE,
     DISPLAY_FIELDS,
@@ -35,6 +37,7 @@ __all__ = [
     "PER_PAGE_OPTIONS",
     "AuthEventsPanel",
     "AuthQuery",
+    "AuthSort",
     "BindScope",
     "CollectorTables",
     "DiskOrder",
@@ -44,12 +47,14 @@ __all__ = [
     "FindingFilter",
     "FindingOptions",
     "FindingsPanel",
+    "FindingSortKey",
     "FindingsQuery",
     "FindingStatus",
     "FlowQuery",
     "FlowsPanel",
     "IntegrityPosture",
     "LogAggregateQuery",
+    "LogDimension",
     "LogFilter",
     "LogQuery",
     "LogsPanel",
@@ -66,6 +71,7 @@ __all__ = [
     "RowFilter",
     "RunMark",
     "RunQueries",
+    "SortOrder",
     "StoredJson",
     "VerdictQueries",
     "VulnQuery",

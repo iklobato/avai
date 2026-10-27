@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from enum import StrEnum
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,8 +17,6 @@ from avai.host_monitor.enums import LogLevel
 from .panel_reads import Page, SchemaProbe
 
 # Syslog severities, most severe first: the order the level filter offers.
-
-GROUP_DIMENSIONS = ("unit", "source", "message")
 
 
 @dataclass(frozen=True)
@@ -123,14 +122,24 @@ class LogQuery:
     page: Page = field(default_factory=Page)
 
 
+class LogDimension(StrEnum):
+    """What the log summary groups lines by."""
+
+    UNIT = "unit"
+    SOURCE = "source"
+    MESSAGE = "message"
+
+    @classmethod
+    def parse(cls, text: str) -> LogDimension:
+        """Anything unknown groups by unit, as it already did."""
+        return cls(text) if text in tuple(cls) else cls.UNIT
+
+
 @dataclass(frozen=True)
 class LogAggregateQuery:
     filters: LogFilter = field(default_factory=LogFilter)
-    group_by: str = "unit"
+    group_by: LogDimension = LogDimension.UNIT
     page: Page = field(default_factory=Page)
-
-    def dimension(self) -> str:
-        return self.group_by if self.group_by in GROUP_DIMENSIONS else "unit"
 
 
 class LogsPanel:
@@ -165,13 +174,13 @@ class LogsPanel:
         paginated."""
         rows = self._lines()
         sources = sorted({row.source for row in rows if row.source})
-        groups = self._groups(query.filters.keep(rows), query.dimension())
+        groups = self._groups(query.filters.keep(rows), query.group_by.value)
         page_rows, paging = query.page.slice(sorted(groups, key=self._rank))
         return {
             "groups": page_rows,
             **paging,
-            "group_by": query.dimension(),
-            "group_options": list(GROUP_DIMENSIONS),
+            "group_by": query.group_by.value,
+            "group_options": [dimension.value for dimension in LogDimension],
             **query.filters.fields(),
             "sources": sources,
             "summary": self._group_summary(groups),

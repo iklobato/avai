@@ -11,6 +11,10 @@ from avai.host_monitor.enums import Verdict
 
 from ..control import ControlReader, MonitorLiveness
 from ..queries import (
+    SortOrder,
+    LogDimension,
+    FindingSortKey,
+    AuthSort,
     DEFAULT_PER_PAGE,
     PER_PAGE_OPTIONS,
     AuthEventsPanel,
@@ -374,7 +378,8 @@ class LogSummaryFragment(LatestRunFragment):
     def build(self, session: Session, run_id: str) -> Any:
         args = RequestArgs()
         filters = LogFilter(source=args.text("source"), search=args.text("q"))
-        query = LogAggregateQuery(filters, args.text("group_by", "unit"), args.page())
+        dimension = LogDimension.parse(args.text("group_by", LogDimension.UNIT))
+        query = LogAggregateQuery(filters, dimension, args.page())
         return LogsPanel(session, run_id).aggregates(query)
 
 
@@ -443,7 +448,7 @@ class AuthEventsFragment(ServiceView):
         query = AuthQuery(
             args.row_filter(),
             args.text("subsystem"),
-            args.text("sort", "count"),
+            AuthSort.parse(args.text("sort", AuthSort.COUNT)),
             args.page(),
         )
         with self._services.read_session() as session:
@@ -464,8 +469,8 @@ class FindingsFragment(ServiceView):
         values = [args.text(name) for name in self.FILTER_ARGS]
         query = FindingsQuery(
             FindingFilter(*values, status),
-            args.text("sort", "severity"),
-            args.text("order", "desc"),
+            FindingSortKey.parse(args.text("sort", FindingSortKey.SEVERITY)),
+            SortOrder.parse(args.text("order", SortOrder.DESC)),
             args.page(),
         )
         with self._services.read_session() as session:
@@ -495,8 +500,8 @@ class FindingsFragment(ServiceView):
             "category_filter": filters.category,
             "status_filter": filters.status.value,
             "q": filters.search,
-            "sort": query.sort,
-            "order": query.order,
+            "sort": query.sort.value,
+            "order": query.order.value,
         }
 
 

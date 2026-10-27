@@ -108,40 +108,68 @@ class FindingFilter:
         return statement if condition is None else statement.where(condition)
 
 
+class FindingSortKey(StrEnum):
+    """The columns the findings table sorts by."""
+
+    SEVERITY = "severity"
+    VERDICT = "verdict"
+    COLLECTOR = "collector"
+    CATEGORY = "category"
+    CONFIDENCE = "confidence"
+    JUDGED = "judged"
+
+    @classmethod
+    def parse(cls, text: str) -> FindingSortKey:
+        """Anything unknown sorts by severity, as it already did."""
+        return cls(text) if text in tuple(cls) else cls.SEVERITY
+
+
+class SortOrder(StrEnum):
+    ASC = "asc"
+    DESC = "desc"
+
+    @classmethod
+    def parse(cls, text: str) -> SortOrder:
+        """Only an explicit "asc" sorts ascending."""
+        return cls.ASC if text == cls.ASC else cls.DESC
+
+
 class FindingSort:
     """The orders the findings table can be sorted by."""
 
-    def ordered(self, statement: Select[Any], sort: str, order: str) -> Select[Any]:
+    def ordered(
+        self, statement: Select[Any], sort: FindingSortKey, order: SortOrder
+    ) -> Select[Any]:
         severity = self._severity()
-        if sort == "severity":
+        if sort is FindingSortKey.SEVERITY:
             # severity ascending + confidence descending is the natural pairing
             return statement.order_by(
                 severity.asc(), Judgement.confidence.desc(), Judgement.created_at.desc()
             )
-        direction = asc if order == "asc" else desc
-        column = self._columns(severity).get(sort, severity)
+        direction = asc if order is SortOrder.ASC else desc
+        column = self._columns(severity)[sort]
         return statement.order_by(direction(column), Judgement.created_at.desc())
 
     def _severity(self) -> Any:
         ranks = Verdict.ranks()
         return case(ranks, value=Judgement.verdict, else_=len(ranks))
 
-    def _columns(self, severity: Any) -> dict[str, Any]:
+    def _columns(self, severity: Any) -> dict[FindingSortKey, Any]:
         return {
-            "severity": severity,
-            "verdict": Judgement.verdict,
-            "collector": Judgement.collector,
-            "category": Judgement.category,
-            "confidence": Judgement.confidence,
-            "judged": Judgement.created_at,
+            FindingSortKey.SEVERITY: severity,
+            FindingSortKey.VERDICT: Judgement.verdict,
+            FindingSortKey.COLLECTOR: Judgement.collector,
+            FindingSortKey.CATEGORY: Judgement.category,
+            FindingSortKey.CONFIDENCE: Judgement.confidence,
+            FindingSortKey.JUDGED: Judgement.created_at,
         }
 
 
 @dataclass(frozen=True)
 class FindingsQuery:
     filters: FindingFilter = field(default_factory=FindingFilter)
-    sort: str = "severity"
-    order: str = "desc"
+    sort: FindingSortKey = FindingSortKey.SEVERITY
+    order: SortOrder = SortOrder.DESC
     page: Page = field(default_factory=Page)
 
 
