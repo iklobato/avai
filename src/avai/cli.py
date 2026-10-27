@@ -115,10 +115,11 @@ class RulesCommand:
         self._console = console
 
     def execute(self, rest: list[str]) -> int:
-        from .host_monitor.collectors import YaraRulesetCompiler
-        from .host_monitor.constants import LOGGER_NAME, YARA_RULES_DIR
+        from .host_monitor.collectors import YaraRulesDir, YaraRulesetCompiler
+        from .host_monitor.constants import LOGGER_NAME
 
-        args = self._parser(YARA_RULES_DIR).parse_args(rest)
+        default_dir = YaraRulesDir().from_environ(os.environ)
+        args = self._parser(default_dir).parse_args(rest)
         rules_dir = Path(args.rules_dir)
         compiler = YaraRulesetCompiler(rules_dir, logging.getLogger(LOGGER_NAME))
         rules, _stats = compiler.compile()

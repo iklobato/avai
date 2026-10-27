@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 from typing import Iterable
 
-from .. import constants
 from ..collectors import (
     AuthEventsCollector,
     BluetoothCollector,
@@ -31,9 +30,11 @@ from ..collectors import (
     TcpdumpCapture,
     UsbDevicesCollector,
     WifiCollector,
+    YaraRulesDir,
     YaraRulesetCompiler,
 )
 from ..constants import BROWSER_PROFILES
+from ..enums import PrivilegeKind
 from ..exposure_collectors import (
     LoginSessionsCollector,
     MacosCertParser,
@@ -56,11 +57,7 @@ from ..net_collectors import (
     NdpNeighborsCollector,
     RoutesCollector,
 )
-from ..persistence_collectors import (
-    EnvValueParser,
-    InjectionEnvCollector,
-)
-from ..enums import PrivilegeKind
+from ..persistence_collectors import EnvValueParser, InjectionEnvCollector
 from ..prompts import Prompts
 from ..runtime import (
     Clock,
@@ -258,7 +255,8 @@ class MacOSHost:
         self, prompts: Prompts, fs: MacOSFilesystemLayout
     ) -> list[SnapshotCollector]:
         hint = prompts.hint_for
-        compiler = YaraRulesetCompiler(constants.YARA_RULES_DIR, self._logger)
+        rules_dir = YaraRulesDir().from_environ(os.environ)
+        compiler = YaraRulesetCompiler(rules_dir, self._logger)
         return [
             FileIntegrityCollector(self._io.paths, judge_hints=hint("file_integrity")),
             FileScanCollector.create(fs, compiler, hint("file_scan")),

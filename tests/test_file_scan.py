@@ -26,6 +26,7 @@ from avai.host_monitor.collectors import (
     CryptoHint,
     FileMagic,
     FileScanCollector,
+    YaraRulesDir,
     YaraRulesetCompiler,
 )
 
@@ -221,7 +222,7 @@ class TestFileScanCollector:
     def test_bundled_eicar_rules_compile(self):
         # Guards against a broken shipped rule silently disabling scanning.
         rules, stats = YaraRulesetCompiler(
-            C.YARA_RULES_DIR, logging.getLogger("test")
+            C.BUNDLED_YARA_RULES_DIR, logging.getLogger("test")
         ).compile()
         assert rules is not None
         assert stats["rules_loaded"] >= 1
@@ -233,6 +234,19 @@ class TestFileScanCollector:
         )
         assert eicar["source"] == "bundled"
         assert eicar["category"] == "eicar"
+
+
+class TestYaraRulesDir:
+    def test_environment_override_wins(self) -> None:
+        environ = {"AVAI_YARA_RULES_DIR": "/srv/rules"}
+
+        assert YaraRulesDir().from_environ(environ) == Path("/srv/rules")
+
+    def test_bundled_pack_without_override(self) -> None:
+        assert YaraRulesDir().from_environ({}) == C.BUNDLED_YARA_RULES_DIR
+        assert YaraRulesDir().from_environ({"AVAI_YARA_RULES_DIR": ""}) == (
+            C.BUNDLED_YARA_RULES_DIR
+        )
 
 
 class TestYaraRulesetCompiler:

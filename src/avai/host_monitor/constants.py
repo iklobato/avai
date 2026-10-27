@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from .enums import Browser, LaunchScope
@@ -196,8 +195,10 @@ APP_INFO_KEYS = (
 
 # --- File scanning (YARA) ---
 # Bundled + user YARA rules live here; the FileScanCollector compiles
-# every *.yar / *.yara found, once per process. Override via the env var.
-YARA_RULES_DIR = Path(os.environ.get("AVAI_YARA_RULES_DIR", str(_PKG_DIR / "rules")))
+# every *.yar / *.yara found, once per process. AVAI_YARA_RULES_DIR
+# overrides it (read by YaraRulesDir where the hosts are assembled).
+BUNDLED_YARA_RULES_DIR = _PKG_DIR / "rules"
+YARA_RULES_ENV = "AVAI_YARA_RULES_DIR"
 
 # Skip files larger than this — YARA reads the whole file. On the measured
 # target set (bin dirs + recent Downloads) p99 ≈ 9 MB, so 64 MB covers

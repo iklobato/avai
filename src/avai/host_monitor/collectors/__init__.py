@@ -15,6 +15,7 @@ from .file_scan import (
     FileMagic,
     FileScanCollector,
     ScanTargets,
+    YaraRulesDir,
     YaraRulesetCompiler,
 )
 from .integrity import (
@@ -129,6 +130,7 @@ __all__ = [
     "UnifiedLogAuthParser",
     "UsbDevicesCollector",
     "WifiCollector",
+    "YaraRulesDir",
     "YaraRulesetCompiler",
     "CryptoHint",
     "FileMagic",

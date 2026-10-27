@@ -11,12 +11,12 @@ import os
 from pathlib import Path
 from typing import Any, Iterable
 
-from .. import constants
 from ..collectors import (
     BrowserExtensionsCollector,
     DnsQueriesCollector,
     FileIntegrityCollector,
     FileScanCollector,
+    HostJournal,
     LinuxAuthEventsCollector,
     LinuxBluetoothCollector,
     LinuxInstalledAppsCollector,
@@ -25,7 +25,6 @@ from ..collectors import (
     LinuxSystemIntegrityCollector,
     LinuxUsbDevicesCollector,
     LinuxWifiCollector,
-    HostJournal,
     LogTailCollector,
     NetworkFlowsCollector,
     ProcessConnectionResolver,
@@ -33,6 +32,7 @@ from ..collectors import (
     SnapshotCollector,
     StreamingCollector,
     TcpdumpCapture,
+    YaraRulesDir,
     YaraRulesetCompiler,
 )
 from ..constants import BROWSER_PROFILES_LINUX, WATCHED_FILES_LINUX
@@ -264,7 +264,8 @@ class LinuxHost:
         self, prompts: Prompts, fs: LinuxFilesystemLayout
     ) -> list[SnapshotCollector]:
         hint = prompts.hint_for
-        compiler = YaraRulesetCompiler(constants.YARA_RULES_DIR, self._logger)
+        rules_dir = YaraRulesDir().from_environ(os.environ)
+        compiler = YaraRulesetCompiler(rules_dir, self._logger)
         return [
             FileIntegrityCollector(
                 self._io.paths, self._watched_files(), hint("file_integrity")

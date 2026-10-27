@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import islice
@@ -15,8 +16,8 @@ import yara
 
 from .. import constants
 from ..enums import ScanSource, YaraSkipReason
-from ..slices import Slices
 from ..runtime import Clock, Digest
+from ..slices import Slices
 from .base import SnapshotCollector
 
 if TYPE_CHECKING:
@@ -146,6 +147,15 @@ class MatchRedactor:
         except (TypeError, ValueError):
             return []
         return [MatchedBytes(identifier, offset, matched)]
+
+
+class YaraRulesDir:
+    """Where the rules to compile live: AVAI_YARA_RULES_DIR, else the
+    bundled pack."""
+
+    def from_environ(self, environ: Mapping[str, str]) -> Path:
+        override = environ.get(constants.YARA_RULES_ENV)
+        return Path(override) if override else constants.BUNDLED_YARA_RULES_DIR
 
 
 class YaraRulesetCompiler:
