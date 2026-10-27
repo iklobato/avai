@@ -454,7 +454,9 @@ class AuthEventsFragment(ServiceView):
         with self._services.read_session() as session:
             return render_template(
                 "partials/_auth_events.html",
-                events=AuthEventsPanel(session, self._services.clock).aggregated(query),
+                events=AuthEventsPanel(
+                    session, self._services.clock, self._services.auth_caches
+                ).aggregated(query),
                 per_page_options=PER_PAGE_OPTIONS,
             )
 

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import threading
-import time
 from enum import StrEnum
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.orm import Session
@@ -18,6 +17,7 @@ from avai.host_monitor.enums import Verdict
 from avai.host_monitor.runtime import Clock
 
 from .panel_reads import Page, RowFilter, SchemaProbe
+from .ttl_cache import TtlCache, TtlPolicy
 
 # (subsystem, the short label the tabs and rows show)
 SUBSYSTEM_LABELS = (
@@ -88,6 +88,26 @@ class AuthQuery:
         return {**fields, "subsystem": self.subsystem, "sort": self.sort.value}
 
 
+@dataclass(frozen=True)
+class AuthCaches:
+    """The auth panel's two caches, owned by the app's services. Kept below
+    the panel's 30s poll, so never staler than the dashboard already is."""
+
+    TTL_S = 15.0
+    CACHE_MAX = 64
+
+    pages: TtlCache
+    summaries: TtlCache
+
+    @classmethod
+    def create(cls, clock: Clock) -> AuthCaches:
+        policy = TtlPolicy(cls.TTL_S, cls.CACHE_MAX)
+        return cls(
+            TtlCache(clock, policy, threading.Lock()),
+            TtlCache(clock, policy, threading.Lock()),
+        )
+
+
 class AuthEventsPanel:
     """Auth events grouped by content_hash (one pattern per unique log line),
     joined with LLM verdicts. Filters by subsystem, verdict (``unjudged`` for
@@ -98,32 +118,24 @@ class AuthEventsPanel:
     (below the poll cadence, so never staler than the dashboard already is)."""
 
     WINDOW_HOURS = 24
-    TTL_S = 15.0
-    CACHE_MAX = 64
     SUMMARY_SUBSYSTEMS = 12
     MINUTE_CHARS = 16  # "YYYY-MM-DDTHH:MM"
-    _pages: ClassVar[dict[tuple[Any, ...], tuple[float, dict[str, Any]]]] = {}
-    _pages_lock: ClassVar[threading.Lock] = threading.Lock()
-    _summaries: ClassVar[dict[str, tuple[float, tuple[dict[str, int], int]]]] = {}
-    _summaries_lock: ClassVar[threading.Lock] = threading.Lock()
+    SUMMARY_KEY = "summary"
 
-    def __init__(self, session: Session, clock: Clock) -> None:
+    def __init__(self, session: Session, clock: Clock, caches: AuthCaches) -> None:
         self._session = session
         self._clock = clock
+        self._caches = caches
 
     def aggregated(self, query: AuthQuery) -> dict[str, Any]:
-        key = (str(self._session.get_bind().url), query)
-        cached = self._pages.get(key)
-        if cached is not None and time.monotonic() - cached[0] < self.TTL_S:
-            return cached[1]
+        cached = self._caches.pages.get(query)
+        if cached is not None:
+            return dict(cached)
         if AuthEventRow.__tablename__ not in SchemaProbe(self._session).tables():
             return self._empty(query)
         panel_page = self._page(query)
-        with self._pages_lock:
-            if len(self._pages) >= self.CACHE_MAX:
-                self._pages.clear()
-            self._pages[key] = (time.monotonic(), panel_page)
-        return panel_page
+        self._caches.pages.put(query, panel_page)
+        return dict(panel_page)
 
     def _empty(self, query: AuthQuery) -> dict[str, Any]:
         return {
@@ -162,18 +174,16 @@ class AuthEventsPanel:
     def _summary(self, cutoff: str) -> tuple[dict[str, int], int]:
         """Recent per-subsystem event counts plus the grand total. The same
         for every tab, so cached per DB and shared across them."""
-        key = str(self._session.get_bind().url)
-        hit = self._summaries.get(key)
-        if hit is not None and time.monotonic() - hit[0] < self.TTL_S:
-            return hit[1]
+        hit = self._caches.summaries.get(self.SUMMARY_KEY)
+        if hit is not None:
+            return hit
         rows = self._subsystem_counts(cutoff)
         names = SubsystemNames()
         summary = {
             names.short(subsystem or "(none)", ""): count for subsystem, count in rows
         }
         value = (summary, sum(summary.values()))
-        with self._summaries_lock:
-            self._summaries[key] = (time.monotonic(), value)
+        self._caches.summaries.put(self.SUMMARY_KEY, value)
         return value
 
     def _subsystem_counts(self, cutoff: str) -> list[Any]:

@@ -12,6 +12,7 @@ from .config import DashboardConfig
 from .control import ControlStore
 from .db import DashboardEngines
 from .filters import TemplateFilters
+from .queries.auth_events import AuthCaches
 from .routes import DashboardServices
 from .routes.api import ApiRoutes
 from .routes.control import ControlRoutes
@@ -80,4 +81,5 @@ class DashboardApp:
             engines.read_only(config.db_path, config.query_log_path),
             ControlStore(engines.writable(config.db_path), clock),
             clock,
+            AuthCaches.create(clock),
         )

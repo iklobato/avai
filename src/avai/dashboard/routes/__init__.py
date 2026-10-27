@@ -14,6 +14,7 @@ from avai.host_monitor.runtime import Clock
 
 from ..config import DashboardConfig
 from ..control import ControlStore
+from ..queries.auth_events import AuthCaches
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class DashboardServices:
     read_engine: Engine
     control: ControlStore
     clock: Clock
+    auth_caches: AuthCaches
 
     def read_session(self) -> Session:
         return Session(self.read_engine)
