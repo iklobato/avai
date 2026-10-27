@@ -34,7 +34,7 @@ from ..collectors import (
     YaraRulesetCompiler,
 )
 from ..constants import BROWSER_PROFILES_LINUX, WATCHED_FILES_LINUX
-from ..enums import Browser
+from ..enums import Browser, PrivilegeKind
 from ..exposure_collectors import (
     LinuxPromiscParser,
     LinuxProxyEnvParser,
@@ -154,7 +154,12 @@ class LinuxPrivilegedAccounts:
         """Members of privileged groups, from ``/etc/group`` text."""
         records = self._records(content, GROUP_FIELDS)
         return [
-            {"kind": "group", "subject": name, "detail": members, "source_path": path}
+            {
+                "kind": PrivilegeKind.GROUP.value,
+                "subject": name,
+                "detail": members,
+                "source_path": path,
+            }
             for name, _password, _gid, members in records
             if name in self.PRIVILEGED_GROUPS and members
         ]
@@ -164,7 +169,7 @@ class LinuxPrivilegedAccounts:
         records = self._records(content, PASSWD_FIELDS)
         return [
             {
-                "kind": "account",
+                "kind": PrivilegeKind.ACCOUNT.value,
                 "subject": user,
                 "detail": f"uid=0 shell={shell}",
                 "source_path": path,

@@ -38,6 +38,7 @@ from ..persistence_collectors import (
     WindowsAppInitParser,
     WindowsDriverParser,
 )
+from ..enums import PrivilegeKind
 from ..prompts import Prompts
 from ..runtime import CommandRunner, CommandSnapshot
 from .portable import AccountCollectors, PortableCollectors
@@ -114,7 +115,7 @@ class WindowsPrivilegedAccounts:
         members = LocalGroupParser().members(output)
         if members:
             yield {
-                "kind": "group",
+                "kind": PrivilegeKind.GROUP.value,
                 "subject": "Administrators",
                 "detail": ", ".join(members),
                 "source_path": "net:localgroup",

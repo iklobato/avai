@@ -59,6 +59,7 @@ from ..persistence_collectors import (
     EnvValueParser,
     InjectionEnvCollector,
 )
+from ..enums import PrivilegeKind
 from ..prompts import Prompts
 from ..runtime import CommandRunner, CommandSnapshot, PsutilConnections
 from .portable import AccountCollectors, PortableCollectors
@@ -149,7 +150,7 @@ class MacOSPrivilegedAccounts:
             members = out.split(":", 1)[1].strip() if ":" in out else out.strip()
             if members:
                 yield {
-                    "kind": "group",
+                    "kind": PrivilegeKind.GROUP.value,
                     "subject": gname,
                     "detail": members,
                     "source_path": "dscl:/Groups",
@@ -161,7 +162,7 @@ class MacOSPrivilegedAccounts:
             cols = line.split()
             if len(cols) > 1 and cols[-1] == "0":
                 yield {
-                    "kind": "account",
+                    "kind": PrivilegeKind.ACCOUNT.value,
                     "subject": cols[0],
                     "detail": "uid=0",
                     "source_path": "dscl:/Users",

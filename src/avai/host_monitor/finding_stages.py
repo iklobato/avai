@@ -16,7 +16,7 @@ from avai.enrichers import EnrichmentChain, IndicatorExtraction
 
 from .collectors import Collector
 from .control_loop import ControlSettings, ProgressHeartbeat
-from .enums import FeedbackLabel, Verdict
+from .enums import BehaviorKind, FeedbackLabel, Verdict
 from .failures import HOST_FAILURES
 from .investigator import UnknownFindingInvestigator
 from .judge import Judge, Judgment
@@ -48,7 +48,6 @@ LOGGED_REASON_CHARS = 120
 
 # Only processes and launch items carry behaviour to correlate.
 CORRELATED_COLLECTORS = (Slices.PROCESSES.name, Slices.LAUNCH_ITEMS.name)
-CORRELATION_KINDS = ("ports", "flows", "conns", "dns", "exec")
 
 # How an operator-feedback label reads in the ground-truth block fed to the
 # judge, keyed by the raw stored label.
@@ -314,24 +313,36 @@ class BehaviorSummary:
 
     def related(self, links: ProcessLinks, content_hash: str | None) -> dict[str, Any]:
         pids, names = links.pids(content_hash), links.names(content_hash)
-        context = self._context
         kinds = (
-            ("listening_ports", self._by_pid("ports", pids)[:MAX_RELATED]),
-            ("outbound_flows", self._by_pid("flows", pids)[:MAX_RELATED]),
-            ("remote_connections", self._by_pid("conns", pids)[:MAX_RELATED]),
+            ("listening_ports", self._by_pid(BehaviorKind.PORTS, pids)[:MAX_RELATED]),
+            ("outbound_flows", self._by_pid(BehaviorKind.FLOWS, pids)[:MAX_RELATED]),
+            (
+                "remote_connections",
+                self._by_pid(BehaviorKind.CONNS, pids)[:MAX_RELATED],
+            ),
             ("dns_queries", self._by_name(names)[:MAX_RELATED_DNS]),
         )
         related: dict[str, Any] = {key: values for key, values in kinds if values}
-        execs = [context["exec"][pid] for pid in pids if pid in context["exec"]]
-        if execs:
-            related["exec_lineage"] = execs[0]
+        lineage = self._lineage(pids)
+        if lineage is not None:
+            related["exec_lineage"] = lineage
         return related
 
-    def _by_pid(self, kind: str, pids: set[int]) -> list[Any]:
+    def _lineage(self, pids: set[int]) -> Any | None:
+        """The exec record of the first PID that has one."""
+        execs = self._context[BehaviorKind.EXEC]
+        found = [execs[pid] for pid in pids if pid in execs]
+        return found[0] if found else None
+
+    def _by_pid(self, kind: BehaviorKind, pids: set[int]) -> list[Any]:
         return [item for pid in pids for item in self._context[kind].get(pid, [])]
 
     def _by_name(self, names: set[str]) -> list[Any]:
-        return [item for name in names for item in self._context["dns"].get(name, [])]
+        return [
+            item
+            for name in names
+            for item in self._context[BehaviorKind.DNS].get(name, [])
+        ]
 
 
 class ProcessBehavior:
@@ -607,7 +618,7 @@ class InvestigationBundle:
             "investigate: host context",
             lambda: io.sink.recent_nonbenign(HOST_CONTEXT_LIMIT),
         )
-        empty = {kind: {} for kind in CORRELATION_KINDS}
+        empty = {kind: {} for kind in BehaviorKind}
         return cls(
             batch.entries_by_hash(), links, history or empty, host_findings or []
         )

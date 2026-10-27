@@ -13,7 +13,7 @@ from sqlalchemy import Engine, Select, exists, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
-from .enums import FeedbackLabel, Verdict
+from .enums import BehaviorKind, FeedbackLabel, Verdict
 from .judge import Judgment
 from .models import (
     CollectionRun,
@@ -259,7 +259,6 @@ class BehaviorReader:
 
     # DNS is keyed by process name, which groups every PID sharing it.
     EXTRA_DNS_PER_NAME = 5
-    KINDS = ("ports", "flows", "conns", "dns", "exec")
 
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
@@ -291,7 +290,7 @@ class BehaviorReader:
         collected at/after ``window.since``. ProcessCollector runs first in a
         cycle, so this deliberately surfaces the *previous* cycle's behaviour
         for a still-running PID."""
-        context: dict[str, dict[Any, Any]] = {kind: {} for kind in self.KINDS}
+        context: dict[str, dict[Any, Any]] = {kind: {} for kind in BehaviorKind}
         live_pids = [pid for pid in pids if pid is not None]
         names = [name for name in proc_names if name]
         with Session(self._engine) as session:
@@ -299,7 +298,7 @@ class BehaviorReader:
             if live_pids:
                 context.update(queries.by_pid(live_pids))
             if names:
-                context["dns"] = queries.dns(names, self.EXTRA_DNS_PER_NAME)
+                context[BehaviorKind.DNS] = queries.dns(names, self.EXTRA_DNS_PER_NAME)
         return context
 
 
@@ -313,10 +312,10 @@ class BehaviorQueries:
     def by_pid(self, pids: list[int]) -> dict[str, dict[Any, Any]]:
         cap = self._window.per_pid_cap
         return {
-            "ports": self._capped(self._listening_ports(pids), cap),
-            "flows": self._capped(self._outbound_flows(pids), cap),
-            "conns": self._capped(self._remote_conns(pids), cap),
-            "exec": self._latest_execs(pids),
+            BehaviorKind.PORTS: self._capped(self._listening_ports(pids), cap),
+            BehaviorKind.FLOWS: self._capped(self._outbound_flows(pids), cap),
+            BehaviorKind.CONNS: self._capped(self._remote_conns(pids), cap),
+            BehaviorKind.EXEC: self._latest_execs(pids),
         }
 
     def dns(self, names: list[str], extra: int) -> dict[Any, list[Any]]:

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 from ..slices import Slices
 from ..constants import LAUNCH_DIRS
-from ..enums import LaunchScope
+from ..enums import LaunchScope, PrivilegeKind
 from ..runtime import Coerce, Digest, HostPaths
 from .base import SnapshotCollector
 
@@ -508,7 +508,7 @@ class SudoersParser:
         rules = (line.split("#", 1)[0].strip() for line in content.splitlines())
         return [
             {
-                "kind": "sudoers",
+                "kind": PrivilegeKind.SUDOERS.value,
                 "subject": rule.split()[0],
                 "detail": rule,
                 "source_path": path,

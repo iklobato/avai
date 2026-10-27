@@ -35,6 +35,7 @@ from .models import (
     YaraStatusRow,
     _RowBase,
 )
+from .enums import PrivilegeKind
 from .runtime import Clock
 from .slices import Slices
 
@@ -95,12 +96,12 @@ class ReportStore:
         privilege-config facts that feed the risk score."""
         nopasswd = self._privilege_count(
             run_id,
-            PrivilegeConfigRow.kind == "sudoers",
+            PrivilegeConfigRow.kind == PrivilegeKind.SUDOERS,
             PrivilegeConfigRow.detail.like("%NOPASSWD%"),
         )
         extra_uid0 = self._privilege_count(
             run_id,
-            PrivilegeConfigRow.kind == "account",
+            PrivilegeConfigRow.kind == PrivilegeKind.ACCOUNT,
             PrivilegeConfigRow.subject != "root",
         )
         return nopasswd, extra_uid0

@@ -90,6 +90,32 @@ class MaintenanceCommand(StrEnum):
     RESET_BASELINE = "reset_baseline"
 
 
+class MonitorState(StrEnum):
+    """What the monitor loop reports in its heartbeat."""
+
+    PAUSED = "paused"
+    RUNNING = "running"
+    SCANNING = "scanning"
+
+
+class PrivilegeKind(StrEnum):
+    """What a privilege_config row describes."""
+
+    SUDOERS = "sudoers"
+    ACCOUNT = "account"
+    GROUP = "group"
+
+
+class BehaviorKind(StrEnum):
+    """The kinds of process behaviour the judge sees as correlation context."""
+
+    PORTS = "ports"
+    FLOWS = "flows"
+    CONNS = "conns"
+    DNS = "dns"
+    EXEC = "exec"
+
+
 class FeedbackLabel(StrEnum):
     """Operator correction on a finding, fed back into judging."""
 

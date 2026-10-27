@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .constants import MONITOR_PROGRESS_HEARTBEAT_S
-from .enums import MaintenanceCommand
+from .enums import MaintenanceCommand, MonitorState
 from .failures import HOST_FAILURES
 from .sink import Sink
 
@@ -167,12 +167,13 @@ class ControlLoop:
             "scan_now_applied", 0
         )
         if not scan_now and (paused or time.monotonic() < next_scan):
-            self._heartbeat("paused" if paused else "running", effective)
+            state = MonitorState.PAUSED if paused else MonitorState.RUNNING
+            self._heartbeat(state, effective)
             return next_scan
         if scan_now:
             # Scan-now runs one cycle even while paused.
             self._plane.sink.ack_scan_now(control["scan_now_nonce"])
-        self._heartbeat("scanning", effective)
+        self._heartbeat(MonitorState.SCANNING, effective)
         started = time.monotonic()
         self._cycle_or_log()
         return started + effective
@@ -210,10 +211,10 @@ class ControlLoop:
             return f"unknown command: {raw}"
         return Maintenance(self._plane.sink, self._plane.max_db_bytes).apply(command)
 
-    def _heartbeat(self, status: str, current_interval: int) -> None:
+    def _heartbeat(self, status: MonitorState, current_interval: int) -> None:
         try:
             self._plane.sink.write_heartbeat(
-                pid=os.getpid(), status=status, current_interval=current_interval
+                pid=os.getpid(), status=status.value, current_interval=current_interval
             )
         except HOST_FAILURES:
             self._plane.logger.exception("heartbeat write failed")
