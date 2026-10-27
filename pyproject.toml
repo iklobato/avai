@@ -47,7 +47,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "psutil>=5.9",
+    "psutil>=6.0",
     "sqlalchemy>=2.0",
     "flask>=3.0",
     "requests>=2.31",

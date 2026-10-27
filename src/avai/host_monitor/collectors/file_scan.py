@@ -26,10 +26,17 @@ if TYPE_CHECKING:
 
 class CryptoHint:
     """Actionable hint for a ruleset that fails to compile because this yara
-    build lacks OpenSSL (the PyPI wheel does): pe.imphash() / hash.* then read
-    as 'invalid field name'. Empty for any other error."""
+    build lacks OpenSSL (the PyPI wheel does): pe.imphash(), pe.signatures
+    and hash.* then read as 'invalid field name'. Empty for any other error."""
 
-    HASH_TERMS = ("md5", "sha1", "sha256", "checksum", "imphash")
+    OPENSSL_FIELDS = (
+        "md5",
+        "sha1",
+        "sha256",
+        "checksum",
+        "imphash",
+        "number_of_signatures",
+    )
     TEXT = (
         ": these rules need a crypto-enabled yara (pe.imphash / hash.*);"
         " the PyPI yara-python wheel is built without it. See"
@@ -44,7 +51,7 @@ class CryptoHint:
 
     def _hash_field_missing(self, message: str) -> bool:
         return "invalid field name" in message and any(
-            term in message for term in self.HASH_TERMS
+            term in message for term in self.OPENSSL_FIELDS
         )
 
 
@@ -233,7 +240,19 @@ class YaraRulesetCompiler:
             self._record(path, file_rules, stats)
         stats["files_loaded"] = len(filepaths)
         stats["files_skipped"] = sum(stats["skip_reasons"].values())
+        self._log_crypto_skips(stats["skip_reasons"])
         return filepaths
+
+    def _log_crypto_skips(self, skip_reasons: dict[str, int]) -> None:
+        # Expected on the stock yara (see NOTICE), so one line, not one per file.
+        skipped = skip_reasons.get(YaraSkipReason.NEEDS_CRYPTO.value, 0)
+        if skipped:
+            self._logger.info(
+                "yara: skipped %d rule files that need a crypto-enabled yara;"
+                " the PyPI yara-python wheel is built without it."
+                " See avai/rules/NOTICE.",
+                skipped,
+            )
 
     def _rule_files(self) -> Iterable[Path]:
         for path in sorted(self._rules_dir.rglob("*")):
@@ -250,8 +269,9 @@ class YaraRulesetCompiler:
             skipped = YaraSkipReason.NEEDS_CRYPTO if hint else YaraSkipReason.OTHER
             reason = skipped.value
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
-            self._logger.warning(
-                "yara: skipping uncompilable rules %s: %s%s", path, exc, hint
+            level = logging.DEBUG if hint else logging.WARNING
+            self._logger.log(
+                level, "yara: skipping uncompilable rules %s: %s%s", path, exc, hint
             )
             return None
 

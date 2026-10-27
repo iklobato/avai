@@ -41,6 +41,23 @@ class TestMonitorOptions:
 
         assert options.enrich_only == ("osv", "nvd")
 
+    def test_narrative_model_follows_the_judge_model(self) -> None:
+        # Only an OpenAI key set: the coverage and narrative stages must not
+        # fall back to a Claude model the key cannot call.
+        options = MonitorArgs().options(["--judge-model", "gpt-4o-mini"])
+
+        assert options.narrative_model == "gpt-4o-mini"
+
+    def test_an_explicit_narrative_model_wins(self) -> None:
+        options = MonitorArgs().options(
+            ["--judge-model", "gpt-4o-mini", "--narrative-model", "gpt-4o"]
+        )
+
+        assert (options.judge_model, options.narrative_model) == (
+            "gpt-4o-mini",
+            "gpt-4o",
+        )
+
     def test_an_unknown_field_is_rejected(self) -> None:
         parsed = MonitorArgs().parser().parse_args([])
         parsed.surprise = True

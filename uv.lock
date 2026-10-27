@@ -254,7 +254,7 @@ requires-dist = [
     { name = "flask", specifier = ">=3.0" },
     { name = "litellm", specifier = ">=1.0" },
     { name = "markdown", specifier = ">=3.5" },
-    { name = "psutil", specifier = ">=5.9" },
+    { name = "psutil", specifier = ">=6.0" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pywebview", marker = "extra == 'app'", specifier = ">=5.0" },

@@ -61,6 +61,7 @@ from avai.host_monitor.collectors.logs import TAIL_BYTES, JournalReader, LogFile
 from avai.host_monitor.collectors.software import ExtensionReaders
 from avai.host_monitor.enums import Browser
 from avai.host_monitor.runtime import (
+    PsutilPortInspector,
     CommandRunner,
     DiskMetrics,
     FrozenClock,
@@ -224,12 +225,94 @@ class TestListeningPortsCollector:
         assert looked_up == [10, 12]
 
 
-class TestProcessConnectionResolver:
-    def test_access_denied_gives_an_empty_map(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def denied(kind="inet"):
+class _OwnTableProcess:
+    """A process whose own socket table is readable, or denied like a
+    process owned by another user."""
+
+    def __init__(self, pid: int, sockets: list[SimpleNamespace] | None) -> None:
+        self.pid = pid
+        self.sockets = sockets
+
+    def net_connections(self, kind: str) -> list[SimpleNamespace]:
+        if self.sockets is None:
+            raise psutil.AccessDenied(self.pid)
+        return self.sockets
+
+
+class _UnprivilegedHost:
+    """macOS without root: the system-wide table raises, each process's own
+    table is readable only for processes of the same user."""
+
+    USER_PID = 501
+    ROOT_PID = 1
+    APP_PORT = 8765
+    CLIENT_PORT = 50000
+    SSH_PORT = 22
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.monkeypatch = monkeypatch
+
+    def running(self, processes: list[_OwnTableProcess]) -> None:
+        def denied(kind: str = "inet") -> list[SimpleNamespace]:
             raise psutil.AccessDenied()
 
-        monkeypatch.setattr(psutil, "net_connections", denied)
+        self.monkeypatch.setattr(psutil, "net_connections", denied)
+        self.monkeypatch.setattr(psutil, "process_iter", lambda: iter(processes))
+        self.monkeypatch.setattr(
+            psutil, "Process", lambda pid: SimpleNamespace(name=lambda: "avai")
+        )
+
+    def socket(self, status: str, port: int) -> SimpleNamespace:
+        """A per-process socket entry: psutil leaves the pid off these."""
+        entry = _conn(status, None, port)
+        del entry.pid
+        return entry
+
+
+class TestUnprivilegedConnectionTable:
+    @pytest.fixture
+    def host(self, monkeypatch: pytest.MonkeyPatch) -> _UnprivilegedHost:
+        return _UnprivilegedHost(monkeypatch)
+
+    def test_listening_ports_reads_each_readable_process(
+        self, host: _UnprivilegedHost
+    ) -> None:
+        sockets = [
+            host.socket(psutil.CONN_LISTEN, host.APP_PORT),
+            host.socket(psutil.CONN_ESTABLISHED, host.CLIENT_PORT),
+        ]
+        host.running(
+            [
+                _OwnTableProcess(host.USER_PID, sockets),
+                _OwnTableProcess(host.ROOT_PID, None),
+            ]
+        )
+
+        rows = list(ListeningPortsCollector(PsutilConnections()).collect())
+
+        found = [(row["pid"], row["process_name"], row["laddr_port"]) for row in rows]
+        assert found == [(host.USER_PID, "avai", host.APP_PORT)]
+
+    def test_port_posture_stays_unknown_without_the_full_table(
+        self, host: _UnprivilegedHost
+    ) -> None:
+        # A root-owned sshd is missing from the partial view, so "not
+        # listening on 22" would be a false answer.
+        listener = host.socket(psutil.CONN_LISTEN, host.SSH_PORT)
+        host.running([_OwnTableProcess(host.USER_PID, [listener])])
+
+        inspector = PsutilPortInspector(PsutilConnections())
+
+        assert inspector.listening(host.SSH_PORT) is None
+
+
+class TestProcessConnectionResolver:
+    def test_no_readable_process_gives_an_empty_map(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        host = _UnprivilegedHost(monkeypatch)
+        host.running([_OwnTableProcess(host.ROOT_PID, None)])
+
         assert ProcessConnectionResolver(PsutilConnections()).snapshot() == {}
 
     def test_vanished_process_is_labelled_by_pid_and_first_owner_wins(

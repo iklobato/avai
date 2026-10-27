@@ -32,7 +32,6 @@ from .constants import (
     DEFAULT_JUDGE_MAX_PER_COLLECTOR,
     DEFAULT_JUDGE_MODEL,
     DEFAULT_LOOKBACK_MIN,
-    DEFAULT_NARRATIVE_MODEL,
     DEFAULT_PROMPTS_PATH,
     LOGGER_NAME,
 )
@@ -252,9 +251,9 @@ class MonitorArgs:
         )
         parser.add_argument(
             "--narrative-model",
-            default=DEFAULT_NARRATIVE_MODEL,
-            help=f"Model id for the incident narrator (default: "
-            f"{DEFAULT_NARRATIVE_MODEL}, i.e. the judge model).",
+            default=None,
+            help="Model id for the incident narrator and the coverage check "
+            "(default: the --judge-model).",
         )
         self._add_second_opinions(parser)
 
@@ -462,7 +461,8 @@ class ShutdownSignals:
         if self._received >= self.FORCE_QUIT_SIGNALS:
             self._logger.warning("second signal, forcing immediate exit")
             os._exit(self.FORCED_EXIT_CODE)
-        self._logger.warning(
+        # An asked-for stop (Ctrl-C, launchd, systemd, the app): not a problem.
+        self._logger.info(
             "received signal %d; stopping after the current step "
             "(press Ctrl-C again to force-quit now)",
             signum,

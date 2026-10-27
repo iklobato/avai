@@ -530,6 +530,65 @@ class TestCryptoHint:
     def test_unrelated_error_gets_no_hint(self) -> None:
         assert CryptoHint().of(yara.Error("syntax error, unexpected '}'")) == ""
 
+    def test_signature_count_error_gets_the_hint(self) -> None:
+        # pe.number_of_signatures reads the Authenticode data, which the
+        # yara PyPI wheel only parses when built with OpenSSL.
+        error = yara.Error(
+            'gen_google_anomaly.yar(21): invalid field name "number_of_signatures"'
+        )
+        assert CryptoHint().of(error) == CryptoHint.TEXT
+
+
+class TestYaraSkipLogging:
+    """A rule file the stock yara cannot compile is a known, documented gap
+    (avai/rules/NOTICE): one summary line, not a warning per file. A file
+    that is broken for any other reason still warns."""
+
+    CRYPTO_RULE = 'import "pe"\nrule signed { condition: pe.number_of_signatures > 0 }'
+
+    def _compile(self, rules: Path, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.DEBUG, logger="test")
+        YaraRulesetCompiler(rules, logging.getLogger("test")).compile()
+
+    def _messages(self, caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
+        return [
+            record.getMessage() for record in caplog.records if record.levelno == level
+        ]
+
+    def _skip_on_crypto_yara(self) -> None:
+        try:
+            yara.compile(source=self.CRYPTO_RULE)
+        except yara.Error:
+            return
+        pytest.skip("this yara build has crypto, nothing is skipped")
+
+    def test_crypto_skips_give_one_info_line(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._skip_on_crypto_yara()
+        (tmp_path / "first.yar").write_text(self.CRYPTO_RULE)
+        (tmp_path / "second.yar").write_text(self.CRYPTO_RULE)
+
+        self._compile(tmp_path, caplog)
+
+        assert self._messages(caplog, logging.WARNING) == []
+        assert self._messages(caplog, logging.INFO) == [
+            "yara: skipped 2 rule files that need a crypto-enabled yara;"
+            " the PyPI yara-python wheel is built without it. See avai/rules/NOTICE."
+        ]
+
+    def test_a_broken_rule_file_still_warns(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        broken = tmp_path / "broken.yar"
+        broken.write_text("rule { nope")
+
+        self._compile(tmp_path, caplog)
+
+        warnings = self._messages(caplog, logging.WARNING)
+        assert len(warnings) == 1
+        assert warnings[0].startswith(f"yara: skipping uncompilable rules {broken}: ")
+
 
 # ---------------------------------------------------------------------------
 # LocalHashDenylistEnricher
