@@ -9,24 +9,25 @@ real OS binaries — so they run anywhere and would have caught the bug.
 Why the bug slipped through before: the enrichment/dashboard/judge
 layers were tested hard, but the collectors were waved off as
 "needs OS binaries". The crash was NOT in OS-binary territory — it
-was in `HostPaths.for_home()` returning [] and the caller doing
+was in `HostPaths().for_home()` returning [] and the caller doing
 `[...][0]`. Pure logic, fully unit-testable. This file closes that gap.
 """
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 import pytest
 
-import avai.host_monitor as hm
 from avai.host_monitor.collectors import (
+    HostJournal,
     LinuxAuthEventsCollector,
     LinuxLaunchItemsCollector,
 )
 from avai.host_monitor.collectors.persistence import CrontabReader, SystemdUnitReader
-from avai.host_monitor.runtime import HostPaths
+from avai.host_monitor.runtime import CommandRunner, HostIo, HostPaths
 
 # HOST_PREFIX path translation, the Linux launch_items collector, and the
 # journald-dir probe all assume POSIX path semantics and a Linux filesystem
@@ -44,17 +45,26 @@ _linux_only = pytest.mark.skipif(
 
 @_linux_only
 class TestHostPath:
-    def test_passthrough_without_prefix(self, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
-        assert HostPaths.translate("/etc/passwd") == Path("/etc/passwd")
+    def test_prefix_comes_from_the_environment_without_trailing_slash(self) -> None:
+        paths = HostPaths.from_environ({"HOST_PREFIX": "/host/"})
 
-    def test_prepends_prefix_when_set(self, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
-        assert HostPaths.translate("/etc/passwd") == Path("/host/etc/passwd")
+        assert paths.in_container() is True
+        assert paths.translate("/etc/passwd") == Path("/host/etc/passwd")
 
-    def test_relative_path_is_passthrough_even_with_prefix(self, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
-        assert HostPaths.translate("relative/dir") == Path("relative/dir")
+    def test_no_environment_prefix_means_running_on_the_host(self) -> None:
+        paths = HostPaths.from_environ({})
+
+        assert paths.in_container() is False
+        assert paths.translate("/etc/passwd") == Path("/etc/passwd")
+
+    def test_passthrough_without_prefix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert HostPaths("").translate("/etc/passwd") == Path("/etc/passwd")
+
+    def test_prepends_prefix_when_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert HostPaths("/host").translate("/etc/passwd") == Path("/host/etc/passwd")
+
+    def test_relative_path_is_passthrough_even_with_prefix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert HostPaths("/host").translate("relative/dir") == Path("relative/dir")
 
 
 # ---------------------------------------------------------------------------
@@ -65,27 +75,24 @@ class TestHostPath:
 
 @_linux_only
 class TestHostPathsForHome:
-    def test_absolute_template_returns_single_translated_path(self, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "/host")
-        out = HostPaths.for_home("/etc/systemd/system")
+    def test_absolute_template_returns_single_translated_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        out = HostPaths("/host").for_home("/etc/systemd/system")
         assert out == [Path("/host/etc/systemd/system")]
 
-    def test_home_template_without_prefix_expands_user_home(self, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
-        out = HostPaths.for_home("~/.config/systemd/user")
+    def test_home_template_without_prefix_expands_user_home(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        out = HostPaths("").for_home("~/.config/systemd/user")
         assert len(out) == 1
         assert str(out[0]).endswith("/.config/systemd/user")
         assert "~" not in str(out[0])  # expanduser ran
 
     def test_home_template_with_prefix_enumerates_user_homes(
-        self, tmp_path, monkeypatch
-    ):
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Simulate /host/home/alice and /host/home/bob + /host/root.
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         (tmp_path / "home" / "alice").mkdir(parents=True)
         (tmp_path / "home" / "bob").mkdir(parents=True)
         (tmp_path / "root").mkdir()
-        out = HostPaths.for_home("~/.config/systemd/user")
+        out = HostPaths(str(tmp_path)).for_home("~/.config/systemd/user")
         names = sorted(str(p) for p in out)
         assert any("home/alice/.config/systemd/user" in p for p in names)
         assert any("home/bob/.config/systemd/user" in p for p in names)
@@ -93,19 +100,17 @@ class TestHostPathsForHome:
         assert len(out) == 3
 
     def test_home_template_with_prefix_but_no_homes_returns_empty(
-        self, tmp_path, monkeypatch
-    ):
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # *** This is the exact condition that crashed launch_items. ***
         # HOST_PREFIX is set, but neither <prefix>/home nor <prefix>/root
         # exist (e.g. only /proc and /sys were bind-mounted). The
         # function must return [] — and callers must tolerate it.
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
-        assert HostPaths.for_home("~/.config/systemd/user") == []
+        assert HostPaths(str(tmp_path)).for_home("~/.config/systemd/user") == []
 
-    def test_only_root_home_present(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+    def test_only_root_home_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         (tmp_path / "root").mkdir()
-        out = HostPaths.for_home("~/.config/systemd/user")
+        out = HostPaths(str(tmp_path)).for_home("~/.config/systemd/user")
         assert len(out) == 1
         assert "root/.config/systemd/user" in str(out[0])
 
@@ -123,12 +128,11 @@ def _write_unit(prefix: Path, rel_dir: str, name: str, body: str) -> None:
 
 @_linux_only
 class TestLinuxLaunchItemsCollect:
-    def test_does_not_crash_when_no_home_or_root_mounted(self, tmp_path, monkeypatch):
+    def test_does_not_crash_when_no_home_or_root_mounted(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """THE regression test. Container mode with HOST_PREFIX set but
         no /host/home and no /host/root present. Pre-fix this raised
         IndexError and killed the collector; post-fix it must complete
         and still return the system units it can see."""
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         _write_unit(
             tmp_path,
             "/etc/systemd/system",
@@ -139,7 +143,9 @@ class TestLinuxLaunchItemsCollect:
         )
 
         # Must not raise.
-        rows = list(LinuxLaunchItemsCollector().collect())
+        rows = list(
+            LinuxLaunchItemsCollector.create(HostPaths(str(tmp_path))).collect()
+        )
 
         labels = [r["label"] for r in rows]
         assert "myapp" in labels
@@ -147,25 +153,27 @@ class TestLinuxLaunchItemsCollect:
         assert row["program"] == "/usr/bin/myapp --flag"
         assert row["run_at_load"] == 1  # has [Install] WantedBy
 
-    def test_collects_user_units_when_homes_present(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+    def test_collects_user_units_when_homes_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_unit(
             tmp_path,
             "home/alice/.config/systemd/user",
             "agent.service",
             "[Service]\nExecStart=/home/alice/bin/agent\n",
         )
-        rows = list(LinuxLaunchItemsCollector().collect())
+        rows = list(
+            LinuxLaunchItemsCollector.create(HostPaths(str(tmp_path))).collect()
+        )
         assert "agent" in [r["label"] for r in rows]
 
-    def test_empty_prefix_tree_yields_nothing_no_crash(self, tmp_path, monkeypatch):
+    def test_empty_prefix_tree_yields_nothing_no_crash(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # HOST_PREFIX points at an empty dir → no unit dirs exist → the
         # collector yields nothing and does not raise.
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
-        assert list(LinuxLaunchItemsCollector().collect()) == []
+        assert (
+            list(LinuxLaunchItemsCollector.create(HostPaths(str(tmp_path))).collect())
+            == []
+        )
 
-    def test_systemd_first_wins_dedup_across_dirs(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+    def test_systemd_first_wins_dedup_across_dirs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Same unit name in /etc (higher precedence) and /lib.
         _write_unit(
             tmp_path,
@@ -179,12 +187,12 @@ class TestLinuxLaunchItemsCollect:
             "dup.service",
             "[Service]\nExecStart=/lib/version\n",
         )
-        rows = [r for r in LinuxLaunchItemsCollector().collect() if r["label"] == "dup"]
+        collector = LinuxLaunchItemsCollector.create(HostPaths(str(tmp_path)))
+        rows = [r for r in collector.collect() if r["label"] == "dup"]
         assert len(rows) == 1
         assert rows[0]["program"] == "/etc/version"  # /etc wins
 
-    def test_reads_every_cron_source_after_the_units(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+    def test_reads_every_cron_source_after_the_units(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _write_unit(
             tmp_path, "/etc/systemd/system", "a.service", "[Service]\nExecStart=/a\n"
         )
@@ -194,7 +202,9 @@ class TestLinuxLaunchItemsCollect:
         _write_unit(
             tmp_path, "/var/spool/cron/crontabs", "alice", "*/5 * * * * /alice-job\n"
         )
-        rows = list(LinuxLaunchItemsCollector().collect())
+        rows = list(
+            LinuxLaunchItemsCollector.create(HostPaths(str(tmp_path))).collect()
+        )
         assert [(r["scope"], r["user_name"], r["program"]) for r in rows] == [
             ("system_service", None, "/a"),
             ("system_crontab", "root", "/sys-job"),
@@ -209,32 +219,32 @@ class TestLinuxLaunchItemsCollect:
 
 
 class TestUnitRow:
-    def test_parses_restart_always_as_keep_alive(self, tmp_path):
+    def test_parses_restart_always_as_keep_alive(self, tmp_path: Path) -> None:
         p = tmp_path / "x.service"
         p.write_text("[Service]\nExecStart=/bin/x\nRestart=always\n")
-        row = SystemdUnitReader.unit_row("system_service", p)
+        row = SystemdUnitReader(HostPaths("")).unit_row("system_service", p)
         assert row["keep_alive"] == 1
 
-    def test_restart_no_is_not_keep_alive(self, tmp_path):
+    def test_restart_no_is_not_keep_alive(self, tmp_path: Path) -> None:
         p = tmp_path / "x.service"
         p.write_text("[Service]\nExecStart=/bin/x\nRestart=no\n")
-        row = SystemdUnitReader.unit_row("system_service", p)
+        row = SystemdUnitReader(HostPaths("")).unit_row("system_service", p)
         assert row["keep_alive"] == 0
 
-    def test_timer_unit_uses_on_calendar_as_program(self, tmp_path):
+    def test_timer_unit_uses_on_calendar_as_program(self, tmp_path: Path) -> None:
         p = tmp_path / "x.timer"
         p.write_text("[Timer]\nOnCalendar=daily\n")
-        row = SystemdUnitReader.unit_row("system_timer", p)
+        row = SystemdUnitReader(HostPaths("")).unit_row("system_timer", p)
         assert row["program"] == "daily"
 
-    def test_malformed_unit_file_returns_none(self, tmp_path):
+    def test_malformed_unit_file_returns_none(self, tmp_path: Path) -> None:
         # configparser chokes on a line with no section / no '=' →
         # must be swallowed, not raised.
         p = tmp_path / "bad.service"
         p.write_text("this is not a valid ini file at all\n%%%\n")
         # Either None or a row — but never an exception.
         try:
-            row = SystemdUnitReader.unit_row("system_service", p)
+            row = SystemdUnitReader(HostPaths("")).unit_row("system_service", p)
         except Exception as exc:  # noqa: BLE001
             pytest.fail(f"unit_row raised on malformed input: {exc!r}")
         assert row is None or isinstance(row, dict)
@@ -246,28 +256,30 @@ class TestUnitRow:
 
 
 class TestCronRows:
-    def test_system_crontab_with_user_column(self, tmp_path):
+    def test_system_crontab_with_user_column(self, tmp_path: Path) -> None:
         p = tmp_path / "crontab"
         p.write_text("0 5 * * * root /usr/bin/backup.sh\n")
-        rows = list(CrontabReader.file_rows("system_crontab", p))
+        rows = list(CrontabReader(HostPaths("")).file_rows("system_crontab", p))
         assert len(rows) == 1
         assert rows[0]["user_name"] == "root"
         assert rows[0]["program"] == "/usr/bin/backup.sh"
 
-    def test_user_crontab_without_user_column(self, tmp_path):
+    def test_user_crontab_without_user_column(self, tmp_path: Path) -> None:
         p = tmp_path / "alice"
         p.write_text("*/5 * * * * /home/alice/poll.sh\n")
-        rows = list(CrontabReader.file_rows("user_crontab", p, owner="alice"))
+        rows = list(
+            CrontabReader(HostPaths("")).file_rows("user_crontab", p, owner="alice")
+        )
         assert rows[0]["user_name"] == "alice"
         assert rows[0]["program"] == "/home/alice/poll.sh"
 
-    def test_reboot_keyword_sets_run_at_load(self, tmp_path):
+    def test_reboot_keyword_sets_run_at_load(self, tmp_path: Path) -> None:
         p = tmp_path / "crontab"
         p.write_text("@reboot root /opt/startup\n")
-        rows = list(CrontabReader.file_rows("system_crontab", p))
+        rows = list(CrontabReader(HostPaths("")).file_rows("system_crontab", p))
         assert rows[0]["run_at_load"] == 1
 
-    def test_comments_blanks_and_env_lines_skipped(self, tmp_path):
+    def test_comments_blanks_and_env_lines_skipped(self, tmp_path: Path) -> None:
         p = tmp_path / "crontab"
         p.write_text(
             "# a comment\n"
@@ -276,26 +288,35 @@ class TestCronRows:
             "PATH=/usr/bin:/bin\n"
             "0 0 * * * root /real/job\n"
         )
-        rows = list(CrontabReader.file_rows("system_crontab", p))
+        rows = list(CrontabReader(HostPaths("")).file_rows("system_crontab", p))
         # Only the one real job — comment, blank, and 2 env lines dropped.
         assert len(rows) == 1
         assert rows[0]["program"] == "/real/job"
 
-    def test_env_line_long_enough_to_look_like_a_job_is_skipped(self, tmp_path):
+    def test_env_line_long_enough_to_look_like_a_job_is_skipped(self, tmp_path: Path) -> None:
         # Six tokens would pass the field count of a user crontab line.
         p = tmp_path / "alice"
         p.write_text('MAILTO="ops team at example dot com"\n')
-        assert list(CrontabReader.file_rows("user_crontab", p, owner="alice")) == []
+        assert (
+            list(
+                CrontabReader(HostPaths("")).file_rows("user_crontab", p, owner="alice")
+            )
+            == []
+        )
 
-    def test_truncated_line_is_skipped_not_crashed(self, tmp_path):
+    def test_truncated_line_is_skipped_not_crashed(self, tmp_path: Path) -> None:
         # A line with too few fields must be skipped, not IndexError.
         p = tmp_path / "crontab"
         p.write_text("0 5 *\n")  # only 3 of 5 schedule fields
-        rows = list(CrontabReader.file_rows("system_crontab", p))
+        rows = list(CrontabReader(HostPaths("")).file_rows("system_crontab", p))
         assert rows == []
 
-    def test_nonexistent_file_yields_nothing(self, tmp_path):
-        rows = list(CrontabReader.file_rows("system_crontab", tmp_path / "missing"))
+    def test_nonexistent_file_yields_nothing(self, tmp_path: Path) -> None:
+        rows = list(
+            CrontabReader(HostPaths("")).file_rows(
+                "system_crontab", tmp_path / "missing"
+            )
+        )
         assert rows == []
 
 
@@ -312,33 +333,29 @@ class TestLinuxAuthEventsJournalDir:
     def _directory_arg(self, cmd):
         return cmd[cmd.index("--directory") + 1] if "--directory" in cmd else None
 
-    def test_no_directory_flag_without_prefix(self, monkeypatch):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", "")
-        cmd = LinuxAuthEventsCollector()._cmd()
+    def test_no_directory_flag_without_prefix(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        cmd = LinuxAuthEventsCollector(HostJournal(HostPaths(""))).command()
         assert "--directory" not in cmd
 
-    def test_prefers_persistent_journal(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
+    def test_prefers_persistent_journal(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         persistent = tmp_path / "var" / "log" / "journal"
         runtime = tmp_path / "run" / "log" / "journal"
         persistent.mkdir(parents=True)
         runtime.mkdir(parents=True)
-        cmd = LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector(HostJournal(HostPaths(str(tmp_path)))).command()
         assert self._directory_arg(cmd) == str(persistent)
 
-    def test_falls_back_to_runtime_journal(self, monkeypatch, tmp_path):
+    def test_falls_back_to_runtime_journal(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         # The regression: only the volatile runtime journal exists.
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
         runtime = tmp_path / "run" / "log" / "journal"
         runtime.mkdir(parents=True)
-        cmd = LinuxAuthEventsCollector()._cmd()
+        cmd = LinuxAuthEventsCollector(HostJournal(HostPaths(str(tmp_path)))).command()
         assert self._directory_arg(cmd) == str(runtime)
 
     def test_no_directory_flag_when_no_host_journal_present(
-        self, monkeypatch, tmp_path
-    ):
-        monkeypatch.setattr(hm.constants, "HOST_PREFIX", str(tmp_path))
-        cmd = LinuxAuthEventsCollector()._cmd()
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cmd = LinuxAuthEventsCollector(HostJournal(HostPaths(str(tmp_path)))).command()
         assert "--directory" not in cmd
 
 
@@ -346,14 +363,14 @@ class TestLogTailCollector:
     """Generic journald + file log capture. Parsing is pure logic, unit-
     testable without journalctl or a real /var/log."""
 
-    def test_parse_journal_maps_fields(self):
-        from avai.host_monitor.collectors import LogTailCollector
+    def test_parse_journal_maps_fields(self) -> None:
+        from avai.host_monitor.collectors import JournalLine
 
-        row = LogTailCollector._parse_journal(
+        row = JournalLine(
             '{"MESSAGE":"Accepted password","PRIORITY":"6",'
             '"_SYSTEMD_UNIT":"ssh.service","_PID":"42",'
             '"__REALTIME_TIMESTAMP":"1700000000000000"}'
-        )
+        ).row()
         assert row["source"] == "journald"
         assert row["unit"] == "ssh.service"
         assert row["level"] == "info"
@@ -361,55 +378,58 @@ class TestLogTailCollector:
         assert row["message"] == "Accepted password"
         assert row["event_timestamp"].startswith("2023-11-14T")
 
-    def test_parse_journal_decodes_binary_message_array(self):
-        from avai.host_monitor.collectors import LogTailCollector
+    def test_parse_journal_decodes_binary_message_array(self) -> None:
+        from avai.host_monitor.collectors import JournalLine
 
         # journald encodes a non-UTF-8 MESSAGE as an array of byte values.
-        row = LogTailCollector._parse_journal('{"MESSAGE":[104,105],"PRIORITY":"3"}')
+        row = JournalLine('{"MESSAGE":[104,105],"PRIORITY":"3"}').row()
         assert row["message"] == "hi"
         assert row["level"] == "err"
 
-    def test_parse_journal_bad_line_is_none(self):
-        from avai.host_monitor.collectors import LogTailCollector
+    def test_parse_journal_bad_line_is_none(self) -> None:
+        from avai.host_monitor.collectors import JournalLine
 
-        assert LogTailCollector._parse_journal("not json") is None
+        assert JournalLine("not json").row() is None
 
-    def test_parse_journal_unknown_priority_has_no_level(self):
-        from avai.host_monitor.collectors import LogTailCollector
+    def test_parse_journal_unknown_priority_has_no_level(self) -> None:
+        from avai.host_monitor.collectors import JournalLine
 
-        assert LogTailCollector._parse_journal('{"MESSAGE":"x"}')["level"] is None
+        assert JournalLine('{"MESSAGE":"x"}').row()["level"] is None
 
-    def test_sniff_text_level(self):
-        from avai.host_monitor.collectors import _sniff_text_level
+    def test_sniff_text_level(self) -> None:
+        from avai.host_monitor.collectors import TextLevel
 
-        assert _sniff_text_level("dpkg: ERROR failed to configure") == "err"
-        assert _sniff_text_level("a warning was issued") == "warning"
-        assert _sniff_text_level("FATAL: disk full") == "crit"
-        assert _sniff_text_level("status installed openssl") is None
+        sniff = TextLevel().sniff
+        assert sniff("dpkg: ERROR failed to configure") == "err"
+        assert sniff("a warning was issued") == "warning"
+        assert sniff("FATAL: disk full") == "crit"
+        assert sniff("status installed openssl") is None
         # Regression: "error" inside an identifier is NOT an error — a dpkg
         # line about the libgpg-error-dev package used to be mis-tagged err,
         # which then dominated the log-summary "most errors" ranking.
-        assert _sniff_text_level("status unpacked libgpg-error-dev:amd64") is None
+        assert sniff("status unpacked libgpg-error-dev:amd64") is None
 
-    def test_tail_file_yields_last_lines_in_order(self, tmp_path):
-        from avai.host_monitor.collectors import LogTailCollector
+    def test_tail_file_yields_last_lines_in_order(self, tmp_path: Path) -> None:
+        from avai.host_monitor.collectors import LogFileTail
 
         f = tmp_path / "agent.log"
         f.write_text("\n".join(f"line {i}" for i in range(10)) + "\n")
-        rows = list(LogTailCollector(files=[str(f)])._tail_file(str(f)))
+        rows = list(LogFileTail(HostPaths("").translate(str(f))).rows())
         assert [r["unit"] for r in rows] == ["agent.log"] * 10
         assert rows[0]["source"] == str(f)
         assert rows[0]["message"] == "line 0"
         assert rows[-1]["message"] == "line 9"
 
-    def test_missing_file_is_skipped_silently(self):
-        from avai.host_monitor.collectors import LogTailCollector
+    def test_missing_file_is_skipped_silently(self) -> None:
+        from avai.host_monitor.collectors import LogFileTail
 
-        assert list(LogTailCollector()._tail_file("/no/such/path.log")) == []
+        assert (
+            list(LogFileTail(HostPaths("").translate("/no/such/path.log")).rows()) == []
+        )
 
     def test_collect_without_journalctl_reads_configured_files(
-        self, tmp_path, monkeypatch
-    ):
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import shutil
 
         import avai.host_monitor.collectors as col
@@ -417,7 +437,10 @@ class TestLogTailCollector:
         f = tmp_path / "x.log"
         f.write_text("boom ERROR happened\n")
         monkeypatch.setattr(shutil, "which", lambda _b: None)  # no journalctl
-        c = col.LogTailCollector(files=[str(f)])
+        journal = col.JournalReader(
+            HostIo(CommandRunner(), HostPaths("")), logging.getLogger("test")
+        )
+        c = col.LogTailCollector("", journal, (f,))
         rows = list(c.collect())
         assert len(rows) == 1
         assert rows[0]["level"] == "err"

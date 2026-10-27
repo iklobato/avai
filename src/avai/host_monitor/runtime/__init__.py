@@ -19,19 +19,29 @@ from .clock import Clock, FrozenClock
 from .coerce import Coerce
 from .command_runner import CommandRunner
 from .digest import Digest
+from .host_identity import HostIdentity
+from .host_io import HostIo
 from .host_paths import HostPaths
+from .mounts import (
+    HostPart,
+    HostRootfs,
+    HostUsage,
+    MountField,
+    MountTable,
+    StatvfsUsage,
+)
 from .probes import (
     DiskMetrics,
-    LaunchdServiceManager,
+    LaunchdServiceSupervisor,
     PortInspector,
     ProcessInspector,
     PsutilConnections,
     PsutilPortInspector,
     PsutilProcessInspector,
-    ServiceManager,
-    SystemdServiceManager,
+    ServiceSupervisor,
+    SystemdServiceSupervisor,
     SystemMetrics,
-    tri_or,
+    TriState,
 )
 from .row_source import CommandSnapshot, FileSnapshot, RowParser, RowSource
 from .sqlite_reader import ExternalSqliteReader
@@ -43,18 +53,26 @@ __all__ = [
     "Coerce",
     "CommandRunner",
     "Digest",
+    "HostIdentity",
+    "HostIo",
     "HostPaths",
     "PsutilConnections",
     "SystemMetrics",
     "DiskMetrics",
-    "ServiceManager",
-    "LaunchdServiceManager",
-    "SystemdServiceManager",
+    "ServiceSupervisor",
+    "LaunchdServiceSupervisor",
+    "SystemdServiceSupervisor",
     "PortInspector",
     "PsutilPortInspector",
     "ProcessInspector",
     "PsutilProcessInspector",
-    "tri_or",
+    "TriState",
+    "HostPart",
+    "HostRootfs",
+    "HostUsage",
+    "MountField",
+    "MountTable",
+    "StatvfsUsage",
     "CommandSnapshot",
     "FileSnapshot",
     "RowParser",

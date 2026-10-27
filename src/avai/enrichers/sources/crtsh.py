@@ -8,10 +8,12 @@ is mildly suspicious.
 
 https://crt.sh/
 """
+
 from __future__ import annotations
 
-from http import HTTPStatus
-from typing import ClassVar, Optional
+from typing import ClassVar
+
+from pydantic import TypeAdapter
 
 from avai.enrichers.base import (
     Enricher,
@@ -20,57 +22,81 @@ from avai.enrichers.base import (
     IndicatorType,
     VerdictHint,
 )
-from avai.enrichers.http import HttpClient
+from avai.enrichers.reply import ApiReply
+from avai.enrichers.http import RequestOptions
 
-_URL = "https://crt.sh/"
+URL = "https://crt.sh/"
+TIMEOUT_S = 12.0
+LISTED_ISSUERS = 3
+NO_CERTS_CONFIDENCE = 0.5
+CERTS_CONFIDENCE = 0.4
+
+
+class CertificateEntry(ApiReply):
+    """One certificate-transparency entry crt.sh lists for a domain."""
+
+    issuer_name: object = ""
+    not_before: object = None
 
 
 class CrtShEnricher(Enricher):
-    name           = "crtsh"
+    name = "crtsh"
     supports_types = frozenset({IndicatorType.DOMAIN})
-    requires_token: ClassVar[Optional[str]] = None
-    ttl_hours      = 24
+    requires_token: ClassVar[str | None] = None
+    ttl_hours = 24
+    rate_host = "crt.sh"
+    # crt.sh is famously slow / overloaded — go gentle.
+    rate_per_second = 0.5
 
-    def __init__(self, http: Optional[HttpClient] = None):
-        self._http = http or HttpClient()
-        # crt.sh is famously slow / overloaded — go gentle.
-        self._http.set_rate("crt.sh", 0.5)
-
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
-        resp = self._http.get(
-            _URL,
-            params={"q": indicator.value, "output": "json"},
-            timeout=12.0,
+    def fetch(self, indicator: Indicator) -> Evidence | None:
+        response = self._http.get(
+            URL,
+            RequestOptions(
+                params={"q": indicator.value, "output": "json"}, timeout=TIMEOUT_S
+            ),
         )
-        if resp.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         try:
-            entries = resp.json() or []
+            body = response.json() or []
         except ValueError:
             return None
-        count = len(entries)
-        if count == 0:
-            # Domain with no CT entries is unusual.
-            return Evidence(
-                source       = self.name,
-                indicator    = indicator,
-                verdict_hint = VerdictHint.SUSPICIOUS,
-                confidence   = 0.5,
-                summary      = "crt.sh: no certificates found for this domain",
-                details      = {"count": 0},
-            )
-        # Take earliest "not_before" as a domain-age proxy.
-        not_befores = [e.get("not_before") for e in entries if e.get("not_before")]
-        oldest = min(not_befores) if not_befores else ""
-        issuers = sorted({e.get("issuer_name", "") for e in entries})[:3]
+        entries = TypeAdapter(list[CertificateEntry]).validate_python(body)
+        if not entries:
+            return self._no_certificates(indicator)
+        return self._certificates(indicator, entries)
+
+    def _no_certificates(self, indicator: Indicator) -> Evidence:
+        # Domain with no CT entries is unusual.
         return Evidence(
-            source       = self.name,
-            indicator    = indicator,
-            verdict_hint = VerdictHint.UNKNOWN,
-            confidence   = 0.4,
-            summary      = (f"crt.sh: {count} cert(s), earliest={oldest}, "
-                            f"issuers={issuers}"),
-            details      = {"count": count,
-                            "earliest_not_before": oldest,
-                            "issuers": issuers},
+            source=self.name,
+            indicator=indicator,
+            verdict_hint=VerdictHint.SUSPICIOUS,
+            confidence=NO_CERTS_CONFIDENCE,
+            summary="crt.sh: no certificates found for this domain",
+            details={"count": 0},
         )
+
+    def _certificates(
+        self, indicator: Indicator, entries: list[CertificateEntry]
+    ) -> Evidence:
+        oldest = self._earliest_not_before(entries)
+        issuers = sorted({entry.issuer_name for entry in entries})
+        listed = issuers[:LISTED_ISSUERS]
+        return Evidence(
+            source=self.name,
+            indicator=indicator,
+            verdict_hint=VerdictHint.UNKNOWN,
+            confidence=CERTS_CONFIDENCE,
+            summary=f"crt.sh: {len(entries)} cert(s), earliest={oldest}, issuers={listed}",
+            details={
+                "count": len(entries),
+                "earliest_not_before": oldest,
+                "issuers": listed,
+            },
+        )
+
+    def _earliest_not_before(self, entries: list[CertificateEntry]) -> str:
+        """Earliest "not_before" across the certs, as a domain-age proxy."""
+        not_befores = [entry.not_before for entry in entries if entry.not_before]
+        return min(not_befores) if not_befores else ""

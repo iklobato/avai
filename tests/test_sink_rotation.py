@@ -9,6 +9,8 @@ deletes. Use a real on-disk SQLite so size measurements are real.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from sqlalchemy import create_engine, select, text
@@ -23,7 +25,8 @@ from avai.host_monitor.models import (
     StreamingSession,
 )
 from avai.host_monitor.runtime import Clock
-from avai.host_monitor.sink import _BUSY_TIMEOUT_MS
+from avai.host_monitor.db_bootstrap import SqlitePragmas
+from avai.host_monitor.sink_admin import DatabaseFile
 
 
 class TestConnectionPragmas:
@@ -33,12 +36,15 @@ class TestConnectionPragmas:
     pysqlite default was too short for write/checkpoint windows on a large DB,
     so the losing writer raised instead of waiting)."""
 
-    def test_busy_timeout_is_generous(self, file_sink):
+    def test_busy_timeout_is_generous(self, file_sink: Sink) -> None:
         with file_sink.engine.connect() as c:
-            assert c.execute(text("PRAGMA busy_timeout")).scalar() == _BUSY_TIMEOUT_MS
-        assert _BUSY_TIMEOUT_MS >= 30_000
+            assert (
+                c.execute(text("PRAGMA busy_timeout")).scalar()
+                == SqlitePragmas.BUSY_TIMEOUT_MS
+            )
+        assert SqlitePragmas.BUSY_TIMEOUT_MS >= 30_000
 
-    def test_wal_mode_enabled(self, file_sink):
+    def test_wal_mode_enabled(self, file_sink: Sink) -> None:
         with file_sink.engine.connect() as c:
             assert c.execute(text("PRAGMA journal_mode")).scalar() == "wal"
 
@@ -49,11 +55,11 @@ class TestConnectionPragmas:
 
 
 @pytest.fixture
-def file_sink(tmp_path):
+def file_sink(tmp_path: Path):
     """An on-disk Sink so size measurements actually mean something."""
     db = tmp_path / "test.db"
     engine = create_engine(f"sqlite:///{db}", connect_args={"check_same_thread": False})
-    s = Sink(engine)
+    s = Sink.create(engine)
     s.setup()
     return s
 
@@ -98,7 +104,7 @@ def _make_run(sink, started_at: datetime, finished_at: datetime, rows: int = 0):
 
 
 class TestDatabaseSizeBytes:
-    def test_grows_after_writes(self, file_sink):
+    def test_grows_after_writes(self, file_sink: Sink) -> None:
         before = file_sink.database_size_bytes()
         # Add a lot of rows so the on-disk file grows.
         ts = Clock().now_iso()
@@ -125,7 +131,7 @@ class TestDatabaseSizeBytes:
 
 
 class TestDatabaseLiveBytes:
-    def test_decreases_after_delete_and_pragma(self, file_sink):
+    def test_decreases_after_delete_and_pragma(self, file_sink: Sink) -> None:
         ts = Clock().now_iso()
         run_id, _ = file_sink.start_run("h", 5)
         file_sink.write(
@@ -148,9 +154,9 @@ class TestDatabaseLiveBytes:
         before = file_sink.database_live_bytes()
         # Wipe the rows; live_bytes is computed from
         # page_count - freelist_count which should drop immediately.
-        with Session(file_sink.engine) as s:
-            s.query(LaunchItemRow).delete()
-            s.commit()
+        with Session(file_sink.engine) as session:
+            session.query(LaunchItemRow).delete()
+            session.commit()
         after = file_sink.database_live_bytes()
         # The estimate should drop (post-vacuum approximation).
         assert after < before
@@ -162,18 +168,18 @@ class TestDatabaseLiveBytes:
 
 
 class TestPruneToSize:
-    def test_no_op_when_under_cap(self, file_sink):
+    def test_no_op_when_under_cap(self, file_sink: Sink) -> None:
         # Cap huge → never prunes. Returns stats indicating no work.
         stats = file_sink.prune_to_size(max_bytes=10_000_000)
         assert stats["runs_pruned"] == 0
         assert stats["events_pruned"] == 0
 
-    def test_no_op_when_no_runs(self, file_sink):
+    def test_no_op_when_no_runs(self, file_sink: Sink) -> None:
         # Empty DB with tight cap — must not crash.
         stats = file_sink.prune_to_size(max_bytes=1024)
         assert stats["runs_pruned"] == 0
 
-    def test_prunes_oldest_completed_runs_first(self, file_sink):
+    def test_prunes_oldest_completed_runs_first(self, file_sink: Sink) -> None:
         # Create three runs, oldest first, each ~50 rows.
         now = datetime.now(timezone.utc)
         old = _make_run(
@@ -188,8 +194,8 @@ class TestPruneToSize:
         # one run gets pruned. After the first prune the live size
         # should drop measurably.
         stats = file_sink.prune_to_size(max_bytes=1)
-        with Session(file_sink.engine) as s:
-            remaining = [r.run_id for r in s.execute(select(CollectionRun)).scalars()]
+        with Session(file_sink.engine) as session:
+            remaining = [r.run_id for r in session.execute(select(CollectionRun)).scalars()]
 
         # Some runs were pruned (stats has reasonable counts).
         assert stats["runs_pruned"] >= 1
@@ -244,7 +250,7 @@ def _streaming_session(sink, finished_at: str) -> str:
 
 
 class TestPruneToSizeBehaviour:
-    def test_zero_cap_means_unlimited(self, file_sink):
+    def test_zero_cap_means_unlimited(self, file_sink: Sink) -> None:
         _three_runs(file_sink)
 
         stats = file_sink.prune_to_size(max_bytes=0)
@@ -257,14 +263,14 @@ class TestPruneToSizeBehaviour:
         }
         assert _count(file_sink, CollectionRun) == 3
 
-    def test_under_the_cap_reports_the_current_size(self, file_sink):
+    def test_under_the_cap_reports_the_current_size(self, file_sink: Sink) -> None:
         size = file_sink.database_size_bytes()
 
         stats = file_sink.prune_to_size(max_bytes=size + 10_000_000)
 
         assert stats["bytes_before"] == stats["bytes_after"] == size
 
-    def test_always_keeps_the_newest_completed_run(self, file_sink):
+    def test_always_keeps_the_newest_completed_run(self, file_sink: Sink) -> None:
         _, (_old, _mid, newest) = _three_runs(file_sink)
 
         stats = file_sink.prune_to_size(max_bytes=1)
@@ -273,18 +279,18 @@ class TestPruneToSizeBehaviour:
         assert _count(file_sink, CollectionRun) == 1
         assert _count(file_sink, LaunchItemRow, LaunchItemRow.run_id == newest) == 50
 
-    def test_child_rows_and_errors_of_a_pruned_run_go_with_it(self, file_sink):
+    def test_child_rows_and_errors_of_a_pruned_run_go_with_it(self, file_sink: Sink) -> None:
         _, (old, _mid, _newest) = _three_runs(file_sink)
-        with Session(file_sink.engine) as s:
-            s.add(CollectorErrorRow(run_id=old, collector="x", occurred_at="t"))
-            s.commit()
+        with Session(file_sink.engine) as session:
+            session.add(CollectorErrorRow(run_id=old, collector="x", occurred_at="t"))
+            session.commit()
 
         file_sink.prune_to_size(max_bytes=1)
 
         assert _count(file_sink, LaunchItemRow, LaunchItemRow.run_id == old) == 0
         assert _count(file_sink, CollectorErrorRow) == 0
 
-    def test_an_unfinished_run_is_never_pruned(self, file_sink):
+    def test_an_unfinished_run_is_never_pruned(self, file_sink: Sink) -> None:
         _three_runs(file_sink)
         in_progress, _ = file_sink.start_run("h", 5)
 
@@ -294,7 +300,7 @@ class TestPruneToSizeBehaviour:
             _count(file_sink, CollectionRun, CollectionRun.run_id == in_progress) == 1
         )
 
-    def test_auth_events_older_than_the_oldest_kept_run_are_pruned(self, file_sink):
+    def test_auth_events_older_than_the_oldest_kept_run_are_pruned(self, file_sink: Sink) -> None:
         now, _ = _three_runs(file_sink)
         _auth_events(file_sink, _iso(now - timedelta(hours=5)), 30)
         _auth_events(file_sink, _iso(now), 4)
@@ -304,7 +310,7 @@ class TestPruneToSizeBehaviour:
         assert stats["events_pruned"] == 30
         assert _count(file_sink, AuthEventRow) == 4
 
-    def test_process_exec_events_are_pruned_like_auth_events(self, file_sink):
+    def test_process_exec_events_are_pruned_like_auth_events(self, file_sink: Sink) -> None:
         # Regression: exec events carry a streaming session's run_id, never a
         # CollectionRun's, so pruning by run_id never reached them and they
         # outlived their deleted session.
@@ -329,8 +335,8 @@ class TestPruneToSizeBehaviour:
         assert _count(file_sink, ProcessExecRow) == 3
 
     def test_streaming_sessions_that_ended_before_the_kept_runs_are_pruned(
-        self, file_sink
-    ):
+        self, file_sink: Sink
+    ) -> None:
         now, _ = _three_runs(file_sink)
         stale = _streaming_session(file_sink, _iso(now - timedelta(hours=5)))
         live = _streaming_session(file_sink, _iso(now))
@@ -342,7 +348,7 @@ class TestPruneToSizeBehaviour:
         )
         assert _count(file_sink, StreamingSession, StreamingSession.run_id == live) == 1
 
-    def test_the_file_shrinks_after_pruning(self, file_sink):
+    def test_the_file_shrinks_after_pruning(self, file_sink: Sink) -> None:
         _three_runs(file_sink)
 
         stats = file_sink.prune_to_size(max_bytes=1)
@@ -356,7 +362,7 @@ class TestPruneToSizeBehaviour:
 
 
 class TestTouchJudgments:
-    def test_marks_observed_hashes_as_seen_now(self, file_sink):
+    def test_marks_observed_hashes_as_seen_now(self, file_sink: Sink) -> None:
         from avai.host_monitor.enums import ThreatCategory, Verdict
         from avai.host_monitor.judge import Judgment
 
@@ -383,11 +389,50 @@ class TestTouchJudgments:
         # Read it back.
         from avai.host_monitor.models import Judgement
 
-        with Session(file_sink.engine) as s:
-            row = s.execute(
+        with Session(file_sink.engine) as session:
+            row = session.execute(
                 select(Judgement).where(Judgement.content_hash == h)
             ).scalar_one()
         assert row.last_seen_at == new_ts
 
-    def test_empty_hash_list_is_noop(self, file_sink):
+    def test_empty_hash_list_is_noop(self, file_sink: Sink) -> None:
         file_sink.touch_judgments("processes", [], Clock().now_iso())  # no crash
+
+
+class _PercentEncodedSqliteUrl:
+    """A sqlite url the way SQLAlchemy 2.1 prints it: the path is
+    percent-encoded in str(), while .database keeps the real path."""
+
+    def __init__(self, database: str) -> None:
+        self.database = database
+
+    def __str__(self) -> str:
+        return "sqlite:///" + quote(self.database)
+
+    def get_backend_name(self) -> str:
+        return "sqlite"
+
+
+class _EngineAt:
+    def __init__(self, url: _PercentEncodedSqliteUrl) -> None:
+        self.url = url
+
+
+class TestDatabaseFileSize:
+    DB_BYTES = 10
+    WAL_BYTES = 5
+
+    def test_reads_the_real_path_when_the_url_is_percent_encoded(
+        self, tmp_path: Path
+    ) -> None:
+        db = tmp_path / "a#b.db"
+        db.write_bytes(b"x" * self.DB_BYTES)
+        (tmp_path / "a#b.db-wal").write_bytes(b"x" * self.WAL_BYTES)
+        engine = _EngineAt(_PercentEncodedSqliteUrl(str(db)))
+
+        assert DatabaseFile(engine).size_bytes() == self.DB_BYTES + self.WAL_BYTES
+
+    def test_in_memory_database_has_no_size(self) -> None:
+        engine = create_engine("sqlite://")
+
+        assert DatabaseFile(engine).size_bytes() == 0

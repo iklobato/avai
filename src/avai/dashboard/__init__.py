@@ -7,13 +7,13 @@ thread. Everything else is imported from its own submodule.
 
 from __future__ import annotations
 
-from .app import create_app
+from .app import DashboardApp
 from .config import DashboardConfig
-from .serve import _ensure_db_exists, main
+from .serve import DashboardCli, DashboardSchema
 
 __all__ = [
+    "DashboardApp",
+    "DashboardCli",
     "DashboardConfig",
-    "_ensure_db_exists",
-    "create_app",
-    "main",
+    "DashboardSchema",
 ]

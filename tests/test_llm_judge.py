@@ -8,15 +8,24 @@ The completion client is replaced by a fake that returns a canned
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from avai.host_monitor.enums import ThreatCategory, Verdict
-from avai.host_monitor.judge import LlmJudge
-from avai.host_monitor.llm import CompletionRequest
+from avai.host_monitor.judge import JudgeSettings, LlmJudge
+from avai.host_monitor.llm import (
+    Completion,
+    CompletionClient,
+    CompletionError,
+    CompletionRequest,
+    LlmSession,
+    TokenUsage,
+)
 from avai.host_monitor.prompts import Prompts
 
 
-class _FakeClient:
+class _FakeClient(CompletionClient):
     """Stand-in for CompletionClient. Records every call; returns a
     configured parsed dict (the framework normally receives this from
     JSON-mode or tool_use)."""
@@ -28,14 +37,15 @@ class _FakeClient:
         self._parsed = parsed
         self._queue = list(parsed_per_call or [])
         self._raise = raise_exc
+        self.usage: TokenUsage | None = None
 
     def complete_structured(self, request):
         self.calls.append(request)
         if self._raise is not None:
             raise self._raise
         if self._queue:
-            return self._queue.pop(0)
-        return self._parsed or {"judgments": []}
+            return Completion(self._queue.pop(0), self.usage)
+        return Completion(self._parsed or {"judgments": []}, self.usage)
 
 
 @pytest.fixture
@@ -47,15 +57,12 @@ def prompts():
     )
 
 
-def _judge(prompts, client=None, **kwargs):
+def _judge(prompts, client=None):
     """Build an LlmJudge wired to ``client`` — no real LLM, no network."""
-    return LlmJudge(
-        prompts=prompts,
-        model="test-model",
-        batch_size=20,
-        max_per_collector=0,  # no cap
-        client=client or _FakeClient(),
-        **kwargs,
+    return LlmJudge.create(
+        prompts,
+        LlmSession(client or _FakeClient(), logging.getLogger("test")),
+        JudgeSettings("test-model", 20, 0),
     )
 
 
@@ -65,7 +72,7 @@ def _judge(prompts, client=None, **kwargs):
 
 
 class TestHappyPath:
-    def test_returns_judgments_for_each_index(self, prompts):
+    def test_returns_judgments_for_each_index(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -101,13 +108,13 @@ class TestHappyPath:
         assert by_h["a"].verdict is Verdict.MALICIOUS
         assert by_h["b"].verdict is Verdict.BENIGN
 
-    def test_empty_input_returns_empty_without_calling_llm(self, prompts):
+    def test_empty_input_returns_empty_without_calling_llm(self, prompts: Prompts) -> None:
         client = _FakeClient()
         judge = _judge(prompts, client)
         assert judge.judge("processes", "", []) == []
         assert client.calls == []
 
-    def test_call_cost_attributed_evenly_across_batch(self, prompts):
+    def test_call_cost_attributed_evenly_across_batch(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -132,14 +139,14 @@ class TestHappyPath:
         )
         # default tier ($1/M in, $5/M out): 1000 in ($0.001) + 200 out
         # ($0.001) = $0.002, split across 2 entries → $0.001 each.
-        client.last_usage = {"input": 1000, "output": 200}
+        client.usage = TokenUsage(1000, 200)
         judge = _judge(prompts, client)  # model "test-model" → default tier
         result = judge.judge(
             "processes", "", [{"content_hash": "a"}, {"content_hash": "b"}]
         )
         assert all(j.cost_usd == pytest.approx(0.001) for j in result)
 
-    def test_cost_zero_when_usage_unavailable(self, prompts):
+    def test_cost_zero_when_usage_unavailable(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -153,12 +160,12 @@ class TestHappyPath:
                     },
                 ]
             }
-        )  # _FakeClient never sets last_usage
+        )  # _FakeClient reports no usage unless told to
         judge = _judge(prompts, client)
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].cost_usd == 0.0
 
-    def test_user_template_is_substituted(self, prompts):
+    def test_user_template_is_substituted(self, prompts: Prompts) -> None:
         client = _FakeClient()
         judge = _judge(prompts, client)
         judge.judge("processes", "be careful", [{"content_hash": "a", "name": "x"}])
@@ -175,12 +182,12 @@ class TestHappyPath:
 
 
 class TestParsingDefensiveness:
-    def test_missing_judgments_key_returns_empty(self, prompts):
+    def test_missing_judgments_key_returns_empty(self, prompts: Prompts) -> None:
         client = _FakeClient(parsed={})  # no 'judgments'
         judge = _judge(prompts, client)
         assert judge.judge("processes", "", [{"content_hash": "a"}]) == []
 
-    def test_judgment_index_out_of_range_is_skipped(self, prompts):
+    def test_judgment_index_out_of_range_is_skipped(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -200,7 +207,7 @@ class TestParsingDefensiveness:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result == []
 
-    def test_judgment_index_negative_is_skipped(self, prompts):
+    def test_judgment_index_negative_is_skipped(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -218,7 +225,7 @@ class TestParsingDefensiveness:
         judge = _judge(prompts, client)
         assert judge.judge("processes", "", [{"content_hash": "a"}]) == []
 
-    def test_judgment_with_non_integer_index_is_skipped(self, prompts):
+    def test_judgment_with_non_integer_index_is_skipped(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -236,7 +243,7 @@ class TestParsingDefensiveness:
         judge = _judge(prompts, client)
         assert judge.judge("processes", "", [{"content_hash": "a"}]) == []
 
-    def test_invalid_verdict_value_falls_back_to_unknown(self, prompts):
+    def test_invalid_verdict_value_falls_back_to_unknown(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -255,7 +262,7 @@ class TestParsingDefensiveness:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].verdict is Verdict.UNKNOWN
 
-    def test_verdict_and_category_are_case_normalized(self, prompts):
+    def test_verdict_and_category_are_case_normalized(self, prompts: Prompts) -> None:
         # Regression: under litellm JSON-mode the enum isn't hard-enforced,
         # so a model returning "Malicious" / " MALICIOUS " used to collapse
         # to UNKNOWN. Values are normalized (strip+lower) before coercion.
@@ -278,7 +285,7 @@ class TestParsingDefensiveness:
         assert result[0].verdict is Verdict.MALICIOUS
         assert result[0].category is ThreatCategory.COMMAND_AND_CONTROL
 
-    def test_invalid_category_value_falls_back_to_none(self, prompts):
+    def test_invalid_category_value_falls_back_to_none(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -297,7 +304,7 @@ class TestParsingDefensiveness:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].category is ThreatCategory.NONE
 
-    def test_non_numeric_confidence_defaults_to_zero(self, prompts):
+    def test_non_numeric_confidence_defaults_to_zero(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -316,7 +323,7 @@ class TestParsingDefensiveness:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].confidence == 0.0
 
-    def test_confidence_is_clamped_to_zero_one(self, prompts):
+    def test_confidence_is_clamped_to_zero_one(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -346,7 +353,7 @@ class TestParsingDefensiveness:
         assert result[0].confidence == 1.0
         assert result[1].confidence == 0.0
 
-    def test_reasoning_is_truncated_to_500_chars(self, prompts):
+    def test_reasoning_is_truncated_to_500_chars(self, prompts: Prompts) -> None:
         long = "x" * 1000
         client = _FakeClient(
             parsed={
@@ -373,52 +380,52 @@ class TestParsingDefensiveness:
 
 
 class TestBatching:
-    def test_splits_into_batches_of_batch_size(self, prompts):
+    def test_splits_into_batches_of_batch_size(self, prompts: Prompts) -> None:
         client = _FakeClient(parsed={"judgments": []})
-        judge = LlmJudge(
-            prompts=prompts, model="m", batch_size=3, max_per_collector=0, client=client
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 3, 0),
         )
         entries = [{"content_hash": f"h{i}", "name": str(i)} for i in range(10)]
         judge.judge("processes", "", entries)
         # 10 items / 3 batch size → 4 calls (3+3+3+1).
         assert len(client.calls) == 4
 
-    def test_caps_entries_to_max_per_collector(self, prompts):
+    def test_caps_entries_to_max_per_collector(self, prompts: Prompts) -> None:
         client = _FakeClient(parsed={"judgments": []})
-        judge = LlmJudge(
-            prompts=prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=3,
-            client=client,
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 3),
         )
         entries = [{"content_hash": f"h{i}"} for i in range(10)]
         judge.judge("processes", "", entries)
         # All 3 capped entries fit in one batch.
         assert len(client.calls) == 1
 
-    def test_zero_batch_size_does_not_crash_cycle(self, prompts):
+    def test_zero_batch_size_does_not_crash_cycle(self, prompts: Prompts) -> None:
         # Regression: batch_size=0 → range(0,n,0) raised ValueError from
         # the _batches generator, escaping the per-batch try/except and
         # breaking the cycle. __init__ now clamps to >=1.
         client = _FakeClient(parsed={"judgments": []})
-        judge = LlmJudge(
-            prompts=prompts, model="m", batch_size=0, max_per_collector=0, client=client
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 0, 0),
         )
         assert judge.batch_size == 1
         entries = [{"content_hash": f"h{i}"} for i in range(3)]
         judge.judge("processes", "", entries)  # must not raise
         assert len(client.calls) == 3  # one per entry at batch_size 1
 
-    def test_negative_batch_size_still_judges(self, prompts):
+    def test_negative_batch_size_still_judges(self, prompts: Prompts) -> None:
         # Negative used to yield zero batches → silently judged nothing.
         client = _FakeClient(parsed={"judgments": []})
-        judge = LlmJudge(
-            prompts=prompts,
-            model="m",
-            batch_size=-5,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", -5, 0),
         )
         assert judge.batch_size == 1
         judge.judge("processes", "", [{"content_hash": "a"}])
@@ -431,11 +438,11 @@ class TestBatching:
 
 
 class TestFailureIsolation:
-    def test_one_failing_batch_does_not_abort_later_batches(self, prompts):
+    def test_one_failing_batch_does_not_abort_later_batches(self, prompts: Prompts) -> None:
         # First call raises, second returns one judgment. The judge
         # must keep going past the first failure.
         results_per_call = [
-            Exception("boom"),
+            CompletionError("boom"),
             {
                 "judgments": [
                     {
@@ -456,11 +463,17 @@ class TestFailureIsolation:
             r = results_per_call.pop(0)
             if isinstance(r, Exception):
                 raise r
-            return r
+            return Completion(r, None)
 
-        client = type("C", (), {"complete_structured": staticmethod(fake_complete)})()
-        judge = LlmJudge(
-            prompts=prompts, model="m", batch_size=1, max_per_collector=0, client=client
+        client = type(
+            "C",
+            (CompletionClient,),
+            {"complete_structured": staticmethod(fake_complete)},
+        )()
+        judge = LlmJudge.create(
+            prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 1, 0),
         )
         entries = [{"content_hash": "a"}, {"content_hash": "b"}]
         result = judge.judge("processes", "", entries)

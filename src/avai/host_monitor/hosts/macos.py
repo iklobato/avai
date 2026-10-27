@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -9,34 +11,30 @@ from ..collectors import (
     AuthEventsCollector,
     BluetoothCollector,
     BrowserExtensionsCollector,
-    DiskUsageCollector,
     DnsQueriesCollector,
     FileIntegrityCollector,
     FileScanCollector,
-    HostResourcesCollector,
-    HostsFileCollector,
     InstalledAppsCollector,
     KernelExtensionsCollector,
     LaunchItemsCollector,
-    ListeningPortsCollector,
     MacosProcessExecCollector,
     MdmProfilesCollector,
-    MountsCollector,
-    NetworkConnectionsCollector,
     NetworkFlowsCollector,
-    NetworkInterfacesCollector,
-    PrivilegeConfigCollector,
-    ProcessCollector,
+    ProcessConnectionResolver,
     QuarantineCollector,
     SetuidFilesCollector,
     SnapshotCollector,
-    SshAuthorizedKeysCollector,
     StreamingCollector,
     SystemExtensionsCollector,
     SystemIntegrityCollector,
+    TcpdumpCapture,
     UsbDevicesCollector,
     WifiCollector,
+    YaraRulesDir,
+    YaraRulesetCompiler,
 )
+from ..constants import BROWSER_PROFILES
+from ..enums import PrivilegeKind
 from ..exposure_collectors import (
     LoginSessionsCollector,
     MacosCertParser,
@@ -59,13 +57,17 @@ from ..net_collectors import (
     NdpNeighborsCollector,
     RoutesCollector,
 )
-from ..persistence_collectors import (
-    EnvValueParser,
-    InjectionEnvCollector,
-    SshKnownHostsCollector,
-)
+from ..persistence_collectors import EnvValueParser, InjectionEnvCollector
 from ..prompts import Prompts
-from ..runtime import CommandRunner, CommandSnapshot
+from ..runtime import (
+    Clock,
+    CommandRunner,
+    CommandSnapshot,
+    HostIo,
+    HostPaths,
+    PsutilConnections,
+)
+from .portable import AccountCollectors, PortableCollectors
 
 
 class MacOSFilesystemLayout:
@@ -82,7 +84,7 @@ class MacOSFilesystemLayout:
     )
 
     def privileged_bin_dirs(self) -> list[Path]:
-        return [Path(d) for d in self._BIN_DIRS]
+        return [Path(directory) for directory in self._BIN_DIRS]
 
     def app_executables(self) -> list[Path]:
         # The bundle's main binary lives at <App>.app/Contents/MacOS/*.
@@ -91,34 +93,12 @@ class MacOSFilesystemLayout:
         app_roots = [Path("/Applications")] + [
             home / "Applications" for home in self.home_dirs()
         ]
-        out: list[Path] = []
-        for root in app_roots:
-            try:
-                # is_dir() re-raises EACCES (e.g. /var/root/Applications when
-                # not root), so it must sit inside the guard, not before it.
-                if not root.is_dir():
-                    continue
-                out += [p for p in root.glob("*.app/Contents/MacOS/*") if p.is_file()]
-            except OSError:
-                continue
-        return out
+        return [path for root in app_roots for path in self._bundle_binaries(root)]
 
     def home_dirs(self) -> list[Path]:
-        homes: list[Path] = []
-        users = Path("/Users")
-        if users.is_dir():
-            try:
-                homes += [
-                    d
-                    for d in users.iterdir()
-                    if d.is_dir() and not d.name.startswith(".")
-                ]
-            except OSError:
-                pass
         root = Path("/var/root")
-        if root.is_dir():
-            homes.append(root)
-        return homes
+        roots = [root] if root.is_dir() else []
+        return self._user_homes(Path("/Users")) + roots
 
     def hosts_file(self) -> Path:
         return Path("/etc/hosts")
@@ -133,6 +113,30 @@ class MacOSFilesystemLayout:
         # macOS auto-selects the 'pktap' aggregating pseudo-device; '-k I'
         # prints the real per-packet interface as the leading token.
         return ["-k", "I"]
+
+    def _bundle_binaries(self, root: Path) -> list[Path]:
+        # is_dir() re-raises EACCES (e.g. /var/root/Applications when not
+        # root), so it must sit inside the guard, not before it.
+        try:
+            if not root.is_dir():
+                return []
+            return [
+                path for path in root.glob("*.app/Contents/MacOS/*") if path.is_file()
+            ]
+        except OSError:
+            return []
+
+    def _user_homes(self, users: Path) -> list[Path]:
+        try:
+            if not users.is_dir():
+                return []
+            return [
+                entry
+                for entry in users.iterdir()
+                if entry.is_dir() and not entry.name.startswith(".")
+            ]
+        except OSError:
+            return []
 
 
 class MacOSPrivilegedAccounts:
@@ -151,7 +155,7 @@ class MacOSPrivilegedAccounts:
             members = out.split(":", 1)[1].strip() if ":" in out else out.strip()
             if members:
                 yield {
-                    "kind": "group",
+                    "kind": PrivilegeKind.GROUP.value,
                     "subject": gname,
                     "detail": members,
                     "source_path": "dscl:/Groups",
@@ -163,7 +167,7 @@ class MacOSPrivilegedAccounts:
             cols = line.split()
             if len(cols) > 1 and cols[-1] == "0":
                 yield {
-                    "kind": "account",
+                    "kind": PrivilegeKind.ACCOUNT.value,
                     "subject": cols[0],
                     "detail": "uid=0",
                     "source_path": "dscl:/Users",
@@ -174,121 +178,127 @@ class MacOSHost:
     """Composition root for macOS: wires capability adapters into the
     OS-agnostic collectors and assembles the macOS collector set."""
 
-    def __init__(self, runner: CommandRunner | None = None) -> None:
-        self._runner = runner or CommandRunner()
-        self._fs = MacOSFilesystemLayout()
-        self._accounts = MacOSPrivilegedAccounts(self._runner)
+    SYSTEM_CERTS = (
+        "security",
+        "find-certificate",
+        "-a",
+        "-Z",
+        "/Library/Keychains/System.keychain",
+    )
+
+    def __init__(self, io: HostIo, logger: logging.Logger) -> None:
+        self._io = io
+        self._logger = logger
+
+    @classmethod
+    def create(cls, logger: logging.Logger) -> MacOSHost:
+        return cls(HostIo(CommandRunner(), HostPaths.from_environ(os.environ)), logger)
 
     def snapshot_collectors(self, prompts: Prompts) -> list[SnapshotCollector]:
-        h = prompts.hint_for
-        iface = self._fs.tcpdump_interface_args()
+        fs = MacOSFilesystemLayout()
+        accounts = MacOSPrivilegedAccounts(self._io.runner)
         return [
-            ProcessCollector(judge_hints=h("processes")),
-            NetworkConnectionsCollector(judge_hints=h("network_connections")),
-            ListeningPortsCollector(judge_hints=h("listening_ports")),
-            NetworkFlowsCollector(
-                judge_hints=h("network_flows"), iface_args=iface, runner=self._runner
-            ),
-            DnsQueriesCollector(
-                judge_hints=h("dns_queries"), iface_args=iface, runner=self._runner
-            ),
-            NetworkInterfacesCollector(judge_hints=h("network_interfaces")),
-            HostResourcesCollector(judge_hints=h("host_resources")),
-            DiskUsageCollector(judge_hints=h("disk_usage")),
-            UsbDevicesCollector(judge_hints=h("usb_devices"), runner=self._runner),
-            BluetoothCollector(judge_hints=h("bluetooth_devices"), runner=self._runner),
-            WifiCollector(judge_hints=h("wifi_state"), runner=self._runner),
-            LaunchItemsCollector(judge_hints=h("launch_items")),
-            QuarantineCollector(judge_hints=h("quarantine_events")),
-            BrowserExtensionsCollector(judge_hints=h("browser_extensions")),
-            SystemIntegrityCollector(
-                judge_hints=h("system_integrity"), runner=self._runner
-            ),
-            FileIntegrityCollector(judge_hints=h("file_integrity")),
-            FileScanCollector(judge_hints=h("file_scan"), fs=self._fs),
-            InstalledAppsCollector(judge_hints=h("installed_apps")),
-            MountsCollector(judge_hints=h("mounts")),
-            SetuidFilesCollector(judge_hints=h("setuid_files"), fs=self._fs),
-            MdmProfilesCollector(judge_hints=h("mdm_profiles"), runner=self._runner),
-            KernelExtensionsCollector(
-                judge_hints=h("kernel_extensions"), runner=self._runner
-            ),
-            SystemExtensionsCollector(judge_hints=h("system_extensions")),
-            SshAuthorizedKeysCollector(
-                judge_hints=h("ssh_authorized_keys"), fs=self._fs
-            ),
-            HostsFileCollector(judge_hints=h("hosts_file"), fs=self._fs),
-            PrivilegeConfigCollector(
-                judge_hints=h("privilege_config"),
-                fs=self._fs,
-                accounts=self._accounts,
-            ),
-            # Network neighborhood & topology
-            ArpTableCollector(
-                CommandSnapshot(self._runner, ["arp", "-an"], MacosArpParser()),
-                judge_hints=h("arp_table"),
-            ),
-            NdpNeighborsCollector(
-                CommandSnapshot(self._runner, ["ndp", "-an"], MacosNdpParser()),
-                judge_hints=h("ndp_neighbors"),
-            ),
-            RoutesCollector(
-                CommandSnapshot(self._runner, ["netstat", "-rn"], MacosRouteParser()),
-                judge_hints=h("routes"),
-            ),
-            DnsResolversCollector(
-                CommandSnapshot(self._runner, ["scutil", "--dns"], MacosDnsParser()),
-                judge_hints=h("dns_resolvers"),
-            ),
-            # Exposure & MITM surface
-            ProxyConfigCollector(
-                CommandSnapshot(
-                    self._runner, ["scutil", "--proxy"], MacosProxyParser()
-                ),
-                judge_hints=h("proxy_config"),
-            ),
-            LoginSessionsCollector(
-                CommandSnapshot(self._runner, ["who"], WhoParser()),
-                judge_hints=h("login_sessions"),
-            ),
-            NetworkSharesCollector(
-                CommandSnapshot(self._runner, ["mount"], MacosMountSharesParser()),
-                judge_hints=h("network_shares"),
-            ),
-            PromiscuousInterfacesCollector(
-                CommandSnapshot(self._runner, ["ifconfig"], MacosPromiscParser()),
-                judge_hints=h("promiscuous_ifaces"),
-            ),
-            TrustedRootsCollector(
-                CommandSnapshot(
-                    self._runner,
-                    [
-                        "security",
-                        "find-certificate",
-                        "-a",
-                        "-Z",
-                        "/Library/Keychains/System.keychain",
-                    ],
-                    MacosCertParser(),
-                ),
-                judge_hints=h("trusted_roots"),
-            ),
-            # Persistence / injection (kernel_modules composed out — the
-            # kernel_extensions collector covers loaded kernel code on macOS).
-            InjectionEnvCollector(
-                CommandSnapshot(
-                    self._runner,
-                    ["launchctl", "getenv", "DYLD_INSERT_LIBRARIES"],
-                    EnvValueParser("DYLD_INSERT_LIBRARIES", "launchd"),
-                ),
-                judge_hints=h("injection_env"),
-            ),
-            SshKnownHostsCollector(judge_hints=h("ssh_known_hosts"), fs=self._fs),
+            *PortableCollectors(self._logger, self._io.paths).build(prompts),
+            *AccountCollectors(fs, accounts).build(prompts),
+            *self._capture(prompts, fs),
+            *self._devices(prompts),
+            *self._software(prompts),
+            *self._files(prompts, fs),
+            *self._neighborhood(prompts),
+            *self._exposure(prompts),
+            *self._persistence(prompts),
         ]
 
     def streaming_collectors(self, prompts: Prompts) -> list[StreamingCollector]:
-        h = prompts.hint_for
+        hint = prompts.hint_for
         return [
-            AuthEventsCollector(judge_hints=h("auth_events")),
-            MacosProcessExecCollector(judge_hints=h("process_exec_events")),
+            AuthEventsCollector(hint("auth_events")),
+            MacosProcessExecCollector(hint("process_exec_events")),
         ]
+
+    def _capture(
+        self, prompts: Prompts, fs: MacOSFilesystemLayout
+    ) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        iface_args = tuple(fs.tcpdump_interface_args())
+        capture = TcpdumpCapture(self._io.runner, iface_args, Clock())
+        resolver = ProcessConnectionResolver(PsutilConnections())
+        return [
+            NetworkFlowsCollector(capture, resolver, hint("network_flows")),
+            DnsQueriesCollector(capture, resolver, hint("dns_queries")),
+        ]
+
+    def _devices(self, prompts: Prompts) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        return [
+            UsbDevicesCollector(self._io.runner, hint("usb_devices")),
+            BluetoothCollector(self._io.runner, hint("bluetooth_devices")),
+            WifiCollector(self._io.runner, hint("wifi_state")),
+            SystemIntegrityCollector.create(self._io, hint("system_integrity")),
+            MdmProfilesCollector(self._io.runner, hint("mdm_profiles")),
+            KernelExtensionsCollector(self._io.runner, hint("kernel_extensions")),
+            SystemExtensionsCollector(self._io.paths, hint("system_extensions")),
+        ]
+
+    def _software(self, prompts: Prompts) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        return [
+            LaunchItemsCollector(self._io.paths, hint("launch_items")),
+            QuarantineCollector(hint("quarantine_events")),
+            BrowserExtensionsCollector.create(
+                dict(BROWSER_PROFILES), hint("browser_extensions")
+            ),
+            InstalledAppsCollector(self._io.paths, hint("installed_apps")),
+        ]
+
+    def _files(
+        self, prompts: Prompts, fs: MacOSFilesystemLayout
+    ) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        rules_dir = YaraRulesDir().from_environ(os.environ)
+        compiler = YaraRulesetCompiler(rules_dir, self._logger)
+        return [
+            FileIntegrityCollector(self._io.paths, judge_hints=hint("file_integrity")),
+            FileScanCollector.create(fs, compiler, hint("file_scan")),
+            SetuidFilesCollector(fs, hint("setuid_files")),
+        ]
+
+    def _neighborhood(self, prompts: Prompts) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        runner = self._io.runner
+        arp = CommandSnapshot(runner, ["arp", "-an"], MacosArpParser())
+        ndp = CommandSnapshot(runner, ["ndp", "-an"], MacosNdpParser())
+        routes = CommandSnapshot(runner, ["netstat", "-rn"], MacosRouteParser())
+        resolvers = CommandSnapshot(runner, ["scutil", "--dns"], MacosDnsParser())
+        return [
+            ArpTableCollector(arp, hint("arp_table")),
+            NdpNeighborsCollector(ndp, hint("ndp_neighbors")),
+            RoutesCollector(routes, hint("routes")),
+            DnsResolversCollector(resolvers, hint("dns_resolvers")),
+        ]
+
+    def _exposure(self, prompts: Prompts) -> list[SnapshotCollector]:
+        hint = prompts.hint_for
+        runner = self._io.runner
+        proxy = CommandSnapshot(runner, ["scutil", "--proxy"], MacosProxyParser())
+        sessions = CommandSnapshot(runner, ["who"], WhoParser())
+        shares = CommandSnapshot(runner, ["mount"], MacosMountSharesParser())
+        promisc = CommandSnapshot(runner, ["ifconfig"], MacosPromiscParser())
+        roots = CommandSnapshot(runner, list(self.SYSTEM_CERTS), MacosCertParser())
+        return [
+            ProxyConfigCollector(proxy, hint("proxy_config")),
+            LoginSessionsCollector(sessions, hint("login_sessions")),
+            NetworkSharesCollector(shares, hint("network_shares")),
+            PromiscuousInterfacesCollector(promisc, hint("promiscuous_ifaces")),
+            TrustedRootsCollector(roots, hint("trusted_roots")),
+        ]
+
+    def _persistence(self, prompts: Prompts) -> list[SnapshotCollector]:
+        # kernel_modules is composed out: the kernel_extensions collector
+        # covers loaded kernel code on macOS.
+        dyld = CommandSnapshot(
+            self._io.runner,
+            ["launchctl", "getenv", "DYLD_INSERT_LIBRARIES"],
+            EnvValueParser("DYLD_INSERT_LIBRARIES", "launchd"),
+        )
+        return [InjectionEnvCollector(dyld, prompts.hint_for("injection_env"))]

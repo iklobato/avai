@@ -19,10 +19,11 @@ restart loop never branches on a status field.
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+import logging
+import threading
+from typing import Protocol
 
 from .constants import (
-    LOG,
     STREAM_CRASH_ESCALATE_THRESHOLD,
     STREAM_RESTART_BACKOFF_FACTOR,
     STREAM_RESTART_BASE_BACKOFF_S,
@@ -78,7 +79,6 @@ class Crashed:
 # --- Restart timing --------------------------------------------------------
 
 
-@runtime_checkable
 class BackoffPolicy(Protocol):
     def delay_for(self, attempt: int) -> float:
         """Seconds to wait before restart ``attempt`` (1-based)."""
@@ -97,12 +97,20 @@ class ExponentialBackoff:
         self._max = max_s
         self._factor = factor
 
+    @classmethod
+    def standard(cls) -> ExponentialBackoff:
+        """Production backoff wired from the tuned constants."""
+        return cls(
+            STREAM_RESTART_BASE_BACKOFF_S,
+            STREAM_RESTART_MAX_BACKOFF_S,
+            STREAM_RESTART_BACKOFF_FACTOR,
+        )
+
     def delay_for(self, attempt: int) -> float:
         raw = self._base * (self._factor ** max(0, attempt - 1))
         return min(raw, self._max)
 
 
-@runtime_checkable
 class Sleeper(Protocol):
     def sleep(self, seconds: float) -> None: ...
 
@@ -111,7 +119,7 @@ class InterruptibleSleep:
     """Waits on a stop ``Event`` so a pending backoff aborts the moment
     shutdown is requested instead of blocking for the full delay."""
 
-    def __init__(self, stop_event) -> None:
+    def __init__(self, stop_event: threading.Event) -> None:
         self._stop = stop_event
 
     def sleep(self, seconds: float) -> None:
@@ -128,7 +136,13 @@ class SupervisionListener(Protocol):
 
     def report_healthy(self, collector: str) -> None: ...
 
+    def report_session_start(self, collector: str, run_id: str) -> None: ...
+
     def report_session_end(self, collector: str, rows: int) -> None: ...
+
+    def report_write_failure(self, collector: str, exc: BaseException) -> None: ...
+
+    def report_pool(self, change: str, workers: int) -> None: ...
 
 
 class LoggingSupervisionListener:
@@ -143,20 +157,23 @@ class LoggingSupervisionListener:
     """
 
     def __init__(
-        self, escalate_threshold: int = STREAM_CRASH_ESCALATE_THRESHOLD
+        self,
+        logger: logging.Logger,
+        escalate_threshold: int = STREAM_CRASH_ESCALATE_THRESHOLD,
     ) -> None:
+        self._logger = logger
         self._threshold = escalate_threshold
 
     def report_crash(self, collector: str, attempt: int, exc: BaseException) -> None:
         if attempt >= self._threshold:
-            LOG.error(
+            self._logger.error(
                 "streaming collector=%s crashed %d× consecutively; last error: %r",
                 collector,
                 attempt,
                 exc,
             )
             return
-        LOG.warning(
+        self._logger.warning(
             "streaming collector=%s crashed (attempt %d), restarting: %r",
             collector,
             attempt,
@@ -164,16 +181,20 @@ class LoggingSupervisionListener:
         )
 
     def report_healthy(self, collector: str) -> None:
-        LOG.info("streaming collector=%s recovered after restart", collector)
+        self._logger.info("streaming collector=%s recovered after restart", collector)
+
+    def report_session_start(self, collector: str, run_id: str) -> None:
+        self._logger.info("streaming collector=%s run_id=%s started", collector, run_id)
 
     def report_session_end(self, collector: str, rows: int) -> None:
-        LOG.info("streaming collector=%s session ended rows=%d", collector, rows)
+        self._logger.info(
+            "streaming collector=%s session ended rows=%d", collector, rows
+        )
 
+    def report_write_failure(self, collector: str, exc: BaseException) -> None:
+        self._logger.error(
+            "streaming write failed collector=%s", collector, exc_info=exc
+        )
 
-def default_backoff() -> ExponentialBackoff:
-    """Production backoff wired from the tuned constants."""
-    return ExponentialBackoff(
-        STREAM_RESTART_BASE_BACKOFF_S,
-        STREAM_RESTART_MAX_BACKOFF_S,
-        STREAM_RESTART_BACKOFF_FACTOR,
-    )
+    def report_pool(self, change: str, workers: int) -> None:
+        self._logger.info("%s %d streaming worker(s)", change, workers)

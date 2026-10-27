@@ -1,73 +1,102 @@
 """Deterministic 0-100 host posture score (no LLM)."""
+
 from __future__ import annotations
 
-from typing import Optional
-
-from .constants import RISK_GRADES, RISK_WEIGHTS
-
-
-def _risk_grade(score: int) -> str:
-    for threshold, grade in RISK_GRADES:
-        if score >= threshold:
-            return grade
-    return "F"
+from dataclasses import dataclass
+from operator import itemgetter
+from typing import Any
 
 
-# Integrity fields that cost points when explicitly off, and those that cost
-# points when on: (field, RISK_WEIGHTS key, driver label).
-_PROTECTIONS = (
-    ("filevault_active", "filevault_off", "Disk encryption (FileVault) off"),
-    ("firewall_global_state", "firewall_off", "Firewall off"),
-    ("gatekeeper_assessments_enabled", "gatekeeper_off", "Gatekeeper off"),
-    ("firewall_stealth", "stealth_off", "Firewall stealth mode off"),
-)
-_EXPOSURES = (
-    ("remote_login_enabled", "ssh_on", "Remote login (SSH) enabled"),
-    ("screen_sharing_enabled", "screen_sharing_on", "Screen sharing enabled"),
-    ("remote_management_enabled", "remote_mgmt_on", "Remote management enabled"),
-)
+from .enums import RiskGrade
 
 
-def compute_risk_score(
-    integrity: Optional[dict],
-    malicious: int,
-    suspicious: int,
-    nopasswd_sudoers: int,
-    extra_uid0: int,
-) -> dict:
-    """Deterministic host posture score in [0, 100] with a letter grade and
-    the list of point-costing ``drivers``. Pure function: all inputs are
-    plain values so it is trivially testable and reproducible.
+@dataclass(frozen=True)
+class RiskCounts:
+    malicious: int = 0
+    suspicious: int = 0
+    nopasswd_sudoers: int = 0
+    extra_uid0: int = 0
+
+
+class RiskScorer:
+    """Host posture score in [0, 100] with a letter grade and the list of
+    point-costing ``drivers``. Pure: all inputs are plain values, so it is
+    trivially testable and reproducible.
 
     Unknown integrity fields (NULL, e.g. a macOS-only field on Linux) are
     treated as "not a known weakness" and cost nothing, so a missing signal
     never silently tanks the score."""
-    w = RISK_WEIGHTS
-    integ = integrity or {}
-    drivers: list[dict] = []
 
-    def penalise(points: int, label: str) -> None:
-        if points > 0:
-            drivers.append({"label": label, "points": points})
-
-    for field, weight, label in _PROTECTIONS:
-        value = integ.get(field)
-        if value is not None and not value:  # None means unknown: free
-            penalise(w[weight], label)
-    for field, weight, label in _EXPOSURES:
-        if integ.get(field):
-            penalise(w[weight], label)
-
-    # (count, RISK_WEIGHTS prefix for <prefix>_each / <prefix>_cap, label)
-    counted = (
-        (malicious, "malicious", f"{malicious} active malicious finding(s)"),
-        (suspicious, "suspicious", f"{suspicious} active suspicious finding(s)"),
-        (nopasswd_sudoers, "nopasswd", f"{nopasswd_sudoers} NOPASSWD sudoers rule(s)"),
-        (extra_uid0, "uid0", f"{extra_uid0} extra uid-0 account(s)"),
+    PERFECT_SCORE = 100
+    GRADES = (
+        (90, RiskGrade.EXCELLENT),
+        (80, RiskGrade.GOOD),
+        (70, RiskGrade.FAIR),
+        (60, RiskGrade.POOR),
+        (0, RiskGrade.FAILING),
     )
-    for count, prefix, label in counted:
-        penalise(min(count * w[f"{prefix}_each"], w[f"{prefix}_cap"]), label)
+    # Integrity fields that cost points when explicitly off:
+    # (field, points, driver label).
+    PROTECTIONS = (
+        ("filevault_active", 15, "Disk encryption (FileVault) off"),
+        ("firewall_global_state", 15, "Firewall off"),
+        ("gatekeeper_assessments_enabled", 12, "Gatekeeper off"),
+        ("firewall_stealth", 3, "Firewall stealth mode off"),
+    )
+    # Integrity fields that cost points when on.
+    EXPOSURES = (
+        ("remote_login_enabled", 10, "Remote login (SSH) enabled"),
+        ("screen_sharing_enabled", 8, "Screen sharing enabled"),
+        ("remote_management_enabled", 10, "Remote management enabled"),
+    )
+    # Points per counted item, and the cap for that count.
+    MALICIOUS = (20, 40)
+    SUSPICIOUS = (8, 24)
+    NOPASSWD = (10, 20)
+    UID0 = (15, 30)
 
-    score = max(0, min(100, 100 - sum(d["points"] for d in drivers)))
-    drivers.sort(key=lambda d: d["points"], reverse=True)
-    return {"score": score, "grade": _risk_grade(score), "drivers": drivers}
+    def score(
+        self, integrity: dict[str, Any] | None, counts: RiskCounts
+    ) -> dict[str, Any]:
+        facts = integrity or {}
+        drivers = [
+            *self._protection_drivers(facts),
+            *self._exposure_drivers(facts),
+            *self._count_drivers(counts),
+        ]
+        drivers = [driver for driver in drivers if driver["points"] > 0]
+        drivers.sort(key=itemgetter("points"), reverse=True)
+        lost = sum(driver["points"] for driver in drivers)
+        total = max(0, min(self.PERFECT_SCORE, self.PERFECT_SCORE - lost))
+        return {"score": total, "grade": self.grade(total), "drivers": drivers}
+
+    def grade(self, score: int) -> str:
+        grades = (grade for threshold, grade in self.GRADES if score >= threshold)
+        return next(grades, RiskGrade.FAILING).value
+
+    def _protection_drivers(self, facts: dict[str, Any]) -> list[dict[str, Any]]:
+        # None means unknown, which is free.
+        return [
+            {"label": label, "points": points}
+            for field, points, label in self.PROTECTIONS
+            if facts.get(field) is not None and not facts.get(field)
+        ]
+
+    def _exposure_drivers(self, facts: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            {"label": label, "points": points}
+            for field, points, label in self.EXPOSURES
+            if facts.get(field)
+        ]
+
+    def _count_drivers(self, counts: RiskCounts) -> list[dict[str, Any]]:
+        counted = (
+            (counts.malicious, self.MALICIOUS, "active malicious finding(s)"),
+            (counts.suspicious, self.SUSPICIOUS, "active suspicious finding(s)"),
+            (counts.nopasswd_sudoers, self.NOPASSWD, "NOPASSWD sudoers rule(s)"),
+            (counts.extra_uid0, self.UID0, "extra uid-0 account(s)"),
+        )
+        return [
+            {"label": f"{count} {label}", "points": min(count * each, cap)}
+            for count, (each, cap), label in counted
+        ]

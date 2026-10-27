@@ -1,19 +1,20 @@
 """HTTP routes, one Blueprint per surface: HTML fragments, the JSON api and
 the token-guarded control plane. They reach the database only through the
-services ``create_app`` installs on the app."""
+services the app hands to each view."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from flask import Flask, current_app
+from flask.views import View
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from avai.host_monitor.runtime import Clock
+
 from ..config import DashboardConfig
 from ..control import ControlStore
-
-_EXTENSION_KEY = "avai"
+from ..queries.auth_events import AuthCaches
 
 
 @dataclass(frozen=True)
@@ -21,14 +22,16 @@ class DashboardServices:
     config: DashboardConfig
     read_engine: Engine
     control: ControlStore
+    clock: Clock
+    auth_caches: AuthCaches
 
-    def install(self, app: Flask) -> None:
-        app.extensions[_EXTENSION_KEY] = self
-
-
-def services() -> DashboardServices:
-    return current_app.extensions[_EXTENSION_KEY]
+    def read_session(self) -> Session:
+        return Session(self.read_engine)
 
 
-def read_session() -> Session:
-    return Session(services().read_engine)
+class ServiceView(View):
+    """A view built with the app's services: ``as_view(endpoint, services)``
+    passes them to the constructor."""
+
+    def __init__(self, services: DashboardServices) -> None:
+        self._services = services

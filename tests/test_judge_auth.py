@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import ast
+import logging
 from dataclasses import replace
-from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+import litellm
 import pytest
 
 from avai.host_monitor import llm
 from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
 from avai.host_monitor.judge import LlmJudge, NullJudge
 from avai.host_monitor.llm import LlmCredentials
-from avai.host_monitor.main import LlmStages, _build_parser
+from avai.host_monitor.main import LlmStageBuilder, MonitorArgs
 from avai.host_monitor.prompts import Prompts
 
 OAUTH = {"CLAUDE_CODE_OAUTH_TOKEN": "oauth-token"}
@@ -20,39 +25,40 @@ OPENAI = {"OPENAI_API_KEY": "sk-openai"}
 
 
 @pytest.mark.parametrize(
-    ("env", "has_litellm", "expected_client"),
+    ("env", "expected_client"),
     [
-        pytest.param({}, True, None, id="no-credentials"),
-        pytest.param({"CLAUDE_CODE_OAUTH_TOKEN": ""}, True, None, id="empty-oauth"),
-        pytest.param(OAUTH, False, "oauth", id="oauth-without-litellm"),
-        pytest.param(ANTHROPIC, True, "litellm", id="anthropic-key"),
-        pytest.param(OPENAI, True, "litellm", id="openai-key"),
-        pytest.param(ANTHROPIC, False, None, id="key-without-litellm"),
-        pytest.param({**OAUTH, **ANTHROPIC}, True, "oauth", id="oauth-wins"),
+        pytest.param({}, None, id="no-credentials"),
+        pytest.param({"CLAUDE_CODE_OAUTH_TOKEN": ""}, None, id="empty-oauth"),
+        pytest.param(OAUTH, "oauth", id="oauth"),
+        pytest.param(ANTHROPIC, "litellm", id="anthropic-key"),
+        pytest.param(OPENAI, "litellm", id="openai-key"),
+        pytest.param({**OAUTH, **ANTHROPIC}, "oauth", id="oauth-wins"),
     ],
 )
-def test_credential_rule(monkeypatch, env, has_litellm, expected_client):
-    monkeypatch.setattr(llm, "HAS_LITELLM", has_litellm)
+def test_credential_rule(env, expected_client) -> None:
     credentials = LlmCredentials.from_env(env)
 
     with (
         patch.object(llm, "AnthropicOAuthClient") as oauth,
         patch.object(llm, "LitellmClient") as litellm_client,
     ):
-        picked = {oauth.return_value: "oauth", litellm_client.return_value: "litellm"}
+        picked = {
+            oauth.create.return_value: "oauth",
+            litellm_client.create.return_value: "litellm",
+        }
         client = picked[credentials.client()] if credentials.can_call() else None
 
     assert client == expected_client
 
 
-def test_oauth_client_is_built_with_the_token():
+def test_oauth_client_is_built_with_the_token() -> None:
     with patch.object(llm, "AnthropicOAuthClient") as oauth:
         LlmCredentials.from_env(OAUTH).client()
 
-    oauth.assert_called_once_with("oauth-token")
+    oauth.create.assert_called_once_with("oauth-token")
 
 
-def test_token_stays_out_of_the_repr():
+def test_token_stays_out_of_the_repr() -> None:
     assert "oauth-token" not in repr(LlmCredentials.from_env(OAUTH))
 
 
@@ -73,12 +79,12 @@ class _StubCredentials:
 
 
 def _args(*flags):
-    return _build_parser().parse_args(list(flags))
+    return MonitorArgs().options(list(flags))
 
 
 def _stages(*flags, prompts=None, credentials=None):
-    return LlmStages.build(
-        _args(*flags),
+    builder = LlmStageBuilder(_args(*flags), logging.getLogger("test"))
+    return builder.build(
         prompts or Prompts.load(DEFAULT_PROMPTS_PATH),
         credentials or _StubCredentials(),
     )
@@ -96,7 +102,7 @@ ALL_OPTIONAL = {"narrator", "coverage", "verifier", "investigator"}
 
 
 class TestLlmStagesBuild:
-    def test_every_stage_shares_one_client(self):
+    def test_every_stage_shares_one_client(self) -> None:
         credentials = _StubCredentials()
 
         stages = _stages(credentials=credentials)
@@ -105,7 +111,7 @@ class TestLlmStagesBuild:
         assert _enabled(stages) == ALL_OPTIONAL
         assert credentials.clients_built == 1
 
-    def test_no_credentials_turns_every_stage_off(self):
+    def test_no_credentials_turns_every_stage_off(self) -> None:
         credentials = _StubCredentials(can_call=False)
 
         stages = _stages(credentials=credentials)
@@ -114,13 +120,21 @@ class TestLlmStagesBuild:
         assert _enabled(stages) == set()
         assert credentials.clients_built == 0
 
-    def test_missing_sdk_turns_every_stage_off(self):
+    def test_missing_sdk_turns_every_stage_off(self) -> None:
         stages = _stages(credentials=_StubCredentials(error=RuntimeError("no sdk")))
 
         assert isinstance(stages.judge, NullJudge)
         assert _enabled(stages) == set()
 
-    def test_no_judge_also_drops_the_narrator_only(self):
+    def test_missing_litellm_module_turns_every_stage_off(self) -> None:
+        missing = ModuleNotFoundError("No module named 'litellm'")
+
+        stages = _stages(credentials=_StubCredentials(error=missing))
+
+        assert isinstance(stages.judge, NullJudge)
+        assert _enabled(stages) == set()
+
+    def test_no_judge_also_drops_the_narrator_only(self) -> None:
         stages = _stages("--no-judge")
 
         assert isinstance(stages.judge, NullJudge)
@@ -135,15 +149,76 @@ class TestLlmStagesBuild:
             ("--no-investigate", "investigator"),
         ],
     )
-    def test_each_flag_turns_off_its_stage(self, flag, stage):
+    def test_each_flag_turns_off_its_stage(self, flag, stage) -> None:
         stages = _stages(flag)
 
         assert isinstance(stages.judge, LlmJudge)
         assert _enabled(stages) == ALL_OPTIONAL - {stage}
 
-    def test_missing_prompt_turns_off_its_stage(self):
+    def test_missing_prompt_turns_off_its_stage(self) -> None:
         prompts = replace(Prompts.load(DEFAULT_PROMPTS_PATH), verifier_system="")
 
         stages = _stages(prompts=prompts)
 
         assert _enabled(stages) == ALL_OPTIONAL - {"verifier"}
+
+
+class TestLitellmClient:
+    INPUT_TOKENS = 1000
+    OUTPUT_TOKENS = 200
+    REQUEST = llm.CompletionRequest(
+        model="anthropic/claude-haiku-4-5",
+        system="system",
+        user="user",
+        schema={},
+        schema_name="verdicts",
+        max_tokens=16,
+        temperature=0.0,
+    )
+
+    def test_the_reply_carries_its_own_token_usage(self) -> None:
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=self.INPUT_TOKENS, completion_tokens=self.OUTPUT_TOKENS
+            ),
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content='{"judgments": []}'))
+            ],
+        )
+        client = llm.LitellmClient(
+            llm.LitellmApi(lambda **_: response, llm.LitellmApi.load().errors)
+        )
+
+        completion = client.complete_structured(self.REQUEST)
+
+        assert completion == llm.Completion(
+            {"judgments": []},
+            llm.TokenUsage(self.INPUT_TOKENS, self.OUTPUT_TOKENS),
+        )
+
+    def test_provider_rate_limit_becomes_a_completion_error(self) -> None:
+        throttled = litellm.exceptions.RateLimitError(
+            "429 slow down", "anthropic", "claude-haiku-4-5"
+        )
+        completion = Mock(side_effect=throttled)
+        client = llm.LitellmClient(
+            llm.LitellmApi(completion, llm.LitellmApi.load().errors)
+        )
+
+        with pytest.raises(llm.CompletionError) as excinfo:
+            client.complete_structured(self.REQUEST)
+
+        assert str(excinfo.value).startswith("litellm call failed: ")
+        assert "429 slow down" in str(excinfo.value)
+        assert excinfo.value.__cause__ is throttled
+
+    def test_litellm_is_loaded_by_an_import_statement_the_bundler_can_see(self) -> None:
+        tree = ast.parse(Path(llm.__file__).read_text())
+        imported = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+
+        assert "litellm" in imported

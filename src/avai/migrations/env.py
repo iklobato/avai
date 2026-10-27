@@ -7,12 +7,12 @@ from __future__ import annotations
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-# Make the full schema visible to Alembic autogenerate. register_schema
+# Make the full schema visible to Alembic autogenerate. EnrichmentSchema
 # attaches the enrichment_evidence table to the shared Base.metadata.
-from avai.enrichers.cache import register_schema
+from avai.enrichers.cache import EnrichmentSchema
 from avai.host_monitor import Base
 
-register_schema(Base)
+EnrichmentSchema(Base).model()
 target_metadata = Base.metadata
 
 config = context.config

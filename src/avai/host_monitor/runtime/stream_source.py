@@ -1,32 +1,69 @@
-"""Long-lived line-stream source for streaming collectors.
-
-Every streaming collector tails a native tool (``log stream``,
-``journalctl -f``, ``eslogger``) the same way: spawn the process, run a
-watchdog thread that terminates it when the stop event fires, and read
-stdout line by line, decoding each line as a JSON object and converting
-it to a row.
-
-That loop — the part with the subprocess and signal-handling bugs — is
-invariant. Only two things vary: the **command** and the **row parser**.
-:class:`JsonLineStreamSource` owns the invariant loop; the command is
-passed in and the parser is a :class:`LineParser` strategy injected per
-OS. The parsers are pure ``dict -> dict`` transforms, so they're unit
-tested without spawning anything.
-"""
-
 from __future__ import annotations
 
 import json
 import subprocess
 import threading
-from typing import Iterable, Protocol
+from collections.abc import Iterable, Iterator
+from typing import Any, Protocol
+
+# How long a terminated child gets to exit before it is killed.
+TERMINATE_GRACE_S = 2
+DEFAULT_KILLER_NAME = "stream-killer"
 
 
 class LineParser(Protocol):
     """Converts one decoded JSON event from a tool's stream into a row
     dict matching the collector's model."""
 
-    def parse(self, event: dict) -> dict: ...
+    def parse(self, event: dict[str, Any]) -> dict[str, Any]: ...
+
+
+class ChildProcess:
+    """A streaming child process: stopped on request, reaped on exit."""
+
+    def __init__(self, proc: subprocess.Popen[str]) -> None:
+        self._proc = proc
+
+    @classmethod
+    def spawn(cls, command: list[str]) -> ChildProcess:
+        return cls(
+            subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+            )
+        )
+
+    def watch(self, stop_event: threading.Event, thread_name: str) -> None:
+        """Watchdog: when stop_event fires, terminate the subprocess, which
+        closes stdout and ends the caller's read loop."""
+        threading.Thread(
+            target=self.terminate_on, args=(stop_event,), daemon=True, name=thread_name
+        ).start()
+
+    def lines(self) -> Iterable[str]:
+        return self._proc.stdout or ()
+
+    def terminate_on(self, stop_event: threading.Event) -> None:
+        stop_event.wait()
+        if self._proc.poll() is None:
+            try:
+                self._proc.terminate()
+            except ProcessLookupError:
+                return
+
+    def shut_down(self) -> None:
+        if self._proc.poll() is not None:
+            return
+        try:
+            self._proc.terminate()
+            self._proc.wait(timeout=TERMINATE_GRACE_S)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+        except ProcessLookupError:
+            return
 
 
 class JsonLineStreamSource:
@@ -41,69 +78,30 @@ class JsonLineStreamSource:
         self,
         command: list[str],
         parser: LineParser,
-        *,
-        killer_name: str = "stream-killer",
+        killer_name: str = DEFAULT_KILLER_NAME,
     ) -> None:
         self._command = command
         self._parser = parser
         self._killer_name = killer_name
 
-    def stream(self, stop_event: threading.Event) -> Iterable[dict]:
-        proc = subprocess.Popen(
-            self._command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-        )
-        # Watchdog: when stop_event fires, terminate the subprocess,
-        # which closes stdout and ends the read loop below.
-        threading.Thread(
-            target=_terminate_on,
-            args=(stop_event, proc),
-            daemon=True,
-            name=self._killer_name,
-        ).start()
+    def stream(self, stop_event: threading.Event) -> Iterator[dict[str, Any]]:
+        child = ChildProcess.spawn(self._command)
+        child.watch(stop_event, self._killer_name)
         try:
-            for event in _json_events(proc.stdout, stop_event):
+            for event in self._json_events(child.lines(), stop_event):
                 yield self._parser.parse(event)
         finally:
-            _shut_down(proc)
+            child.shut_down()
 
-
-# How long a terminated child gets to exit before it is killed.
-_TERMINATE_GRACE_S = 2
-
-
-def _terminate_on(stop_event: threading.Event, proc: subprocess.Popen) -> None:
-    stop_event.wait()
-    if proc.poll() is None:
-        try:
-            proc.terminate()
-        except ProcessLookupError:
-            pass
-
-
-def _json_events(lines: Iterable[str], stop_event: threading.Event) -> Iterable[dict]:
-    """Each line decoded as JSON, until ``stop_event`` is set. Lines that
-    aren't JSON (blank ones included) are skipped."""
-    for line in lines:
-        if stop_event.is_set():
-            return
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        yield event
-
-
-def _shut_down(proc: subprocess.Popen) -> None:
-    if proc.poll() is not None:
-        return
-    try:
-        proc.terminate()
-        proc.wait(timeout=_TERMINATE_GRACE_S)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-    except ProcessLookupError:
-        pass
+    def _json_events(
+        self, lines: Iterable[str], stop_event: threading.Event
+    ) -> Iterator[dict[str, Any]]:
+        """Each line decoded as JSON, until ``stop_event`` is set. Lines that
+        aren't JSON (blank ones included) are skipped."""
+        for line in lines:
+            if stop_event.is_set():
+                return
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue

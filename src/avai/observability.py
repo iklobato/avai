@@ -18,50 +18,51 @@ client IP) is left off because avai handles sensitive host-security telemetry.
 from __future__ import annotations
 
 import logging
-import os
+from collections.abc import Mapping
+
+import sentry_sdk
+from sentry_sdk.integrations.logging import LoggingIntegration
 
 from . import __version__
 
-# Bundled so reporting works for every install without setup. Override via
-# SENTRY_DSN; disable via AVAI_TELEMETRY=0 or an empty SENTRY_DSN.
-_DEFAULT_DSN = (
-    "https://169b79dede851f0b9c7674fba38487d8"
-    "@o4505128597127168.ingest.us.sentry.io/4511593453518848"
-)
-
-_DSN_ENV = "SENTRY_DSN"
-_TELEMETRY_ENV = "AVAI_TELEMETRY"
 # Values that turn the AVAI_TELEMETRY toggle off; unset means on.
-_FALSY = frozenset({"", "0", "false", "no", "off"})
+TELEMETRY_OFF_VALUES = frozenset({"", "0", "false", "no", "off"})
 
 
-def _resolve_dsn() -> str | None:
-    """The DSN to report to, or None when the operator has opted out."""
-    toggle = os.environ.get(_TELEMETRY_ENV)
-    if toggle is not None and toggle.strip().lower() in _FALSY:
-        return None
-    dsn = os.environ.get(_DSN_ENV, _DEFAULT_DSN)
-    return dsn or None
+class SentryReporting:
+    """Starts Sentry for this process unless the operator opted out."""
 
-
-def init_sentry() -> bool:
-    """Initialize Sentry unless the operator opted out. Returns whether it did.
-
-    Safe to call once at process startup; a no-op when reporting is disabled.
-    """
-    dsn = _resolve_dsn()
-    if not dsn:
-        return False
-
-    import sentry_sdk
-    from sentry_sdk.integrations.logging import LoggingIntegration
-
-    sentry_sdk.init(
-        dsn=dsn,
-        release=f"avai@{__version__}",
-        send_default_pii=False,
-        # event_level=WARNING promotes LOG.warning (the tolerated monitor-loop
-        # degradations) to issues, on top of the default ERROR-and-above.
-        integrations=[LoggingIntegration(event_level=logging.WARNING)],
+    # Bundled so reporting works for every install without setup. Override via
+    # SENTRY_DSN; disable via AVAI_TELEMETRY=0 or an empty SENTRY_DSN.
+    DEFAULT_DSN = (
+        "https://169b79dede851f0b9c7674fba38487d8"
+        "@o4505128597127168.ingest.us.sentry.io/4511593453518848"
     )
-    return True
+    DSN_ENV = "SENTRY_DSN"
+    TELEMETRY_ENV = "AVAI_TELEMETRY"
+
+    def __init__(self, environ: Mapping[str, str]) -> None:
+        self._environ = environ
+
+    def dsn(self) -> str | None:
+        """The DSN to report to, or None when the operator has opted out."""
+        toggle = self._environ.get(self.TELEMETRY_ENV)
+        if toggle is not None and toggle.strip().lower() in TELEMETRY_OFF_VALUES:
+            return None
+        return self._environ.get(self.DSN_ENV, self.DEFAULT_DSN) or None
+
+    def init(self) -> bool:
+        """Initialize Sentry unless the operator opted out. Returns whether it
+        did. Safe to call once at process startup."""
+        dsn = self.dsn()
+        if not dsn:
+            return False
+        sentry_sdk.init(
+            dsn=dsn,
+            release=f"avai@{__version__}",
+            send_default_pii=False,
+            # event_level=WARNING promotes LOG.warning (the tolerated
+            # monitor-loop degradations) to issues, on top of ERROR-and-above.
+            integrations=[LoggingIntegration(event_level=logging.WARNING)],
+        )
+        return True

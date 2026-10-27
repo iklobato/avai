@@ -10,9 +10,11 @@ https://ipwho.is/
 
 from __future__ import annotations
 
-from http import HTTPStatus
-from typing import ClassVar, Optional
+from typing import Any, ClassVar
 
+from pydantic import field_validator
+
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -20,53 +22,80 @@ from avai.enrichers.base import (
     IndicatorType,
     VerdictHint,
 )
-from avai.enrichers.http import HttpClient
 
-_BASE = "https://ipwho.is"
+BASE_URL = "https://ipwho.is"
+ONE_WEEK_HOURS = 24 * 7
+INFORMATIONAL_CONFIDENCE = 0.0
+
+
+class GeoConnection(ApiReply):
+    asn: object = None
+    org: object = None
+    isp: object = None
+
+
+class GeoReply(ApiReply):
+    """An ipwho.is lookup; ``success`` is false for bogon/reserved IPs."""
+
+    success: object = False
+    country: object = None
+    country_code: object = None
+    region: object = None
+    city: object = None
+    latitude: object = None
+    longitude: object = None
+    connection: GeoConnection | None = None
+
+    @field_validator("connection", mode="before")
+    @classmethod
+    def _connection(cls, value: Any) -> Any:
+        return value or {}
+
+    def details(self) -> dict[str, Any]:
+        connection = self.connection or GeoConnection()
+        return {
+            "country": self.country or "",
+            "country_code": self.country_code,
+            "region": self.region or "",
+            "city": self.city or "",
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "asn": connection.asn,
+            "org": connection.org or connection.isp or "",
+            "isp": connection.isp,
+        }
 
 
 class IpwhoisGeoEnricher(Enricher):
     name = "ipwhois_geo"
     supports_types = frozenset({IndicatorType.IPV4, IndicatorType.IPV6})
-    requires_token: ClassVar[Optional[str]] = None
-    ttl_hours = 24 * 7  # geolocation is stable — refresh weekly
+    requires_token: ClassVar[str | None] = None
+    ttl_hours = ONE_WEEK_HOURS  # geolocation is stable — refresh weekly
+    rate_host = "ipwho.is"
+    rate_per_second = 1.0
 
-    def __init__(self, http: Optional[HttpClient] = None):
-        self._http = http or HttpClient()
-        self._http.set_rate("ipwho.is", 1.0)
-
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
-        resp = self._http.get(f"{_BASE}/{indicator.value}")
-        if resp.status_code != HTTPStatus.OK:
+    def fetch(self, indicator: Indicator) -> Evidence | None:
+        response = self._http.get(f"{BASE_URL}/{indicator.value}")
+        if not self.answered(response):
             return None
-        body = resp.json() or {}
+        reply = GeoReply.model_validate(response.json() or {})
         # ipwho.is answers {"success": false, "message": ...} for bogon /
         # reserved / unroutable addresses — treat as "no opinion".
-        if not body.get("success"):
+        if not reply.success:
             return None
-        conn = body.get("connection") or {}
-        country = body.get("country") or ""
-        city = body.get("city") or ""
-        region = body.get("region") or ""
-        org = conn.get("org") or conn.get("isp") or ""
-        asn = conn.get("asn")
-        where = ", ".join(p for p in (city, region, country) if p)
-        net = f" (AS{asn} {org})".rstrip() if (asn or org) else ""
+        return self._evidence(indicator, reply)
+
+    def _evidence(self, indicator: Indicator, reply: GeoReply) -> Evidence:
+        details = reply.details()
+        place = (details["city"], details["region"], details["country"])
+        where = ", ".join(part for part in place if part)
+        asn, org = details["asn"], details["org"]
+        network = f" (AS{asn} {org})".rstrip() if (asn or org) else ""
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.UNKNOWN,  # informational, not a threat
-            confidence=0.0,
-            summary=f"Geo: {where or 'unknown'}{net}",
-            details={
-                "country": country,
-                "country_code": body.get("country_code"),
-                "region": region,
-                "city": city,
-                "latitude": body.get("latitude"),
-                "longitude": body.get("longitude"),
-                "asn": asn,
-                "org": org,
-                "isp": conn.get("isp"),
-            },
+            confidence=INFORMATIONAL_CONFIDENCE,
+            summary=f"Geo: {where or 'unknown'}{network}",
+            details=details,
         )

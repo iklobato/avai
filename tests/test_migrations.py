@@ -9,9 +9,10 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.exc import OperationalError
 
-from avai.db_migrate import _config, upgrade_to_head
+from avai.db_migrate import AlembicMigrator
 from avai.host_monitor.models import Base
 from avai.host_monitor.sink import Sink
+from pathlib import Path
 
 _IDX = [
     "ix_collection_runs_started_at",
@@ -51,37 +52,37 @@ def _version(db: str) -> str | None:
         con.close()
 
 
-def test_sink_setup_applies_migrations(tmp_path):
+def test_sink_setup_applies_migrations(tmp_path: Path) -> None:
     db = str(tmp_path / "a.db")
-    Sink(create_engine(f"sqlite:///{db}")).setup()
+    Sink.create(create_engine(f"sqlite:///{db}")).setup()
     assert set(_IDX) <= _indexes(db)
     assert "control_state" in _tables(db)
     assert _version(db) == "0012_log_entries"
 
 
-def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path, monkeypatch):
+def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A pending migration that can't be applied (e.g. a read-only DB owned by
     another user) must abort startup with a clear error rather than silently
     serving on a stale schema and 500ing on the first write later."""
     import avai.db_migrate as db_migrate
 
-    def _readonly(_url):
+    def _readonly(_migrator: AlembicMigrator) -> None:
         raise OperationalError(
             "attempt to write a readonly database", None, Exception()
         )
 
-    monkeypatch.setattr(db_migrate, "upgrade_to_head", _readonly)
+    monkeypatch.setattr(db_migrate.AlembicMigrator, "upgrade_to_head", _readonly)
     db = str(tmp_path / "ro.db")
     with pytest.raises(RuntimeError, match="migration to head failed"):
-        Sink(create_engine(f"sqlite:///{db}")).setup()
+        Sink.create(create_engine(f"sqlite:///{db}")).setup()
 
 
-def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
+def test_upgrade_stamps_preexisting_create_all_db(tmp_path: Path) -> None:
     db = str(tmp_path / "b.db")
     eng = create_engine(f"sqlite:///{db}")
-    from avai.enrichers.cache import register_schema
+    from avai.enrichers.cache import EnrichmentSchema
 
-    register_schema(Base)
+    EnrichmentSchema(Base).model()
     Base.metadata.create_all(eng)  # tables, but emulate an old DB:
     con = sqlite3.connect(db)
     for i in _IDX:
@@ -92,26 +93,26 @@ def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
     eng.dispose()
     assert not (_indexes(db) & set(_IDX))  # gone
 
-    upgrade_to_head(f"sqlite:///{db}")  # stamps baseline then adds indexes
+    AlembicMigrator(f"sqlite:///{db}").upgrade_to_head()  # stamp, then indexes
     assert set(_IDX) <= _indexes(db)
     assert _version(db) == "0012_log_entries"
 
 
-def test_downgrade_then_upgrade_roundtrip(tmp_path):
+def test_downgrade_then_upgrade_roundtrip(tmp_path: Path) -> None:
     from alembic import command
 
     db = str(tmp_path / "c.db")
-    Sink(create_engine(f"sqlite:///{db}")).setup()
+    Sink.create(create_engine(f"sqlite:///{db}")).setup()
     assert set(_IDX) <= _indexes(db)
 
-    command.downgrade(_config(f"sqlite:///{db}"), "0001_baseline")
+    command.downgrade(AlembicMigrator(f"sqlite:///{db}").config(), "0001_baseline")
     assert not (_indexes(db) & set(_IDX))  # dropped
 
-    command.upgrade(_config(f"sqlite:///{db}"), "head")
+    command.upgrade(AlembicMigrator(f"sqlite:///{db}").config(), "head")
     assert set(_IDX) <= _indexes(db)  # recreated
 
 
-def test_control_state_migration_roundtrip(tmp_path):
+def test_control_state_migration_roundtrip(tmp_path: Path) -> None:
     from alembic import command
 
     db = str(tmp_path / "d.db")
@@ -123,11 +124,21 @@ def test_control_state_migration_roundtrip(tmp_path):
     con.commit()
     con.close()
     eng.dispose()
-    command.stamp(_config(f"sqlite:///{db}"), "0002_perf_indexes")
+    command.stamp(AlembicMigrator(f"sqlite:///{db}").config(), "0002_perf_indexes")
 
-    command.upgrade(_config(f"sqlite:///{db}"), "head")
+    command.upgrade(AlembicMigrator(f"sqlite:///{db}").config(), "head")
     assert "control_state" in _tables(db)
     assert _version(db) == "0012_log_entries"
 
-    command.downgrade(_config(f"sqlite:///{db}"), "0002_perf_indexes")
+    command.downgrade(AlembicMigrator(f"sqlite:///{db}").config(), "0002_perf_indexes")
     assert "control_state" not in _tables(db)
+
+
+def test_config_keeps_a_percent_encoded_url_verbatim() -> None:
+    """SQLAlchemy 2.1 renders a Windows path as sqlite:///C%3A%5C...; alembic's
+    configparser must not read the % signs as interpolation."""
+    url = "sqlite:///C%3A%5CUsers%5Cdemo%5Cavai.db"
+
+    alembic_config = AlembicMigrator(url).config()
+
+    assert alembic_config.get_main_option("sqlalchemy.url") == url

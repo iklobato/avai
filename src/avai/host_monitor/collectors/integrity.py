@@ -1,38 +1,42 @@
-"""Security posture: system integrity settings, watched files and setuid binaries."""
-
 from __future__ import annotations
 
 import json
+import os
+import stat
+from collections.abc import Iterable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..hosts.capabilities import FilesystemLayout
+    from ..hosts.capabilities import ExecutableLayout
 
-from .. import slices
-from ..constants import (
-    WATCHED_FILES,
-)
+from ..enums import SelinuxMode
+from ..slices import Slices
+from ..constants import WATCHED_FILES
 from ..runtime import (
     Coerce,
-    CommandRunner,
     Digest,
+    HostIo,
     HostPaths,
-    LaunchdServiceManager,
-    PortInspector,
-    ProcessInspector,
+    LaunchdServiceSupervisor,
+    PsutilConnections,
     PsutilPortInspector,
     PsutilProcessInspector,
-    ServiceManager,
-    SystemdServiceManager,
-    tri_or,
+    SystemdServiceSupervisor,
+    TriState,
 )
-from ..security_controls import NetworkServiceControl, ServiceSpec
+from ..security_controls import ServiceProbes, ServiceSpec
 from .base import SnapshotCollector
+
+SPCTL_TIMEOUT_S = 10
+SYSTEMCTL_TIMEOUT_S = 5
+VNC_UNITS = ("x11vnc", "vncserver", "xrdp")
+VNC_PORT = 5900
+FILE_STAT_FIELDS = ("size", "mtime", "mode", "uid", "gid")
 
 
 class SystemIntegrityCollector(SnapshotCollector):
-    slice = slices.SYSTEM_INTEGRITY
+    slice = Slices.SYSTEM_INTEGRITY
     judge_fields = (
         "filevault_active",
         "firewall_global_state",
@@ -46,7 +50,7 @@ class SystemIntegrityCollector(SnapshotCollector):
     # macOS network-service topics (label, port, process). enabled = launchd
     # job enabled OR port listening — so an idle-but-enabled daemon (whose
     # process hasn't been spawned yet by launchd) is never reported "off".
-    _SERVICES = (
+    SERVICES = (
         ServiceSpec("remote_login", "com.openssh.sshd", 22, "sshd"),
         ServiceSpec(
             "screen_sharing", "com.apple.screensharing", 5900, "screensharingd"
@@ -55,62 +59,67 @@ class SystemIntegrityCollector(SnapshotCollector):
             "remote_management", "com.apple.RemoteDesktop.agent", 3283, "ARDAgent"
         ),
     )
+    ALF_PLIST = Path("/Library/Preferences/com.apple.alf.plist")
 
     def __init__(
-        self,
-        judge_hints: str = "",
-        services: Optional[ServiceManager] = None,
-        ports: Optional[PortInspector] = None,
-        processes: Optional[ProcessInspector] = None,
-        runner: Optional[CommandRunner] = None,
+        self, io: HostIo, probes: ServiceProbes, judge_hints: str = ""
     ) -> None:
         super().__init__(judge_hints=judge_hints)
-        self._runner = runner or CommandRunner()
-        svc = services or LaunchdServiceManager()
-        ports = ports or PsutilPortInspector()
-        processes = processes or PsutilProcessInspector()
-        self._controls = {
-            s.topic: NetworkServiceControl(s, svc, ports, processes)
-            for s in self._SERVICES
-        }
+        self._io = io
+        self._probes = probes
 
-    def collect(self):
-        fv = self._runner.exit_code(["fdesetup", "isactive"])
-        alf = (
-            HostPaths.read_plist(Path("/Library/Preferences/com.apple.alf.plist")) or {}
+    @classmethod
+    def create(cls, io: HostIo, judge_hints: str = "") -> SystemIntegrityCollector:
+        probes = ServiceProbes(
+            LaunchdServiceSupervisor(io.runner),
+            PsutilPortInspector(PsutilConnections()),
+            PsutilProcessInspector(),
         )
-        gk = self._gatekeeper_state()
-        # Posture (enabled) + behaviour (active) for the network services,
-        # via the injected controls. Persisting enabled into the existing
-        # columns; the live-session signal is kept in raw_json for the judge.
-        svc = {t: c.inspect() for t, c in self._controls.items()}
+        return cls(io, probes, judge_hints)
+
+    def collect(self) -> Iterator[dict[str, Any]]:
+        filevault = self._io.runner.exit_code(["fdesetup", "isactive"])
+        alf = self._io.paths.read_plist(self.ALF_PLIST) or {}
+        # Enabled goes to the columns; the live-session signal stays in raw_json.
+        signals = self._service_signals()
         yield {
-            "filevault_active": None if fv is None else int(fv == 0),
-            "firewall_global_state": alf.get("globalstate"),
-            "firewall_stealth": int(bool(alf.get("stealthenabled"))) if alf else None,
-            "firewall_logging": int(bool(alf.get("loggingenabled"))) if alf else None,
-            "gatekeeper_assessments_enabled": gk,
-            "remote_login_enabled": svc["remote_login"].enabled,
-            "screen_sharing_enabled": svc["screen_sharing"].enabled,
-            "remote_management_enabled": svc["remote_management"].enabled,
+            "filevault_active": None if filevault is None else int(filevault == 0),
+            **self._firewall(alf),
+            "gatekeeper_assessments_enabled": self._gatekeeper_state(),
+            **{
+                f"{topic}_enabled": signal["enabled"]
+                for topic, signal in signals.items()
+            },
             "raw_json": json.dumps(
-                {
-                    "alf": Coerce.jsonable(alf),
-                    "services": {
-                        t: {"enabled": f.enabled, "active": f.active}
-                        for t, f in svc.items()
-                    },
-                }
+                {"alf": Coerce().jsonable(alf), "services": signals}
             ),
         }
 
-    def _gatekeeper_state(self) -> Optional[int]:
+    def _service_signals(self) -> dict[str, dict[str, int | None]]:
+        findings = {
+            spec.topic: self._probes.control(spec).inspect() for spec in self.SERVICES
+        }
+        return {
+            topic: {"enabled": finding.enabled, "active": finding.active}
+            for topic, finding in findings.items()
+        }
+
+    def _firewall(self, alf: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "firewall_global_state": alf.get("globalstate"),
+            "firewall_stealth": int(bool(alf.get("stealthenabled"))) if alf else None,
+            "firewall_logging": int(bool(alf.get("loggingenabled"))) if alf else None,
+        }
+
+    def _gatekeeper_state(self) -> int | None:
         # spctl --status always exits 0; the state is in its text output.
         try:
-            out = self._runner.capture(["spctl", "--status"], timeout=10)
+            output = self._io.runner.capture(
+                ["spctl", "--status"], timeout=SPCTL_TIMEOUT_S
+            )
         except FileNotFoundError:
             return None
-        status = (out.stdout + out.stderr).lower()
+        status = (output.stdout + output.stderr).lower()
         if "assessments enabled" in status:
             return 1
         if "assessments disabled" in status:
@@ -119,46 +128,95 @@ class SystemIntegrityCollector(SnapshotCollector):
 
 
 class FileIntegrityCollector(SnapshotCollector):
-    slice = slices.FILE_INTEGRITY
+    slice = Slices.FILE_INTEGRITY
     judge_fields = ("path", "sha256", "exists_flag")
 
-    def __init__(self, watched: Iterable[str] = WATCHED_FILES, judge_hints: str = ""):
+    def __init__(
+        self,
+        paths: HostPaths,
+        watched: Iterable[str] = WATCHED_FILES,
+        judge_hints: str = "",
+    ) -> None:
         super().__init__(judge_hints=judge_hints)
-        self.watched = list(watched)
+        self._paths = paths
+        self._watched = watched
 
-    def collect(self):
-        for path_str in self.watched:
-            p = HostPaths.expand(path_str)
+    def collect(self) -> Iterator[dict[str, Any]]:
+        for path_str in self._watched:
+            path = self._paths.expand(path_str)
             try:
-                st = p.lstat()
+                file_stat = path.lstat()
             except FileNotFoundError:
-                yield self._missing(p)
+                yield self._missing(path)
                 continue
             except PermissionError:
                 continue
             yield {
-                "path": str(p),
-                "sha256": Digest.sha256_file(p) if p.is_file() else None,
-                "size": st.st_size,
-                "mtime": st.st_mtime,
-                "mode": st.st_mode,
-                "uid": st.st_uid,
-                "gid": st.st_gid,
+                "path": str(path),
+                "sha256": Digest().sha256_file(path) if path.is_file() else None,
+                **{
+                    field: getattr(file_stat, f"st_{field}")
+                    for field in FILE_STAT_FIELDS
+                },
                 "exists_flag": 1,
             }
 
-    @staticmethod
-    def _missing(p):
+    def _missing(self, path: Path) -> dict[str, Any]:
         return {
-            "path": str(p),
+            "path": str(path),
             "sha256": None,
-            "size": None,
-            "mtime": None,
-            "mode": None,
-            "uid": None,
-            "gid": None,
+            **dict.fromkeys(FILE_STAT_FIELDS),
             "exists_flag": 0,
         }
+
+
+class LinuxSecurityPosture:
+    """Linux security controls read from sysfs, config files and systemd."""
+
+    def __init__(self, io: HostIo) -> None:
+        self._io = io
+
+    def selinux_state(self) -> SelinuxMode | None:
+        """Returns 'Enforcing' / 'Permissive' / None (not present)."""
+        paths = self._io.paths
+        flag = paths.read_sysfs(paths.translate("/sys/fs/selinux/enforce"))
+        if flag is None:
+            return None
+        return SelinuxMode.from_flag(flag)
+
+    def apparmor_state(self) -> dict[str, bool]:
+        paths = self._io.paths
+        enabled = paths.read_sysfs(
+            paths.translate("/sys/module/apparmor/parameters/enabled")
+        )
+        return {"enabled": enabled == "Y"}
+
+    def ufw_active(self) -> bool:
+        # /etc/ufw/ufw.conf is the canonical persistent state.
+        paths = self._io.paths
+        conf = paths.read_sysfs(paths.translate("/etc/ufw/ufw.conf"))
+        settings = (line.partition("=") for line in (conf or "").splitlines())
+        enabled = next(
+            (value for key, sep, value in settings if sep and key.strip() == "ENABLED"),
+            None,
+        )
+        return enabled is not None and enabled.strip().strip('"').lower() == "yes"
+
+    def service_active(self, unit: str) -> bool:
+        state = self._io.runner.text(
+            ["systemctl", "is-active", unit], timeout=SYSTEMCTL_TIMEOUT_S
+        )
+        return state.strip() == "active"
+
+    def luks_count(self) -> int:
+        if not self._io.runner.exists("dmsetup"):
+            return 0
+        mappings = self._io.runner.text(
+            ["dmsetup", "ls", "--target", "crypt"], timeout=SYSTEMCTL_TIMEOUT_S
+        )
+        if "No devices found" in mappings:
+            return 0
+        return sum(1 for line in mappings.splitlines() if line.strip())
 
 
 class LinuxSystemIntegrityCollector(SnapshotCollector):
@@ -185,7 +243,7 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     vnc systemd status) live in ``raw_json`` for the LLM judge.
     """
 
-    slice = slices.SYSTEM_INTEGRITY
+    slice = Slices.SYSTEM_INTEGRITY
     judge_fields = (
         "filevault_active",
         "firewall_global_state",
@@ -198,117 +256,73 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     # SSH goes through the shared control (systemd-enabled OR port 22
     # listening); VNC stays multi-server (x11vnc/vncserver/xrdp) but gains
     # the port-5900 robustness + an active signal.
-    _SSH = ServiceSpec("remote_login", "ssh.service", 22, "sshd")
-    _VNC_PORT = 5900
+    SSH = ServiceSpec("remote_login", "ssh.service", 22, "sshd")
 
     def __init__(
         self,
+        posture: LinuxSecurityPosture,
+        probes: ServiceProbes,
         judge_hints: str = "",
-        services: Optional[ServiceManager] = None,
-        ports: Optional[PortInspector] = None,
-        processes: Optional[ProcessInspector] = None,
-        runner: Optional[CommandRunner] = None,
     ) -> None:
         super().__init__(judge_hints=judge_hints)
-        self._runner = runner or CommandRunner()
-        self._ports = ports or PsutilPortInspector()
-        self._ssh = NetworkServiceControl(
-            self._SSH,
-            services or SystemdServiceManager(),
-            self._ports,
-            processes or PsutilProcessInspector(),
+        self._posture = posture
+        self._probes = probes
+
+    @classmethod
+    def create(cls, io: HostIo, judge_hints: str = "") -> LinuxSystemIntegrityCollector:
+        probes = ServiceProbes(
+            SystemdServiceSupervisor(io.runner),
+            PsutilPortInspector(PsutilConnections()),
+            PsutilProcessInspector(),
         )
+        return cls(LinuxSecurityPosture(io), probes, judge_hints)
 
-    def collect(self):
-        selinux = self._selinux_state()
-        apparmor = self._apparmor_state()
-        ufw = self._ufw_active()
-        fwd = self._service_active("firewalld")
-        vnc = (
-            self._service_active("x11vnc")
-            or self._service_active("vncserver")
-            or self._service_active("xrdp")
-        )
-        luks_n = self._luks_count()
-
-        ssh = self._ssh.inspect()
-        vnc_enabled = tri_or(int(vnc), self._ports.listening(self._VNC_PORT))
-        vnc_active = tri_or(int(vnc), self._ports.established(self._VNC_PORT))
-
-        raw = {
-            "selinux": selinux,
-            "apparmor": apparmor,
-            "ufw_active": ufw,
-            "firewalld_active": fwd,
-            # posture (enabled) drives the dashboard badge; behaviour lives
-            # under "services" for the "active" pill.
-            "sshd_active": ssh.enabled,
-            "vnc_active": vnc_enabled,
-            "luks_mappings": luks_n,
-            "services": {
-                "remote_login": {"enabled": ssh.enabled, "active": ssh.active},
-                "screen_sharing": {"enabled": vnc_enabled, "active": vnc_active},
-                "remote_management": {"enabled": vnc_enabled, "active": vnc_active},
-            },
-        }
-
+    def collect(self) -> Iterator[dict[str, Any]]:
+        raw = self._raw(self._posture)
+        ssh, vnc = raw["services"]["remote_login"], raw["services"]["screen_sharing"]
         yield {
-            "filevault_active": int(luks_n > 0),
-            "firewall_global_state": int(ufw or fwd),
+            "filevault_active": int(raw["luks_mappings"] > 0),
+            "firewall_global_state": int(raw["ufw_active"] or raw["firewalld_active"]),
             "firewall_stealth": None,
             "firewall_logging": None,
             "gatekeeper_assessments_enabled": int(
-                selinux == "Enforcing" or apparmor.get("enabled") is True
+                raw["selinux"] == SelinuxMode.ENFORCING
+                or raw["apparmor"].get("enabled") is True
             ),
-            "remote_login_enabled": ssh.enabled,
-            "screen_sharing_enabled": vnc_enabled,
-            "remote_management_enabled": vnc_enabled,
+            "remote_login_enabled": ssh["enabled"],
+            "screen_sharing_enabled": vnc["enabled"],
+            "remote_management_enabled": vnc["enabled"],
             "raw_json": json.dumps(raw),
         }
 
-    # ---- helpers ----------------------------------------------------
+    def _raw(self, posture: LinuxSecurityPosture) -> dict[str, Any]:
+        ssh = self._probes.control(self.SSH).inspect()
+        vnc = self._vnc(posture)
+        return {
+            "selinux": posture.selinux_state(),
+            "apparmor": posture.apparmor_state(),
+            "ufw_active": posture.ufw_active(),
+            "firewalld_active": posture.service_active("firewalld"),
+            # posture (enabled) drives the dashboard badge; behaviour lives
+            # under "services" for the "active" pill.
+            "sshd_active": ssh.enabled,
+            "vnc_active": vnc["enabled"],
+            "luks_mappings": posture.luks_count(),
+            "services": {
+                "remote_login": {"enabled": ssh.enabled, "active": ssh.active},
+                "screen_sharing": vnc,
+                "remote_management": vnc,
+            },
+        }
 
-    @staticmethod
-    def _selinux_state() -> Optional[str]:
-        """Returns 'Enforcing' / 'Permissive' / None (not present)."""
-        flag = HostPaths.read_sysfs(HostPaths.translate("/sys/fs/selinux/enforce"))
-        if flag is None:
-            return None
-        return {"0": "Permissive", "1": "Enforcing"}.get(flag, "Unknown")
-
-    @staticmethod
-    def _apparmor_state() -> dict:
-        enabled = HostPaths.read_sysfs(
-            HostPaths.translate("/sys/module/apparmor/parameters/enabled")
-        )
-        return (
-            {"enabled": enabled == "Y"} if enabled is not None else {"enabled": False}
-        )
-
-    @staticmethod
-    def _ufw_active() -> bool:
-        # /etc/ufw/ufw.conf is the canonical persistent state.
-        conf = HostPaths.read_sysfs(HostPaths.translate("/etc/ufw/ufw.conf"))
-        if conf is None:
-            return False
-        for line in conf.splitlines():
-            if line.lstrip().startswith("ENABLED"):
-                key, _, value = line.partition("=")
-                if key.strip() == "ENABLED":
-                    return value.strip().strip('"').lower() == "yes"
-        return False
-
-    def _service_active(self, unit: str) -> bool:
-        state = self._runner.text(["systemctl", "is-active", unit], timeout=5)
-        return state.strip() == "active"
-
-    def _luks_count(self) -> int:
-        if not self._runner.exists("dmsetup"):
-            return 0
-        mappings = self._runner.text(["dmsetup", "ls", "--target", "crypt"], timeout=5)
-        if "No devices found" in mappings:
-            return 0
-        return sum(1 for line in mappings.splitlines() if line.strip())
+    def _vnc(self, posture: LinuxSecurityPosture) -> dict[str, int | None]:
+        running = int(any(posture.service_active(unit) for unit in VNC_UNITS))
+        signals = TriState()
+        ports = self._probes.ports
+        return {
+            "enabled": signals.any_on((running, ports.listening(VNC_PORT))),
+            "active": signals.any_on((running, ports.established(VNC_PORT))),
+        }
 
 
 class SetuidFilesCollector(SnapshotCollector):
@@ -324,49 +338,51 @@ class SetuidFilesCollector(SnapshotCollector):
     host's ``/usr/bin`` rather than its own.
     """
 
-    slice = slices.SETUID_FILES
+    slice = Slices.SETUID_FILES
     judge_fields = ("path", "uid", "setuid", "setgid")
 
-    def __init__(self, judge_hints: str = "", fs: "FilesystemLayout" = None):
+    def __init__(self, fs: ExecutableLayout, judge_hints: str = "") -> None:
         super().__init__(judge_hints=judge_hints)
         self._fs = fs
 
-    def collect(self):
-        for base in self._fs.privileged_bin_dirs():
-            if not base.is_dir():
-                continue
-            try:
-                paths = list(base.rglob("*"))
-            except (PermissionError, OSError):
-                continue
-            for path in paths:
-                try:
-                    if not path.is_file():
-                        continue
-                    st = path.lstat()
-                except (PermissionError, OSError):
-                    continue
-                mode = st.st_mode
-                setuid = bool(mode & 0o4000)
-                setgid = bool(mode & 0o2000)
-                if not (setuid or setgid):
-                    continue
-                yield {
-                    "path": str(path),
-                    "mode": mode,
-                    "uid": st.st_uid,
-                    "gid": st.st_gid,
-                    "size": st.st_size,
-                    "mtime": st.st_mtime,
-                    "sha256": Digest.sha256_file(path),
-                    "setuid": int(setuid),
-                    "setgid": int(setgid),
-                    "raw_json": json.dumps(
-                        {
-                            "path": str(path),
-                            "mode": oct(mode),
-                            "setuid": setuid,
-                            "setgid": setgid,
-                        }
-                    ),
-                }
+    def collect(self) -> Iterator[dict[str, Any]]:
+        paths = (
+            path for base in self._fs.privileged_bin_dirs() for path in self._tree(base)
+        )
+        rows = (self._row(path) for path in paths)
+        yield from (row for row in rows if row is not None)
+
+    def _tree(self, base: Path) -> list[Path]:
+        if not base.is_dir():
+            return []
+        try:
+            return list(base.rglob("*"))
+        except OSError:
+            return []
+
+    def _row(self, path: Path) -> dict[str, Any] | None:
+        try:
+            if not path.is_file():
+                return None
+            file_stat = path.lstat()
+        except OSError:
+            return None
+        setuid = bool(file_stat.st_mode & stat.S_ISUID)
+        setgid = bool(file_stat.st_mode & stat.S_ISGID)
+        if not (setuid or setgid):
+            return None
+        return self._privileged_row(path, file_stat, (setuid, setgid))
+
+    def _privileged_row(
+        self, path: Path, file_stat: os.stat_result, flags: tuple[bool, bool]
+    ) -> dict[str, Any]:
+        setuid, setgid = flags
+        details = {"path": str(path), "mode": oct(file_stat.st_mode)}
+        return {
+            "path": str(path),
+            **{field: getattr(file_stat, f"st_{field}") for field in FILE_STAT_FIELDS},
+            "sha256": Digest().sha256_file(path),
+            "setuid": int(setuid),
+            "setgid": int(setgid),
+            "raw_json": json.dumps({**details, "setuid": setuid, "setgid": setgid}),
+        }

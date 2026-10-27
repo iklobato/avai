@@ -41,7 +41,7 @@ def _firefox_profile(base: Path, profile: str, addons: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 class TestChromiumReader:
-    def test_reads_one_extension(self, tmp_path):
+    def test_reads_one_extension(self, tmp_path: Path) -> None:
         _chromium_profile(tmp_path, "Default",
                           "abcdefghijklmnopabcdefghijklmnop",
                           "1.0.0",
@@ -59,28 +59,28 @@ class TestChromiumReader:
         assert json.loads(r["permissions_json"]) == ["tabs", "<all_urls>"]
         assert json.loads(r["host_permissions_json"]) == ["https://*/*"]
 
-    def test_walks_multiple_profiles(self, tmp_path):
+    def test_walks_multiple_profiles(self, tmp_path: Path) -> None:
         _chromium_profile(tmp_path, "Default", "a" * 32, "1.0", {"name": "A"})
         _chromium_profile(tmp_path, "Profile 1", "b" * 32, "1.0", {"name": "B"})
         rows = list(ChromiumExtensionReader().read(tmp_path, Browser.CHROME))
         profiles = sorted(r["profile"] for r in rows)
         assert profiles == ["Default", "Profile 1"]
 
-    def test_walks_multiple_versions_per_extension(self, tmp_path):
+    def test_walks_multiple_versions_per_extension(self, tmp_path: Path) -> None:
         _chromium_profile(tmp_path, "Default", "a" * 32, "1.0", {"name": "v1"})
         _chromium_profile(tmp_path, "Default", "a" * 32, "1.1", {"name": "v1.1"})
         rows = list(ChromiumExtensionReader().read(tmp_path, Browser.CHROME))
         names = sorted(r["name"] for r in rows)
         assert names == ["v1", "v1.1"]
 
-    def test_skips_extension_without_manifest(self, tmp_path):
+    def test_skips_extension_without_manifest(self, tmp_path: Path) -> None:
         # An extension directory exists but no manifest.json — skipped.
         ext_dir = tmp_path / "Default" / "Extensions" / ("a" * 32) / "1.0"
         ext_dir.mkdir(parents=True)
         rows = list(ChromiumExtensionReader().read(tmp_path, Browser.CHROME))
         assert rows == []
 
-    def test_skips_malformed_manifest_json(self, tmp_path):
+    def test_skips_malformed_manifest_json(self, tmp_path: Path) -> None:
         ext_dir = tmp_path / "Default" / "Extensions" / ("a" * 32) / "1.0"
         ext_dir.mkdir(parents=True)
         (ext_dir / "manifest.json").write_text("not { valid json")
@@ -88,19 +88,19 @@ class TestChromiumReader:
         rows = list(ChromiumExtensionReader().read(tmp_path, Browser.CHROME))
         assert rows == []
 
-    def test_returns_nothing_when_base_does_not_exist(self, tmp_path):
+    def test_returns_nothing_when_base_does_not_exist(self, tmp_path: Path) -> None:
         rows = list(ChromiumExtensionReader().read(
             tmp_path / "no-such-dir", Browser.CHROME))
         assert rows == []
 
-    def test_uses_matches_when_host_permissions_missing(self, tmp_path):
+    def test_uses_matches_when_host_permissions_missing(self, tmp_path: Path) -> None:
         # Manifest v2 used `matches` instead of `host_permissions`.
         _chromium_profile(tmp_path, "Default", "a" * 32, "1.0",
                           {"name": "Old", "matches": ["http://*/*"]})
         rows = list(ChromiumExtensionReader().read(tmp_path, Browser.CHROME))
         assert json.loads(rows[0]["host_permissions_json"]) == ["http://*/*"]
 
-    def test_missing_optional_fields_default_to_empty(self, tmp_path):
+    def test_missing_optional_fields_default_to_empty(self, tmp_path: Path) -> None:
         _chromium_profile(tmp_path, "Default", "a" * 32, "1.0",
                           {"name": "Bare"})  # no permissions / hosts
         rows = list(ChromiumExtensionReader().read(tmp_path, Browser.CHROME))
@@ -113,7 +113,7 @@ class TestChromiumReader:
 # ---------------------------------------------------------------------------
 
 class TestFirefoxReader:
-    def test_reads_extensions_json_addon_list(self, tmp_path):
+    def test_reads_extensions_json_addon_list(self, tmp_path: Path) -> None:
         _firefox_profile(tmp_path, "abc.default-release", [
             {"id": "test@ext",
              "version": "2.0.0",
@@ -133,31 +133,31 @@ class TestFirefoxReader:
         assert json.loads(r["permissions_json"]) == ["tabs"]
         assert json.loads(r["host_permissions_json"]) == ["<all_urls>"]
 
-    def test_walks_multiple_profiles(self, tmp_path):
+    def test_walks_multiple_profiles(self, tmp_path: Path) -> None:
         _firefox_profile(tmp_path, "abc.default", [{"id": "a@x"}])
         _firefox_profile(tmp_path, "xyz.dev",     [{"id": "b@x"}])
         rows = list(FirefoxExtensionReader().read(tmp_path, Browser.FIREFOX))
         profiles = sorted(r["profile"] for r in rows)
         assert profiles == ["abc.default", "xyz.dev"]
 
-    def test_skips_profile_without_extensions_json(self, tmp_path):
+    def test_skips_profile_without_extensions_json(self, tmp_path: Path) -> None:
         # Profile dir exists but no extensions.json.
         (tmp_path / "Profiles" / "barren").mkdir(parents=True)
         rows = list(FirefoxExtensionReader().read(tmp_path, Browser.FIREFOX))
         assert rows == []
 
-    def test_skips_corrupt_extensions_json(self, tmp_path):
+    def test_skips_corrupt_extensions_json(self, tmp_path: Path) -> None:
         p = tmp_path / "Profiles" / "broken"
         p.mkdir(parents=True)
         (p / "extensions.json").write_text("not json")
         rows = list(FirefoxExtensionReader().read(tmp_path, Browser.FIREFOX))
         assert rows == []
 
-    def test_returns_nothing_without_profiles_dir(self, tmp_path):
+    def test_returns_nothing_without_profiles_dir(self, tmp_path: Path) -> None:
         rows = list(FirefoxExtensionReader().read(tmp_path, Browser.FIREFOX))
         assert rows == []
 
-    def test_missing_user_permissions_default_to_empty(self, tmp_path):
+    def test_missing_user_permissions_default_to_empty(self, tmp_path: Path) -> None:
         _firefox_profile(tmp_path, "p", [{"id": "x@y", "version": "1"}])
         rows = list(FirefoxExtensionReader().read(tmp_path, Browser.FIREFOX))
         assert rows[0]["permissions_json"] == "[]"

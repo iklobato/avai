@@ -2,48 +2,63 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from typing import ClassVar
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
-from ..queries import (
-    new_alerts,
-    resource_trend,
-    verdict_timeseries,
-)
-from . import read_session
-
-bp = Blueprint("api", __name__)
+from ..queries import ResourceQueries, VerdictQueries
+from . import DashboardServices, ServiceView
 
 
-@bp.route("/api/chart/verdicts")
-def api_chart_verdicts():
-    with read_session() as s:
-        return jsonify(verdict_timeseries(s, hours=12))
+class VerdictChart(ServiceView):
+    methods: ClassVar[list[str]] = ["GET"]
+
+    def dispatch_request(self) -> Response:
+        with self._services.read_session() as session:
+            now = self._services.clock.now()
+            return jsonify(VerdictQueries(session).verdict_timeseries(now))
 
 
-@bp.route("/api/chart/resources")
-def api_chart_resources():
-    """Memory / CPU / swap percentage time-series for the resource trend
-    charts (latest N runs)."""
-    with read_session() as s:
-        return jsonify(resource_trend(s))
+class ResourceChart(ServiceView):
+    """Memory / CPU / swap percentage series for the resource trend charts
+    (latest N runs)."""
+
+    methods: ClassVar[list[str]] = ["GET"]
+
+    def dispatch_request(self) -> Response:
+        with self._services.read_session() as session:
+            return jsonify(ResourceQueries(session).resource_trend())
 
 
-@bp.route("/api/notifications/new")
-def api_notifications_new():
-    """Return malicious/suspicious judgements created after ``?since``.
-    The client supplies its last-seen timestamp (persisted in
-    localStorage). The response also includes ``now`` so the client can
-    advance its cursor even when there are no new items, avoiding
-    re-alerting on the same gap if the timestamp ever changed."""
-    since = request.args.get("since", "")
-    with read_session() as s:
-        items = new_alerts(s, since=since or None)
-    return jsonify(
-        {
-            "since": since,
-            "items": items,
-            "now": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
+class NewAlerts(ServiceView):
+    """Malicious/suspicious judgements created after ``?since`` (the client's
+    last-seen timestamp, kept in localStorage). ``now`` lets the client
+    advance its cursor even when nothing is new, so a gap never re-alerts."""
+
+    methods: ClassVar[list[str]] = ["GET"]
+
+    def dispatch_request(self) -> Response:
+        since = request.args.get("since", "")
+        with self._services.read_session() as session:
+            items = VerdictQueries(session).new_alerts(since or None)
+        now = self._services.clock.now_iso()
+        return jsonify({"since": since, "items": items, "now": now})
+
+
+class ApiRoutes:
+    ROUTES = (
+        ("/api/chart/verdicts", "api_chart_verdicts", VerdictChart),
+        ("/api/chart/resources", "api_chart_resources", ResourceChart),
+        ("/api/notifications/new", "api_notifications_new", NewAlerts),
     )
+
+    def __init__(self, services: DashboardServices) -> None:
+        self._services = services
+
+    def blueprint(self) -> Blueprint:
+        blueprint = Blueprint("api", __name__)
+        for path, endpoint, view in self.ROUTES:
+            blueprint.add_url_rule(
+                path, view_func=view.as_view(endpoint, self._services)
+            )
+        return blueprint

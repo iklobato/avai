@@ -2,41 +2,74 @@
 
 from __future__ import annotations
 
-import socket
+import logging
 import threading
-import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from .collectors import StreamingCollector
-from .constants import LOG, STREAM_HEALTHY_RESET_S
+from .constants import STREAM_HEALTHY_RESET_S
+from .failures import HOST_FAILURES
 from .runtime import Clock, Digest
 from .sink import Sink
 from .supervision import (
     BackoffPolicy,
     Completed,
     Crashed,
+    ExponentialBackoff,
     InterruptibleSleep,
     LoggingSupervisionListener,
     Sleeper,
     Stopped,
     StreamOutcome,
     SupervisionListener,
-    default_backoff,
 )
+
+WRITE_FAILURES = (SQLAlchemyError, OSError, ValueError, TypeError)
 
 
 @dataclass(frozen=True)
 class SupervisionPolicy:
-    """How a streaming worker buffers, restarts and reports. The defaults are
-    production's; tests pass deterministic fakes for backoff and listener."""
+    """How a streaming worker buffers, restarts and reports. Tests pass
+    deterministic fakes for backoff and listener."""
 
+    listener: SupervisionListener
     batch_size: int = 50
     flush_interval_s: float = 5.0
     join_timeout_s: float = 5.0
     healthy_reset_s: float = STREAM_HEALTHY_RESET_S
-    backoff: BackoffPolicy = field(default_factory=default_backoff)
-    listener: SupervisionListener = field(default_factory=LoggingSupervisionListener)
+    backoff: BackoffPolicy = field(default_factory=ExponentialBackoff.standard)
+
+    @classmethod
+    def standard(cls, logger: logging.Logger) -> SupervisionPolicy:
+        return cls(LoggingSupervisionListener(logger))
+
+
+@dataclass(frozen=True)
+class StreamChannel:
+    """Where a worker's rows go."""
+
+    sink: Sink
+    hostname: str
+    clock: Clock = field(default_factory=Clock)
+
+
+@dataclass(frozen=True)
+class WorkerControls:
+    """A worker's policy plus the stop event its sleeper waits on."""
+
+    policy: SupervisionPolicy
+    stop_event: threading.Event
+    sleeper: Sleeper
+
+    @classmethod
+    def interruptible(cls, policy: SupervisionPolicy) -> WorkerControls:
+        # The sleeper wakes on this worker's own stop event, so a pending
+        # backoff aborts the moment shutdown is requested.
+        stop_event = threading.Event()
+        return cls(policy, stop_event, InterruptibleSleep(stop_event))
 
 
 class StreamingSupervisor:
@@ -45,30 +78,29 @@ class StreamingSupervisor:
 
     def __init__(
         self,
-        sink: Sink,
+        channel: StreamChannel,
         collectors: list[StreamingCollector],
-        policy: Optional[SupervisionPolicy] = None,
-    ):
-        self._sink = sink
+        policy: SupervisionPolicy,
+    ) -> None:
+        self._channel = channel
         self._collectors = collectors
-        self._policy = policy or SupervisionPolicy()
+        self._policy = policy
         self._workers: list[StreamingWorker] = []
 
     def start(self) -> None:
         if not self._collectors:
             return
-        hostname = socket.gethostname()
         for collector in self._collectors:
-            worker = StreamingWorker(collector, self._sink, hostname, self._policy)
+            worker = StreamingWorker.create(collector, self._channel, self._policy)
             worker.start()
             self._workers.append(worker)
-        LOG.info("started %d streaming worker(s)", len(self._workers))
+        self._policy.listener.report_pool("started", len(self._workers))
 
     def stop(self) -> None:
         for worker in self._workers:
             worker.stop()
         if self._workers:
-            LOG.info("stopped %d streaming worker(s)", len(self._workers))
+            self._policy.listener.report_pool("stopped", len(self._workers))
         self._workers.clear()
 
 
@@ -84,8 +116,7 @@ class StreamingWorker:
     If the collector raises mid-stream, the worker does not die: it opens a
     fresh session and restarts, backing off between attempts. Restart
     timing, waiting, and crash escalation are delegated to injected
-    collaborators (see :mod:`.supervision`) so the policy is configurable
-    and the behaviour is deterministically testable. ``stop()`` signals the
+    collaborators (see :mod:`.supervision`). ``stop()`` signals the
     collector to terminate its source, aborts any pending backoff, and joins
     the thread.
     """
@@ -93,23 +124,33 @@ class StreamingWorker:
     def __init__(
         self,
         collector: StreamingCollector,
-        sink: Sink,
-        hostname: str,
-        policy: Optional[SupervisionPolicy] = None,
-        sleeper: Optional[Sleeper] = None,
-    ):
+        channel: StreamChannel,
+        controls: WorkerControls,
+    ) -> None:
         self.collector = collector
-        self.sink = sink
-        self.hostname = hostname
-        self.policy = policy or SupervisionPolicy()
-        self.stop_event = threading.Event()
-        # The default sleeper wakes on this worker's own stop event, so it
-        # can't live in the shared policy; tests inject an immediate one.
-        self.sleeper = sleeper or InterruptibleSleep(self.stop_event)
-        self.thread: Optional[threading.Thread] = None
-        self.run_id: Optional[str] = None
+        self._channel = channel
+        self._controls = controls
+        self.thread: threading.Thread | None = None
+        self.run_id: str | None = None
         self._rows_written = 0
         self._restart_attempt = 0
+
+    @classmethod
+    def create(
+        cls,
+        collector: StreamingCollector,
+        channel: StreamChannel,
+        policy: SupervisionPolicy,
+    ) -> StreamingWorker:
+        return cls(collector, channel, WorkerControls.interruptible(policy))
+
+    @property
+    def stop_event(self) -> threading.Event:
+        return self._controls.stop_event
+
+    @property
+    def _policy(self) -> SupervisionPolicy:
+        return self._controls.policy
 
     def start(self) -> None:
         if self.thread is not None and self.thread.is_alive():
@@ -125,14 +166,7 @@ class StreamingWorker:
     def stop(self) -> None:
         self.stop_event.set()
         if self.thread is not None:
-            self.thread.join(timeout=self.policy.join_timeout_s)
-
-    def _flush(self, buffer: list[dict]) -> None:
-        if not buffer:
-            return
-        self.sink.write(self.collector.model, buffer)
-        self._rows_written += len(buffer)
-        buffer.clear()
+            self.thread.join(timeout=self._policy.join_timeout_s)
 
     def _run(self) -> None:
         """Supervision loop: run a session, then dispatch on its outcome.
@@ -143,14 +177,19 @@ class StreamingWorker:
         """
         self._restart_attempt = 0
         while not self.stop_event.is_set():
-            started = time.monotonic()
+            clock = self._channel.clock
+            started = clock.monotonic()
             outcome = self._stream_once()
-            if time.monotonic() - started >= self.policy.healthy_reset_s:
-                if self._restart_attempt:
-                    self.policy.listener.report_healthy(self.collector.name)
-                self._restart_attempt = 0
+            self._note_runtime(clock.monotonic() - started)
             if not outcome.accept(self):
                 break
+
+    def _note_runtime(self, elapsed_s: float) -> None:
+        if elapsed_s < self._policy.healthy_reset_s:
+            return
+        if self._restart_attempt:
+            self._policy.listener.report_healthy(self.collector.name)
+        self._restart_attempt = 0
 
     # -- OutcomeHandler: one method per StreamOutcome, no status branching --
 
@@ -165,10 +204,11 @@ class StreamingWorker:
         if self.stop_event.is_set():
             return False
         self._restart_attempt += 1
-        self.policy.listener.report_crash(
+        self._policy.listener.report_crash(
             self.collector.name, self._restart_attempt, exc
         )
-        self.sleeper.sleep(self.policy.backoff.delay_for(self._restart_attempt))
+        delay = self._policy.backoff.delay_for(self._restart_attempt)
+        self._controls.sleeper.sleep(delay)
         return not self.stop_event.is_set()
 
     def _stream_once(self) -> StreamOutcome:
@@ -180,50 +220,66 @@ class StreamingWorker:
         outcome warrants.
         """
         rows_before = self._rows_written
-        self.run_id = self.sink.start_streaming_session(
-            self.collector.name,
-            self.hostname,
+        self.run_id = self._channel.sink.start_streaming_session(
+            self.collector.name, self._channel.hostname
         )
-        LOG.info(
-            "streaming collector=%s run_id=%s started", self.collector.name, self.run_id
-        )
-        buffer: list[dict] = []
-        last_flush = time.monotonic()
-        crash: Optional[BaseException] = None
+        self._policy.listener.report_session_start(self.collector.name, self.run_id)
+        buffer: list[dict[str, Any]] = []
+        try:
+            crash = self._pump(buffer)
+        finally:
+            self._close_session(buffer, rows_before)
+        return self._outcome(crash)
+
+    def _pump(self, buffer: list[dict[str, Any]]) -> BaseException | None:
+        last_flush = self._channel.clock.monotonic()
         try:
             for row in self.collector.stream(self.stop_event):
-                row["run_id"] = self.run_id
-                row["collected_at"] = Clock().now_iso()
-                row["content_hash"] = Digest.of_row(row, self.collector.judge_fields)
-                buffer.append(row)
-                now = time.monotonic()
-                if len(buffer) >= self.policy.batch_size or (
-                    buffer and now - last_flush >= self.policy.flush_interval_s
-                ):
-                    try:
-                        self._flush(buffer)
-                    except Exception:
-                        LOG.exception(
-                            "streaming flush failed collector=%s", self.collector.name
-                        )
-                    last_flush = now
-        except Exception as exc:  # noqa: BLE001 - relayed to the supervisor as Crashed
-            crash = exc
-        finally:
-            try:
-                self._flush(buffer)
-            except Exception:
-                LOG.exception(
-                    "streaming final flush failed collector=%s", self.collector.name
-                )
-            session_rows = self._rows_written - rows_before
-            try:
-                self.sink.end_streaming_session(self.run_id, session_rows)
-            except Exception:
-                LOG.exception(
-                    "end_streaming_session failed collector=%s", self.collector.name
-                )
-            self.policy.listener.report_session_end(self.collector.name, session_rows)
+                buffer.append(self._stamped(row))
+                last_flush = self._flush_if_due(buffer, last_flush)
+        except HOST_FAILURES as exc:  # relayed to the supervisor as Crashed
+            return exc
+        return None
+
+    def _stamped(self, row: dict[str, Any]) -> dict[str, Any]:
+        """A copy of ``row`` with this session's run id, time and hash."""
+        clock = self._channel.clock
+        stamped = {**row, "run_id": self.run_id, "collected_at": clock.now_iso()}
+        content_hash = Digest().of_row(stamped, self.collector.judge_fields)
+        return stamped | {"content_hash": content_hash}
+
+    def _flush_if_due(self, buffer: list[dict[str, Any]], last_flush: float) -> float:
+        now = self._channel.clock.monotonic()
+        full = len(buffer) >= self._policy.batch_size
+        stale = bool(buffer) and now - last_flush >= self._policy.flush_interval_s
+        if not (full or stale):
+            return last_flush
+        self._safe_flush(buffer)
+        return now
+
+    def _safe_flush(self, buffer: list[dict[str, Any]]) -> None:
+        try:
+            self._flush(buffer)
+        except WRITE_FAILURES as exc:
+            self._policy.listener.report_write_failure(self.collector.name, exc)
+
+    def _flush(self, buffer: list[dict[str, Any]]) -> None:
+        if not buffer:
+            return
+        self._channel.sink.write(self.collector.model, buffer)
+        self._rows_written += len(buffer)
+        buffer.clear()
+
+    def _close_session(self, buffer: list[dict[str, Any]], rows_before: int) -> None:
+        self._safe_flush(buffer)
+        session_rows = self._rows_written - rows_before
+        try:
+            self._channel.sink.end_streaming_session(self.run_id, session_rows)
+        except WRITE_FAILURES as exc:
+            self._policy.listener.report_write_failure(self.collector.name, exc)
+        self._policy.listener.report_session_end(self.collector.name, session_rows)
+
+    def _outcome(self, crash: BaseException | None) -> StreamOutcome:
         if crash is not None:
             return Crashed(crash)
         if self.stop_event.is_set():

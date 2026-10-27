@@ -21,19 +21,34 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from avai.dashboard.app import create_app
+from avai.dashboard.app import DashboardApp
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.queries import dns_queries, network_flows, persistence_tampering
-from avai.enrichers import IndicatorType, extract_indicators
-from avai.host_monitor.runtime import Digest
-from avai.host_monitor.collectors import (
-    DnsQueriesCollector,
-    HostsFileCollector,
-    NetworkFlowsCollector,
-    PrivilegeConfigCollector,
-    ProcessConnectionResolver,
-    SshAuthorizedKeysCollector,
+from avai.dashboard.queries import (
+    DnsPanel,
+    DnsQuery,
+    FlowQuery,
+    FlowsPanel,
+    PersistencePages,
+    PersistencePanel,
+    RowFilter,
 )
+from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
+from avai.host_monitor.collectors import (
+    CapturedPackets,
+    DnsQueriesCollector,
+    DnsQuestion,
+    NetworkFlowsCollector,
+    ProcessConnectionResolver,
+    QueryTable,
+    TcpdumpLine,
+)
+from avai.host_monitor.collectors.persistence import (
+    AuthorizedKeysParser,
+    HostsFileParser,
+    SudoersParser,
+)
+from avai.host_monitor.runtime import HostPaths
+from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 from avai.host_monitor.models import (
     DnsQueryRow,
     HostsFileRow,
@@ -41,8 +56,25 @@ from avai.host_monitor.models import (
     PrivilegeConfigRow,
     SshAuthorizedKeyRow,
 )
+from avai.host_monitor.runtime import Digest, PsutilConnections
 from avai.host_monitor.sink import Sink
-from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
+from pathlib import Path
+
+
+class _FakeCapture:
+    """A capture that hands back canned tcpdump output."""
+
+    def __init__(self, stdout: str, default_iface: str | None) -> None:
+        self._stdout = stdout
+        self._default_iface = default_iface
+
+    def record(
+        self, flags: list[str], bpf_filter: list[str], timeout: int
+    ) -> CapturedPackets:
+        return CapturedPackets(
+            self._stdout, self._default_iface, "2026-01-01T00:00:00+00:00"
+        )
+
 
 # ---------------------------------------------------------------------------
 # process -> flow attribution
@@ -58,7 +90,7 @@ class _FakeResolver:
 
 
 class TestProcessAttribution:
-    def test_resolver_maps_remote_endpoint_to_process(self, monkeypatch):
+    def test_resolver_maps_remote_endpoint_to_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
         conns = [
             SimpleNamespace(raddr=SimpleNamespace(ip="8.8.8.8", port=443), pid=4321),
             SimpleNamespace(raddr=None, pid=999),  # listening — no remote, skipped
@@ -68,25 +100,24 @@ class TestProcessAttribution:
         monkeypatch.setattr(
             psutil, "Process", lambda pid: SimpleNamespace(name=lambda: "curl")
         )
-        snap = ProcessConnectionResolver().snapshot()
+        snap = ProcessConnectionResolver(PsutilConnections()).snapshot()
         assert snap[("8.8.8.8", 443)] == ("curl", 4321)
         assert ("1.2.3.4", 53) not in snap  # pid None skipped
 
-    def test_collect_attaches_process_to_matching_flow(self, monkeypatch):
+    def test_collect_attaches_process_to_matching_flow(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sample = "(en6) IP 10.0.0.5.55555 > 8.8.8.8.443: tcp 0"
         c = NetworkFlowsCollector(
-            resolver=_FakeResolver({("8.8.8.8", 443): ("curl", 4321)})
+            _FakeCapture(sample, "en6"),
+            _FakeResolver({("8.8.8.8", 443): ("curl", 4321)}),
         )
-        monkeypatch.setattr(c, "_capture", lambda: (sample, "en6"))
         rows = list(c.collect())
         assert len(rows) == 1
         assert rows[0]["process"] == "curl"
         assert rows[0]["pid"] == 4321
 
-    def test_collect_sets_process_none_when_unresolved(self, monkeypatch):
+    def test_collect_sets_process_none_when_unresolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sample = "(en6) IP 10.0.0.5.55555 > 9.9.9.9.443: tcp 0"
-        c = NetworkFlowsCollector(resolver=_FakeResolver({}))
-        monkeypatch.setattr(c, "_capture", lambda: (sample, "en6"))
+        c = NetworkFlowsCollector(_FakeCapture(sample, "en6"), _FakeResolver({}))
         row = list(c.collect())[0]
         # keys must be present (uniform-column insert) even when unresolved
         assert row["process"] is None and row["pid"] is None
@@ -98,42 +129,43 @@ class TestProcessAttribution:
 
 
 class TestDnsParse:
-    def test_query_line(self):
-        assert DnsQueriesCollector._parse_dns_line(
+    def parse(self, line: str) -> DnsQuestion | None:
+        return TcpdumpLine.of(line).dns_question()
+
+    def test_query_line(self) -> None:
+        assert self.parse(
             "(en6) IP 10.0.0.5.51000 > 8.8.8.8.53: 1234+ A? example.com. (29)"
         ) == ("en6", "example.com", "A", "8.8.8.8")
 
-    def test_aaaa_query_ipv6_resolver(self):
-        out = DnsQueriesCollector._parse_dns_line(
+    def test_aaaa_query_ipv6_resolver(self) -> None:
+        out = self.parse(
             "(en6) IP6 fe80::1.51000 > 2001:4860:4860::8888.53: 5+ AAAA? host.test. (30)"
         )
         assert out == ("en6", "host.test", "AAAA", "2001:4860:4860::8888")
 
-    def test_response_is_ignored(self):
+    def test_response_is_ignored(self) -> None:
         # src port 53 → a response, not a question
-        assert (
-            DnsQueriesCollector._parse_dns_line(
-                "(en6) IP 8.8.8.8.53 > 10.0.0.5.51000: 1234 1/0/0 A 93.184.216.34 (45)"
-            )
-            is None
-        )
+        line = "(en6) IP 8.8.8.8.53 > 10.0.0.5.51000: 1234 1/0/0 A 93.184.216.34 (45)"
+        assert self.parse(line) is None
 
-    def test_non_dns_line_ignored(self):
-        assert DnsQueriesCollector._parse_dns_line("ARP, Request who-has x") is None
+    def test_non_dns_line_ignored(self) -> None:
+        assert self.parse("ARP, Request who-has x") is None
 
-    def test_aggregate_counts_repeats(self):
+    def test_aggregate_counts_repeats(self) -> None:
         out = (
             "(en6) IP 10.0.0.5.5.53 > 8.8.8.8.53: 1+ A? a.com. (20)\n"
             "(en6) IP 10.0.0.5.6.53 > 8.8.8.8.53: 2+ A? a.com. (20)\n"
         )
-        agg = DnsQueriesCollector()._aggregate(out, "en6", {})
+        agg = QueryTable().aggregate(
+            CapturedPackets(out, "en6", "2026-01-01T00:00:00+00:00"), {}
+        )
         assert agg[("a.com", "A", "8.8.8.8")]["count"] == 2
 
-    def test_doh_endpoint_detected_from_connections(self, monkeypatch):
+    def test_doh_endpoint_detected_from_connections(self, monkeypatch: pytest.MonkeyPatch) -> None:
         c = DnsQueriesCollector(
-            resolver=_FakeResolver({("1.1.1.1", 443): ("firefox", 22)})
+            _FakeCapture("", None),
+            _FakeResolver({("1.1.1.1", 443): ("firefox", 22)}),
         )
-        monkeypatch.setattr(c, "_capture", lambda: ("", None))
         rows = list(c.collect())
         doh = [r for r in rows if r["qtype"] == "DoH"]
         assert len(doh) == 1
@@ -151,8 +183,8 @@ _VALID_BLOB = base64.b64encode(b"raw-ed25519-public-key-bytes----").decode()
 
 
 class TestAuthorizedKeys:
-    def test_key_with_options_and_comment(self):
-        rows = SshAuthorizedKeysCollector._parse_authorized_keys(
+    def test_key_with_options_and_comment(self) -> None:
+        rows = AuthorizedKeysParser().parse(
             'from="10.0.0.0/8",no-pty ssh-ed25519 ' f"{_VALID_BLOB} admin@laptop\n",
             "/Users/x/.ssh/authorized_keys",
             "x",
@@ -165,23 +197,19 @@ class TestAuthorizedKeys:
         assert r["fingerprint"].startswith("SHA256:")
         assert r["owner"] == "x"
 
-    def test_plain_key_no_options(self):
-        rows = SshAuthorizedKeysCollector._parse_authorized_keys(
+    def test_plain_key_no_options(self) -> None:
+        rows = AuthorizedKeysParser().parse(
             f"ssh-rsa {_VALID_BLOB} root\n", "/p", "root"
         )
         assert rows[0]["options"] is None
         assert rows[0]["key_type"] == "ssh-rsa"
 
-    def test_comments_and_blanks_skipped(self):
-        rows = SshAuthorizedKeysCollector._parse_authorized_keys(
-            "# a comment\n\n   \n", "/p", "x"
-        )
+    def test_comments_and_blanks_skipped(self) -> None:
+        rows = AuthorizedKeysParser().parse("# a comment\n\n   \n", "/p", "x")
         assert rows == []
 
-    def test_invalid_base64_yields_no_fingerprint(self):
-        rows = SshAuthorizedKeysCollector._parse_authorized_keys(
-            "ssh-ed25519 not!base64!! c\n", "/p", "x"
-        )
+    def test_invalid_base64_yields_no_fingerprint(self) -> None:
+        rows = AuthorizedKeysParser().parse("ssh-ed25519 not!base64!! c\n", "/p", "x")
         assert rows[0]["fingerprint"] is None
 
 
@@ -191,8 +219,8 @@ class TestAuthorizedKeys:
 
 
 class TestHostsParse:
-    def test_parses_mappings_and_strips_comments(self):
-        rows = HostsFileCollector._parse_hosts(
+    def test_parses_mappings_and_strips_comments(self) -> None:
+        rows = HostsFileParser().parse(
             "127.0.0.1 localhost\n# c\n6.6.6.6 my-bank.com extra # evil\n\n",
             "/etc/hosts",
         )
@@ -201,8 +229,8 @@ class TestHostsParse:
             ("6.6.6.6", "my-bank.com extra"),
         ]
 
-    def test_lone_ip_without_name_skipped(self):
-        assert HostsFileCollector._parse_hosts("1.2.3.4\n", "/etc/hosts") == []
+    def test_lone_ip_without_name_skipped(self) -> None:
+        assert HostsFileParser().parse("1.2.3.4\n", "/etc/hosts") == []
 
 
 # ---------------------------------------------------------------------------
@@ -211,8 +239,8 @@ class TestHostsParse:
 
 
 class TestPrivilegeParsers:
-    def test_sudoers_keeps_rules_drops_defaults(self):
-        rows = PrivilegeConfigCollector._parse_sudoers(
+    def test_sudoers_keeps_rules_drops_defaults(self) -> None:
+        rows = SudoersParser().parse(
             "Defaults env_reset\n"
             "# comment\n"
             "%admin ALL=(ALL) ALL\n"
@@ -222,18 +250,16 @@ class TestPrivilegeParsers:
         assert [r["subject"] for r in rows] == ["%admin", "bob"]
         assert all(r["kind"] == "sudoers" for r in rows)
 
-    def test_groups_only_privileged_with_members(self):
-        rows = LinuxPrivilegedAccounts._parse_groups(
-            "sudo:x:27:alice,bob\nwheel:x:10:\nstaff:x:50:carol\n",
-            "/etc/group",
-            LinuxPrivilegedAccounts._PRIV_GROUPS,
+    def test_groups_only_privileged_with_members(self) -> None:
+        rows = LinuxPrivilegedAccounts(HostPaths("")).group_rows(
+            "sudo:x:27:alice,bob\nwheel:x:10:\nstaff:x:50:carol\n", "/etc/group"
         )
         assert len(rows) == 1
         assert rows[0]["subject"] == "sudo"
         assert rows[0]["detail"] == "alice,bob"
 
-    def test_passwd_flags_uid0_only(self):
-        rows = LinuxPrivilegedAccounts._parse_passwd_uid0(
+    def test_passwd_flags_uid0_only(self) -> None:
+        rows = LinuxPrivilegedAccounts(HostPaths("")).uid0_rows(
             "root:x:0:0:root:/root:/bin/bash\n"
             "backdoor:x:0:0::/:/bin/sh\n"
             "bob:x:1000:1000::/home/bob:/bin/bash\n",
@@ -248,31 +274,31 @@ class TestPrivilegeParsers:
 
 
 class TestNewExtractors:
-    def test_dns_query_emits_domain(self):
-        out = extract_indicators("dns_queries", {"qname": "evil.example", "qtype": "A"})
+    def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
+        return IndicatorExtraction.default().extract(collector, row)
+
+    def test_dns_query_emits_domain(self) -> None:
+        out = self.extract("dns_queries", {"qname": "evil.example", "qtype": "A"})
         assert [(i.type, i.value) for i in out] == [
             (IndicatorType.DOMAIN, "evil.example")
         ]
 
-    def test_doh_row_not_a_domain(self):
+    def test_doh_row_not_a_domain(self) -> None:
         # qname is a provider label, not a domain → no indicator
         assert (
-            extract_indicators("dns_queries", {"qname": "Cloudflare", "qtype": "DoH"})
-            == []
+            self.extract("dns_queries", {"qname": "Cloudflare", "qtype": "DoH"}) == []
         )
 
-    def test_hosts_emits_public_ip_and_domain(self):
-        out = extract_indicators(
+    def test_hosts_emits_public_ip_and_domain(self) -> None:
+        out = self.extract(
             "hosts_file", {"ip": "6.6.6.6", "hostnames": "my-bank.com localhost"}
         )
         pairs = {(i.type, i.value) for i in out}
         assert (IndicatorType.IPV4, "6.6.6.6") in pairs
         assert (IndicatorType.DOMAIN, "my-bank.com") in pairs
 
-    def test_hosts_skips_loopback_ip(self):
-        out = extract_indicators(
-            "hosts_file", {"ip": "127.0.0.1", "hostnames": "localhost"}
-        )
+    def test_hosts_skips_loopback_ip(self) -> None:
+        out = self.extract("hosts_file", {"ip": "127.0.0.1", "hostnames": "localhost"})
         assert out == []  # private ip + non-domain name
 
 
@@ -282,11 +308,11 @@ class TestNewExtractors:
 
 
 @pytest.fixture
-def db(tmp_path):
+def db(tmp_path: Path):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'n.db'}", connect_args={"check_same_thread": False}
     )
-    sink = Sink(engine)
+    sink = Sink.create(engine)
     sink.setup()
     run_id, ts = sink.start_run("h", 5)
     return engine, sink, run_id, ts
@@ -296,12 +322,12 @@ def _write(sink, model, rows, fields, ts, run_id):
     for r in rows:
         r["run_id"] = run_id
         r["collected_at"] = ts
-        r["content_hash"] = Digest.of_row(r, fields)
+        r["content_hash"] = Digest().of_row(r, fields)
     sink.write(model, rows)
 
 
 class TestDashboardDns:
-    def test_dns_queries_summary_and_doh(self, db):
+    def test_dns_queries_summary_and_doh(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,
@@ -332,8 +358,8 @@ class TestDashboardDns:
             ts,
             run_id,
         )
-        with Session(engine) as s:
-            data = dns_queries(s, run_id)
+        with Session(engine) as session:
+            data = DnsPanel(session, run_id).queries(DnsQuery())
         assert data["summary"]["domains"] == 2
         assert data["summary"]["queries"] == 4
         assert data["summary"]["doh"] == 1
@@ -341,17 +367,17 @@ class TestDashboardDns:
         assert by_name["good.com"] == "external DNS"  # public resolver
         assert by_name["Cloudflare"] == "DoH (encrypted)"
 
-    def test_resolution_level_classification(self):
-        from avai.dashboard.queries.dns import _dns_resolution_level
+    def test_resolution_level_classification(self) -> None:
+        from avai.dashboard.queries import DnsLevel
 
-        assert _dns_resolution_level("192.168.1.1", "A") == "local resolver"
-        assert _dns_resolution_level("127.0.0.1", "A") == "local resolver"
-        assert _dns_resolution_level("8.8.8.8", "A") == "external DNS"
-        assert _dns_resolution_level("1.1.1.1", "DoH") == "DoH (encrypted)"
-        assert _dns_resolution_level(None, "A") == "unknown"
-        assert _dns_resolution_level("not-an-ip", "A") == "unknown"
+        assert DnsLevel().of("192.168.1.1", "A") == "local resolver"
+        assert DnsLevel().of("127.0.0.1", "A") == "local resolver"
+        assert DnsLevel().of("8.8.8.8", "A") == "external DNS"
+        assert DnsLevel().of("1.1.1.1", "DoH") == "DoH (encrypted)"
+        assert DnsLevel().of(None, "A") == "unknown"
+        assert DnsLevel().of("not-an-ip", "A") == "unknown"
 
-    def test_fragment_renders(self, db):
+    def test_fragment_renders(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,
@@ -373,13 +399,13 @@ class TestDashboardDns:
             run_id,
         )
         config = DashboardConfig(db_path=engine.url.database)
-        with create_app(config).test_client() as c:
+        with DashboardApp(config).build().test_client() as c:
             html = c.get("/fragments/dns-queries").data.decode()
         assert "tracker.bad" in html and "DNS queries" in html
 
 
 class TestDashboardPersistence:
-    def test_sections_populated(self, db):
+    def test_sections_populated(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,
@@ -427,15 +453,17 @@ class TestDashboardPersistence:
             ts,
             run_id,
         )
-        with Session(engine) as s:
-            data = persistence_tampering(s, run_id)
+        with Session(engine) as session:
+            data = PersistencePanel(session, run_id).tampering(
+                RowFilter(), PersistencePages()
+            )
         assert data["any"] is True
         assert data["counts"]["ssh_keys"]["total"] == 1
         assert data["ssh_keys"][0]["owner"] == "x"
         assert data["hosts"][0]["ip"] == "6.6.6.6"
         assert data["privilege"][0]["subject"] == "bob"
 
-    def test_fragment_renders(self, db):
+    def test_fragment_renders(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,
@@ -452,19 +480,21 @@ class TestDashboardPersistence:
             run_id,
         )
         config = DashboardConfig(db_path=engine.url.database)
-        with create_app(config).test_client() as c:
+        with DashboardApp(config).build().test_client() as c:
             html = c.get("/fragments/persistence").data.decode()
         assert "my-bank.com" in html and "persistence" in html.lower()
 
-    def test_empty_when_no_data(self, db):
+    def test_empty_when_no_data(self, db) -> None:
         engine, sink, run_id, ts = db
-        with Session(engine) as s:
-            data = persistence_tampering(s, run_id)
+        with Session(engine) as session:
+            data = PersistencePanel(session, run_id).tampering(
+                RowFilter(), PersistencePages()
+            )
         assert data["any"] is False
 
 
 class TestNetworkFlowProcessColumn:
-    def test_process_attached_in_dashboard(self, db):
+    def test_process_attached_in_dashboard(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,
@@ -487,6 +517,6 @@ class TestNetworkFlowProcessColumn:
             ts,
             run_id,
         )
-        with Session(engine) as s:
-            rows = network_flows(s, run_id)["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         assert rows[0]["process"] == "curl"

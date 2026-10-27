@@ -15,13 +15,13 @@ codebase doesn't have yet; that's a deliberate follow-up.
 from __future__ import annotations
 
 import json
-from typing import Optional
+from typing import Any
 
 from .constants import DEFAULT_JUDGE_MODEL
 from .enums import ThreatCategory, Verdict
-from .llm import CompletionClient, CompletionRequest, StructuredCall
+from .llm import CompletionRequest, LlmSession, StructuredCall
+from .llm_replies import JudgmentReply
 from .prompts import Prompts
-from .runtime import Coerce
 
 
 class UnknownFindingInvestigator:
@@ -31,76 +31,52 @@ class UnknownFindingInvestigator:
     TEMPERATURE = 0.0
     MAX_TOKENS = 1024
 
+    REQUIRED = ("verdict", "category", "confidence", "reasoning", "remediation")
+
     @classmethod
-    def _investigation_schema(cls) -> dict:
+    def _investigation_schema(cls) -> dict[str, Any]:
+        verdicts = [str(verdict) for verdict in Verdict]
+        categories = [str(category) for category in ThreatCategory]
         return {
             "type": "object",
             "properties": {
-                "verdict": {"type": "string", "enum": [str(v) for v in Verdict]},
-                "category": {
-                    "type": "string",
-                    "enum": [str(c) for c in ThreatCategory],
-                },
+                "verdict": {"type": "string", "enum": verdicts},
+                "category": {"type": "string", "enum": categories},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "reasoning": {"type": "string"},
                 "remediation": {"type": "string"},
             },
-            "required": [
-                "verdict",
-                "category",
-                "confidence",
-                "reasoning",
-                "remediation",
-            ],
+            "required": list(cls.REQUIRED),
         }
 
-    def __init__(
-        self,
-        prompts: Prompts,
-        client: CompletionClient,
-        model: str = DEFAULT_JUDGE_MODEL,
-    ):
-        self.model = model
-        self._llm = StructuredCall(
-            "investigator",
-            client,
-            CompletionRequest(
-                model=model,
-                system=prompts.investigator_system,
-                user=prompts.investigator_user_template,
-                schema=self._investigation_schema(),
-                schema_name=self.SCHEMA_NAME,
-                max_tokens=self.MAX_TOKENS,
-                temperature=self.TEMPERATURE,
-            ),
-        )
+    def __init__(self, llm: StructuredCall) -> None:
+        self._llm = llm
 
-    def investigate(self, collector: str, finding: dict) -> Optional[dict]:
+    @classmethod
+    def create(
+        cls, prompts: Prompts, session: LlmSession, model: str = DEFAULT_JUDGE_MODEL
+    ) -> UnknownFindingInvestigator:
+        request = CompletionRequest(
+            model=model,
+            system=prompts.investigator_system,
+            user=prompts.investigator_user_template,
+            schema=cls._investigation_schema(),
+            schema_name=cls.SCHEMA_NAME,
+            max_tokens=cls.MAX_TOKENS,
+            temperature=cls.TEMPERATURE,
+        )
+        return cls(StructuredCall("investigator", session, request))
+
+    def investigate(
+        self, collector: str, finding: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Return a fresh judgment
         ``{verdict, category, confidence, reasoning, remediation}`` (verdict and
-        category as enums) or None on failure. Never raises."""
+        category as enums) or None when the call fails."""
+        finding_json = json.dumps(finding, ensure_ascii=False, default=str)
         parsed = self._llm.ask_or_none(
-            collector=collector,
-            finding=json.dumps(finding, ensure_ascii=False, default=str),
+            {"collector": collector, "finding": finding_json}
         )
         if parsed is None:
             return None
-        try:
-            confidence = float(parsed.get("confidence") or 0.0)
-        except (TypeError, ValueError):
-            confidence = 0.0
-        return {
-            "verdict": Coerce.enum(
-                str(parsed.get("verdict") or "").strip().lower(),
-                Verdict,
-                Verdict.UNKNOWN,
-            ),
-            "category": Coerce.enum(
-                str(parsed.get("category") or "").strip().lower(),
-                ThreatCategory,
-                ThreatCategory.NONE,
-            ),
-            "confidence": max(0.0, min(1.0, confidence)),
-            "reasoning": str(parsed.get("reasoning") or "")[:500],
-            "remediation": str(parsed.get("remediation") or "")[:2000],
-        }
+        return JudgmentReply.model_validate(parsed).fields()

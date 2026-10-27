@@ -1,1156 +1,234 @@
-"""The single DB write/read gateway used by the runner."""
+"""The single DB write/read gateway used by the monitor. A facade over the
+stores in ``sink_stores`` and ``sink_admin``: callers keep one object."""
 
 from __future__ import annotations
 
-import json
-import os
-import uuid
-from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import (
-    Engine,
-    asc,
-    delete,
-    event,
-    exists,
-    func,
-    inspect,
-    select,
-    text,
-    update,
-)
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine, event
 
-from . import slices
-from .constants import LOG
-from .enums import FeedbackLabel, Verdict
+from .constants import LOGGER_NAME
+from .db_bootstrap import SchemaBootstrap, SqlitePragmas
 from .judge import Judgment
 from .models import (
-    Base,
-    BrowserExtensionRow,
     CollectionRun,
-    CollectorErrorRow,
-    ControlState,
-    DnsQueryRow,
-    FeedbackRow,
     IncidentNarrativeRow,
-    InstalledAppRow,
     Judgement,
-    KernelExtensionRow,
-    LaunchItemRow,
-    ListeningPortRow,
-    NetworkConnectionRow,
-    NetworkFlowRow,
-    PrivilegeConfigRow,
-    ProcessExecRow,
-    ProcessRow,
     RiskScoreRow,
-    StreamingSession,
-    SystemExtensionRow,
-    SystemIntegrityRow,
     YaraCoverageRow,
-    YaraRuleRow,
-    YaraStatusRow,
     _RowBase,
 )
 from .runtime import Clock
+from .sink_admin import ControlSeed, ControlStore, DatabaseFile, ReportStore, Retention
+from .sink_stores import BehaviorReader, CorrelationWindow, JudgmentStore, RunLog
 
 if TYPE_CHECKING:
     from .collectors import Collector
 
-# How long a writer waits for the SQLite write lock before raising
-# "database is locked". Generous (vs. the 5s pysqlite default) so the
-# snapshot loop and streaming-worker threads can serialise their writes
-# through WAL checkpoints on a large DB without losing a batch.
-_BUSY_TIMEOUT_MS = 30_000
 
-# The monitor commonly runs as root (deep host inspection) while the dashboard
-# runs unprivileged; both write the same SQLite file (the dashboard's only write
-# is the control_state row). Group-writable dir + files let a same-group user
-# write — and SQLite needs to create the -wal/-shm siblings in the dir, so the
-# directory itself must be group-writable, not just the db file.
-_DB_DIR_MODE = 0o775  # rwxrwxr-x
-_DB_FILE_MODE = 0o664  # rw-rw-r--
-
-# Operator feedback label → the verdict the monitor pins on the corrected
-# finding. Keyed by the raw string so lookup on a stored label is exact.
-# Streaming events carry a StreamingSession run_id, never a CollectionRun's,
-# so pruning trims them by collected_at instead of by run.
-_STREAMING_MODELS = tuple(s.model for s in slices.ALL if s.streaming)
-_SNAPSHOT_MODELS = tuple(
-    m for m in _RowBase.__subclasses__() if m not in _STREAMING_MODELS
-)
-# DNS is keyed by process name, which groups every PID sharing it.
-_EXTRA_DNS_PER_NAME = 5
-
-_FEEDBACK_VERDICT = {
-    FeedbackLabel.FALSE_POSITIVE.value: str(Verdict.BENIGN),
-    FeedbackLabel.CONFIRMED.value: str(Verdict.MALICIOUS),
-}
+@dataclass(frozen=True)
+class SinkStores:
+    runs: RunLog
+    behavior: BehaviorReader
+    judgments: JudgmentStore
+    reports: ReportStore
+    retention: Retention
+    control: ControlStore
 
 
 class Sink:
-    """SQLAlchemy repository — owns schema, run lifecycle, writes, lookups."""
+    """SQLAlchemy repository: owns schema, run lifecycle, writes, lookups."""
 
-    def __init__(self, engine: Engine):
+    def __init__(
+        self, engine: Engine, stores: SinkStores, logger: logging.Logger
+    ) -> None:
         self.engine = engine
-        self.run_id: Optional[str] = None
-        event.listen(engine, "connect", _set_sqlite_pragmas)
+        self._stores = stores
+        self._logger = logger
+
+    @classmethod
+    def create(cls, engine: Engine) -> Sink:
+        return cls.create_with_clock(engine, Clock())
+
+    @classmethod
+    def create_with_clock(cls, engine: Engine, clock: Clock) -> Sink:
+        logger = logging.getLogger(LOGGER_NAME)
+        event.listen(engine, "connect", SqlitePragmas().apply)
+        stores = SinkStores(
+            RunLog(engine, clock),
+            BehaviorReader(engine),
+            JudgmentStore(engine),
+            ReportStore(engine, clock),
+            Retention(engine, logger),
+            ControlStore(engine, logger, clock),
+        )
+        return cls(engine, stores, logger)
 
     def setup(self) -> None:
-        # Register the enrichment evidence model on Base.metadata so
-        # `create_all` provisions its table even when the enrichment
-        # chain isn't enabled (the dashboard reads from it regardless).
-        try:
-            from avai.enrichers.cache import register_schema
+        SchemaBootstrap(self.engine, self._logger).setup()
 
-            register_schema(Base)
-        except Exception:
-            LOG.exception("enrichment schema registration failed")
-        # create_all / ALTER are not atomic with respect to a second
-        # process running the same bootstrap on the shared SQLite file
-        # (monitor + dashboard both call setup() at startup against the
-        # bind-mounted DB). Two processes can each pass create_all's
-        # checkfirst and then both issue CREATE/ALTER, so the loser sees
-        # "table already exists" / "duplicate column name". Those are
-        # benign here — the schema is the same — so tolerate them rather
-        # than crash a container's startup.
-        try:
-            Base.metadata.create_all(self.engine)
-        except OperationalError as e:
-            if not _is_benign_concurrent_ddl(e):
-                raise
-            LOG.info("create_all raced with another bootstrap (continuing): %s", e)
-        _migrate_add_columns(self.engine)
-        # An in-memory DB is per-connection and ephemeral: create_all already
-        # built the full head schema in-process, and Alembic (which opens its
-        # own connection) would see an empty DB. There's no "update" path to
-        # migrate, so skip it — file DBs below get the real upgrade.
-        db_file = self.engine.url.database
-        if not db_file or db_file == ":memory:":
-            return
-        # Apply Alembic migrations (indexes / future schema changes). The DB
-        # was just built by create_all, so this stamps the baseline and runs
-        # only the incremental migrations on top. This must run on every start
-        # so a freshly-updated build reaches head before serving — and if it
-        # can't (e.g. a read-only DB owned by another user), we fail loudly
-        # rather than silently serve on a stale schema and 500 later.
-        from avai.db_migrate import upgrade_to_head
-
-        try:
-            upgrade_to_head(str(self.engine.url))
-        except Exception as e:
-            raise RuntimeError(
-                f"database migration to head failed for {self.engine.url}: {e}. "
-                "If this is 'readonly database', the DB is owned by another user "
-                "(run the monitor as the owner so it can migrate + chmod it)."
-            ) from e
-        _relax_db_permissions(Path(db_file))
+    # -- runs and rows ------------------------------------------------------
 
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
-        run_id = str(uuid.uuid4())
-        started = Clock().now_iso()
-        with Session(self.engine) as session:
-            session.add(
-                CollectionRun(
-                    run_id=run_id,
-                    started_at=started,
-                    hostname=hostname,
-                    lookback_min=lookback_min,
-                )
-            )
-            session.commit()
-        self.run_id = run_id
-        return run_id, started
+        return self._stores.runs.start_run(hostname, lookback_min)
 
-    def end_run(self, ok: int, failed: int) -> None:
-        with Session(self.engine) as session:
-            session.execute(
-                update(CollectionRun)
-                .where(CollectionRun.run_id == self.run_id)
-                .values(
-                    finished_at=Clock().now_iso(),
-                    collectors_ok=ok,
-                    collectors_failed=failed,
-                )
-            )
-            session.commit()
+    def end_run(self, run_id: str, ok: int, failed: int) -> None:
+        self._stores.runs.end_run(run_id, ok, failed)
 
-    def write(self, model: type[_RowBase], rows: list[dict]) -> None:
-        if not rows:
-            return
-        with Session(self.engine) as session:
-            session.execute(sqlite_insert(model), rows)
-            session.commit()
+    def write(self, model: type[_RowBase], rows: list[dict[str, Any]]) -> None:
+        self._stores.runs.write(model, rows)
 
-    def write_error(self, collector: str, exc: BaseException) -> None:
-        with Session(self.engine) as session:
-            session.add(
-                CollectorErrorRow(
-                    run_id=self.run_id,
-                    collector=collector,
-                    error_class=type(exc).__name__,
-                    message=str(exc)[:1000],
-                    occurred_at=Clock().now_iso(),
-                )
-            )
-            session.commit()
+    def write_error(self, run_id: str, collector: str, exc: BaseException) -> None:
+        self._stores.runs.write_error(run_id, collector, exc)
 
-    def unjudged(self, collector: Collector) -> list[dict]:
-        """Return one entry per distinct, unjudged content_hash for the
-        current run (judge_fields drive what's selected)."""
-        run_id = self.run_id
-        if run_id is None or not collector.judge_fields:
-            return []
-        return self._unjudged_select(collector, run_id_filter=run_id)
+    def unjudged(self, run_id: str, collector: Collector) -> list[dict[str, Any]]:
+        return self._stores.runs.unjudged(run_id, collector)
 
-    def unjudged_all(self, collector: Collector) -> list[dict]:
-        """Same as ``unjudged`` but with no run_id filter — used for
-        streaming collectors whose rows accumulate continuously
-        between snapshot runs. The Runner calls this once per cycle
-        so the judge gets a chance to classify newly-streamed
-        content_hashes."""
-        if not collector.judge_fields:
-            return []
-        return self._unjudged_select(collector, run_id_filter=None)
-
-    def _unjudged_select(
-        self, collector: Collector, run_id_filter: Optional[str]
-    ) -> list[dict]:
-        model = collector.model
-        cols = [model.content_hash] + [
-            getattr(model, f) for f in collector.judge_fields
-        ]
-        conditions = [
-            model.content_hash.is_not(None),
-            ~exists().where(
-                Judgement.content_hash == model.content_hash,
-                Judgement.collector == collector.name,
-            ),
-        ]
-        if run_id_filter is not None:
-            conditions.insert(0, model.run_id == run_id_filter)
-        stmt = select(*cols).distinct().where(*conditions)
-        col_names = ["content_hash"] + list(collector.judge_fields)
-        with Session(self.engine) as session:
-            return [
-                {col_names[i]: row[i] for i in range(len(col_names))}
-                for row in session.execute(stmt).all()
-            ]
-
-    # -- baseline / novelty -------------------------------------------------
+    def unjudged_all(self, collector: Collector) -> list[dict[str, Any]]:
+        return self._stores.runs.unjudged_all(collector)
 
     def completed_run_count(self) -> int:
-        """Number of snapshot runs that have finished. The in-progress run
-        is excluded (its ``finished_at`` is still NULL), so this reflects
-        how much history the host already had *before* the current cycle."""
-        with Session(self.engine) as session:
-            return int(
-                session.execute(
-                    select(func.count())
-                    .select_from(CollectionRun)
-                    .where(CollectionRun.finished_at.is_not(None))
-                ).scalar_one()
-            )
+        return self._stores.runs.completed_run_count()
 
-    def nth_run_started_at(self, n: int) -> Optional[str]:
-        """``started_at`` of the n-th completed run (1-indexed, oldest
-        first), or None if fewer than ``n`` completed runs exist. Marks the
-        end of the baseline-learning window."""
-        if n < 1:
-            return None
-        with Session(self.engine) as session:
-            return session.execute(
-                select(CollectionRun.started_at)
-                .where(CollectionRun.finished_at.is_not(None))
-                .order_by(CollectionRun.started_at)
-                .limit(1)
-                .offset(n - 1)
-            ).scalar_one_or_none()
-
-    def pids_by_executable(
-        self, exes: list[str], since: Optional[str] = None
-    ) -> dict[str, set]:
-        """Map each executable path to the set of PIDs running it, from the
-        process snapshot at/after ``since``. Resolves a launch item's
-        ``program`` to the live process it spawned, so persistence can be
-        correlated with that process's runtime behaviour."""
-        out: dict[str, set] = {}
-        if not exes:
-            return out
-        stmt = select(ProcessRow.exe, ProcessRow.pid).where(ProcessRow.exe.in_(exes))
-        if since:
-            stmt = stmt.where(ProcessRow.collected_at >= since)
-        with Session(self.engine) as session:
-            for exe, pid in session.execute(stmt).all():
-                if exe and pid is not None:
-                    out.setdefault(exe, set()).add(pid)
-        return out
+    def nth_run_started_at(self, position: int) -> str | None:
+        return self._stores.runs.nth_run_started_at(position)
 
     def run_started_ats(self) -> list[str]:
-        """Every run's ``started_at`` (including the in-progress run),
-        ascending — the timeline used to size an artifact's presence window
-        for the intermittent/persistent drift signal. ISO strings sort
-        lexicographically, so the caller can bisect directly."""
-        with Session(self.engine) as session:
-            return list(
-                session.execute(
-                    select(CollectionRun.started_at).order_by(CollectionRun.started_at)
-                ).scalars()
-            )
+        return self._stores.runs.run_started_ats()
 
     def first_seen_map(
-        self, model: type[_RowBase], content_hashes: list[str]
-    ) -> dict[str, tuple[str, int]]:
-        """For each content_hash, return ``(first_seen, times_seen)``:
-        the earliest ``collected_at`` still retained and the number of
-        distinct runs it appeared in. Bounded by retention (pruned history
-        is invisible) — but only ever queried for *unjudged* hashes, which
-        are judged exactly once and never again, so the retention bound
-        cannot make an already-established artifact look novel."""
-        if not content_hashes:
-            return {}
-        stmt = (
-            select(
-                model.content_hash,
-                func.min(model.collected_at),
-                func.count(func.distinct(model.run_id)),
-            )
-            .where(model.content_hash.in_(content_hashes))
-            .group_by(model.content_hash)
-        )
-        with Session(self.engine) as session:
-            return {
-                row[0]: (row[1], int(row[2])) for row in session.execute(stmt).all()
-            }
+        self, model: type[_RowBase], hashes: list[str]
+    ) -> dict[str, Any]:
+        return self._stores.runs.first_seen_map(model, hashes)
 
-    # -- correlation (process story) ---------------------------------------
+    def prior_run_started_at(self, run_id: str | None) -> str | None:
+        return self._stores.runs.prior_run_started_at(run_id)
 
-    def prior_run_started_at(self, run_id: str) -> Optional[str]:
-        """``started_at`` of the run immediately preceding ``run_id``, or
-        None if it's the first run. Used to time-bound correlation so it
-        only pulls the previous cycle's behaviour for a PID — long enough
-        to be useful, short enough that PID reuse can't pollute it."""
-        with Session(self.engine) as session:
-            cur = session.execute(
-                select(CollectionRun.started_at).where(CollectionRun.run_id == run_id)
-            ).scalar_one_or_none()
-            if cur is None:
-                return None
-            return session.execute(
-                select(CollectionRun.started_at)
-                .where(CollectionRun.started_at < cur)
-                .order_by(CollectionRun.started_at.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-
-    def correlation_context(
-        self,
-        pids: list[int],
-        proc_names: list[str],
-        since: Optional[str],
-        per_pid_cap: int = 10,
-    ) -> dict:
-        """Gather a PID's recent runtime behaviour for the process judge:
-        listening ports, outbound flows, established remote connections,
-        DNS queries (joined by process *name*, which is all DNS capture
-        records), and exec lineage. ``since`` bounds every lookup to rows
-        collected at/after the previous cycle. ProcessCollector runs first
-        in a cycle, so the current run's network rows don't exist yet:
-        this deliberately surfaces the *previous* cycle's behaviour for a
-        still-running PID."""
-        out: dict[str, dict] = {
-            "ports": {},
-            "flows": {},
-            "conns": {},
-            "dns": {},
-            "exec": {},
-        }
-        pids = [p for p in pids if p is not None]
-        names = [n for n in proc_names if n]
-        with Session(self.engine) as session:
-            if pids:
-                out["ports"] = _capped(
-                    _listening_ports(session, pids, since), per_pid_cap
-                )
-                out["flows"] = _capped(
-                    _outbound_flows(session, pids, since), per_pid_cap
-                )
-                out["conns"] = _capped(_remote_conns(session, pids, since), per_pid_cap)
-                out["exec"] = _latest_execs(session, pids, since)
-            if names:
-                out["dns"] = _capped(
-                    _dns_queries(session, names, since),
-                    per_pid_cap + _EXTRA_DNS_PER_NAME,
-                )
-        return out
-
-    def write_judgments(
-        self, judgments: list[Judgment], context: Optional[dict] = None
-    ) -> None:
-        """Persist judgments. ``context`` maps content_hash → a dict that may
-        hold ``baseline`` and/or ``related`` (the novelty + correlated-story
-        signals computed at judge time) so the dashboard can surface them on
-        the finding."""
-        if not judgments:
-            return
-        context = context or {}
-        rows = []
-        for j in judgments:
-            ctx = context.get(j.content_hash) or {}
-            baseline = ctx.get("baseline") or {}
-            rows.append(
-                {
-                    "content_hash": j.content_hash,
-                    "collector": j.collector,
-                    "verdict": str(j.verdict),
-                    "category": str(j.category),
-                    "confidence": j.confidence,
-                    "reasoning": j.reasoning,
-                    "remediation": j.remediation,
-                    "model": j.model,
-                    "created_at": j.created_at,
-                    "novel": 1 if baseline.get("novel") else (0 if baseline else None),
-                    "context_json": json.dumps(ctx) if ctx else None,
-                    "cost_usd": getattr(j, "cost_usd", 0.0) or None,
-                }
-            )
-        with Session(self.engine) as session:
-            session.execute(
-                sqlite_insert(Judgement).on_conflict_do_nothing(),
-                rows,
-            )
-            session.commit()
-
-    # -- incident narrative -------------------------------------------------
-
-    def active_findings(self, started: str) -> list[dict]:
-        """Non-benign judgments still present as of the current run, i.e.
-        ``last_seen_at == started`` (the same active/resolved rule the
-        dashboard uses). These are what the incident narrator synthesises.
-        Ordered oldest-first so the narrative reads as a timeline."""
-        stmt = (
-            select(
-                Judgement.content_hash,
-                Judgement.collector,
-                Judgement.verdict,
-                Judgement.category,
-                Judgement.confidence,
-                Judgement.reasoning,
-                Judgement.remediation,
-                Judgement.created_at,
-            )
-            .where(
-                Judgement.verdict.in_(
-                    [str(Verdict.SUSPICIOUS), str(Verdict.MALICIOUS)]
-                ),
-                Judgement.last_seen_at == started,
-            )
-            .order_by(Judgement.created_at)
-        )
-        with Session(self.engine) as session:
-            return [
-                {
-                    "content_hash": r[0],
-                    "collector": r[1],
-                    "verdict": r[2],
-                    "category": r[3],
-                    "confidence": r[4],
-                    "reasoning": r[5],
-                    "remediation": r[6],
-                    "first_flagged": r[7],
-                }
-                for r in session.execute(stmt).all()
-            ]
-
-    # -- operator feedback --------------------------------------------------
-
-    def apply_feedback(self) -> int:
-        """Apply each not-yet-applied operator correction to its finding's
-        verdict (false_positive → benign, confirmed → malicious) and mark it
-        applied. Idempotent; a row whose finding no longer exists updates
-        nothing but is still marked. Returns the number processed."""
-        applied = 0
-        with Session(self.engine) as session:
-            pending = (
-                session.execute(select(FeedbackRow).where(FeedbackRow.applied == 0))
-                .scalars()
-                .all()
-            )
-            for fb in pending:
-                verdict = _FEEDBACK_VERDICT.get(fb.label)
-                if verdict is not None:
-                    reasoning = f"[operator: {fb.label}]"
-                    if fb.note:
-                        reasoning = f"{reasoning} {fb.note}"
-                    session.execute(
-                        update(Judgement)
-                        .where(
-                            Judgement.content_hash == fb.content_hash,
-                            Judgement.collector == fb.collector,
-                        )
-                        .values(
-                            verdict=verdict, confidence=1.0, reasoning=reasoning[:500]
-                        )
-                    )
-                fb.applied = 1
-                applied += 1
-            session.commit()
-        return applied
-
-    def feedback_examples(self, collector: str, limit: int = 10) -> list[dict]:
-        """Recent operator corrections for a collector as
-        ``[{artifact, label, note}]`` — host-specific ground-truth the judge
-        is shown so it classifies matching artifacts the same way."""
-        stmt = (
-            select(FeedbackRow.artifact, FeedbackRow.label, FeedbackRow.note)
-            .where(FeedbackRow.collector == collector)
-            .order_by(FeedbackRow.created_at.desc())
-            .limit(limit)
-        )
-        with Session(self.engine) as session:
-            return [
-                {"artifact": artifact, "label": label, "note": note}
-                for artifact, label, note in session.execute(stmt).all()
-            ]
-
-    def recent_nonbenign(self, limit: int = 15) -> list[dict]:
-        """Most recent non-benign judgments as compact dicts — the host's
-        situational context for the investigator (what else is flagged here)."""
-        stmt = (
-            select(
-                Judgement.content_hash,
-                Judgement.collector,
-                Judgement.verdict,
-                Judgement.category,
-                Judgement.reasoning,
-            )
-            .where(
-                Judgement.verdict.in_([str(Verdict.MALICIOUS), str(Verdict.SUSPICIOUS)])
-            )
-            .order_by(Judgement.created_at.desc())
-            .limit(limit)
-        )
-        with Session(self.engine) as session:
-            return [
-                {
-                    "content_hash": r[0],
-                    "collector": r[1],
-                    "verdict": r[2],
-                    "category": r[3],
-                    "reasoning": r[4],
-                }
-                for r in session.execute(stmt).all()
-            ]
-
-    def latest_narrative_finding_hashes(self) -> Optional[str]:
-        """``finding_hashes`` of the most recent narrative, or None. Used to
-        skip regeneration when the active-finding set is unchanged."""
-        with Session(self.engine) as session:
-            return session.execute(
-                select(IncidentNarrativeRow.finding_hashes)
-                .order_by(IncidentNarrativeRow.created_at.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-
-    def write_narrative(self, row: dict) -> None:
-        with Session(self.engine) as session:
-            session.add(IncidentNarrativeRow(**row))
-            session.commit()
-
-    # -- risk score ---------------------------------------------------------
-
-    _RISK_INTEGRITY_FIELDS = (
-        "filevault_active",
-        "firewall_global_state",
-        "firewall_stealth",
-        "gatekeeper_assessments_enabled",
-        "remote_login_enabled",
-        "screen_sharing_enabled",
-        "remote_management_enabled",
-    )
-
-    def system_integrity_row(self, run_id: str) -> Optional[dict]:
-        """The system_integrity posture for a run as a plain dict, or None."""
-        cols = [getattr(SystemIntegrityRow, f) for f in self._RISK_INTEGRITY_FIELDS]
-        with Session(self.engine) as session:
-            row = session.execute(
-                select(*cols).where(SystemIntegrityRow.run_id == run_id).limit(1)
-            ).first()
-        if row is None:
-            return None
-        return dict(zip(self._RISK_INTEGRITY_FIELDS, row))
-
-    def privilege_risk_counts(self, run_id: str) -> tuple[int, int]:
-        """``(nopasswd_sudoers, extra_uid0_accounts)`` for a run — the two
-        privilege-config facts that feed the risk score."""
-        with Session(self.engine) as session:
-            nopasswd = session.execute(
-                select(func.count())
-                .select_from(PrivilegeConfigRow)
-                .where(
-                    PrivilegeConfigRow.run_id == run_id,
-                    PrivilegeConfigRow.kind == "sudoers",
-                    PrivilegeConfigRow.detail.like("%NOPASSWD%"),
-                )
-            ).scalar_one()
-            extra_uid0 = session.execute(
-                select(func.count())
-                .select_from(PrivilegeConfigRow)
-                .where(
-                    PrivilegeConfigRow.run_id == run_id,
-                    PrivilegeConfigRow.kind == "account",
-                    PrivilegeConfigRow.subject != "root",
-                )
-            ).scalar_one()
-        return int(nopasswd), int(extra_uid0)
-
-    def latest_risk_row(self) -> Optional[RiskScoreRow]:
-        with Session(self.engine) as session:
-            return session.execute(
-                select(RiskScoreRow).order_by(RiskScoreRow.created_at.desc()).limit(1)
-            ).scalar_one_or_none()
-
-    def write_risk_score(self, row: dict) -> None:
-        with Session(self.engine) as session:
-            session.add(RiskScoreRow(**row))
-            session.commit()
-
-    def write_yara_status(self, stats: dict) -> None:
-        """Upsert the single-row file-scanner ruleset summary (id=1) so the
-        read-only dashboard can show what's loaded."""
-        with Session(self.engine) as session:
-            session.merge(
-                YaraStatusRow(
-                    id=1,
-                    compiled_at=Clock().now_iso(),
-                    rules_loaded=stats.get("rules_loaded"),
-                    files_loaded=stats.get("files_loaded"),
-                    files_skipped=stats.get("files_skipped"),
-                    rules_dir=stats.get("rules_dir"),
-                    sources_json=json.dumps(stats.get("sources") or {}),
-                    skip_reasons_json=json.dumps(stats.get("skip_reasons") or {}),
-                    by_category_json=json.dumps(stats.get("by_category") or {}),
-                )
-            )
-            session.commit()
-
-    def write_yara_rules(self, inventory: list[dict]) -> None:
-        """Replace the browsable rule inventory. Skipped when the row count
-        already matches — the ruleset is static within a monitor process, so
-        this rewrites once (on first cycle / after a restart with changes)
-        rather than every cycle."""
-        with Session(self.engine) as session:
-            current = session.scalar(select(func.count()).select_from(YaraRuleRow))
-            if current == len(inventory):
-                return
-            session.execute(delete(YaraRuleRow))
-            if inventory:
-                session.execute(sqlite_insert(YaraRuleRow), inventory)
-            session.commit()
-
-    # -- yara coverage assessment -------------------------------------------
-
-    # Inventory tables describing the host's attack surface — the host side
-    # of the coverage assessment (ruleset categories weighed against these).
-    _COVERAGE_INVENTORY = {
-        "processes": ProcessRow,
-        "installed_apps": InstalledAppRow,
-        "launch_items": LaunchItemRow,
-        "browser_extensions": BrowserExtensionRow,
-        "kernel_extensions": KernelExtensionRow,
-        "system_extensions": SystemExtensionRow,
-        "listening_ports": ListeningPortRow,
-    }
-
-    def read_yara_status(self) -> Optional[dict]:
-        """The persisted compiled-ruleset summary (single row), or None. The
-        coverage assessor reads this rather than the collector's in-memory
-        compile stats so it stays decoupled from the scan cycle."""
-        with Session(self.engine) as session:
-            row = session.get(YaraStatusRow, 1)
-        if row is None:
-            return None
-        return {
-            "rules_loaded": row.rules_loaded,
-            "files_loaded": row.files_loaded,
-            "files_skipped": row.files_skipped,
-            "rules_dir": row.rules_dir,
-            "sources": json.loads(row.sources_json or "{}"),
-            "skip_reasons": json.loads(row.skip_reasons_json or "{}"),
-            "by_category": json.loads(row.by_category_json or "{}"),
-        }
-
-    def coverage_profile(self, run_id: str) -> dict:
-        """Per-collector row counts for ``run_id`` over the inventory tables —
-        a compact picture of the host's attack surface for the coverage
-        assessment (e.g. how many apps / launch items / extensions exist)."""
-        counts: dict[str, int] = {}
-        with Session(self.engine) as session:
-            for name, model in self._COVERAGE_INVENTORY.items():
-                counts[name] = int(
-                    session.execute(
-                        select(func.count())
-                        .select_from(model)
-                        .where(model.run_id == run_id)
-                    ).scalar()
-                    or 0
-                )
-        return counts
-
-    def latest_yara_coverage_fingerprint(self) -> Optional[str]:
-        """``ruleset_fingerprint`` of the most recent assessment, or None.
-        Compared to the current ruleset so we skip regeneration when the
-        loaded rules are unchanged."""
-        with Session(self.engine) as session:
-            return session.execute(
-                select(YaraCoverageRow.ruleset_fingerprint)
-                .order_by(YaraCoverageRow.created_at.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-
-    def write_yara_coverage(self, row: dict) -> None:
-        with Session(self.engine) as session:
-            session.add(YaraCoverageRow(**row))
-            session.commit()
-
-    def database_size_bytes(self) -> int:
-        """Total on-disk bytes including the SQLite WAL/SHM sidecars."""
-        url = str(self.engine.url)
-        prefix = "sqlite:///"
-        if not url.startswith(prefix):
-            return 0
-        base = Path(url[len(prefix) :])
-        total = 0
-        for suffix in ("", "-wal", "-shm"):
-            p = Path(str(base) + suffix)
-            if p.exists():
-                try:
-                    total += p.stat().st_size
-                except OSError:
-                    pass
-        return total
-
-    def database_live_bytes(self) -> int:
-        """Estimate post-VACUUM database size from SQLite pragmas. Deletes
-        only mark pages free; until VACUUM runs, the file size doesn't
-        shrink. This estimate decreases immediately as we delete rows,
-        so the prune loop has a meaningful stop condition."""
-        with self.engine.connect() as conn:
-            conn = conn.execution_options(isolation_level="AUTOCOMMIT")
-            page_count = conn.execute(text("PRAGMA page_count")).scalar() or 0
-            page_size = conn.execute(text("PRAGMA page_size")).scalar() or 0
-            freelist = conn.execute(text("PRAGMA freelist_count")).scalar() or 0
-        return max(0, (page_count - freelist) * page_size)
-
-    def prune_to_size(self, max_bytes: int) -> dict:
-        """Delete oldest completed runs (and their child rows) plus the
-        streaming events older than the oldest remaining run, until
-        the database fits under ``max_bytes``. Always preserves at
-        least one completed run so the dashboard stays useful.
-
-        Returns ``{runs_pruned, events_pruned, bytes_before, bytes_after}``.
-        """
-        if max_bytes <= 0:
-            return _prune_stats(0, 0, 0, 0)
-        bytes_before = self.database_size_bytes()
-        if bytes_before <= max_bytes:
-            return _prune_stats(0, 0, bytes_before, bytes_before)
-
-        runs_pruned = events_pruned = 0
-        with Session(self.engine) as session:
-            # Deletes only mark pages free until VACUUM, so the file size
-            # can't be the stop condition; the live-page estimate drops
-            # right after each delete.
-            while self.database_live_bytes() > max_bytes:
-                completed = _completed_runs_oldest_first(session)
-                if len(completed) <= 1:
-                    LOG.warning(
-                        "prune_to_size: only %d completed run(s) "
-                        "left; cannot shrink further",
-                        len(completed),
-                    )
-                    break
-                _delete_run(session, completed[0])
-                runs_pruned += 1
-                events_pruned += _trim_streaming(
-                    session, before=completed[1].started_at
-                )
-                session.commit()
-
-        self._vacuum()
-        return _prune_stats(
-            runs_pruned, events_pruned, bytes_before, self.database_size_bytes()
-        )
-
-    def _vacuum(self) -> None:
-        """Reclaim the pruned pages. VACUUM cannot run inside a transaction,
-        so use AUTOCOMMIT. Checkpoint the WAL before and after so VACUUM
-        sees committed pages and the final file reflects the prune."""
-        try:
-            with self.engine.connect() as conn:
-                conn = conn.execution_options(isolation_level="AUTOCOMMIT")
-                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
-                conn.execute(text("VACUUM"))
-                conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
-        except Exception:
-            LOG.exception("VACUUM failed; space not yet reclaimed")
-
-    def touch_judgments(
-        self, collector: str, content_hashes: list[str], at: str
-    ) -> None:
-        """Update ``last_seen_at`` for every judgment whose ``content_hash``
-        was observed in the current snapshot cycle. Used to derive
-        "active vs resolved" status without storing transitions
-        explicitly: a judgment whose ``last_seen_at`` matches the latest
-        run started_at is still present on the host; anything older
-        (including NULL) means the underlying artifact has gone away."""
-        if not content_hashes:
-            return
-        with Session(self.engine) as session:
-            session.execute(
-                update(Judgement)
-                .where(Judgement.collector == collector)
-                .where(Judgement.content_hash.in_(content_hashes))
-                .values(last_seen_at=at)
-            )
-            session.commit()
-
-    # -- streaming sessions -------------------------------------------------
+    def touch_judgments(self, collector: str, hashes: list[str], seen_at: str) -> None:
+        self._stores.runs.touch_judgments(collector, hashes, seen_at)
 
     def start_streaming_session(self, collector: str, hostname: str) -> str:
-        run_id = str(uuid.uuid4())
-        with Session(self.engine) as session:
-            session.add(
-                StreamingSession(
-                    run_id=run_id,
-                    collector=collector,
-                    hostname=hostname,
-                    started_at=Clock().now_iso(),
-                )
-            )
-            session.commit()
-        return run_id
+        return self._stores.runs.start_streaming_session(collector, hostname)
 
-    def end_streaming_session(self, run_id: str, row_count: int) -> None:
-        with Session(self.engine) as session:
-            session.execute(
-                update(StreamingSession)
-                .where(StreamingSession.run_id == run_id)
-                .values(finished_at=Clock().now_iso(), row_count=row_count)
-            )
-            session.commit()
+    def end_streaming_session(self, run_id: str | None, row_count: int) -> None:
+        self._stores.runs.end_streaming_session(run_id, row_count)
 
-    # ----- cooperative control plane (see models.ControlState) -----
+    # -- behaviour ----------------------------------------------------------
 
-    def ensure_control_row(
-        self, *, interval: int, judge_enabled: bool, enrich_enabled: bool
+    def pids_by_executable(self, exes: list[str], since: str | None = None) -> dict:
+        return self._stores.behavior.pids_by_executable(exes, since)
+
+    def correlation_context(
+        self, pids: list[int], names: list[str], window: CorrelationWindow
+    ) -> dict[str, dict[Any, Any]]:
+        return self._stores.behavior.correlation_context(pids, names, window)
+
+    # -- judgments ----------------------------------------------------------
+
+    def write_judgments(
+        self, judgments: list[Judgment], context: dict[str, Any] | None = None
     ) -> None:
-        """Seed the single control row (id=1) with the monitor's startup
-        settings so the dashboard reflects reality. No-op if it already
-        exists — control state persists across restarts by design."""
-        with Session(self.engine) as session:
-            session.execute(
-                sqlite_insert(ControlState)
-                .values(
-                    id=1,
-                    paused=0,
-                    interval_override=interval,
-                    judge_enabled=int(judge_enabled),
-                    enrich_enabled=int(enrich_enabled),
-                )
-                .on_conflict_do_nothing()
-            )
-            session.commit()
+        self._stores.judgments.write_judgments(judgments, context)
 
-    def read_control(self) -> Optional[dict]:
-        """Return the control row as a plain dict, or None. Best-effort: a
-        control read must never crash the monitor loop."""
-        try:
-            with Session(self.engine) as session:
-                row = session.get(ControlState, 1)
-                if row is None:
-                    return None
-                return {
-                    c.name: getattr(row, c.name) for c in ControlState.__table__.columns
-                }
-        except Exception:
-            LOG.exception("read_control failed")
-            return None
+    def active_findings(self, started: str) -> list[dict[str, Any]]:
+        return self._stores.judgments.active_findings(started)
 
-    def write_heartbeat(self, *, pid: int, status: str, current_interval: int) -> None:
-        now = Clock().now_iso()
-        with Session(self.engine) as session:
-            session.execute(
-                update(ControlState)
-                .where(ControlState.id == 1)
-                .values(
-                    pid=pid,
-                    status=status,
-                    current_interval=current_interval,
-                    last_seen_at=now,
-                    applied_at=now,
-                )
-            )
-            session.commit()
+    def apply_feedback(self) -> int:
+        return self._stores.judgments.apply_feedback()
 
-    def touch_heartbeat(self) -> None:
-        """Refresh only ``last_seen_at`` on the control row, leaving status,
-        interval, and ``applied_at`` as the last full ``write_heartbeat`` set
-        them. Lets a long scan keep proving liveness to the dashboard without
-        claiming a status change or a control-application it didn't make."""
-        now = Clock().now_iso()
-        with Session(self.engine) as session:
-            session.execute(
-                update(ControlState)
-                .where(ControlState.id == 1)
-                .values(last_seen_at=now)
-            )
-            session.commit()
+    def feedback_examples(self, collector: str) -> list[dict[str, Any]]:
+        return self._stores.judgments.feedback_examples(collector)
 
-    def ack_scan_now(self, nonce: int) -> None:
-        with Session(self.engine) as session:
-            session.execute(
-                update(ControlState)
-                .where(ControlState.id == 1)
-                .values(scan_now_applied=nonce)
-            )
-            session.commit()
+    def recent_nonbenign(self, limit: int) -> list[dict[str, Any]]:
+        return self._stores.judgments.recent_nonbenign(limit)
 
-    def ack_command(self, nonce: int, result: str) -> None:
-        with Session(self.engine) as session:
-            session.execute(
-                update(ControlState)
-                .where(ControlState.id == 1)
-                .values(command_applied=nonce, command_result=result)
-            )
-            session.commit()
+    # -- reports ------------------------------------------------------------
 
-    # ----- maintenance helpers (invoked by Runner on a one-shot command) -----
+    def latest_narrative_finding_hashes(self) -> str | None:
+        table = IncidentNarrativeRow
+        return self._stores.reports.latest(table.finding_hashes, table.created_at)
+
+    def write_narrative(self, row: dict[str, Any]) -> None:
+        self._stores.reports.add(IncidentNarrativeRow(**row))
+
+    def system_integrity_row(self, run_id: str) -> dict[str, Any] | None:
+        return self._stores.reports.system_integrity_row(run_id)
+
+    def privilege_risk_counts(self, run_id: str) -> tuple[int, int]:
+        return self._stores.reports.privilege_risk_counts(run_id)
+
+    def latest_risk_row(self) -> RiskScoreRow | None:
+        return self._stores.reports.latest_risk_row()
+
+    def write_risk_score(self, row: dict[str, Any]) -> None:
+        self._stores.reports.add(RiskScoreRow(**row))
+
+    def write_yara_status(self, stats: dict[str, Any]) -> None:
+        self._stores.reports.write_yara_status(stats)
+
+    def write_yara_rules(self, inventory: list[dict[str, Any]]) -> None:
+        self._stores.reports.write_yara_rules(inventory)
+
+    def read_yara_status(self) -> dict[str, Any] | None:
+        return self._stores.reports.read_yara_status()
+
+    def coverage_profile(self, run_id: str) -> dict[str, int]:
+        return self._stores.reports.coverage_profile(run_id)
+
+    def latest_yara_coverage_fingerprint(self) -> str | None:
+        table = YaraCoverageRow
+        return self._stores.reports.latest(table.ruleset_fingerprint, table.created_at)
+
+    def write_yara_coverage(self, row: dict[str, Any]) -> None:
+        self._stores.reports.add(YaraCoverageRow(**row))
+
+    # -- retention and maintenance -------------------------------------------
+
+    def database_size_bytes(self) -> int:
+        return DatabaseFile(self.engine).size_bytes()
+
+    def database_live_bytes(self) -> int:
+        return DatabaseFile(self.engine).live_bytes()
+
+    def prune_to_size(self, max_bytes: int) -> dict[str, int]:
+        return self._stores.retention.prune_to_size(max_bytes)
 
     def clear_data(self) -> int:
-        """Wipe all collected telemetry, runs, judgements, narratives, and
-        risk scores — a clean slate. Keeps control_state and the enrichment
-        cache. Returns the number of rows deleted."""
-        models = [
-            *_RowBase.__subclasses__(),
-            CollectionRun,
-            CollectorErrorRow,
-            StreamingSession,
-            Judgement,
-            IncidentNarrativeRow,
-            RiskScoreRow,
-        ]
-        deleted = 0
-        with Session(self.engine) as session:
-            for model in models:
-                deleted += session.execute(delete(model)).rowcount or 0
-            session.commit()
-        return deleted
+        return self._stores.retention.clear_data()
 
     def clear_judgements(self) -> int:
-        """Delete all verdicts so the next cycles re-judge from scratch
-        (the unjudged-selection logic keys off the absence of a row)."""
-        with Session(self.engine) as session:
-            n = session.execute(delete(Judgement)).rowcount or 0
-            session.commit()
-        return n
+        """Delete all verdicts so the next cycles re-judge from scratch."""
+        return self._stores.reports.clear(Judgement)
 
     def clear_narratives(self) -> int:
-        """Delete incident digests so the narrator regenerates next cycle."""
-        with Session(self.engine) as session:
-            n = session.execute(delete(IncidentNarrativeRow)).rowcount or 0
-            session.commit()
-        return n
+        return self._stores.reports.clear(IncidentNarrativeRow)
 
     def reset_baseline(self) -> int:
-        """Forget the host's learned-normal: drop run history so
-        completed_run_count falls below baseline_min_runs and novelty
-        re-learns over the next runs."""
-        with Session(self.engine) as session:
-            n = session.execute(delete(CollectionRun)).rowcount or 0
-            session.commit()
-        return n
+        """Drop run history so novelty re-learns over the next runs."""
+        return self._stores.reports.clear(CollectionRun)
 
+    # -- control plane (see models.ControlState) ------------------------------
 
-def _since(stmt, model, since: Optional[str]):
-    return stmt.where(model.collected_at >= since) if since else stmt
+    def ensure_control_row(self, seed: ControlSeed) -> None:
+        self._stores.control.ensure_control_row(seed)
 
+    def read_control(self) -> dict[str, Any] | None:
+        return self._stores.control.read_control()
 
-def _capped(pairs, cap: int) -> dict[object, list]:
-    """Group (key, value) pairs into per-key lists of at most ``cap``."""
-    grouped: dict[object, list] = {}
-    for key, value in pairs:
-        values = grouped.setdefault(key, [])
-        if len(values) < cap:
-            values.append(value)
-    return grouped
+    def write_heartbeat(self, *, pid: int, status: str, current_interval: int) -> None:
+        self._stores.control.write_heartbeat(pid, status, current_interval)
 
+    def touch_heartbeat(self) -> None:
+        """Refresh only ``last_seen_at``, so a long scan keeps proving
+        liveness without claiming a status change."""
+        self._stores.control.touch_heartbeat()
 
-def _listening_ports(session: Session, pids: list[int], since: Optional[str]):
-    m = ListeningPortRow
-    stmt = select(m.pid, m.laddr_ip, m.laddr_port).where(m.pid.in_(pids))
-    for pid, ip, port in session.execute(_since(stmt, m, since)):
-        yield pid, f"{ip}:{port}"
+    def ack_scan_now(self, nonce: int) -> None:
+        self._stores.control.set_values({"scan_now_applied": nonce})
 
-
-def _outbound_flows(session: Session, pids: list[int], since: Optional[str]):
-    m = NetworkFlowRow
-    stmt = select(m.pid, m.dst_ip, m.dst_port, m.service, m.packets).where(
-        m.pid.in_(pids)
-    )
-    stmt = _since(stmt, m, since).order_by(m.packets.desc())
-    for pid, ip, port, service, packets in session.execute(stmt):
-        yield pid, {"dst": f"{ip}:{port}", "service": service, "packets": packets}
-
-
-def _remote_conns(session: Session, pids: list[int], since: Optional[str]):
-    m = NetworkConnectionRow
-    stmt = select(m.pid, m.raddr_ip, m.raddr_port, m.status).where(
-        m.pid.in_(pids), m.raddr_ip.is_not(None)
-    )
-    for pid, ip, port, status in session.execute(_since(stmt, m, since)):
-        yield pid, f"{ip}:{port} {status}"
-
-
-def _dns_queries(session: Session, names: list[str], since: Optional[str]):
-    m = DnsQueryRow
-    stmt = select(m.process, m.qname, m.qtype).where(m.process.in_(names))
-    for process, qname, qtype in session.execute(_since(stmt, m, since)):
-        yield process, f"{qname} ({qtype})"
-
-
-def _latest_execs(session: Session, pids: list[int], since: Optional[str]) -> dict:
-    m = ProcessExecRow
-    stmt = select(m.pid, m.parent_path, m.signing_id, m.exe_path).where(m.pid.in_(pids))
-    stmt = _since(stmt, m, since).order_by(m.event_timestamp.desc())
-    latest: dict[int, dict] = {}
-    for pid, parent, signing, exe in session.execute(stmt):
-        latest.setdefault(pid, {"parent": parent, "signed": signing, "exe": exe})
-    return latest
-
-
-def _prune_stats(runs: int, events: int, before: int, after: int) -> dict:
-    return {
-        "runs_pruned": runs,
-        "events_pruned": events,
-        "bytes_before": before,
-        "bytes_after": after,
-    }
-
-
-def _completed_runs_oldest_first(session: Session) -> list[CollectionRun]:
-    return list(
-        session.execute(
-            select(CollectionRun)
-            .where(CollectionRun.finished_at.is_not(None))
-            .order_by(asc(CollectionRun.started_at))
-            .limit(2)
-        ).scalars()
-    )
-
-
-def _delete_run(session: Session, run: CollectionRun) -> None:
-    for model in _SNAPSHOT_MODELS:
-        session.execute(delete(model).where(model.run_id == run.run_id))
-    session.execute(
-        delete(CollectorErrorRow).where(CollectorErrorRow.run_id == run.run_id)
-    )
-    session.execute(delete(CollectionRun).where(CollectionRun.run_id == run.run_id))
-
-
-def _trim_streaming(session: Session, before: str) -> int:
-    """Delete streaming events and sessions older than ``before`` (the
-    earliest kept run). Returns the events deleted."""
-    deleted = 0
-    for model in _STREAMING_MODELS:
-        result = session.execute(delete(model).where(model.collected_at < before))
-        deleted += result.rowcount or 0
-    session.execute(
-        delete(StreamingSession).where(StreamingSession.finished_at < before)
-    )
-    return deleted
-
-
-def _is_benign_concurrent_ddl(exc: OperationalError) -> bool:
-    """True when a DDL statement failed only because another process ran
-    the same bootstrap first (monitor + dashboard both call Sink.setup on
-    the shared SQLite file). SQLite reports these as "table ... already
-    exists" or "duplicate column name ...". The resulting schema is
-    identical either way, so the loser can safely continue."""
-    msg = str(exc).lower()
-    return "already exists" in msg or "duplicate column name" in msg
-
-
-def _set_sqlite_pragmas(dbapi_conn, _connection_record):
-    cur = dbapi_conn.cursor()
-    cur.execute("PRAGMA journal_mode=WAL")
-    cur.execute("PRAGMA synchronous=NORMAL")
-    cur.execute("PRAGMA foreign_keys=ON")
-    # SQLite serialises writes, so the snapshot loop and the streaming-worker
-    # threads (auth_events, process_exec) contend for the single write lock.
-    # The pysqlite default busy timeout is only 5s — on a large DB a write or
-    # WAL checkpoint can hold the lock longer than that, and the loser raises
-    # "database is locked" instead of waiting. A generous timeout makes the
-    # contending writer block-and-retry rather than fail, which is the
-    # documented SQLite remedy for multi-connection write contention.
-    cur.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-    cur.close()
-
-
-def _relax_db_permissions(db_path: Path) -> None:
-    """Make the DB dir + files group-writable so a root monitor and a
-    same-group unprivileged dashboard can both write (the dashboard's only
-    write is the control_state row). Best-effort: only the owner may chmod,
-    so the non-owning process no-ops — the owning (root) monitor sets the
-    mode, which is what unblocks the dashboard."""
-    targets = [
-        (db_path.parent, _DB_DIR_MODE),
-        (db_path, _DB_FILE_MODE),
-        (db_path.with_name(db_path.name + "-wal"), _DB_FILE_MODE),
-        (db_path.with_name(db_path.name + "-shm"), _DB_FILE_MODE),
-    ]
-    for path, mode in targets:
-        if not path.exists():
-            continue
-        try:
-            os.chmod(path, mode)
-        except PermissionError:
-            pass  # not the owner; the owning process sets the mode
-
-
-def _migrate_add_columns(engine: Engine) -> None:
-    """Idempotent forward-only migration: add any columns that exist on
-    the ORM models but not yet on the live tables. SQLite supports
-    ``ALTER TABLE ADD COLUMN`` (no ALTER COLUMN, no DROP COLUMN) so this
-    handles the common case of adding a new optional field to a model.
-    """
-    inspector = inspect(engine)
-    live_tables = set(inspector.get_table_names())
-    for table in Base.metadata.tables.values():
-        if table.name not in live_tables:
-            continue
-        existing = {c["name"] for c in inspector.get_columns(table.name)}
-        for col in table.columns:
-            if col.name in existing:
-                continue
-            col_type = col.type.compile(engine.dialect)
-            nullable = "" if col.nullable else " NOT NULL DEFAULT ''"
-            try:
-                with engine.begin() as conn:
-                    conn.execute(
-                        text(
-                            f"ALTER TABLE {table.name} "
-                            f"ADD COLUMN {col.name} {col_type}{nullable}"
-                        )
-                    )
-            except OperationalError as e:
-                # Another process added the column between our inspect and
-                # our ALTER. Benign — keep going with the rest.
-                if not _is_benign_concurrent_ddl(e):
-                    raise
-                continue
-            LOG.info("schema migration: added %s.%s", table.name, col.name)
+    def ack_command(self, nonce: int, outcome: str) -> None:
+        self._stores.control.set_values(
+            {"command_applied": nonce, "command_result": outcome}
+        )

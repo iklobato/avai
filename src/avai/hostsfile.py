@@ -6,7 +6,7 @@ concern is split along three SOLID seams:
 
 - :class:`Platform` — a structural ``Protocol`` (DIP/ISP) for the OS-varying
   facts: *where* the hosts file lives and *how* to gain write access. One
-  concrete strategy per OS family; :func:`resolve_platform` is the single
+  concrete strategy per OS family; :class:`PlatformResolver` is the single
   platform-detection point (mirrors ``host_monitor.hosts.HostFactory``).
 - :class:`HostsTable` — a pure, I/O-free transform of the file's text. It
   owns the idempotent, marker-delimited managed block and leaves every other
@@ -31,7 +31,9 @@ import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
+
+from avai.errors import AvaiError, UnsupportedPlatformError
 
 DASHBOARD_HOSTNAME = "avai.local"
 LOOPBACK_IPV4 = "127.0.0.1"
@@ -57,26 +59,30 @@ _HOSTNAME_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})*$")
 _MAX_HOSTNAME_LEN = 253  # RFC 1035, as text without the trailing dot
 
 
-class HostsError(RuntimeError):
+class HostsError(AvaiError, RuntimeError):
     """Base class for hosts-file management failures."""
 
 
-class UnsupportedPlatformError(HostsError):
-    def __init__(self, system: str) -> None:
-        super().__init__(f"avai cannot manage the hosts file on platform {system!r}")
-        self.system = system
+class UnsupportedHostsPlatformError(HostsError, UnsupportedPlatformError):
+    def __str__(self) -> str:
+        return f"avai cannot manage the hosts file on platform {self.system!r}"
+
+
+class HostsAccessDeniedError(HostsError):
+    """The OS refused the write (no privilege); the registrar adds the hint."""
 
 
 class HostsPermissionError(HostsError):
     """The hosts file exists but can't be written without more privilege."""
 
     def __init__(self, path: Path, hint: str) -> None:
-        super().__init__(f"cannot write {path}: {hint}")
         self.path = path
         self.hint = hint
 
+    def __str__(self) -> str:
+        return f"cannot write {self.path}: {self.hint}"
 
-@runtime_checkable
+
 class Platform(Protocol):
     """OS-varying hosts-file facts the registrar depends on (DIP)."""
 
@@ -113,27 +119,43 @@ class _WindowsPlatform:
         )
 
 
-def resolve_platform(system: str | None = None) -> Platform:
+class PlatformResolver:
     """Select the hosts-file strategy for the current (or a named) OS.
 
     The single point that reads ``platform.system()``; an unsupported OS
     fails loudly here rather than producing a wrong path later.
     """
-    name = system if system is not None else platform.system()
-    if name in ("Darwin", "Linux"):
-        return _PosixPlatform()
-    if name == "Windows":
-        return _WindowsPlatform()
-    raise UnsupportedPlatformError(name)
+
+    POSIX_SYSTEMS = ("Darwin", "Linux")
+    WINDOWS_SYSTEM = "Windows"
+
+    def current(self) -> Platform:
+        return self.resolve(platform.system())
+
+    def resolve(self, system: str) -> Platform:
+        if system in self.POSIX_SYSTEMS:
+            return _PosixPlatform()
+        if system == self.WINDOWS_SYSTEM:
+            return _WindowsPlatform()
+        raise UnsupportedHostsPlatformError(system)
 
 
-def _entry_hostnames(line: str) -> list[str]:
-    """Hostnames declared by an active (non-comment) hosts line; ``[]`` for
-    blank/comment lines. The first whitespace-separated token is the address."""
-    body = line.split("#", 1)[0].strip()
-    if not body:
-        return []
-    return body.split()[1:]
+@dataclass(frozen=True)
+class HostsLine:
+    """One line of a hosts file. The first whitespace-separated token of an
+    active line is the address; the rest are the hostnames it declares."""
+
+    text: str
+
+    def hostnames(self) -> list[str]:
+        """``[]`` for blank and comment lines."""
+        body = self.text.split("#", 1)[0].strip()
+        if not body:
+            return []
+        return body.split()[1:]
+
+    def address(self) -> str:
+        return self.text.split()[0]
 
 
 @dataclass(frozen=True)
@@ -150,7 +172,8 @@ class HostsTable:
     def resolves(self, hostname: str) -> bool:
         """True if *any* active line maps ``hostname`` — including one the user
         added by hand outside our block. Used to avoid nagging/duplicating."""
-        return any(hostname in _entry_hostnames(ln) for ln in self.text.splitlines())
+        lines = self.text.splitlines()
+        return any(hostname in HostsLine(line).hostnames() for line in lines)
 
     def with_mapping(self, hostname: str, ips: tuple[str, ...]) -> "HostsTable":
         """Map ``hostname`` to one line per address in ``ips`` (e.g. an IPv4 and
@@ -187,16 +210,14 @@ class HostsTable:
     def _block_entries(self) -> dict[str, list[str]]:
         _before, block, _after = self._split_block()
         entries: dict[str, list[str]] = {}
-        for line in block:
-            names = _entry_hostnames(line)
-            if not names:
-                continue
-            ip = line.split()[0]
-            for name in names:
-                ips = entries.setdefault(name, [])
-                if ip not in ips:
-                    ips.append(ip)
+        for line in map(HostsLine, block):
+            for name in line.hostnames():
+                self._add_address(entries.setdefault(name, []), line.address())
         return entries
+
+    def _add_address(self, ips: list[str], ip: str) -> None:
+        if ip not in ips:
+            ips.append(ip)
 
     def _rewrite(self, entries: dict[str, list[str]]) -> str:
         before, _block, after = self._split_block()
@@ -221,48 +242,63 @@ class Outcome(Enum):
     NEEDS_PRIVILEGE = "needs_privilege"
 
 
-def _validate_hostname(hostname: str) -> None:
-    if not _HOSTNAME_RE.match(hostname) or len(hostname) > _MAX_HOSTNAME_LEN:
-        raise HostsError(f"invalid hostname: {hostname!r}")
+class HostnameRule:
+    def check(self, hostname: str) -> None:
+        if not _HOSTNAME_RE.match(hostname) or len(hostname) > _MAX_HOSTNAME_LEN:
+            raise HostsError(f"invalid hostname: {hostname!r}")
 
 
-def _atomic_write(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` via a same-directory temp file + ``os.replace``
-    so a crash mid-write can't leave a truncated hosts file. Preserves the
-    existing file mode (hosts files are world-readable, 0644).
+class AtomicFile:
+    """Write via a same-directory temp file + ``os.replace`` so a crash
+    mid-write can't leave a truncated hosts file. Preserves the existing file
+    mode (hosts files are world-readable, 0644).
 
-    Any OS-level write failure (no privilege, parent unwritable, or — in a
-    container — the bind-mounted ``/etc/hosts`` that ``os.replace`` can't
-    replace, EBUSY) is surfaced as :class:`HostsError` so callers degrade
-    gracefully instead of crashing on a raw ``OSError``."""
-    try:
-        mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".avai-hosts-")
-    except OSError as e:
-        raise HostsError(f"could not update {path}: {e}") from e
-    try:
+    Any OS-level write failure (no privilege, parent unwritable, or, in a
+    container, the bind-mounted ``/etc/hosts`` that ``os.replace`` can't
+    replace with EBUSY) is surfaced as :class:`HostsError` so callers (the
+    dashboard banner, ``install-hosts``) degrade gracefully instead of
+    crashing on a raw ``OSError``."""
+
+    PERMISSION_BITS = 0o777
+    NEW_FILE_MODE = 0o644
+    STAGING_PREFIX = ".avai-hosts-"
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def write(self, text: str) -> None:
+        try:
+            mode = self._mode()
+            fd, staging = tempfile.mkstemp(
+                dir=str(self._path.parent), prefix=self.STAGING_PREFIX
+            )
+        except OSError as err:
+            raise self._failure(err) from err
+        try:
+            self._fill(fd, text)
+            os.chmod(staging, mode)
+            os.replace(staging, self._path)
+        except OSError as err:
+            raise self._failure(err) from err
+        finally:
+            Path(staging).unlink(missing_ok=True)
+
+    def _failure(self, err: OSError) -> HostsError:
+        message = f"could not update {self._path}: {err}"
+        if isinstance(err, PermissionError):
+            return HostsAccessDeniedError(message)
+        return HostsError(message)
+
+    def _mode(self) -> int:
+        if not self._path.exists():
+            return self.NEW_FILE_MODE
+        return self._path.stat().st_mode & self.PERMISSION_BITS
+
+    def _fill(self, fd: int, text: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except OSError as e:
-        # The target can be unwritable for reasons beyond privilege — e.g. in a
-        # container /etc/hosts is a bind-mounted file, so os.replace() onto it
-        # fails with EBUSY. Surface as HostsError so callers (the dashboard
-        # banner, `install-hosts`) degrade gracefully instead of crashing.
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise HostsError(f"could not update {path}: {e}") from e
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 class HostsRegistrar:
@@ -273,7 +309,7 @@ class HostsRegistrar:
 
     @classmethod
     def for_current_platform(cls) -> "HostsRegistrar":
-        return cls(resolve_platform())
+        return cls(PlatformResolver().current())
 
     @property
     def hosts_path(self) -> Path:
@@ -287,7 +323,7 @@ class HostsRegistrar:
         hostname: str = DASHBOARD_HOSTNAME,
         ips: tuple[str, ...] = LOOPBACK_ADDRESSES,
     ) -> Outcome:
-        _validate_hostname(hostname)
+        HostnameRule().check(hostname)
         table = self._read()
         updated = table.with_mapping(hostname, ips)
         if updated.text == table.text:
@@ -327,6 +363,6 @@ class HostsRegistrar:
     def _write(self, text: str) -> None:
         path = self.hosts_path
         try:
-            _atomic_write(path, text)
-        except PermissionError as e:
+            AtomicFile(path).write(text)
+        except HostsAccessDeniedError as e:
             raise HostsPermissionError(path, self._platform.elevation_hint(path)) from e

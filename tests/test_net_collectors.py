@@ -6,7 +6,9 @@ samples are representative of the documented formats.
 
 from __future__ import annotations
 
-from avai.enrichers import IndicatorType, extract_indicators
+import logging
+
+from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.hosts.linux import LinuxHost
 from avai.host_monitor.hosts.macos import MacOSHost
 from avai.host_monitor.hosts.windows import WindowsHost
@@ -37,7 +39,7 @@ _ARP = """\
 
 
 class TestMacosArpParser:
-    def test_parses_gateway_and_incomplete(self):
+    def test_parses_gateway_and_incomplete(self) -> None:
         rows = MacosArpParser().parse(_ARP)
         assert rows[0] == {
             "ip": "192.168.1.1",
@@ -58,7 +60,7 @@ Neighbor                                Linklayer Address  Netif Expire    St Fl
 
 
 class TestMacosNdpParser:
-    def test_parses_state_and_incomplete(self):
+    def test_parses_state_and_incomplete(self) -> None:
         rows = MacosNdpParser().parse(_NDP)
         assert rows[0]["ip"].startswith("2803:")
         assert rows[0]["mac"] == "34:29:8f:72:3b:3a"
@@ -66,7 +68,7 @@ class TestMacosNdpParser:
         assert rows[0]["state"] == "R"
         assert rows[1]["mac"] is None
 
-    def test_state_falls_back_to_expire_then_none(self):
+    def test_state_falls_back_to_expire_then_none(self) -> None:
         rows = MacosNdpParser().parse(
             "fe80::1 aa:bb:cc:dd:ee:ff en0 permanent\nfe80::2 (incomplete) en0\n"
         )
@@ -86,7 +88,7 @@ link#13            link#13            UCS                   en6
 
 
 class TestMacosRouteParser:
-    def test_keeps_default_drops_neighbor_and_link(self):
+    def test_keeps_default_drops_neighbor_and_link(self) -> None:
         rows = MacosRouteParser().parse(_ROUTES)
         dests = [r["destination"] for r in rows]
         assert "default" in dests
@@ -114,7 +116,7 @@ resolver #2
 
 
 class TestMacosDnsParser:
-    def test_one_row_per_nameserver_with_iface(self):
+    def test_one_row_per_nameserver_with_iface(self) -> None:
         rows = MacosDnsParser().parse(_SCUTIL)
         assert [r["server"] for r in rows] == ["192.168.1.1", "8.8.8.8"]
         assert all(r["interface"] == "en6" for r in rows)
@@ -125,7 +127,7 @@ class TestMacosDnsParser:
 
 
 class TestIpNeighParser:
-    def test_arp_flags_key_and_missing_lladdr(self):
+    def test_arp_flags_key_and_missing_lladdr(self) -> None:
         text = (
             "192.168.1.1 dev eth0 lladdr 74:24:9f:e8:d2:23 REACHABLE\n"
             "10.0.0.9 dev eth0 FAILED\n"
@@ -140,7 +142,7 @@ class TestIpNeighParser:
         }
         assert rows[1]["mac"] is None and rows[1]["flags"] == "FAILED"
 
-    def test_ndp_uses_state_key(self):
+    def test_ndp_uses_state_key(self) -> None:
         rows = IpNeighParser("state").parse(
             "fe80::1 dev eth0 lladdr aa:bb:cc:dd:ee:ff STALE\n"
         )
@@ -149,7 +151,7 @@ class TestIpNeighParser:
 
 
 class TestIpRouteParser:
-    def test_keeps_default_and_via_routes(self):
+    def test_keeps_default_and_via_routes(self) -> None:
         text = (
             "default via 192.168.1.1 dev eth0 proto dhcp metric 100\n"
             "192.168.1.0/24 dev eth0 proto kernel scope link src 192.168.1.50\n"
@@ -162,7 +164,7 @@ class TestIpRouteParser:
 
 
 class TestResolvConfParser:
-    def test_nameservers_and_search(self):
+    def test_nameservers_and_search(self) -> None:
         rows = ResolvConfParser().parse(
             "# comment\nsearch lan corp\nnameserver 1.1.1.1\nnameserver 8.8.4.4\n"
         )
@@ -175,7 +177,7 @@ class TestResolvConfParser:
 
 
 class TestPsParsers:
-    def test_neighbor_array_and_state_key(self):
+    def test_neighbor_array_and_state_key(self) -> None:
         text = (
             '[{"IPAddress":"192.168.1.1","LinkLayerAddress":"74-24-9F-E8-D2-23",'
             '"InterfaceAlias":"Ethernet","State":"Reachable"}]'
@@ -185,7 +187,7 @@ class TestPsParsers:
         assert rows[0]["mac"] == "74-24-9F-E8-D2-23"
         assert rows[0]["flags"] == "Reachable"
 
-    def test_route_keeps_default_and_nexthop(self):
+    def test_route_keeps_default_and_nexthop(self) -> None:
         text = (
             '[{"DestinationPrefix":"0.0.0.0/0","NextHop":"192.168.1.1",'
             '"InterfaceAlias":"Ethernet","RouteMetric":0},'
@@ -195,12 +197,12 @@ class TestPsParsers:
         rows = PsRouteParser().parse(text)
         assert [r["destination"] for r in rows] == ["0.0.0.0/0"]
 
-    def test_dns_one_row_per_server(self):
+    def test_dns_one_row_per_server(self) -> None:
         text = '{"InterfaceAlias":"Ethernet","ServerAddresses":["8.8.8.8","8.8.4.4"]}'
         rows = PsDnsParser().parse(text)
         assert [r["server"] for r in rows] == ["8.8.8.8", "8.8.4.4"]
 
-    def test_empty_json_is_empty(self):
+    def test_empty_json_is_empty(self) -> None:
         assert PsRouteParser().parse("") == []
         assert PsNeighborParser("flags").parse("null") == []
 
@@ -209,20 +211,27 @@ class TestPsParsers:
 
 
 class TestDnsResolverEnrichment:
-    def test_public_server_emits_indicator(self):
-        inds = extract_indicators("dns_resolvers", {"server": "8.8.8.8"})
+    def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
+        return IndicatorExtraction.default().extract(collector, row)
+
+    def test_public_server_emits_indicator(self) -> None:
+        inds = self.extract("dns_resolvers", {"server": "8.8.8.8"})
         assert inds and inds[0].type == IndicatorType.IPV4
 
-    def test_private_server_is_not_enriched(self):
-        assert extract_indicators("dns_resolvers", {"server": "192.168.1.1"}) == []
+    def test_private_server_is_not_enriched(self) -> None:
+        assert self.extract("dns_resolvers", {"server": "192.168.1.1"}) == []
 
-    def test_arp_table_has_no_extractor(self):
+    def test_arp_table_has_no_extractor(self) -> None:
         # LAN MACs/IPs aren't threat-intel material → NoOp.
-        assert extract_indicators("arp_table", {"ip": "192.168.1.1"}) == []
+        assert self.extract("arp_table", {"ip": "192.168.1.1"}) == []
 
 
 class TestWiring:
-    def test_each_host_assembles_tier1(self):
-        for host in (MacOSHost(), LinuxHost(), WindowsHost()):
+    def test_each_host_assembles_tier1(self) -> None:
+        for host in (
+            MacOSHost.create(logging.getLogger("test")),
+            LinuxHost.create(logging.getLogger("test")),
+            WindowsHost.create(logging.getLogger("test")),
+        ):
             names = {c.name for c in host.snapshot_collectors(_P)}
             assert {"arp_table", "ndp_neighbors", "routes", "dns_resolvers"} <= names
