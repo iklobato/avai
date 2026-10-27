@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator
 
 MIN_BASELINE_RUNS = 1
 
@@ -39,6 +39,13 @@ class MonitorOptions(BaseModel):
     @classmethod
     def from_namespace(cls, parsed: argparse.Namespace) -> MonitorOptions:
         return cls.model_validate(vars(parsed))
+
+    @field_validator("narrative_model", mode="before")
+    @classmethod
+    def _judge_model_by_default(cls, value: str | None, parsed: ValidationInfo) -> str:
+        """No --narrative-model means the judge's model, so one provider key
+        covers every stage."""
+        return parsed.data["judge_model"] if value is None else value
 
     @field_validator("max_db_mb")
     @classmethod
