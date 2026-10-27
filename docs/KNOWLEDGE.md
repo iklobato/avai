@@ -218,9 +218,14 @@ In order:
 2. Rebase https://github.com/iklobato/avai/pull/40 onto `dev` once 39 lands, then merge.
 3. Release a version with both, then watch Sentry (section 10).
 4. Not done, and worth a separate decision:
-   - `file_scan` takes about 2 minutes every cycle, which makes the cycle and a graceful stop slow. Options: a smaller per-cycle cap, or skipping files whose mtime and size did not change.
-   - `kernel_extensions` runs `system_profiler` every cycle (about 95% CPU for 10 to 23 s). It could run less often.
-   - The DB grows about 16 MB per cycle, mostly `auth_events`. The 1024 MB cap (`--max-db-mb`) prunes old runs. Check that pruning keeps up.
+   - **avai logs its own noise.** Found in the 2026-10-27 run, 79 min, 31 cycles:
+     - Every cycle, `kernel_extensions` runs `system_profiler -json SPExtensionsDataType`.
+     - That makes macOS `securityd` log exactly 4048 `MacOS error: -67062` lines (process `/usr/sbin/system_profiler`, category `security_exception`). Each run of the child is a new pid.
+     - The `auth_events` stream stores them: 133,584 of 289,685 rows (46%). `auth_events` is 424 MB of the about 600 MB DB.
+     - Fix options: run `kernel_extensions` less often (it also costs about 12 s of 95% CPU per cycle), and/or drop auth events whose pid is a child avai itself started.
+   - `file_scan` takes about 128 s per cycle on average, 85% of the cycle time (cycle median 135 s). That also makes a graceful stop slow. Options: a smaller per-cycle cap, or skipping files whose mtime and size did not change.
+   - Snapshot collectors store their full list every cycle: `launch_items` (842 rows) used 37 MB and `kernel_extensions` (843 rows) used 22 MB in 31 cycles. Storing only changes would cut this.
+   - The DB grew about 600 MB in 79 min. The 1024 MB cap (`--max-db-mb`) prunes old runs. Pruning was not reached in the test, so it is still unchecked.
    - `process_exec_events` ends at once with `rows=0` without root (no warning). Root is probably needed (eslogger); confirm and say so in the dashboard.
    - The test-suite debt: 2685 mechanical findings in `tests/`.
    - Untested: the Linux and Windows collectors on real machines, and the socket fallback outside macOS. psutil's docs say only macOS and AIX need root for the system table.
