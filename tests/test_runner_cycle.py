@@ -566,22 +566,32 @@ class TestControlLoopCommands:
 
 
 class TestStreamingWorkers:
+    WAIT_S = 5
+    POLL_S = 0.05
+
+    def _stream_threads(self) -> list[str]:
+        names = (thread.name for thread in threading.enumerate())
+        return [name for name in names if name.startswith("stream-")]
+
     def test_workers_write_streamed_rows_and_stop(self, sink):
         runner = _runner(
             sink,
             streaming=[_AuthStream([_stream_row("sshd", "a"), _stream_row("su", "b")])],
         )
 
+        # The in-memory sink is ONE sqlite connection shared by every thread,
+        # so the test must not read it while the worker writes: a read here
+        # ends its session with a ROLLBACK on that same connection and can
+        # drop the worker's insert. Wait for the finite stream's thread to
+        # finish instead, then count.
         runner.start_streaming()
-        deadline = time.monotonic() + 5
-        while _count(sink, AuthEventRow) < 2 and time.monotonic() < deadline:
-            time.sleep(0.05)
+        deadline = time.monotonic() + self.WAIT_S
+        while self._stream_threads() and time.monotonic() < deadline:
+            time.sleep(self.POLL_S)
         runner.stop_streaming()
 
         assert _count(sink, AuthEventRow) == 2
-        assert [
-            t.name for t in threading.enumerate() if t.name.startswith("stream-")
-        ] == []
+        assert self._stream_threads() == []
 
     def test_no_streaming_collectors_starts_nothing(self, sink):
         runner = _runner(sink)
