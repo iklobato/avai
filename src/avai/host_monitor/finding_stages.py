@@ -9,10 +9,10 @@ import bisect
 import json
 import logging
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
-from avai.enrichers import EnrichmentChain, IndicatorExtraction
+from avai.enrichers import EnrichmentChain, Indicator, IndicatorExtraction
 
 from .collectors import Collector
 from .control_loop import ControlSettings, ProgressHeartbeat
@@ -96,18 +96,17 @@ class BatchOrigin:
     baseline: HostBaseline
 
 
+@dataclass(frozen=True)
 class FindingBatch:
-    """One collector's unjudged entries on their way to a verdict. Stages
-    add keys to the entries and replace ``judgments``."""
+    """One collector's unjudged entries on their way to a verdict. Each
+    stage returns a new batch with keys added to copies of the entries or
+    with new ``judgments``; the entries it was given stay as they were."""
 
-    def __init__(
-        self, collector: Collector, entries: list[dict[str, Any]], origin: BatchOrigin
-    ) -> None:
-        self.collector = collector
-        self.entries = entries
-        self.origin = origin
-        self.judgments: list[Judgment] = []
-        self.indicators_looked_up = 0
+    collector: Collector
+    entries: list[dict[str, Any]]
+    origin: BatchOrigin
+    judgments: list[Judgment] = field(default_factory=list)
+    indicators_looked_up: int = 0
 
     @property
     def rows(self) -> list[dict[str, Any]]:
@@ -129,6 +128,15 @@ class FindingBatch:
             if isinstance(content_hash, str) and content_hash:
                 by_hash.setdefault(content_hash, row)
         return by_hash
+
+    def enriched(self, extras: dict[str, dict[str, Any]]) -> FindingBatch:
+        """A batch whose entries carry the extra keys given for their
+        content_hash; entries with no extras are kept as they are."""
+        entries = [
+            {**entry, **extras.get(entry.get("content_hash") or "", {})}
+            for entry in self.entries
+        ]
+        return replace(self, entries=entries)
 
     def entries_by_hash(self) -> dict[str, dict[str, Any]]:
         return {
@@ -154,7 +162,7 @@ class FindingBatch:
 
 
 class FindingStage(Protocol):
-    def apply(self, batch: FindingBatch) -> None: ...
+    def apply(self, batch: FindingBatch) -> FindingBatch: ...
 
 
 class FindingPipeline:
@@ -164,9 +172,10 @@ class FindingPipeline:
     def __init__(self, stages: list[FindingStage]) -> None:
         self._stages = stages
 
-    def process(self, batch: FindingBatch) -> None:
+    def process(self, batch: FindingBatch) -> FindingBatch:
         for stage in self._stages:
-            stage.apply(batch)
+            batch = stage.apply(batch)
+        return batch
 
 
 @dataclass(frozen=True)
@@ -196,35 +205,43 @@ class EvidenceStage:
         self._settings = settings
         self._heartbeat = heartbeat
 
-    def apply(self, batch: FindingBatch) -> None:
+    def apply(self, batch: FindingBatch) -> FindingBatch:
         if not self._settings.enrich_on():
-            return
+            return batch
         rows_by_hash = batch.rows_by_hash()
+        extras: dict[str, dict[str, Any]] = {}
+        looked_up = batch.indicators_looked_up
         for entry in batch.entries:
             # Each indicator is a serial, rate-limited HTTP call; keep proving
             # liveness to the dashboard as we go.
             self._heartbeat.beat()
-            row = rows_by_hash.get(entry.get("content_hash"))
-            evidence = [] if row is None else list(self._evidence(batch, row))
+            content_hash = entry.get("content_hash")
+            indicators = self._indicators(batch, rows_by_hash.get(content_hash))
+            looked_up += len(indicators)
+            evidence = [item for found in indicators for item in self._evidence(found)]
             if evidence:
-                entry["evidence"] = evidence
+                extras[content_hash] = {"evidence": evidence}
+        return replace(batch.enriched(extras), indicators_looked_up=looked_up)
 
-    def _evidence(
-        self, batch: FindingBatch, row: dict[str, Any]
-    ) -> Iterator[dict[str, Any]]:
-        for indicator in self._intel.extraction.extract(batch.collector.name, row):
-            batch.indicators_looked_up += 1
-            yield from (
-                {
-                    "src": found.source,
-                    "type": str(indicator.type),
-                    "value": indicator.value,
-                    "hint": str(found.verdict_hint),
-                    "confidence": round(found.confidence, self.EVIDENCE_PRECISION),
-                    "note": found.summary,
-                }
-                for found in self._intel.chain.enrich(indicator)
-            )
+    def _indicators(
+        self, batch: FindingBatch, row: dict[str, Any] | None
+    ) -> list[Indicator]:
+        if row is None:
+            return []
+        return list(self._intel.extraction.extract(batch.collector.name, row))
+
+    def _evidence(self, indicator: Indicator) -> Iterator[dict[str, Any]]:
+        return (
+            {
+                "src": found.source,
+                "type": str(indicator.type),
+                "value": indicator.value,
+                "hint": str(found.verdict_hint),
+                "confidence": round(found.confidence, self.EVIDENCE_PRECISION),
+                "note": found.summary,
+            }
+            for found in self._intel.chain.enrich(indicator)
+        )
 
 
 class PresenceWindow:
@@ -265,23 +282,26 @@ class BaselineStage:
     def __init__(self, io: StepIO) -> None:
         self._io = io
 
-    def apply(self, batch: FindingBatch) -> None:
+    def apply(self, batch: FindingBatch) -> FindingBatch:
         collector, sink = batch.collector, self._io.sink
         if not batch.entries or not collector.judge_fields:
-            return
+            return batch
         hashes = list(batch.entries_by_hash())
         first_seen = self._io.read(
             f"baseline: first_seen_map({collector.name})",
             lambda: sink.first_seen_map(collector.model, hashes),
         )
         if first_seen is None:
-            return
+            return batch
         timeline = self._io.read("baseline: run timeline fetch", sink.run_started_ats)
         presence = PresenceWindow(timeline or [], batch.baseline)
-        for entry in batch.entries:
-            seen = first_seen.get(entry.get("content_hash"))
-            if seen is not None:
-                entry["baseline"] = presence.describe(*seen)
+        return batch.enriched(
+            {
+                content_hash: {"baseline": presence.describe(*seen)}
+                for content_hash, seen in first_seen.items()
+                if seen is not None
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -432,25 +452,25 @@ class CorrelationStage:
         self._io = io
         self._behavior = behavior
 
-    def apply(self, batch: FindingBatch) -> None:
+    def apply(self, batch: FindingBatch) -> FindingBatch:
         name = batch.collector.name
         if not batch.entries or name not in CORRELATED_COLLECTORS:
-            return
+            return batch
         try:
             # None is a valid answer here (no previous run), so this read is
             # guarded by hand instead of through StepIO.read.
             since = self._io.sink.prior_run_started_at(batch.run_id)
         except HOST_FAILURES as exc:
             self._io.logger.warning("correlation: prior_run(%s) failed: %s", name, exc)
-            return
-        self._correlate(batch, since)
+            return batch
+        return self._correlate(batch, since)
 
-    def _correlate(self, batch: FindingBatch, since: str | None) -> None:
+    def _correlate(self, batch: FindingBatch, since: str | None) -> FindingBatch:
         name = batch.collector.name
         links = self._behavior.links(name, batch.rows, since)
         pids, names = links.all_pids(), links.all_names()
         if not pids and not names:
-            return
+            return batch
         context = self._io.read(
             f"correlation: context({name})",
             lambda: self._io.sink.correlation_context(
@@ -458,12 +478,17 @@ class CorrelationStage:
             ),
         )
         if context is None:
-            return
-        summary = BehaviorSummary(context)
-        for entry in batch.entries:
-            related = summary.related(links, entry.get("content_hash"))
-            if related:
-                entry["related"] = related
+            return batch
+        return batch.enriched(self._related(batch, BehaviorSummary(context), links))
+
+    def _related(
+        self, batch: FindingBatch, summary: BehaviorSummary, links: ProcessLinks
+    ) -> dict[str, dict[str, Any]]:
+        related = {
+            content_hash: summary.related(links, content_hash)
+            for content_hash in batch.entries_by_hash()
+        }
+        return {key: {"related": value} for key, value in related.items() if value}
 
 
 class JsonColumn:
@@ -485,22 +510,26 @@ class YaraContextStage:
     Both live on the rows but not in ``judge_fields``, so they don't affect
     the content_hash."""
 
-    def apply(self, batch: FindingBatch) -> None:
+    def apply(self, batch: FindingBatch) -> FindingBatch:
         if batch.collector.name != Slices.FILE_SCAN.name or not batch.entries:
-            return
+            return batch
         rows_by_hash = batch.rows_by_hash()
-        for entry in batch.entries:
-            row = rows_by_hash.get(entry.get("content_hash"))
-            if row is not None:
-                self._attach(entry, row)
+        return batch.enriched(
+            {
+                content_hash: self._context(row)
+                for content_hash, row in rows_by_hash.items()
+            }
+        )
 
-    def _attach(self, entry: dict[str, Any], row: dict[str, Any]) -> None:
+    def _context(self, row: dict[str, Any]) -> dict[str, Any]:
+        context: dict[str, Any] = {}
         meta = JsonColumn().parse(row.get("meta_json"))
         if isinstance(meta, dict) and meta:
-            entry["rule_meta"] = meta
+            context["rule_meta"] = meta
         strings = JsonColumn().parse(row.get("strings_json"))
         if isinstance(strings, list) and strings:
-            entry["matched_strings"] = strings
+            context["matched_strings"] = strings
+        return context
 
 
 class JudgeStage:
@@ -516,10 +545,11 @@ class JudgeStage:
         self._judge = judge
         self._io = io
 
-    def apply(self, batch: FindingBatch) -> None:
+    def apply(self, batch: FindingBatch) -> FindingBatch:
         collector = batch.collector
         hints = self._hints(collector.name, collector.judge_hints)
-        batch.judgments = self._judge.judge(collector.name, hints, batch.entries)
+        judgments = self._judge.judge(collector.name, hints, batch.entries)
+        return replace(batch, judgments=judgments)
 
     def _hints(self, collector_name: str, base_hints: str) -> str:
         examples = self._io.read(
@@ -550,19 +580,19 @@ class VerifyStage:
         self._verifier = verifier
         self._logger = logger
 
-    def apply(self, batch: FindingBatch) -> None:
+    def apply(self, batch: FindingBatch) -> FindingBatch:
         malicious = [
             index
             for index, judgment in enumerate(batch.judgments)
             if judgment.verdict == Verdict.MALICIOUS
         ][:MAX_VERIFY_PER_COLLECTOR]
         if not malicious:
-            return
+            return batch
         entries = batch.entries_by_hash()
         revised = list(batch.judgments)
         for index in malicious:
             revised[index] = self._verify(batch.collector.name, revised[index], entries)
-        batch.judgments = revised
+        return replace(batch, judgments=revised)
 
     def _verify(
         self, collector: str, judgment: Judgment, entries: dict[str, dict[str, Any]]
@@ -656,14 +686,14 @@ class InvestigateStage:
         self._io = io
         self._behavior = behavior
 
-    def apply(self, batch: FindingBatch) -> None:
+    def apply(self, batch: FindingBatch) -> FindingBatch:
         unknown = [
             index
             for index, judgment in enumerate(batch.judgments)
             if judgment.verdict == Verdict.UNKNOWN
         ][:MAX_INVESTIGATE_PER_COLLECTOR]
         if not unknown:
-            return
+            return batch
         # Gathered once, and only when there is an unknown to look at.
         bundle = InvestigationBundle.gather(self._io, self._behavior, batch)
         revised = list(batch.judgments)
@@ -671,7 +701,7 @@ class InvestigateStage:
             revised[index] = self._investigate(
                 batch.collector.name, revised[index], bundle
             )
-        batch.judgments = revised
+        return replace(batch, judgments=revised)
 
     def _investigate(
         self, collector: str, judgment: Judgment, bundle: InvestigationBundle

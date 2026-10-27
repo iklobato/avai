@@ -236,8 +236,8 @@ class CollectionCycle:
         if not unjudged or not self.controls.settings.judge_on():
             return 0, 0
         origin = BatchOrigin(rows, stamp.run_id, stamp.baseline)
-        batch = FindingBatch(collector, unjudged, origin)
-        self.plan.snapshot_pipeline.process(batch)
+        pending = FindingBatch(collector, unjudged, origin)
+        batch = self.plan.snapshot_pipeline.process(pending)
         self.config.sink.write_judgments(batch.judgments, context=batch.context())
         return len(batch.judgments), batch.indicators_looked_up
 
@@ -279,13 +279,13 @@ class CollectionCycle:
     def _judge_stream(self, batch: FindingBatch) -> None:
         name = batch.collector.name
         try:
-            self.plan.streaming_pipeline.process(batch)
-            self.config.sink.write_judgments(batch.judgments, context=batch.context())
+            judged = self.plan.streaming_pipeline.process(batch)
+            self.config.sink.write_judgments(judged.judgments, context=judged.context())
         except HOST_FAILURES:
             self._log.exception("streaming-judge failed for %s", name)
             return
         self._log.info(
-            "streaming-judge collector=%s judged=%d", name, len(batch.judgments)
+            "streaming-judge collector=%s judged=%d", name, len(judged.judgments)
         )
 
     def _apply_feedback(self) -> None:

@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from typing import NoReturn
+from dataclasses import replace
+from typing import Any, NoReturn
 
 import pytest
 from sqlalchemy import create_engine
@@ -27,10 +28,10 @@ from avai.enrichers import (
 from avai.enrichers.base import EnricherError
 from avai.host_monitor.constants import DEFAULT_BASELINE_MIN_RUNS
 from avai.host_monitor.control_loop import (
-    ControlLoop,
-    ControlSettings,
     ControlDefaults,
+    ControlLoop,
     ControlPlane,
+    ControlSettings,
     Maintenance,
     MaintenanceCommand,
     ProgressHeartbeat,
@@ -42,8 +43,8 @@ from avai.host_monitor.cycle_steps import (
     StepIO,
 )
 from avai.host_monitor.finding_stages import (
-    BatchOrigin,
     BaselineStage,
+    BatchOrigin,
     CorrelationStage,
     EvidenceStage,
     FindingBatch,
@@ -192,11 +193,32 @@ class TestEvidenceStage:
         ]
 
         batch = _batch(collector, unjudged, rows)
-        stage.apply(batch)
+        batch = stage.apply(batch)
+        unjudged = batch.entries
         assert batch.indicators_looked_up == 1  # one indicator (8.8.8.8)
         assert "evidence" in unjudged[0]
         assert any(e["src"] == "test_hit" for e in unjudged[0]["evidence"])
         assert unjudged[0]["evidence"][0]["hint"] == "malicious"
+
+    def test_returns_an_enriched_copy_and_leaves_the_input_alone(
+        self, sink: Sink, chain: EnrichmentChain
+    ) -> None:
+        from avai.host_monitor.models import NetworkConnectionRow
+
+        collector = _StubCollector()
+        collector.name = "network_connections"
+        collector.model = NetworkConnectionRow
+        collector.judge_fields = ("raddr",)
+        rows = [{"content_hash": "x", "raddr": "8.8.8.8:53"}]
+        unjudged = [{"content_hash": "x", "raddr": "8.8.8.8:53"}]
+        batch = _batch(collector, unjudged, rows)
+
+        enriched = _evidence_stage(sink, chain).apply(batch)
+
+        assert enriched.entries[0]["evidence"][0]["src"] == "test_hit"
+        assert enriched.indicators_looked_up == 1
+        assert unjudged == [{"content_hash": "x", "raddr": "8.8.8.8:53"}]
+        assert batch.indicators_looked_up == 0
 
     def test_enrichment_turned_off_means_no_evidence_no_lookups(self, sink):
         source = _AlwaysHitEnricher()
@@ -213,7 +235,8 @@ class TestEvidenceStage:
         rows = [{"content_hash": "x", "raddr": "8.8.8.8:53"}]
         unjudged = [{"content_hash": "x", "raddr": "8.8.8.8:53"}]
         batch = _batch(collector, unjudged, rows)
-        stage.apply(batch)
+        batch = stage.apply(batch)
+        unjudged = batch.entries
         assert batch.indicators_looked_up == 0
         assert "evidence" not in unjudged[0]
         assert source.calls == []
@@ -225,7 +248,8 @@ class TestEvidenceStage:
         collector.name = "no_extractor_for_this_collector"
         unjudged = [{"content_hash": "x", "name": "irrelevant"}]
         batch = _batch(collector, unjudged, [{"content_hash": "x"}])
-        _evidence_stage(sink, chain).apply(batch)
+        batch = _evidence_stage(sink, chain).apply(batch)
+        unjudged = batch.entries
         assert batch.indicators_looked_up == 0
         assert "evidence" not in unjudged[0]
 
@@ -239,7 +263,8 @@ class TestEvidenceStage:
         unjudged = [{"content_hash": "never-seen", "raddr": "x"}]
         rows = [{"content_hash": "different-hash", "raddr": "8.8.8.8:53"}]
         batch = _batch(collector, unjudged, rows)
-        _evidence_stage(sink, chain).apply(batch)
+        batch = _evidence_stage(sink, chain).apply(batch)
+        unjudged = batch.entries
         assert batch.indicators_looked_up == 0
         assert "evidence" not in unjudged[0]
 
@@ -270,7 +295,8 @@ class TestEvidenceStage:
         unjudged = [{"content_hash": h, "raddr": "8.8.8.8:53"}]
         # Should not raise.
         batch = _batch(collector, unjudged, rows)
-        _evidence_stage(sink, chain).apply(batch)
+        batch = _evidence_stage(sink, chain).apply(batch)
+        unjudged = batch.entries
         assert batch.indicators_looked_up == 1
         # No evidence attached (the only source errored).
         assert unjudged[0].get("evidence") in (None, [])
@@ -491,9 +517,9 @@ class TestFirstSeenMap:
 class TestAnnotateBaseline:
     def _annotate(
         self, sink: Sink, unjudged: list[dict[str, str]], baseline: HostBaseline
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         stage = BaselineStage(StepIO(sink, logging.getLogger("test")))
-        stage.apply(_batch(_ProcStub(), unjudged, baseline=baseline))
+        return stage.apply(_batch(_ProcStub(), unjudged, baseline=baseline)).entries
 
     def test_novel_true_for_artifact_first_seen_after_cutoff(self, sink):
         # Establish a baseline of 2 runs; cutoff == 2nd run start (_TS[1]).
@@ -507,7 +533,7 @@ class TestAnnotateBaseline:
             {"content_hash": h_old, "name": "old"},
             {"content_hash": h_new, "name": "new"},
         ]
-        self._annotate(sink, unjudged, bl)
+        unjudged = self._annotate(sink, unjudged, bl)
 
         old, new = unjudged
         assert old["baseline"]["novel"] is False
@@ -524,7 +550,7 @@ class TestAnnotateBaseline:
         bl = HostBaseline.measure(sink, 5)
 
         unjudged = [{"content_hash": h, "name": "x"}]
-        self._annotate(sink, unjudged, bl)
+        unjudged = self._annotate(sink, unjudged, bl)
 
         assert unjudged[0]["baseline"]["baseline_established"] is False
         assert unjudged[0]["baseline"]["novel"] is False
@@ -534,7 +560,7 @@ class TestAnnotateBaseline:
         _add_run(sink, _TS[1])
         bl = HostBaseline.measure(sink, 2)
         unjudged = [{"content_hash": "never-collected", "name": "ghost"}]
-        self._annotate(sink, unjudged, bl)
+        unjudged = self._annotate(sink, unjudged, bl)
         assert "baseline" not in unjudged[0]
 
     def test_intermittent_flagged_for_flapping_artifact(self, sink):
@@ -554,7 +580,7 @@ class TestAnnotateBaseline:
             {"content_hash": Digest().of_row({"name": n}, ("name",)), "name": n}
             for n in ("steady", "flap", "fresh")
         ]
-        self._annotate(sink, unjudged, bl)
+        unjudged = self._annotate(sink, unjudged, bl)
         steady, flap, fresh = unjudged
         assert flap["baseline"]["intermittent"] is True
         assert steady["baseline"]["intermittent"] is False  # present every run
@@ -575,7 +601,7 @@ def _correlate(sink, collector, unjudged, rows, run_id):
         StepIO(sink, logging.getLogger("test")),
         ProcessBehavior(StepIO(sink, logging.getLogger("test"))),
     )
-    stage.apply(_batch(collector, unjudged, rows, run_id=run_id))
+    return stage.apply(_batch(collector, unjudged, rows, run_id=run_id)).entries
 
 
 class TestCorrelationStage:
@@ -650,7 +676,7 @@ class TestCorrelationStage:
         h = Digest().of_row({"name": "evil"}, ("name",))
         rows = [{"content_hash": h, "pid": 42, "name": "evil"}]
         unjudged = [{"content_hash": h, "name": "evil"}]
-        _correlate(sink, _ProcStub(), unjudged, rows, _TS[1])
+        unjudged = _correlate(sink, _ProcStub(), unjudged, rows, _TS[1])
 
         rel = unjudged[0]["related"]
         assert rel["listening_ports"] == ["0.0.0.0:4444"]
@@ -700,7 +726,7 @@ class TestCorrelationStage:
         h = "launch-hash"
         rows = [{"content_hash": h, "program": "/usr/local/bin/foo", "label": "com.x"}]
         unjudged = [{"content_hash": h, "label": "com.x"}]
-        _correlate(sink, _LaunchStub(), unjudged, rows, _TS[1])
+        unjudged = _correlate(sink, _LaunchStub(), unjudged, rows, _TS[1])
         rel = unjudged[0]["related"]
         assert rel["outbound_flows"][0]["dst"] == "9.9.9.9:443"
         assert rel["outbound_flows"][0]["packets"] == 99
@@ -718,7 +744,7 @@ class TestCorrelationStage:
 
         rows = [{"content_hash": "h", "program": "/never/running", "label": "com.y"}]
         unjudged = [{"content_hash": "h", "label": "com.y"}]
-        _correlate(sink, _LaunchStub(), unjudged, rows, _TS[1])
+        unjudged = _correlate(sink, _LaunchStub(), unjudged, rows, _TS[1])
         assert "related" not in unjudged[0]
 
     def test_non_process_collector_is_not_correlated(self, sink):
@@ -743,7 +769,7 @@ class TestCorrelationStage:
 
         rows = [{"content_hash": "h", "pid": 42, "name": "evil"}]
         unjudged = [{"content_hash": "h"}]
-        _correlate(sink, _PortStub(), unjudged, rows, _TS[1])
+        unjudged = _correlate(sink, _PortStub(), unjudged, rows, _TS[1])
         assert "related" not in unjudged[0]
 
     def test_process_with_no_correlated_rows_gets_no_related(self, sink):
@@ -751,7 +777,7 @@ class TestCorrelationStage:
         h = Digest().of_row({"name": "quiet"}, ("name",))
         rows = [{"content_hash": h, "pid": 999, "name": "quiet"}]
         unjudged = [{"content_hash": h, "name": "quiet"}]
-        _correlate(sink, _ProcStub(), unjudged, rows, _TS[1])
+        unjudged = _correlate(sink, _ProcStub(), unjudged, rows, _TS[1])
         assert "related" not in unjudged[0]
 
     def test_stale_rows_before_prior_run_are_excluded(self, sink):
@@ -778,7 +804,7 @@ class TestCorrelationStage:
         h = Digest().of_row({"name": "evil"}, ("name",))
         rows = [{"content_hash": h, "pid": 42, "name": "evil"}]
         unjudged = [{"content_hash": h, "name": "evil"}]
-        _correlate(sink, _ProcStub(), unjudged, rows, _TS[2])
+        unjudged = _correlate(sink, _ProcStub(), unjudged, rows, _TS[2])
         assert "related" not in unjudged[0]  # _TS[0] < prior(_TS[2]) == _TS[1]
 
 
@@ -1507,7 +1533,7 @@ class TestYaraContextStage:
     touching the content_hash (they aren't judge_fields)."""
 
     def _apply(self, collector, unjudged, rows):
-        YaraContextStage().apply(_batch(collector, unjudged, rows))
+        return YaraContextStage().apply(_batch(collector, unjudged, rows)).entries
 
     def test_attaches_meta_and_strings_from_row(self):
         h = "hash-1"
@@ -1523,7 +1549,7 @@ class TestYaraContextStage:
             }
         ]
         unjudged = [{"content_hash": h, "rule": "apt42_loader"}]
-        self._apply(_FileScanStub(), unjudged, rows)
+        unjudged = self._apply(_FileScanStub(), unjudged, rows)
         assert unjudged[0]["rule_meta"]["description"] == "APT42 implant loader"
         assert unjudged[0]["matched_strings"][0]["text"] == "http://evil.example/x"
 
@@ -1531,7 +1557,7 @@ class TestYaraContextStage:
         unjudged = [{"content_hash": "h", "name": "x"}]
         meta = json.dumps({"author": "Jane"})
         # _StubCollector.name is "processes", not the file_scan collector.
-        self._apply(
+        unjudged = self._apply(
             _StubCollector(), unjudged, [{"content_hash": "h", "meta_json": meta}]
         )
         assert "rule_meta" not in unjudged[0]
@@ -1542,14 +1568,14 @@ class TestYaraContextStage:
         # No meta, malformed strings — neither key should be attached, no raise.
         rows = [{"content_hash": h, "strings_json": "{not json"}]
         unjudged = [{"content_hash": h, "rule": "r"}]
-        self._apply(_FileScanStub(), unjudged, rows)
+        unjudged = self._apply(_FileScanStub(), unjudged, rows)
         assert "rule_meta" not in unjudged[0]
         assert "matched_strings" not in unjudged[0]
 
     def test_entry_without_matching_row_is_skipped(self):
         unjudged = [{"content_hash": "absent", "rule": "r"}]
         meta = json.dumps({"author": "Jane"})
-        self._apply(
+        unjudged = self._apply(
             _FileScanStub(), unjudged, [{"content_hash": "other", "meta_json": meta}]
         )
         assert "rule_meta" not in unjudged[0]
@@ -1768,10 +1794,8 @@ class _FakeVerifier:
 
 
 def _revise(stage, judgments, entries, rows=()):
-    batch = _batch(_ProcStub(), entries, rows)
-    batch.judgments = judgments
-    stage.apply(batch)
-    return batch.judgments
+    batch = replace(_batch(_ProcStub(), entries, rows), judgments=judgments)
+    return stage.apply(batch).judgments
 
 
 class _FixedJudge:
@@ -1854,8 +1878,8 @@ class TestVerifyStage:
 class TestMaliciousVerdictVerifier:
     def _verifier(self, payload):
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
-        from avai.host_monitor.prompts import Prompts
         from avai.host_monitor.llm import LlmSession
+        from avai.host_monitor.prompts import Prompts
         from avai.host_monitor.verifier import MaliciousVerdictVerifier
 
         class _FakeClient:
