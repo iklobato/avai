@@ -3,8 +3,6 @@ in some containers) makes the per-user collectors find nothing, not fail."""
 
 from __future__ import annotations
 
-import pwd
-
 import pytest
 
 from avai.host_monitor.collectors import InstalledAppsCollector, QuarantineCollector
@@ -13,12 +11,14 @@ from avai.host_monitor.runtime import HostPaths
 
 @pytest.fixture
 def homeless(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The passwd lookup only exists on Unix; Windows has no such case.
+    passwd = pytest.importorskip("pwd")
     monkeypatch.delenv("HOME", raising=False)
 
-    def no_entry(uid: int) -> pwd.struct_passwd:
+    def no_entry(uid: int) -> object:
         raise KeyError(f"getpwuid(): uid not found: {uid}")
 
-    monkeypatch.setattr(pwd, "getpwuid", no_entry)
+    monkeypatch.setattr(passwd, "getpwuid", no_entry)
 
 
 class TestNoHomeDirectory:
