@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any, ClassVar
 
+from pydantic import Field
+
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -73,6 +76,33 @@ class EngineStats:
         return Verdict(VerdictHint.UNKNOWN, UNKNOWN_CONFIDENCE)
 
 
+class VtAttributes(ApiReply):
+    """The ``data.attributes`` object of a VirusTotal lookup."""
+
+    last_analysis_stats: object = None
+    reputation: object = None
+    names: object = None
+    type_description: object = None
+    popular_threat_classification: object = None
+
+    def details(self) -> dict[str, Any]:
+        return {
+            "stats": self.last_analysis_stats or {},
+            "reputation": self.reputation,
+            "names": (self.names or [])[:LISTED_NAMES],
+            "type_description": self.type_description,
+            "popular_threat_classification": self.popular_threat_classification,
+        }
+
+
+class VtData(ApiReply):
+    attributes: VtAttributes = VtAttributes()
+
+
+class VtReply(ApiReply):
+    record: VtData = Field(VtData(), alias="data")
+
+
 class VirusTotalEnricher(Enricher):
     name = "virustotal"
     supports_types = frozenset(
@@ -114,13 +144,11 @@ class VirusTotalEnricher(Enricher):
         )
         if response.status_code != HTTPStatus.OK:
             return None
-        attributes = response.json().get("data", {}).get("attributes", {})
+        attributes = VtReply.model_validate(response.json()).record.attributes
         return self._evidence(indicator, attributes)
 
-    def _evidence(
-        self, indicator: Indicator, attributes: Mapping[str, Any]
-    ) -> Evidence:
-        stats = EngineStats.of(attributes.get("last_analysis_stats") or {})
+    def _evidence(self, indicator: Indicator, attributes: VtAttributes) -> Evidence:
+        stats = EngineStats.of(attributes.last_analysis_stats or {})
         verdict = stats.verdict()
         return Evidence(
             source=self.name,
@@ -131,16 +159,5 @@ class VirusTotalEnricher(Enricher):
                 f"VirusTotal: {stats.malicious} malicious + "
                 f"{stats.suspicious} suspicious / {stats.total} engines"
             ),
-            details=self._details(attributes),
+            details=attributes.details(),
         )
-
-    def _details(self, attributes: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "stats": attributes.get("last_analysis_stats") or {},
-            "reputation": attributes.get("reputation"),
-            "names": (attributes.get("names") or [])[:LISTED_NAMES],
-            "type_description": attributes.get("type_description"),
-            "popular_threat_classification": attributes.get(
-                "popular_threat_classification"
-            ),
-        }

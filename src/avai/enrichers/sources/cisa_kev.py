@@ -12,8 +12,11 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+from pydantic import Field, field_validator
+
 from avai.enrichers.base import Evidence, Indicator, IndicatorType, VerdictHint
 from avai.enrichers.feed import FeedEnricher
+from avai.enrichers.reply import ApiReply
 
 URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 MALICIOUS_CONFIDENCE = 0.98
@@ -28,7 +31,25 @@ DETAIL_FIELDS = (
 )
 
 
-class CisaKevEnricher(FeedEnricher):
+class KevEntry(ApiReply):
+    """One known-exploited vulnerability."""
+
+    cve_id: object = Field("", alias="cveID")
+    product: object = None
+    date_added: object = Field(None, alias="dateAdded")
+    ransomware: object = Field(None, alias="knownRansomwareCampaignUse")
+
+
+class KevFeed(ApiReply):
+    vulnerabilities: list[KevEntry] = []
+
+    @field_validator("vulnerabilities", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or []
+
+
+class CisaKevEnricher(FeedEnricher[KevEntry]):
     name = "cisa_kev"
     supports_types = frozenset({IndicatorType.CVE})
     requires_token: ClassVar[str | None] = None
@@ -37,20 +58,21 @@ class CisaKevEnricher(FeedEnricher):
     rate_per_second = 1.0
     feed_url = URL
 
-    def index(self, body: Any) -> dict[str, dict[str, Any]]:
+    def index(self, body: Any) -> dict[str, KevEntry]:
+        feed = KevFeed.model_validate(body or {})
         return {
-            entry.get("cveID", "").upper(): entry
-            for entry in (body or {}).get("vulnerabilities") or []
-            if entry.get("cveID")
+            entry.cve_id.upper(): entry
+            for entry in feed.vulnerabilities
+            if entry.cve_id
         }
 
     def fetch(self, indicator: Indicator) -> Evidence | None:
         hit = self.entry(indicator.value.upper())
         if hit is None:
             return None
-        product = hit.get("product") or "?"
-        added = hit.get("dateAdded") or ""
-        ransomware = hit.get("knownRansomwareCampaignUse") or "?"
+        product = hit.product or "?"
+        added = hit.date_added or ""
+        ransomware = hit.ransomware or "?"
         return Evidence(
             source=self.name,
             indicator=indicator,
@@ -60,5 +82,5 @@ class CisaKevEnricher(FeedEnricher):
                 f"CISA KEV: actively exploited "
                 f"product={product} added={added} ransomware={ransomware}"
             ),
-            details={field: hit.get(field) for field in DETAIL_FIELDS},
+            details=hit.given(DETAIL_FIELDS),
         )

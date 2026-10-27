@@ -8,37 +8,42 @@ import threading
 import time
 from abc import abstractmethod
 from collections.abc import Mapping
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Generic, TypeVar
 
 from avai.enrichers.base import Enricher
 from avai.enrichers.http import HttpClient
+from avai.enrichers.reply import ApiReply
 
 ONE_HOUR_S = 60 * 60
 NEVER_FETCHED = 0.0
 
+FeedEntry = TypeVar("FeedEntry", bound=ApiReply)
 
-class FeedEnricher(Enricher):
+
+class FeedEnricher(Enricher, Generic[FeedEntry]):
     feed_url: ClassVar[str]
     feed_fresh_s: ClassVar[float] = ONE_HOUR_S
 
     def __init__(self, http: HttpClient, lock: threading.Lock) -> None:
         self._http = http
         self._lock = lock
-        self._index: dict[str, dict[str, Any]] = {}
+        self._index: dict[str, FeedEntry] = {}
         self._fetched_at = NEVER_FETCHED
 
     @classmethod
-    def create(cls, http: HttpClient, env: Mapping[str, str]) -> FeedEnricher:
+    def create(
+        cls, http: HttpClient, env: Mapping[str, str]
+    ) -> FeedEnricher[FeedEntry]:
         if cls.rate_host is not None:
             http.set_rate(cls.rate_host, cls.rate_per_second)
         return cls(http, threading.Lock())
 
-    def entry(self, key: str) -> dict[str, Any] | None:
+    def entry(self, key: str) -> FeedEntry | None:
         self._refresh()
         return self._index.get(key)
 
     @abstractmethod
-    def index(self, body: Any) -> dict[str, dict[str, Any]]:
+    def index(self, body: Any) -> dict[str, FeedEntry]:
         """The feed's entries keyed by the indicator value they describe."""
 
     def _refresh(self) -> None:

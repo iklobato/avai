@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+from pydantic import TypeAdapter
+
 from avai.enrichers.base import Evidence, Indicator, IndicatorType, VerdictHint
 from avai.enrichers.feed import FeedEnricher
+from avai.enrichers.reply import ApiReply
 
 URL = "https://feodotracker.abuse.ch/downloads/ipblocklist.json"
 MALICIOUS_CONFIDENCE = 0.97
@@ -26,7 +29,14 @@ DETAIL_FIELDS = (
 )
 
 
-class FeodoTrackerEnricher(FeedEnricher):
+class FeodoEntry(ApiReply):
+    """One botnet C2 address."""
+
+    ip_address: object = ""
+    malware: object = None
+
+
+class FeodoTrackerEnricher(FeedEnricher[FeodoEntry]):
     name = "feodo_tracker"
     supports_types = frozenset({IndicatorType.IPV4})
     requires_token: ClassVar[str | None] = None
@@ -35,23 +45,24 @@ class FeodoTrackerEnricher(FeedEnricher):
     rate_per_second = 1.0
     feed_url = URL
 
-    def index(self, body: Any) -> dict[str, dict[str, Any]]:
+    def index(self, body: Any) -> dict[str, FeodoEntry]:
+        entries = TypeAdapter(list[FeodoEntry]).validate_python(body or [])
         return {
-            entry.get("ip_address", "").strip(): entry
-            for entry in body or []
-            if entry.get("ip_address")
+            entry.ip_address.strip(): entry
+            for entry in entries
+            if entry.ip_address
         }
 
     def fetch(self, indicator: Indicator) -> Evidence | None:
         hit = self.entry(indicator.value)
         if hit is None:
             return None
-        family = hit.get("malware") or "?"
+        family = hit.malware or "?"
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.MALICIOUS,
             confidence=MALICIOUS_CONFIDENCE,
             summary=f"Feodo Tracker: known botnet C2 (malware={family})",
-            details={field: hit.get(field) for field in DETAIL_FIELDS},
+            details=hit.given(DETAIL_FIELDS),
         )

@@ -7,10 +7,12 @@ https://urlhaus-api.abuse.ch/
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
 
+from pydantic import field_validator
+
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -36,6 +38,27 @@ URL_DETAIL_FIELDS = (
 HOST_DETAIL_FIELDS = ("firstseen", "url_count", "blacklists", "urlhaus_reference")
 
 
+class UrlhausReply(ApiReply):
+    """A /url/ or /host/ lookup; the two share only ``query_status``."""
+
+    query_status: object = None
+    threat: object = None
+    tags: object = None
+    url_status: object = None
+    date_added: object = None
+    firstseen: object = None
+    url_count: int = NO_URLS
+
+    @field_validator("url_count", mode="before")
+    @classmethod
+    def _url_count(cls, value: Any) -> int:
+        """A missing or non-numeric count means no URLs."""
+        try:
+            return int(value or NO_URLS)
+        except (TypeError, ValueError):
+            return NO_URLS
+
+
 class URLhausEnricher(Enricher):
     name = "urlhaus"
     supports_types = frozenset({IndicatorType.URL, IndicatorType.DOMAIN})
@@ -55,8 +78,8 @@ class URLhausEnricher(Enricher):
         )
         if response.status_code != HTTPStatus.OK:
             return None
-        body = response.json()
-        if body.get("query_status") != "ok":
+        body = UrlhausReply.model_validate(response.json())
+        if body.query_status != "ok":
             return None
         # The /url/ and /host/ responses have different shapes: a URL hit
         # carries threat/url_status/tags/date_added; a host hit carries
@@ -65,11 +88,11 @@ class URLhausEnricher(Enricher):
             return self._url_evidence(indicator, body)
         return self._host_evidence(indicator, body)
 
-    def _url_evidence(self, indicator: Indicator, body: Mapping[str, Any]) -> Evidence:
-        threat = body.get("threat") or "?"
-        tags = body.get("tags") or []
-        status = body.get("url_status") or "?"
-        added = body.get("date_added") or ""
+    def _url_evidence(self, indicator: Indicator, body: UrlhausReply) -> Evidence:
+        threat = body.threat or "?"
+        tags = body.tags or []
+        status = body.url_status or "?"
+        added = body.date_added or ""
         return Evidence(
             source=self.name,
             indicator=indicator,
@@ -79,15 +102,15 @@ class URLhausEnricher(Enricher):
                 f"URLhaus: known-malicious url, threat={threat} status={status} "
                 f"tags={tags} added={added}"
             ),
-            details={field: body.get(field) for field in URL_DETAIL_FIELDS},
+            details=body.given(URL_DETAIL_FIELDS),
         )
 
     def _host_evidence(
-        self, indicator: Indicator, body: Mapping[str, Any]
+        self, indicator: Indicator, body: UrlhausReply
     ) -> Evidence | None:
         # host/domain: "ok" only means URLhaus knows the host; a host with
         # zero associated malware URLs is not actionable.
-        url_count = self._url_count(body)
+        url_count = body.url_count
         if url_count <= NO_URLS:
             return None
         return Evidence(
@@ -97,13 +120,7 @@ class URLhausEnricher(Enricher):
             confidence=HOST_CONFIDENCE,
             summary=(
                 f"URLhaus: host has hosted {url_count} malware URL(s), "
-                f"firstseen={body.get('firstseen') or ''}"
+                f"firstseen={body.firstseen or ''}"
             ),
-            details={field: body.get(field) for field in HOST_DETAIL_FIELDS},
+            details=body.given(HOST_DETAIL_FIELDS),
         )
-
-    def _url_count(self, body: Mapping[str, Any]) -> int:
-        try:
-            return int(body.get("url_count") or NO_URLS)
-        except (TypeError, ValueError):
-            return NO_URLS
