@@ -7,6 +7,7 @@ calling ``datetime.now`` directly, so tests can inject a
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 
@@ -20,6 +21,10 @@ class Clock:
     def now_iso(self) -> str:
         """Current UTC instant as a second-resolution ISO-8601 string."""
         return self.now().isoformat(timespec="seconds")
+
+    def monotonic(self) -> float:
+        """Seconds on a clock that never goes back, for measuring spans."""
+        return time.monotonic()
 
 
 class FrozenClock(Clock):

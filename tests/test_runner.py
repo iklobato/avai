@@ -58,7 +58,7 @@ from avai.host_monitor.finding_stages import (
 from avai.host_monitor.judge import NullJudge
 from avai.host_monitor.models import Base, CollectionRun, FileScanRow, ProcessRow
 from avai.host_monitor.runner import Runner, RunnerConfig
-from avai.host_monitor.runtime import Clock, Digest
+from avai.host_monitor.runtime import Clock, Digest, HostIdentity
 from avai.host_monitor.sink import Sink
 from avai.host_monitor.sink_admin import ControlSeed
 
@@ -151,7 +151,7 @@ def _evidence_stage(sink, chain, enrich_on=True):
     return EvidenceStage(
         intel,
         _settings(sink, enrich_on=enrich_on),
-        ProgressHeartbeat(sink, logging.getLogger("test")),
+        ProgressHeartbeat(sink, logging.getLogger("test"), Clock()),
     )
 
 
@@ -1610,26 +1610,34 @@ def _latest_coverage_row(sink):
 
 
 class TestCoverageStep:
+    DEMO_PID = 4242
+
+    def _step(self, sink: Sink, assessor: _FakeAssessor) -> CoverageStep:
+        io = StepIO(sink, logging.getLogger("test"))
+        identity = HostIdentity("demo-host", "Linux", self.DEMO_PID)
+        return CoverageStep(io, assessor, identity)
+
     def test_no_ruleset_no_assessment(self, sink):
         a = _FakeAssessor()
-        CoverageStep(StepIO(sink, logging.getLogger("test")), a).report("run-1", _TS[1])
+        self._step(sink, a).report("run-1", _TS[1])
         assert a.calls == []
         assert sink.latest_yara_coverage_fingerprint() is None
 
     def test_zero_rules_no_assessment(self, sink):
         _seed_yara_status(sink, rules_loaded=0)
         a = _FakeAssessor()
-        CoverageStep(StepIO(sink, logging.getLogger("test")), a).report("run-1", _TS[1])
+        self._step(sink, a).report("run-1", _TS[1])
         assert a.calls == []
 
     def test_assessment_generated_and_stored(self, sink):
         _seed_yara_status(sink)
         a = _FakeAssessor()
-        CoverageStep(StepIO(sink, logging.getLogger("test")), a).report("run-1", _TS[1])
+        self._step(sink, a).report("run-1", _TS[1])
         assert len(a.calls) == 1
         # The host profile passed carries the platform + inventory counts.
         _ruleset, host = a.calls[0]
-        assert "platform" in host and "processes" in host
+        assert "processes" in host
+        assert (host["platform"], host["hostname"]) == ("Linux", "demo-host")
         row = _latest_coverage_row(sink)
         assert row.posture == "thin"
         assert row.headline.startswith("Windows-centric")
@@ -1639,7 +1647,7 @@ class TestCoverageStep:
     def test_unchanged_ruleset_not_regenerated(self, sink):
         _seed_yara_status(sink)
         a = _FakeAssessor()
-        step = CoverageStep(StepIO(sink, logging.getLogger("test")), a)
+        step = self._step(sink, a)
         step.report("run-1", _TS[1])
         step.report("run-2", _TS[1])
         assert len(a.calls) == 1  # same ruleset fingerprint → skipped
@@ -1647,7 +1655,7 @@ class TestCoverageStep:
     def test_changed_ruleset_regenerates(self, sink):
         _seed_yara_status(sink, rules_loaded=10)
         a = _FakeAssessor()
-        step = CoverageStep(StepIO(sink, logging.getLogger("test")), a)
+        step = self._step(sink, a)
         step.report("run-1", _TS[1])
         _seed_yara_status(sink, rules_loaded=99)  # ruleset changed
         step.report("run-2", _TS[1])

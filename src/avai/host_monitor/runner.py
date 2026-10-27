@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import socket
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -50,9 +48,9 @@ from .finding_stages import (
 from .investigator import UnknownFindingInvestigator
 from .judge import Judge, NullJudge
 from .narrator import IncidentNarrator
-from .runtime import Digest
+from .runtime import Clock, Digest, HostIdentity
 from .sink import Sink
-from .streaming import StreamingSupervisor, SupervisionPolicy
+from .streaming import StreamChannel, StreamingSupervisor, SupervisionPolicy
 from .verifier import MaliciousVerdictVerifier
 
 BYTES_PER_MB = 1024 * 1024
@@ -86,6 +84,8 @@ class RunnerConfig:
     verifier: Optional[MaliciousVerdictVerifier] = None
     investigator: Optional[UnknownFindingInvestigator] = None
     logger: logging.Logger = field(default_factory=HostMonitorLog.logger)
+    clock: Clock = field(default_factory=Clock)
+    identity: HostIdentity = field(default_factory=HostIdentity.current)
 
 
 @dataclass(frozen=True)
@@ -132,7 +132,8 @@ class CollectionCycle:
         # corrections so this cycle's narrative and risk see fixed verdicts.
         self.controls.settings.refresh()
         self._apply_feedback()
-        run_id, started = sink.start_run(socket.gethostname(), self.config.lookback_min)
+        hostname = self.config.identity.hostname
+        run_id, started = sink.start_run(hostname, self.config.lookback_min)
         self.controls.heartbeat.reset()
         # Measured once: it can't change mid-cycle, and every collector shares
         # the same cutoff.
@@ -182,10 +183,11 @@ class CollectionCycle:
         return True
 
     def _collect(self, collector: SnapshotCollector, stamp: CycleStamp) -> None:
-        started_at = time.monotonic()
+        clock = self.config.clock
+        started_at = clock.monotonic()
         rows = self._stamped_rows(collector, stamp)
         self.config.sink.write(collector.model, rows)
-        collected_ms = int((time.monotonic() - started_at) * MS_PER_SECOND)
+        collected_ms = int((clock.monotonic() - started_at) * MS_PER_SECOND)
         judged, enriched = self._judge_rows(collector, rows, stamp)
         self._log.info(
             "collector=%s rows=%d duration_ms=%d judged=%d enriched=%d",
@@ -364,7 +366,7 @@ class CyclePlanner:
         return [VerifyStage(verifier, self._config.logger)]
 
     def _io(self) -> StepIO:
-        return StepIO(self._config.sink, self._config.logger)
+        return StepIO(self._config.sink, self._config.logger, self._config.clock)
 
     def _cycle_steps(self) -> list[CycleStep]:
         config = self._config
@@ -375,7 +377,7 @@ class CyclePlanner:
             steps.append(NarrativeStep(io, config.narrator))
         steps += [RiskScoreStep(io), YaraStatusStep(io, config.snapshot_collectors)]
         if config.coverage is not None:
-            steps.append(CoverageStep(io, config.coverage))
+            steps.append(CoverageStep(io, config.coverage, config.identity))
         return steps
 
 
@@ -402,19 +404,33 @@ class Runner:
             enrich=config.enrichment_chain is not None,
         )
         settings = ControlSettings(sink, defaults)
-        heartbeat = ProgressHeartbeat(sink, config.logger)
+        heartbeat = ProgressHeartbeat(sink, config.logger, config.clock)
         controls = CycleControls(settings, heartbeat, threading.Event())
         cycle = CollectionCycle(
             config, controls, CyclePlanner(config).plan(settings, heartbeat)
         )
-        plane = ControlPlane(
-            sink, controls.shutdown_event, config.logger, config.max_db_bytes
-        )
+        plane = cls._control_plane(config, controls.shutdown_event)
         control = ControlLoop(plane, settings, cycle.scan)
-        streaming = StreamingSupervisor(
-            sink, config.streaming_collectors, SupervisionPolicy.standard(config.logger)
+        return cls(config, RunnerParts(cycle, control, cls._streaming(config)))
+
+    @classmethod
+    def _control_plane(
+        cls, config: RunnerConfig, shutdown_event: threading.Event
+    ) -> ControlPlane:
+        return ControlPlane(
+            config.sink,
+            shutdown_event,
+            config.logger,
+            config.max_db_bytes,
+            clock=config.clock,
+            identity=config.identity,
         )
-        return cls(config, RunnerParts(cycle, control, streaming))
+
+    @classmethod
+    def _streaming(cls, config: RunnerConfig) -> StreamingSupervisor:
+        channel = StreamChannel(config.sink, config.identity.hostname, config.clock)
+        policy = SupervisionPolicy.standard(config.logger)
+        return StreamingSupervisor(channel, config.streaming_collectors, policy)
 
     @property
     def shutdown_event(self) -> threading.Event:

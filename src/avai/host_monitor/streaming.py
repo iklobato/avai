@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import socket
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -80,11 +78,11 @@ class StreamingSupervisor:
 
     def __init__(
         self,
-        sink: Sink,
+        channel: StreamChannel,
         collectors: list[StreamingCollector],
         policy: SupervisionPolicy,
     ) -> None:
-        self._sink = sink
+        self._channel = channel
         self._collectors = collectors
         self._policy = policy
         self._workers: list[StreamingWorker] = []
@@ -92,9 +90,8 @@ class StreamingSupervisor:
     def start(self) -> None:
         if not self._collectors:
             return
-        channel = StreamChannel(self._sink, socket.gethostname())
         for collector in self._collectors:
-            worker = StreamingWorker.create(collector, channel, self._policy)
+            worker = StreamingWorker.create(collector, self._channel, self._policy)
             worker.start()
             self._workers.append(worker)
         self._policy.listener.report_pool("started", len(self._workers))
@@ -180,9 +177,10 @@ class StreamingWorker:
         """
         self._restart_attempt = 0
         while not self.stop_event.is_set():
-            started = time.monotonic()
+            clock = self._channel.clock
+            started = clock.monotonic()
             outcome = self._stream_once()
-            self._note_runtime(time.monotonic() - started)
+            self._note_runtime(clock.monotonic() - started)
             if not outcome.accept(self):
                 break
 
@@ -234,7 +232,7 @@ class StreamingWorker:
         return self._outcome(crash)
 
     def _pump(self, buffer: list[dict[str, Any]]) -> BaseException | None:
-        last_flush = time.monotonic()
+        last_flush = self._channel.clock.monotonic()
         try:
             for row in self.collector.stream(self.stop_event):
                 buffer.append(self._stamped(row))
@@ -251,7 +249,7 @@ class StreamingWorker:
         return stamped | {"content_hash": content_hash}
 
     def _flush_if_due(self, buffer: list[dict[str, Any]], last_flush: float) -> float:
-        now = time.monotonic()
+        now = self._channel.clock.monotonic()
         full = len(buffer) >= self._policy.batch_size
         stale = bool(buffer) and now - last_flush >= self._policy.flush_interval_s
         if not (full or stale):

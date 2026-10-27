@@ -19,6 +19,7 @@ from .clock import Clock, FrozenClock
 from .coerce import Coerce
 from .command_runner import CommandRunner
 from .digest import Digest
+from .host_identity import HostIdentity
 from .host_io import HostIo
 from .host_paths import HostPaths
 from .mounts import (
@@ -52,6 +53,7 @@ __all__ = [
     "Coerce",
     "CommandRunner",
     "Digest",
+    "HostIdentity",
     "HostIo",
     "HostPaths",
     "PsutilConnections",

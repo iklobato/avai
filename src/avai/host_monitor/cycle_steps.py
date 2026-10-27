@@ -4,8 +4,6 @@ best-effort: a failed report is logged and never fails the cycle."""
 from __future__ import annotations
 
 import json
-import platform
-import socket
 from typing import Any, Protocol
 
 from .collectors import SnapshotCollector
@@ -14,6 +12,7 @@ from .enums import Verdict
 from .models import RiskScoreRow
 from .narrator import IncidentNarrator
 from .risk import RiskCounts, RiskScorer
+from .runtime import HostIdentity
 from .step_io import StepIO
 
 
@@ -189,9 +188,12 @@ class CoverageStep:
     surface, only when the ruleset changed since the last assessment (it is
     static within a process, so this avoids re-spending tokens)."""
 
-    def __init__(self, io: StepIO, assessor: YaraCoverageAssessor) -> None:
+    def __init__(
+        self, io: StepIO, assessor: YaraCoverageAssessor, identity: HostIdentity
+    ) -> None:
         self._io = io
         self._assessor = assessor
+        self._identity = identity
 
     def report(self, run_id: str, started: str) -> None:
         ruleset = self._changed_ruleset()
@@ -225,7 +227,8 @@ class CoverageStep:
         host = self._io.read("coverage: profile", lambda: sink.coverage_profile(run_id))
         if host is None:
             return None
-        return {**host, "platform": platform.system(), "hostname": socket.gethostname()}
+        identity = self._identity
+        return {**host, "platform": identity.platform, "hostname": identity.hostname}
 
     def _row(
         self, run_id: str, assessment: dict[str, Any], fingerprint: str

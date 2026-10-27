@@ -5,16 +5,15 @@ its heartbeat back. There is no other IPC."""
 from __future__ import annotations
 
 import logging
-import os
 import threading
-import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .constants import MONITOR_PROGRESS_HEARTBEAT_S
 from .enums import MaintenanceCommand, MonitorState
 from .failures import HOST_FAILURES
+from .runtime import Clock, HostIdentity
 from .sink import Sink
 
 
@@ -62,18 +61,19 @@ class ProgressHeartbeat:
     collector/enrichment loops. The control loop owns status/interval, so
     this touches only the timestamp."""
 
-    def __init__(self, sink: Sink, logger: logging.Logger) -> None:
+    def __init__(self, sink: Sink, logger: logging.Logger, clock: Clock) -> None:
         self._sink = sink
         self._logger = logger
+        self._clock = clock
         self._last_beat = 0.0
 
     def reset(self) -> None:
         # The control loop wrote a full heartbeat just before the cycle, so
         # the first touch lands one interval into the scan, not immediately.
-        self._last_beat = time.monotonic()
+        self._last_beat = self._clock.monotonic()
 
     def beat(self) -> None:
-        now = time.monotonic()
+        now = self._clock.monotonic()
         if now - self._last_beat < MONITOR_PROGRESS_HEARTBEAT_S:
             return
         self._last_beat = now
@@ -126,6 +126,8 @@ class ControlPlane:
     shutdown_event: threading.Event
     logger: logging.Logger
     max_db_bytes: int = 0
+    clock: Clock = field(default_factory=Clock)
+    identity: HostIdentity = field(default_factory=HostIdentity.current)
 
 
 class ControlLoop:
@@ -150,7 +152,7 @@ class ControlLoop:
 
     def run_forever(self, interval: int) -> None:
         # Scan immediately on the first tick, then every effective interval.
-        next_scan = time.monotonic()
+        next_scan = self._plane.clock.monotonic()
         while not self._plane.shutdown_event.is_set():
             next_scan = self._tick(interval, next_scan)
             # Backed by the shutdown event so SIGINT/SIGTERM stay responsive
@@ -166,7 +168,7 @@ class ControlLoop:
         scan_now = control.get("scan_now_nonce", 0) != control.get(
             "scan_now_applied", 0
         )
-        if not scan_now and (paused or time.monotonic() < next_scan):
+        if not scan_now and (paused or self._plane.clock.monotonic() < next_scan):
             state = MonitorState.PAUSED if paused else MonitorState.RUNNING
             self._heartbeat(state, effective)
             return next_scan
@@ -174,7 +176,7 @@ class ControlLoop:
             # Scan-now runs one cycle even while paused.
             self._plane.sink.ack_scan_now(control["scan_now_nonce"])
         self._heartbeat(MonitorState.SCANNING, effective)
-        started = time.monotonic()
+        started = self._plane.clock.monotonic()
         self._cycle_or_log()
         return started + effective
 
@@ -214,7 +216,9 @@ class ControlLoop:
     def _heartbeat(self, status: MonitorState, current_interval: int) -> None:
         try:
             self._plane.sink.write_heartbeat(
-                pid=os.getpid(), status=status.value, current_interval=current_interval
+                pid=self._plane.identity.pid,
+                status=status.value,
+                current_interval=current_interval,
             )
         except HOST_FAILURES:
             self._plane.logger.exception("heartbeat write failed")
