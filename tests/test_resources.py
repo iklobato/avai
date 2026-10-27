@@ -263,8 +263,8 @@ class TestQueries:
     def test_host_resources_latest_row(self, db) -> None:
         engine, _, run_id, _, _ = db
         _seed(db)
-        with Session(engine) as s:
-            res = ResourceQueries(s).host_resources(run_id)
+        with Session(engine) as session:
+            res = ResourceQueries(session).host_resources(run_id)
         assert res is not None
         assert res["row"].mem_percent == 42.0
         assert res["per_core"] == [10.0, 16.0]
@@ -272,15 +272,15 @@ class TestQueries:
     def test_disk_usage_sorted_fullest_first(self, db) -> None:
         engine, _, run_id, _, _ = db
         _seed(db)
-        with Session(engine) as s:
-            disks = ResourceQueries(s).disk_usage(run_id)
+        with Session(engine) as session:
+            disks = ResourceQueries(session).disk_usage(run_id)
         assert [d.mountpoint for d in disks] == ["/boot", "/"]  # 95% before 60%
 
     def test_resource_trend_shape(self, db) -> None:
         engine, _, run_id, _, _ = db
         _seed(db)
-        with Session(engine) as s:
-            trend = ResourceQueries(s).resource_trend()
+        with Session(engine) as session:
+            trend = ResourceQueries(session).resource_trend()
         assert trend["mem"] == [42.0]
         assert trend["cpu"] == [13.0]
         assert len(trend["labels"]) == 1
@@ -290,10 +290,10 @@ class TestQueries:
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE host_resources"))
             conn.execute(text("DROP TABLE disk_usage"))
-        with Session(engine) as s:
-            assert ResourceQueries(s).host_resources(run_id) is None
-            assert ResourceQueries(s).disk_usage(run_id) == []
-            assert ResourceQueries(s).resource_trend()["labels"] == []
+        with Session(engine) as session:
+            assert ResourceQueries(session).host_resources(run_id) is None
+            assert ResourceQueries(session).disk_usage(run_id) == []
+            assert ResourceQueries(session).resource_trend()["labels"] == []
 
 
 class TestRoutes:
@@ -304,9 +304,9 @@ class TestRoutes:
         with DashboardApp(
             DashboardConfig(db_path=str(tmp_path / "r.db"))
         ).build().test_client() as c:
-            r = c.get("/fragments/resources")
-        assert r.status_code == 200
-        body = r.data.decode()
+            response = c.get("/fragments/resources")
+        assert response.status_code == 200
+        body = response.data.decode()
         assert "system resources" in body
         assert "/boot" in body  # disk row rendered
 
@@ -320,8 +320,8 @@ class TestRoutes:
         with DashboardApp(
             DashboardConfig(db_path=str(tmp_path / "e.db"))
         ).build().test_client() as c:
-            r = c.get("/fragments/resources")
-        assert r.status_code == 200
+            response = c.get("/fragments/resources")
+        assert response.status_code == 200
 
     def test_chart_api_returns_series(self, db) -> None:
         engine, _, _, _, tmp_path = db
@@ -330,8 +330,8 @@ class TestRoutes:
         with DashboardApp(
             DashboardConfig(db_path=str(tmp_path / "r.db"))
         ).build().test_client() as c:
-            r = c.get("/api/chart/resources")
-        assert r.status_code == 200
-        data = r.get_json()
+            response = c.get("/api/chart/resources")
+        assert response.status_code == 200
+        data = response.get_json()
         assert data["cpu"] == [13.0]
         assert set(data) == {"labels", "mem", "cpu", "swap"}

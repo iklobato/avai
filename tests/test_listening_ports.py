@@ -167,15 +167,15 @@ class TestListeningPortsRollup:
         # Regression: the row loop reused the name ``verdict``, so the filter
         # and its echo took the last socket's verdict instead of the user's.
         engine, run_id = seeded
-        with Session(engine) as s:
-            data = PortsPanel(s, run_id).ports(PortQuery(filters=RowFilter(verdict="malicious")))
+        with Session(engine) as session:
+            data = PortsPanel(session, run_id).ports(PortQuery(filters=RowFilter(verdict="malicious")))
         assert [r["port"] for r in data["rows"]] == [22]
         assert data["verdict"] == "malicious"
 
     def test_wildcard_v4_v6_collapse_to_one_row(self, seeded) -> None:
         engine, run_id = seeded
-        with Session(engine) as s:
-            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
+        with Session(engine) as session:
+            rows = PortsPanel(session, run_id).ports(PortQuery())["rows"]
         # two distinct listeners: sshd:22 (v4+v6 merged) and postgres:5432
         assert len(rows) == 2
         ssh = next(r for r in rows if r["port"] == 22)
@@ -186,8 +186,8 @@ class TestListeningPortsRollup:
 
     def test_worst_verdict_and_sort_order(self, seeded) -> None:
         engine, run_id = seeded
-        with Session(engine) as s:
-            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
+        with Session(engine) as session:
+            rows = PortsPanel(session, run_id).ports(PortQuery())["rows"]
         # malicious sorts first
         assert rows[0]["port"] == 22
         assert rows[0]["verdict"] == "malicious"
@@ -195,8 +195,8 @@ class TestListeningPortsRollup:
 
     def test_bind_scope_signals_exposure(self, seeded) -> None:
         engine, run_id = seeded
-        with Session(engine) as s:
-            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
+        with Session(engine) as session:
+            rows = PortsPanel(session, run_id).ports(PortQuery())["rows"]
         ssh = next(r for r in rows if r["port"] == 22)
         pg = next(r for r in rows if r["port"] == 5432)
         assert ssh["scope"] == "all" and ssh["exposed"] is True
@@ -204,8 +204,8 @@ class TestListeningPortsRollup:
 
     def test_process_enrichment_attached(self, seeded) -> None:
         engine, run_id = seeded
-        with Session(engine) as s:
-            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
+        with Session(engine) as session:
+            rows = PortsPanel(session, run_id).ports(PortQuery())["rows"]
         ssh = next(r for r in rows if r["port"] == 22)
         proc = ssh["proc"]
         assert proc["username"] == "root"
@@ -219,8 +219,8 @@ class TestListeningPortsRollup:
 
     def test_established_connection_count(self, seeded) -> None:
         engine, run_id = seeded
-        with Session(engine) as s:
-            rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
+        with Session(engine) as session:
+            rows = PortsPanel(session, run_id).ports(PortQuery())["rows"]
         ssh = next(r for r in rows if r["port"] == 22)
         pg = next(r for r in rows if r["port"] == 5432)
         assert ssh["conns"] == 1  # only the ESTABLISHED row counts
@@ -228,8 +228,8 @@ class TestListeningPortsRollup:
 
     def test_summary_totals(self, seeded) -> None:
         engine, run_id = seeded
-        with Session(engine) as s:
-            summary = PortsPanel(s, run_id).ports(PortQuery())["summary"]
+        with Session(engine) as session:
+            summary = PortsPanel(session, run_id).ports(PortQuery())["summary"]
         assert summary["ports"] == 2
         assert summary["exposed"] == 1  # only sshd:22 is non-loopback
         assert summary["malicious"] == 1
@@ -267,8 +267,8 @@ class TestMissingTableGraceful:
 
     def test_returns_empty_when_table_absent(self, tmp_path: Path) -> None:
         engine, _ = self._db_without_ports(tmp_path)
-        with Session(engine) as s:
-            data = PortsPanel(s, "x").ports(PortQuery())
+        with Session(engine) as session:
+            data = PortsPanel(session, "x").ports(PortQuery())
         assert data["rows"] == []
         assert data["summary"]["ports"] == 0
 
@@ -276,7 +276,7 @@ class TestMissingTableGraceful:
         engine, db = self._db_without_ports(tmp_path)
         engine.dispose()
         with DashboardApp(DashboardConfig(db_path=str(db))).build().test_client() as c:
-            r = c.get("/fragments/listening-ports")
+            response = c.get("/fragments/listening-ports")
         # missing table degrades to the empty-state card, not a 500
-        assert r.status_code == 200
-        assert "no listening sockets match the current filters" in r.data.decode()
+        assert response.status_code == 200
+        assert "no listening sockets match the current filters" in response.data.decode()

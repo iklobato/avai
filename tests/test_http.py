@@ -70,9 +70,9 @@ class TestSuccessPath:
     def test_get_returns_response(self, fast_client) -> None:
         mock = MagicMock(return_value=_resp(200, "hi"))
         fast_client._session.request = mock
-        r = fast_client.get("https://api.test/")
-        assert r.status_code == 200
-        assert r.text == "hi"
+        response = fast_client.get("https://api.test/")
+        assert response.status_code == 200
+        assert response.text == "hi"
         mock.assert_called_once()
         args, kwargs = mock.call_args
         assert args == ("GET", "https://api.test/")
@@ -109,8 +109,8 @@ class TestRateLimited429:
         mock = MagicMock(side_effect=responses)
         fast_client._session.request = mock
         with patch("time.sleep") as sleep:
-            r = fast_client.get("https://api.test/")
-        assert r.status_code == 200
+            response = fast_client.get("https://api.test/")
+        assert response.status_code == 200
         assert mock.call_count == 2
         # The respected wait must have been issued (1 s).
         assert any(args[0] == 1.0 for args, _ in sleep.call_args_list)
@@ -121,8 +121,8 @@ class TestRetryOnTransient5xx:
         responses = [_resp(503), _resp(500), _resp(200, "ok")]
         mock = MagicMock(side_effect=responses)
         fast_client._session.request = mock
-        r = fast_client.get("https://api.test/")
-        assert r.status_code == 200
+        response = fast_client.get("https://api.test/")
+        assert response.status_code == 200
         assert mock.call_count == 3
 
     def test_exhausts_retries_and_raises(self, fast_client) -> None:
@@ -142,8 +142,8 @@ class TestNetworkErrors:
             ]
         )
         fast_client._session.request = mock
-        r = fast_client.get("https://api.test/")
-        assert r.status_code == 200
+        response = fast_client.get("https://api.test/")
+        assert response.status_code == 200
         assert mock.call_count == 3
 
     def test_propagates_after_exhausting(self, fast_client) -> None:

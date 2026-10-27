@@ -183,8 +183,8 @@ class TestFlushing:
         from sqlalchemy import func, select
         from sqlalchemy.orm import Session
 
-        with Session(sink.engine) as s:
-            n = s.execute(select(func.count()).select_from(AuthEventRow)).scalar()
+        with Session(sink.engine) as session:
+            n = session.execute(select(func.count()).select_from(AuthEventRow)).scalar()
         assert n == 2
 
     def test_final_flush_on_shutdown_drains_buffer(self, sink: Sink) -> None:
@@ -204,8 +204,8 @@ class TestFlushing:
         from sqlalchemy import func, select
         from sqlalchemy.orm import Session
 
-        with Session(sink.engine) as s:
-            n = s.execute(select(func.count()).select_from(AuthEventRow)).scalar()
+        with Session(sink.engine) as session:
+            n = session.execute(select(func.count()).select_from(AuthEventRow)).scalar()
         assert n == 3
 
 

@@ -358,8 +358,8 @@ class TestDashboardDns:
             ts,
             run_id,
         )
-        with Session(engine) as s:
-            data = DnsPanel(s, run_id).queries(DnsQuery())
+        with Session(engine) as session:
+            data = DnsPanel(session, run_id).queries(DnsQuery())
         assert data["summary"]["domains"] == 2
         assert data["summary"]["queries"] == 4
         assert data["summary"]["doh"] == 1
@@ -453,8 +453,8 @@ class TestDashboardPersistence:
             ts,
             run_id,
         )
-        with Session(engine) as s:
-            data = PersistencePanel(s, run_id).tampering(
+        with Session(engine) as session:
+            data = PersistencePanel(session, run_id).tampering(
                 RowFilter(), PersistencePages()
             )
         assert data["any"] is True
@@ -486,8 +486,8 @@ class TestDashboardPersistence:
 
     def test_empty_when_no_data(self, db) -> None:
         engine, sink, run_id, ts = db
-        with Session(engine) as s:
-            data = PersistencePanel(s, run_id).tampering(
+        with Session(engine) as session:
+            data = PersistencePanel(session, run_id).tampering(
                 RowFilter(), PersistencePages()
             )
         assert data["any"] is False
@@ -517,6 +517,6 @@ class TestNetworkFlowProcessColumn:
             ts,
             run_id,
         )
-        with Session(engine) as s:
-            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         assert rows[0]["process"] == "curl"

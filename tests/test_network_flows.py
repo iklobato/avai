@@ -282,8 +282,8 @@ def seeded(tmp_path: Path):
 class TestNetworkFlowsAggregation:
     def test_groups_by_destination_with_sums_and_counts(self, seeded) -> None:
         engine, run_id = seeded
-        with Session(engine) as s:
-            data = FlowsPanel(s, run_id).flows(FlowQuery())
+        with Session(engine) as session:
+            data = FlowsPanel(session, run_id).flows(FlowQuery())
         rows = data["rows"]
         # 2 distinct destinations (203.0.113.9 collapses its two flows)
         assert len(rows) == 2
@@ -298,8 +298,8 @@ class TestNetworkFlowsAggregation:
 
     def test_summary_totals(self, seeded) -> None:
         engine, run_id = seeded
-        with Session(engine) as s:
-            summary = FlowsPanel(s, run_id).flows(FlowQuery())["summary"]
+        with Session(engine) as session:
+            summary = FlowsPanel(session, run_id).flows(FlowQuery())["summary"]
         assert summary["destinations"] == 2
         assert summary["flows"] == 3
         assert summary["packets"] == 650
@@ -309,8 +309,8 @@ class TestNetworkFlowsAggregation:
         # Regression: the row loop reused the name ``verdict``, so the filter
         # and its echo took the last flow's verdict instead of the user's.
         engine, run_id = seeded
-        with Session(engine) as s:
-            data = FlowsPanel(s, run_id).flows(
+        with Session(engine) as session:
+            data = FlowsPanel(session, run_id).flows(
                 FlowQuery(filters=RowFilter(verdict="malicious"))
             )
         assert [r["dst_ip"] for r in data["rows"]] == ["203.0.113.9"]
@@ -363,8 +363,8 @@ class TestTrafficVolume:
 
     def test_bytes_summed_and_in_summary(self, tmp_path: Path) -> None:
         engine, run_id = self._seed_flow(tmp_path, 1_200_000)
-        with Session(engine) as s:
-            data = FlowsPanel(s, run_id).flows(FlowQuery())
+        with Session(engine) as session:
+            data = FlowsPanel(session, run_id).flows(FlowQuery())
         assert data["rows"][0]["bytes"] == 1_200_000
         assert data["summary"]["bytes"] == 1_200_000
 
@@ -438,8 +438,8 @@ class TestGeolocationColumn:
                 },
             ],
         )
-        with Session(engine) as s:
-            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         geo = next(r for r in rows if r["dst_ip"] == "203.0.113.9")["geo"]
         assert geo is not None
         assert geo["city"] == "San Jose"
@@ -461,8 +461,8 @@ class TestGeolocationColumn:
                 }
             ],
         )
-        with Session(engine) as s:
-            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         geo = next(r for r in rows if r["dst_ip"] == "203.0.113.9")["geo"]
         assert geo["country"] == "DE"
         assert geo["org"] == "Hetzner"
@@ -480,8 +480,8 @@ class TestGeolocationColumn:
                 }
             ],
         )
-        with Session(engine) as s:
-            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         benign = next(r for r in rows if r["dst_ip"] == "142.250.80.46")
         assert benign["geo"] is None
 
@@ -528,8 +528,8 @@ class TestGeolocationColumn:
                 }
             ],
         )
-        with Session(engine) as s:
-            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         geo = next(r for r in rows if r["dst_ip"] == "2606:4700:4700::1111")["geo"]
         assert geo is not None
         assert geo["city"] == "San Francisco"
@@ -597,8 +597,8 @@ class TestGeolocationColumn:
         sink.write(NetworkFlowRow, [row])
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE enrichment_evidence"))
-        with Session(engine) as s:
-            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         assert rows[0]["geo"] is None
 
 
@@ -653,8 +653,8 @@ class TestDestinationHostname:
                 }
             ],
         )
-        with Session(engine) as s:
-            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
         assert bad["hostname"] == "evil.example.com"
 
@@ -671,8 +671,8 @@ class TestDestinationHostname:
                 }
             ],
         )
-        with Session(engine) as s:
-            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
         assert bad["hostname"] == "bad-host.net"
 
@@ -688,8 +688,8 @@ class TestDestinationHostname:
                 }
             ],
         )
-        with Session(engine) as s:
-            rows = FlowsPanel(s, run_id).flows(FlowQuery())["rows"]
+        with Session(engine) as session:
+            rows = FlowsPanel(session, run_id).flows(FlowQuery())["rows"]
         bad = next(r for r in rows if r["dst_ip"] == "203.0.113.9")
         assert bad["hostname"] is None
 
@@ -733,8 +733,8 @@ class TestMissingTableGraceful:
 
     def test_returns_empty_when_table_absent(self, tmp_path: Path) -> None:
         engine, _ = self._db_without_flows(tmp_path)
-        with Session(engine) as s:
-            data = FlowsPanel(s, "x").flows(FlowQuery())
+        with Session(engine) as session:
+            data = FlowsPanel(session, "x").flows(FlowQuery())
         assert data["rows"] == []
         assert data["summary"]["destinations"] == 0
 
@@ -742,16 +742,16 @@ class TestMissingTableGraceful:
         engine, db = self._db_without_flows(tmp_path)
         engine.dispose()
         with DashboardApp(DashboardConfig(db_path=str(db))).build().test_client() as c:
-            r = c.get("/fragments/network-flows")
-        assert r.status_code == 200
-        assert "no network flows match the current filters" in r.data.decode()
+            response = c.get("/fragments/network-flows")
+        assert response.status_code == 200
+        assert "no network flows match the current filters" in response.data.decode()
 
     def test_row_counts_skips_missing_table(self, tmp_path: Path) -> None:
         from avai.dashboard.queries import RowCounts, RunMark
 
         engine, _ = self._db_without_flows(tmp_path)
-        with Session(engine) as s:
-            counts = RowCounts(s).for_runs(
+        with Session(engine) as session:
+            counts = RowCounts(session).for_runs(
                 RunMark("some-run", "2000-01-01"), RunMark(None, None)
             )
         names = {c["name"] for c in counts}
@@ -786,8 +786,8 @@ class TestMissingColumnGraceful:
                 ),
                 {"r": run_id, "t": ts},
             )
-        with Session(engine) as s:
-            data = FlowsPanel(s, run_id).flows(FlowQuery())
+        with Session(engine) as session:
+            data = FlowsPanel(session, run_id).flows(FlowQuery())
         assert data["summary"]["destinations"] == 1
         assert data["rows"][0]["dst_ip"] == "8.8.8.8"
         assert data["rows"][0]["iface"] == "—"  # NULL → rendered placeholder

@@ -312,8 +312,8 @@ class TestSnapshotCycle:
         ).run_once()
 
         assert (ok, failed) == (1, 0)
-        with Session(sink.engine) as s:
-            rows = s.scalars(select(ProcessRow)).all()
+        with Session(sink.engine) as session:
+            rows = session.scalars(select(ProcessRow)).all()
         assert {r.name for r in rows} == {"evil", "good"}
         assert {r.run_id for r in rows} == {run_id}
         judged = _judgements(sink)
@@ -323,8 +323,8 @@ class TestSnapshotCycle:
         assert {j.last_seen_at for j in judged.values()} == {started}
 
     def test_judge_sees_baseline_and_operator_feedback(self, sink: Sink) -> None:
-        with Session(sink.engine) as s:
-            s.add(
+        with Session(sink.engine) as session:
+            session.add(
                 FeedbackRow(
                     content_hash="old",
                     collector="processes",
@@ -334,7 +334,7 @@ class TestSnapshotCycle:
                     applied=1,
                 )
             )
-            s.commit()
+            session.commit()
         judge = _ScriptedJudge()
 
         _runner(sink, [_Procs("evil")], judge=judge).run_once()
@@ -376,8 +376,8 @@ class TestSnapshotCycle:
         assert judged[_proc_hash("odd")].reasoning.startswith("[investigated]")
 
     def test_judging_off_still_marks_known_findings_seen(self, sink: Sink) -> None:
-        with Session(sink.engine) as s:
-            s.add(
+        with Session(sink.engine) as session:
+            session.add(
                 Judgement(
                     content_hash=_proc_hash("evil"),
                     collector="processes",
@@ -386,7 +386,7 @@ class TestSnapshotCycle:
                     created_at="2026-01-01T00:00:00Z",
                 )
             )
-            s.commit()
+            session.commit()
         _set_control(sink, judge_enabled=0)
         judge = _ScriptedJudge()
 
@@ -401,8 +401,8 @@ class TestSnapshotCycle:
         run_id, ok, failed = _runner(sink, [_Broken(), _Procs("a")]).run_once()
 
         assert (ok, failed) == (1, 1)
-        with Session(sink.engine) as s:
-            error = s.scalars(select(CollectorErrorRow)).one()
+        with Session(sink.engine) as session:
+            error = session.scalars(select(CollectorErrorRow)).one()
         assert (error.run_id, error.collector) == (run_id, "broken")
         assert error.error_class == "OSError"
 

@@ -154,9 +154,9 @@ class TestDatabaseLiveBytes:
         before = file_sink.database_live_bytes()
         # Wipe the rows; live_bytes is computed from
         # page_count - freelist_count which should drop immediately.
-        with Session(file_sink.engine) as s:
-            s.query(LaunchItemRow).delete()
-            s.commit()
+        with Session(file_sink.engine) as session:
+            session.query(LaunchItemRow).delete()
+            session.commit()
         after = file_sink.database_live_bytes()
         # The estimate should drop (post-vacuum approximation).
         assert after < before
@@ -194,8 +194,8 @@ class TestPruneToSize:
         # one run gets pruned. After the first prune the live size
         # should drop measurably.
         stats = file_sink.prune_to_size(max_bytes=1)
-        with Session(file_sink.engine) as s:
-            remaining = [r.run_id for r in s.execute(select(CollectionRun)).scalars()]
+        with Session(file_sink.engine) as session:
+            remaining = [r.run_id for r in session.execute(select(CollectionRun)).scalars()]
 
         # Some runs were pruned (stats has reasonable counts).
         assert stats["runs_pruned"] >= 1
@@ -281,9 +281,9 @@ class TestPruneToSizeBehaviour:
 
     def test_child_rows_and_errors_of_a_pruned_run_go_with_it(self, file_sink: Sink) -> None:
         _, (old, _mid, _newest) = _three_runs(file_sink)
-        with Session(file_sink.engine) as s:
-            s.add(CollectorErrorRow(run_id=old, collector="x", occurred_at="t"))
-            s.commit()
+        with Session(file_sink.engine) as session:
+            session.add(CollectorErrorRow(run_id=old, collector="x", occurred_at="t"))
+            session.commit()
 
         file_sink.prune_to_size(max_bytes=1)
 
@@ -389,8 +389,8 @@ class TestTouchJudgments:
         # Read it back.
         from avai.host_monitor.models import Judgement
 
-        with Session(file_sink.engine) as s:
-            row = s.execute(
+        with Session(file_sink.engine) as session:
+            row = session.execute(
                 select(Judgement).where(Judgement.content_hash == h)
             ).scalar_one()
         assert row.last_seen_at == new_ts

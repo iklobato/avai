@@ -263,8 +263,8 @@ class TestSinkLifecycle:
         from sqlalchemy import select
         from sqlalchemy.orm import Session
 
-        with Session(sink.engine) as s:
-            row = s.execute(
+        with Session(sink.engine) as session:
+            row = session.execute(
                 select(CollectionRun).where(CollectionRun.run_id == run_id)
             ).scalar_one()
         assert row.hostname == "host-x"
@@ -371,8 +371,8 @@ class TestSinkWriteJudgments:
         from sqlalchemy import func, select
         from sqlalchemy.orm import Session
 
-        with Session(sink.engine) as s:
-            n = s.execute(select(func.count()).select_from(Judgement)).scalar()
+        with Session(sink.engine) as session:
+            n = session.execute(select(func.count()).select_from(Judgement)).scalar()
         assert n == 1
 
     def test_write_error_records_collector_failure(self, sink: Sink) -> None:
@@ -388,8 +388,8 @@ class TestSinkWriteJudgments:
 
         from avai.host_monitor.models import CollectorErrorRow
 
-        with Session(sink.engine) as s:
-            row = s.execute(select(CollectorErrorRow)).scalar_one()
+        with Session(sink.engine) as session:
+            row = session.execute(select(CollectorErrorRow)).scalar_one()
         assert row.collector == "processes"
         assert row.error_class == "RuntimeError"
         assert "boom" in row.message

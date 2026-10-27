@@ -914,8 +914,8 @@ class TestJudgmentContext:
             }
         }
         sink.write_judgments([self._judgment("h1")], context=ctx)
-        with Session(sink.engine) as s:
-            row = s.get(Judgement, ("h1", "processes"))
+        with Session(sink.engine) as session:
+            row = session.get(Judgement, ("h1", "processes"))
         assert row.novel == 1
         parsed = _json.loads(row.context_json)
         assert parsed["baseline"]["novel"] is True
@@ -925,8 +925,8 @@ class TestJudgmentContext:
         from avai.host_monitor.models import Judgement
 
         sink.write_judgments([self._judgment("h2")])
-        with Session(sink.engine) as s:
-            row = s.get(Judgement, ("h2", "processes"))
+        with Session(sink.engine) as session:
+            row = session.get(Judgement, ("h2", "processes"))
         assert row.novel is None
         assert row.context_json is None
 
@@ -1345,8 +1345,8 @@ class TestJudgmentCostPersistence:
             cost_usd=0.0012,
         )
         sink.write_judgments([j])
-        with Session(sink.engine) as s:
-            row = s.get(Judgement, ("hc", "processes"))
+        with Session(sink.engine) as session:
+            row = session.get(Judgement, ("hc", "processes"))
         assert row.cost_usd == pytest.approx(0.0012)
 
 
@@ -1465,8 +1465,8 @@ class TestControlCommands:
     def test_rejudge_clears_judgements_and_acks(self, sink: Sink) -> None:
         from avai.host_monitor.models import Judgement
 
-        with Session(sink.engine) as s:
-            s.add(
+        with Session(sink.engine) as session:
+            session.add(
                 Judgement(
                     content_hash="h1",
                     collector="processes",
@@ -1475,11 +1475,11 @@ class TestControlCommands:
                     created_at=Clock().now_iso(),
                 )
             )
-            s.commit()
+            session.commit()
         _set_control(sink, command="rejudge", command_nonce=1, command_applied=0)
         _loop_once(sink)
-        with Session(sink.engine) as s:
-            assert s.query(Judgement).count() == 0
+        with Session(sink.engine) as session:
+            assert session.query(Judgement).count() == 0
         c = sink.read_control()
         assert c["command_applied"] == 1
         assert "judgement" in c["command_result"]
@@ -2108,8 +2108,8 @@ class TestFeedback:
         _add_judgement(sink, "h1", "malicious", last_seen=_TS[1])
         _add_feedback(sink, "h1", "processes", "false_positive", note="known dev tool")
         assert sink.apply_feedback() == 1
-        with Session(sink.engine) as s:
-            row = s.get(Judgement, ("h1", "processes"))
+        with Session(sink.engine) as session:
+            row = session.get(Judgement, ("h1", "processes"))
         assert row.verdict == str(Verdict.BENIGN)
         assert "operator" in row.reasoning and "known dev tool" in row.reasoning
         assert sink.apply_feedback() == 0  # already applied → not reprocessed
@@ -2121,8 +2121,8 @@ class TestFeedback:
         _add_judgement(sink, "h2", "suspicious", last_seen=_TS[1])
         _add_feedback(sink, "h2", "processes", "confirmed")
         sink.apply_feedback()
-        with Session(sink.engine) as s:
-            row = s.get(Judgement, ("h2", "processes"))
+        with Session(sink.engine) as session:
+            row = session.get(Judgement, ("h2", "processes"))
         assert row.verdict == str(Verdict.MALICIOUS)
 
     def test_feedback_examples_scoped_to_collector(self, sink: Sink) -> None:
