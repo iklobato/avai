@@ -223,6 +223,7 @@ In order:
      - That makes macOS `securityd` log exactly 4048 `MacOS error: -67062` lines (process `/usr/sbin/system_profiler`, category `security_exception`). Each run of the child is a new pid.
      - The `auth_events` stream stores them: 133,584 of 289,685 rows (46%). `auth_events` is 424 MB of the about 600 MB DB.
      - Fix options: run `kernel_extensions` less often (it also costs about 12 s of 95% CPU per cycle), and/or drop auth events whose pid is a child avai itself started.
+     - Decision 2026-10-27 (maintainer): leave it as is for now; no code change. Revisit if DB size or CPU becomes a complaint.
    - `file_scan` takes about 128 s per cycle on average, 85% of the cycle time (cycle median 135 s). That also makes a graceful stop slow. Options: a smaller per-cycle cap, or skipping files whose mtime and size did not change.
    - Snapshot collectors store their full list every cycle: `launch_items` (842 rows) used 37 MB and `kernel_extensions` (843 rows) used 22 MB in 31 cycles. Storing only changes would cut this.
    - The DB grew about 600 MB in 79 min. The 1024 MB cap (`--max-db-mb`) prunes old runs. Pruning was not reached in the test, so it is still unchecked.
