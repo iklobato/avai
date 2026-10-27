@@ -10,6 +10,8 @@ from flask.views import View
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from avai.host_monitor.runtime import Clock
+
 from ..config import DashboardConfig
 from ..control import ControlStore
 
@@ -19,6 +21,7 @@ class DashboardServices:
     config: DashboardConfig
     read_engine: Engine
     control: ControlStore
+    clock: Clock
 
     def read_session(self) -> Session:
         return Session(self.read_engine)

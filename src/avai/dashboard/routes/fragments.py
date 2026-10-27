@@ -168,7 +168,7 @@ class TriageFragment(ServiceView):
                 risk=risk["risk"],
                 active_malicious=self._active(session, Verdict.MALICIOUS),
                 active_suspicious=self._active(session, Verdict.SUSPICIOUS),
-                alive=MonitorLiveness().alive(state),
+                alive=MonitorLiveness(self._services.clock).alive(state),
                 ctrl=state,
                 latest_run=RunQueries(session).latest_run(),
                 drivers=risk["drivers"],
@@ -449,7 +449,7 @@ class AuthEventsFragment(ServiceView):
         with self._services.read_session() as session:
             return render_template(
                 "partials/_auth_events.html",
-                events=AuthEventsPanel(session).aggregated(query),
+                events=AuthEventsPanel(session, self._services.clock).aggregated(query),
                 per_page_options=PER_PAGE_OPTIONS,
             )
 

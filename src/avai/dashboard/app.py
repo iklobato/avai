@@ -6,6 +6,8 @@ from pathlib import Path
 
 from flask import Flask, Response
 
+from avai.host_monitor.runtime import Clock
+
 from .config import DashboardConfig
 from .control import ControlStore
 from .db import DashboardEngines
@@ -60,8 +62,8 @@ class DashboardApp:
         app.config["TEMPLATES_AUTO_RELOAD"] = True
         app.jinja_env.auto_reload = True
         app.after_request(SecurityHeaders().apply)
-        TemplateFilters().register(app)
         services = self._services()
+        TemplateFilters(services.clock).register(app)
         routes = (
             FragmentRoutes(services),
             ApiRoutes(services),
@@ -72,9 +74,10 @@ class DashboardApp:
         return app
 
     def _services(self) -> DashboardServices:
-        config, engines = self._config, DashboardEngines()
+        config, engines, clock = self._config, DashboardEngines(), Clock()
         return DashboardServices(
             config,
             engines.read_only(config.db_path, config.query_log_path),
-            ControlStore(engines.writable(config.db_path)),
+            ControlStore(engines.writable(config.db_path), clock),
+            clock,
         )

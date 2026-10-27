@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from avai.host_monitor import AuthEventRow, Judgement
 from avai.host_monitor.enums import Verdict
+from avai.host_monitor.runtime import Clock
 
 from .panel_reads import Page, RowFilter, SchemaProbe
 
@@ -94,8 +95,9 @@ class AuthEventsPanel:
     _summaries: ClassVar[dict[str, tuple[float, tuple[dict[str, int], int]]]] = {}
     _summaries_lock: ClassVar[threading.Lock] = threading.Lock()
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, clock: Clock) -> None:
         self._session = session
+        self._clock = clock
 
     def aggregated(self, query: AuthQuery) -> dict[str, Any]:
         key = (str(self._session.get_bind().url), query)
@@ -124,9 +126,8 @@ class AuthEventsPanel:
     def _page(self, query: AuthQuery) -> dict[str, Any]:
         # A recent window on the indexed event_timestamp: auth_events grows
         # without bound and the GROUP BY would otherwise scan the whole table.
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(hours=self.WINDOW_HOURS)
-        ).isoformat(timespec="seconds")
+        since = self._clock.now() - timedelta(hours=self.WINDOW_HOURS)
+        cutoff = since.isoformat(timespec="seconds")
         summary, total_events = self._summary(cutoff)
         patterns, count_column = self._patterns(query, cutoff)
         total = self._total(patterns)

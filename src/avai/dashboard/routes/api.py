@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import ClassVar
 
 from flask import Blueprint, Response, jsonify, request
@@ -16,7 +15,8 @@ class VerdictChart(ServiceView):
 
     def dispatch_request(self) -> Response:
         with self._services.read_session() as session:
-            return jsonify(VerdictQueries(session).verdict_timeseries())
+            now = self._services.clock.now()
+            return jsonify(VerdictQueries(session).verdict_timeseries(now))
 
 
 class ResourceChart(ServiceView):
@@ -41,7 +41,7 @@ class NewAlerts(ServiceView):
         since = request.args.get("since", "")
         with self._services.read_session() as session:
             items = VerdictQueries(session).new_alerts(since or None)
-        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        now = self._services.clock.now_iso()
         return jsonify({"since": since, "items": items, "now": now})
 
 

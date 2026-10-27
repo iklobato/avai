@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from sqlalchemy import desc, func, select
@@ -171,12 +171,11 @@ class VerdictQueries:
             "artifact": artifact,
         }
 
-    def verdict_timeseries(self, hours: int = TIMESERIES_HOURS) -> dict[str, Any]:
-        """Verdict counts per hour over the last ``hours`` hours:
+    def verdict_timeseries(self, now: datetime) -> dict[str, Any]:
+        """Verdict counts per hour over the last TIMESERIES_HOURS hours:
         ``{"labels": [...iso hours...], "datasets": {verdict: [counts...]}}``."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(
-            timespec="seconds"
-        )
+        since = now - timedelta(hours=self.TIMESERIES_HOURS)
+        cutoff = since.isoformat(timespec="seconds")
         buckets = self._hourly(cutoff)
         labels = sorted(buckets)
         datasets = {

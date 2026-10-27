@@ -12,6 +12,8 @@ import markdown
 from flask import Flask
 from markupsafe import Markup
 
+from avai.host_monitor.runtime import Clock
+
 MARKDOWN_TAGS = (
     "p",
     "br",
@@ -84,12 +86,15 @@ class TimeLabels:
     # (seconds per unit, suffix), coarsest last
     UNITS = ((1, "s"), (60, "m"), (3600, "h"), (86400, "d"))
 
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
     def relative(self, iso_string: str) -> str:
         """Short relative-time string like '5m ago'."""
         moment = self._parse(iso_string)
         if moment is None:
             return str(iso_string or "")
-        seconds = int((datetime.now(timezone.utc) - moment).total_seconds())
+        seconds = int((self._clock.now() - moment).total_seconds())
         if seconds < 0:
             return "just now"
         fitting = [unit for unit in self.UNITS if seconds >= unit[0]] or [self.UNITS[0]]
@@ -160,8 +165,11 @@ class ValueLabels:
 
 
 class TemplateFilters:
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
     def register(self, app: Flask) -> None:
-        times, values = TimeLabels(), ValueLabels()
+        times, values = TimeLabels(self._clock), ValueLabels()
         app.add_template_filter(MarkdownRenderer().render, "markdown")
         app.add_template_filter(times.relative, "relative_time")
         app.add_template_filter(times.absolute, "datetime_fmt")

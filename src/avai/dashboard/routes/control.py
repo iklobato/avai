@@ -58,7 +58,7 @@ class ControlPanel:
         return render_template(
             "partials/_control.html",
             ctrl=state,
-            alive=MonitorLiveness().alive(state),
+            alive=MonitorLiveness(self._services.clock).alive(state),
             collectors=sorted(CollectorTables().models()),
             control_enabled=config.control_enabled,
             control_open=config.control_open,

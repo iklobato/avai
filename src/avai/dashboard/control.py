@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import update
@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from avai.host_monitor import ControlState, FeedbackRow
 from avai.host_monitor.constants import MONITOR_LIVENESS_WINDOW_S
 from avai.host_monitor.enums import FeedbackLabel, MaintenanceCommand
+from avai.host_monitor.runtime import Clock
 
 # The control_state table holds one row with this id.
 CONTROL_ROW_ID = 1
@@ -70,8 +71,9 @@ class Feedback:
 class ControlStore:
     """The dashboard's writes, through one writable engine per app."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, clock: Clock) -> None:
         self._engine = engine
+        self._clock = clock
 
     def pause(self) -> None:
         self._update({"paused": 1})
@@ -105,9 +107,7 @@ class ControlStore:
         """Persist an operator correction (latest wins per finding). The
         monitor applies it to the verdict and feeds it back to the judge next
         cycle; it stays the sole writer of findings."""
-        fields = feedback.fields(
-            datetime.now(timezone.utc).isoformat(timespec="seconds")
-        )
+        fields = feedback.fields(self._clock.now_iso())
         keys = {"content_hash": feedback.content_hash, "collector": feedback.collector}
         statement = (
             sqlite_insert(FeedbackRow)
@@ -166,6 +166,9 @@ class MonitorLiveness:
     (~3s) even while idle or paused, and refreshes it mid-scan, so this only
     reads 'dead' when the process is actually gone."""
 
+    def __init__(self, clock: Clock) -> None:
+        self._clock = clock
+
     def alive(self, state: dict[str, Any] | None) -> bool:
         if not state or not state.get("last_seen_at"):
             return False
@@ -173,5 +176,5 @@ class MonitorLiveness:
             seen = datetime.fromisoformat(state["last_seen_at"])
         except (TypeError, ValueError):
             return False
-        age = (datetime.now(timezone.utc) - seen).total_seconds()
+        age = (self._clock.now() - seen).total_seconds()
         return age < MONITOR_LIVENESS_WINDOW_S

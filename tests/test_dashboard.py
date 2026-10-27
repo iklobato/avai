@@ -1176,37 +1176,72 @@ class TestRowCountsDelta:
         assert counts["listening_ports"]["is_new"] is True  # 0 → 1
 
 
+class TestRelativeTime:
+    NOW = "2026-05-30T19:00:00+00:00"
+
+    @pytest.mark.parametrize(
+        ("moment", "label"),
+        [
+            ("2026-05-30T18:59:30+00:00", "30s ago"),
+            ("2026-05-30T18:57:20+00:00", "2m ago"),
+            ("2026-05-30T16:00:00+00:00", "3h ago"),
+            ("2026-05-28T19:00:00+00:00", "2d ago"),
+            ("2026-05-30T19:05:00+00:00", "just now"),
+        ],
+    )
+    def test_label_is_measured_from_the_injected_clock(
+        self, moment: str, label: str
+    ) -> None:
+        from avai.dashboard.filters import TimeLabels
+        from avai.host_monitor.runtime import FrozenClock
+
+        assert TimeLabels(FrozenClock(self.NOW)).relative(moment) == label
+
+
 class TestDatetimeFmt:
     def test_formats_iso_to_human_utc(self):
         from avai.dashboard.filters import TimeLabels
+        from avai.host_monitor.runtime import FrozenClock
 
         assert (
-            TimeLabels().absolute("2026-05-30T18:57:20+00:00")
+            TimeLabels(FrozenClock("2026-05-30T19:00:00+00:00")).absolute(
+                "2026-05-30T18:57:20+00:00"
+            )
             == "May 30, 2026 · 18:57:20 UTC"
         )
 
     def test_naive_timestamp_assumed_utc(self):
         from avai.dashboard.filters import TimeLabels
+        from avai.host_monitor.runtime import FrozenClock
 
         assert (
-            TimeLabels().absolute("2026-05-30T18:57:20")
+            TimeLabels(FrozenClock("2026-05-30T19:00:00+00:00")).absolute(
+                "2026-05-30T18:57:20"
+            )
             == "May 30, 2026 · 18:57:20 UTC"
         )
 
     def test_non_utc_offset_converted_to_utc(self):
         from avai.dashboard.filters import TimeLabels
+        from avai.host_monitor.runtime import FrozenClock
 
         # 20:57 +02:00 == 18:57 UTC
         assert (
-            TimeLabels().absolute("2026-05-30T20:57:20+02:00")
+            TimeLabels(FrozenClock("2026-05-30T19:00:00+00:00")).absolute(
+                "2026-05-30T20:57:20+02:00"
+            )
             == "May 30, 2026 · 18:57:20 UTC"
         )
 
     def test_empty_and_garbage_pass_through(self):
         from avai.dashboard.filters import TimeLabels
+        from avai.host_monitor.runtime import FrozenClock
 
-        assert TimeLabels().absolute("") == ""
-        assert TimeLabels().absolute("not-a-date") == "not-a-date"
+        assert TimeLabels(FrozenClock("2026-05-30T19:00:00+00:00")).absolute("") == ""
+        assert (
+            TimeLabels(FrozenClock("2026-05-30T19:00:00+00:00")).absolute("not-a-date")
+            == "not-a-date"
+        )
 
 
 def _engine_rw(db_path):
