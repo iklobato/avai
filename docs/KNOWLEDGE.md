@@ -173,7 +173,7 @@ Each one says what it costs if it turns out wrong.
    - GitHub Release https://github.com/iklobato/avai/releases/tag/v0.10.0: Windows `.exe` and Linux `.deb` attached; the macOS job failed at signing as expected.
 4. Bring `main` back into `dev` (the release branch commits exist only on `main` otherwise).
 
-Known noise: GitGuardian flags a "Generic Password" in an old commit of `tests/test_home_lookup.py` (incident https://dashboard.gitguardian.com/workspace/697954/incidents/17490324). It was the variable name `passwd` for the stdlib `pwd` module, renamed since. No secret was ever there. It turns the GitGuardian check red on any PR whose range includes commit 8a6193b, until someone marks the incident as a false positive in the GitGuardian dashboard.
+Known noise: GitGuardian flags a "Generic Password" in an old commit of `tests/test_home_lookup.py` (incident https://dashboard.gitguardian.com/workspace/697954/incidents/17490324). It was the variable name `passwd` for the stdlib `pwd` module, renamed since. No secret was ever there. The maintainer resolved the incident in the GitGuardian dashboard on 2026-10-27. If the check goes red again on a range with commit 8a6193b, it is the same false positive.
 
 The Docker image installs `tcpdump`, `iproute2` and `p11-kit` since 0.10.0. Without them 7 collectors failed every cycle in the container. In a local build of 0.10.0 the first cycle ended `ok=35 failed=0`.
 
