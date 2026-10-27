@@ -19,6 +19,7 @@ from .llm import (
     CompletionError,
     CompletionRequest,
     LlmSession,
+    TokenUsage,
     StructuredCall,
 )
 from .prompts import Prompts
@@ -223,19 +224,18 @@ class LlmJudge(Judge):
         self, request: JudgeRequest, batch: list[dict[str, Any]]
     ) -> list[Judgment]:
         entries = json.dumps(self._payload(batch), ensure_ascii=False)
-        parsed = self._llm.ask(
+        completion = self._llm.answer(
             {"collector": request.collector, "hints": request.hints, "entries": entries}
         )
         # One API call judges the whole batch, so each entry bears an equal
         # share of its estimated cost.
-        stamp = JudgmentStamp(
-            request.collector, self.model, request.created_at, self._share(batch)
-        )
+        share = self._share(completion.usage, len(batch))
+        stamp = JudgmentStamp(request.collector, self.model, request.created_at, share)
         return [
             self._judgment(
                 stamp, batch[index]["content_hash"], JudgmentReply.model_validate(item)
             )
-            for index, item in self._indexed(parsed, len(batch))
+            for index, item in self._indexed(completion.values, len(batch))
         ]
 
     def _payload(self, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -251,14 +251,13 @@ class LlmJudge(Judge):
             for index, entry in enumerate(batch)
         ]
 
-    def _share(self, batch: list[dict[str, Any]]) -> float:
-        usage = self._llm.last_usage()
-        if not usage or not batch:
+    def _share(self, usage: TokenUsage | None, entries: int) -> float:
+        if usage is None or not entries:
             return 0.0
         cost = ModelPricing().estimate(
-            self.model, usage.get("input", 0), usage.get("output", 0)
+            self.model, usage.input_tokens, usage.output_tokens
         )
-        return cost / len(batch)
+        return cost / entries
 
     def _indexed(
         self, parsed: dict[str, Any], size: int

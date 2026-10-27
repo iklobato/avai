@@ -15,10 +15,12 @@ import pytest
 from avai.host_monitor.enums import ThreatCategory, Verdict
 from avai.host_monitor.judge import JudgeSettings, LlmJudge
 from avai.host_monitor.llm import (
+    Completion,
     CompletionClient,
     CompletionError,
     CompletionRequest,
     LlmSession,
+    TokenUsage,
 )
 from avai.host_monitor.prompts import Prompts
 
@@ -35,14 +37,15 @@ class _FakeClient(CompletionClient):
         self._parsed = parsed
         self._queue = list(parsed_per_call or [])
         self._raise = raise_exc
+        self.usage: TokenUsage | None = None
 
     def complete_structured(self, request):
         self.calls.append(request)
         if self._raise is not None:
             raise self._raise
         if self._queue:
-            return self._queue.pop(0)
-        return self._parsed or {"judgments": []}
+            return Completion(self._queue.pop(0), self.usage)
+        return Completion(self._parsed or {"judgments": []}, self.usage)
 
 
 @pytest.fixture
@@ -136,7 +139,7 @@ class TestHappyPath:
         )
         # default tier ($1/M in, $5/M out): 1000 in ($0.001) + 200 out
         # ($0.001) = $0.002, split across 2 entries → $0.001 each.
-        client.last_usage = {"input": 1000, "output": 200}
+        client.usage = TokenUsage(1000, 200)
         judge = _judge(prompts, client)  # model "test-model" → default tier
         result = judge.judge(
             "processes", "", [{"content_hash": "a"}, {"content_hash": "b"}]
@@ -157,7 +160,7 @@ class TestHappyPath:
                     },
                 ]
             }
-        )  # _FakeClient never sets last_usage
+        )  # _FakeClient reports no usage unless told to
         judge = _judge(prompts, client)
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].cost_usd == 0.0
@@ -460,7 +463,7 @@ class TestFailureIsolation:
             r = results_per_call.pop(0)
             if isinstance(r, Exception):
                 raise r
-            return r
+            return Completion(r, None)
 
         client = type(
             "C",

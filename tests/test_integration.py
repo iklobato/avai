@@ -23,7 +23,7 @@ import pytest
 from sqlalchemy import create_engine
 
 from avai.host_monitor.enums import ThreatCategory, Verdict
-from avai.host_monitor.llm import CompletionClient, LlmSession
+from avai.host_monitor.llm import Completion, CompletionClient, LlmSession
 from avai.host_monitor.judge import JudgeSettings, Judgment, LlmJudge
 from avai.host_monitor.prompts import Prompts
 from avai.host_monitor.runtime import Digest
@@ -42,7 +42,7 @@ class _CapturingClient(CompletionClient):
 
     def complete_structured(self, request):
         self.user_prompts.append(request.user)
-        return {"judgments": []}
+        return Completion({"judgments": []}, None)
 
 
 @pytest.fixture

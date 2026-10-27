@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import ast
 import logging
-
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import litellm
@@ -164,6 +164,8 @@ class TestLlmStagesBuild:
 
 
 class TestLitellmClient:
+    INPUT_TOKENS = 1000
+    OUTPUT_TOKENS = 200
     REQUEST = llm.CompletionRequest(
         model="anthropic/claude-haiku-4-5",
         system="system",
@@ -173,6 +175,26 @@ class TestLitellmClient:
         max_tokens=16,
         temperature=0.0,
     )
+
+    def test_the_reply_carries_its_own_token_usage(self) -> None:
+        response = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=self.INPUT_TOKENS, completion_tokens=self.OUTPUT_TOKENS
+            ),
+            choices=[
+                SimpleNamespace(message=SimpleNamespace(content='{"judgments": []}'))
+            ],
+        )
+        client = llm.LitellmClient(
+            llm.LitellmApi(lambda **_: response, llm.LitellmApi.load().errors)
+        )
+
+        completion = client.complete_structured(self.REQUEST)
+
+        assert completion == llm.Completion(
+            {"judgments": []},
+            llm.TokenUsage(self.INPUT_TOKENS, self.OUTPUT_TOKENS),
+        )
 
     def test_provider_rate_limit_becomes_a_completion_error(self) -> None:
         throttled = litellm.exceptions.RateLimitError(

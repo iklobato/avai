@@ -57,6 +57,7 @@ from avai.host_monitor.finding_stages import (
     YaraContextStage,
 )
 from avai.host_monitor.judge import NullJudge
+from avai.host_monitor.llm import Completion
 from avai.host_monitor.models import Base, CollectionRun, FileScanRow, ProcessRow
 from avai.host_monitor.runner import Runner, RunnerConfig
 from avai.host_monitor.runtime import Clock, Digest, HostIdentity
@@ -1010,7 +1011,7 @@ class TestIncidentNarratorNormalization:
 
             def complete_structured(self, request):
                 self.calls.append(request)
-                return payload
+                return Completion(payload, None)
 
         return IncidentNarrator.create(
             Prompts.load(DEFAULT_PROMPTS_PATH),
@@ -1065,13 +1066,16 @@ class TestIncidentNarratorNormalization:
 
             def complete_structured(self, request):
                 self.calls.append(request)
-                return {
-                    "headline": "h",
-                    "severity": "high",
-                    "summary": "s",
-                    "timeline": [],
-                    "actions": [],
-                }
+                return Completion(
+                    {
+                        "headline": "h",
+                        "severity": "high",
+                        "summary": "s",
+                        "timeline": [],
+                        "actions": [],
+                    },
+                    None,
+                )
 
         client = _FakeClient()
         nar = IncidentNarrator.create(
@@ -1701,7 +1705,7 @@ class TestYaraCoverageAssessor:
 
             def complete_structured(self, request):
                 self.calls.append(request)
-                return payload
+                return Completion(payload, None)
 
         return YaraCoverageAssessor.create(
             Prompts.load(DEFAULT_PROMPTS_PATH),
@@ -1888,7 +1892,7 @@ class TestMaliciousVerdictVerifier:
 
             def complete_structured(self, request):
                 self.calls.append(request)
-                return payload
+                return Completion(payload, None)
 
         return MaliciousVerdictVerifier.create(
             Prompts.load(DEFAULT_PROMPTS_PATH),
@@ -2022,7 +2026,7 @@ class TestUnknownFindingInvestigator:
 
         class _FakeClient:
             def complete_structured(self, request):
-                return payload
+                return Completion(payload, None)
 
         return UnknownFindingInvestigator.create(
             Prompts.load(DEFAULT_PROMPTS_PATH),

@@ -35,17 +35,30 @@ class CompletionRequest:
     temperature: float
 
 
+@dataclass(frozen=True)
+class TokenUsage:
+    """Tokens one call spent; the judge turns them into a cost."""
+
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True)
+class Completion:
+    """One structured reply and the tokens it cost (None when the provider
+    did not report them)."""
+
+    values: dict[str, Any]
+    usage: TokenUsage | None
+
+
 class CompletionClient(ABC):
     """Strategy for issuing an LLM chat completion that returns
-    structured output matching a JSON schema. Returns a dict: no
+    structured output matching a JSON schema. The values are a dict: no
     text-level JSON parsing happens in the caller."""
 
-    # Token usage of the most recent call ({"input","output"}); the judge
-    # reads it to attribute cost. None when unavailable.
-    last_usage: dict[str, int] | None = None
-
     @abstractmethod
-    def complete_structured(self, request: CompletionRequest) -> dict[str, Any]: ...
+    def complete_structured(self, request: CompletionRequest) -> Completion: ...
 
 
 @dataclass(frozen=True)
@@ -77,14 +90,12 @@ class LitellmClient(CompletionClient):
 
     def __init__(self, api: LitellmApi) -> None:
         self._api = api
-        self.last_usage = None
 
     @classmethod
     def create(cls) -> LitellmClient:
         return cls(LitellmApi.load())
 
-    def complete_structured(self, request: CompletionRequest) -> dict[str, Any]:
-        self.last_usage = None
+    def complete_structured(self, request: CompletionRequest) -> Completion:
         try:
             response = self._api.completion(
                 model=request.model,
@@ -96,8 +107,7 @@ class LitellmClient(CompletionClient):
             )
         except self._api.errors as exc:
             raise CompletionError(f"litellm call failed: {exc}") from exc
-        self.last_usage = self._usage(response)
-        return self._content(response)
+        return Completion(self._content(response), self._usage(response))
 
     def _messages(self, request: CompletionRequest) -> list[dict[str, str]]:
         return [
@@ -105,13 +115,12 @@ class LitellmClient(CompletionClient):
             {"role": "user", "content": request.user},
         ]
 
-    def _usage(self, response: Any) -> dict[str, int] | None:
+    def _usage(self, response: Any) -> TokenUsage | None:
         try:
             usage = response.usage
-            return {
-                "input": int(usage.prompt_tokens or 0),
-                "output": int(usage.completion_tokens or 0),
-            }
+            return TokenUsage(
+                int(usage.prompt_tokens or 0), int(usage.completion_tokens or 0)
+            )
         except (AttributeError, TypeError, ValueError):
             return None
 
@@ -140,7 +149,6 @@ class AnthropicOAuthClient(CompletionClient):
 
     def __init__(self, client: Anthropic) -> None:
         self._client = client
-        self.last_usage = None
 
     @classmethod
     def create(cls, oauth_token: str) -> AnthropicOAuthClient:
@@ -153,14 +161,13 @@ class AnthropicOAuthClient(CompletionClient):
             )
         )
 
-    def complete_structured(self, request: CompletionRequest) -> dict[str, Any]:
-        self.last_usage = None
+    def complete_structured(self, request: CompletionRequest) -> Completion:
         try:
             response = self._send(request)
         except AnthropicApiError as exc:
             raise CompletionError(f"anthropic call failed: {exc}") from exc
-        self.last_usage = self._usage(response)
-        return self._tool_input(response, request.schema_name)
+        values = self._tool_input(response, request.schema_name)
+        return Completion(values, self._usage(response))
 
     def _send(self, request: CompletionRequest) -> Any:
         schema_name = request.schema_name
@@ -180,13 +187,12 @@ class AnthropicOAuthClient(CompletionClient):
             messages=[{"role": "user", "content": request.user}],
         )
 
-    def _usage(self, response: Any) -> dict[str, int] | None:
+    def _usage(self, response: Any) -> TokenUsage | None:
         try:
             usage = response.usage
-            return {
-                "input": int(usage.input_tokens or 0),
-                "output": int(usage.output_tokens or 0),
-            }
+            return TokenUsage(
+                int(usage.input_tokens or 0), int(usage.output_tokens or 0)
+            )
         except (AttributeError, TypeError, ValueError):
             return None
 
@@ -249,10 +255,13 @@ class StructuredCall:
     session: LlmSession
     request: CompletionRequest
 
-    def ask(self, fields: Mapping[str, str]) -> dict[str, Any]:
+    def answer(self, fields: Mapping[str, str]) -> Completion:
         user = Template(self.request.user).safe_substitute(fields)
         request = replace(self.request, user=user)
         return self.session.client.complete_structured(request)
+
+    def ask(self, fields: Mapping[str, str]) -> dict[str, Any]:
+        return self.answer(fields).values
 
     def ask_or_none(self, fields: Mapping[str, str]) -> dict[str, Any] | None:
         """A failed call returns None: a failed stage must not abort the cycle."""
@@ -266,6 +275,3 @@ class StructuredCall:
                 str(exc)[: self.ERROR_EXCERPT_CHARS],
             )
             return None
-
-    def last_usage(self) -> dict[str, int] | None:
-        return self.session.client.last_usage
