@@ -1,0 +1,53 @@
+---
+# Build the Docker image and push it to Docker Hub (iklob1/avai) when a
+# version tag is pushed: tag v0.10.0 pushes iklob1/avai:0.10.0 and :latest.
+#
+# Needs two repository secrets: DOCKERHUB_USERNAME and DOCKERHUB_TOKEN (a
+# Docker Hub access token with read and write access to iklob1/avai).
+name: docker
+
+"on":
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The YARA pack is VCS-ignored, but the image installs the package from
+      # src/ and hatch force-includes the pack. Without this step the image
+      # would ship only the one bundled EICAR rule.
+      - name: Fetch the YARA pack
+        run: python scripts/update_rules.py
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: iklob1/avai
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
