@@ -168,6 +168,22 @@ class TestDashboardConfigFromEnv:
         assert config.control_token is None
         assert not config.control_enabled
 
+    @pytest.mark.parametrize("off", ["0", "false", "no", "off", "", "FALSE"])
+    def test_off_values_keep_control_closed_and_app_mode_off(self, off: str) -> None:
+        environ = {"AVAI_CONTROL_OPEN": off, "AVAI_APP_MODE": off}
+
+        config = DashboardConfig.from_env("/x.db", environ)
+
+        assert config.control_open is False
+        assert config.app_mode is False
+        assert config.control_enabled is False
+
+    @pytest.mark.parametrize("on", ["1", "true", "yes", "on", "TRUE"])
+    def test_on_values_open_control(self, on: str) -> None:
+        config = DashboardConfig.from_env("/x.db", {"AVAI_CONTROL_OPEN": on})
+
+        assert config.control_open is True
+
 
 class TestDashboardEndpoints:
     def test_root_returns_html_page(self, client):
@@ -1690,7 +1706,7 @@ class TestVulnerabilitiesPanel:
             s.commit()
 
     def test_sorted_by_severity_with_metadata(self, tmp_path):
-        from avai.dashboard.queries import VulnQuery, VulnerabilitiesPanel
+        from avai.dashboard.queries import VulnerabilitiesPanel, VulnQuery
 
         db = tmp_path / "v.db"
         DashboardSchema().ensure(str(db))
@@ -1706,7 +1722,7 @@ class TestVulnerabilitiesPanel:
         assert res["summary"]["critical"] == 1
 
     def test_severity_filter(self, tmp_path):
-        from avai.dashboard.queries import VulnQuery, VulnerabilitiesPanel
+        from avai.dashboard.queries import VulnerabilitiesPanel, VulnQuery
 
         db = tmp_path / "v.db"
         DashboardSchema().ensure(str(db))
@@ -1717,7 +1733,7 @@ class TestVulnerabilitiesPanel:
         assert res["total"] == 1
 
     def test_search_filter(self, tmp_path):
-        from avai.dashboard.queries import VulnQuery, VulnerabilitiesPanel
+        from avai.dashboard.queries import VulnerabilitiesPanel, VulnQuery
 
         db = tmp_path / "v.db"
         DashboardSchema().ensure(str(db))
@@ -1733,7 +1749,7 @@ class TestVulnerabilitiesPanel:
         assert [r["software"] for r in by_cve["rows"]] == ["leftpad@1.0.0"]
 
     def test_pagination_slices_and_reports_pages(self, tmp_path):
-        from avai.dashboard.queries import VulnQuery, VulnerabilitiesPanel
+        from avai.dashboard.queries import VulnerabilitiesPanel, VulnQuery
 
         db = tmp_path / "v.db"
         DashboardSchema().ensure(str(db))
