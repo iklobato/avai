@@ -16,9 +16,35 @@ from sqlalchemy import create_engine
 
 from avai.host_monitor.models import AuthEventRow
 from avai.host_monitor.sink import Sink
-from avai.host_monitor.streaming import StreamingWorker
-from avai.host_monitor.streaming import SupervisionPolicy
+from avai.host_monitor.streaming import (
+    StreamChannel,
+    StreamingWorker,
+    SupervisionPolicy,
+    WorkerControls,
+)
 from avai.host_monitor.supervision import ExponentialBackoff, LoggingSupervisionListener
+from pathlib import Path
+
+
+class _WorkerKit:
+    """Builds workers on the test sink; a given sleeper replaces the real
+    interruptible one."""
+
+    def __init__(self, sink: Sink) -> None:
+        self._sink = sink
+
+    def build(
+        self,
+        collector: object,
+        policy: SupervisionPolicy | None = None,
+        sleeper: object | None = None,
+    ) -> StreamingWorker:
+        chosen = policy or SupervisionPolicy(_RecordingListener())
+        channel = StreamChannel(self._sink, "h")
+        if sleeper is None:
+            return StreamingWorker.create(collector, channel, chosen)
+        controls = WorkerControls(chosen, threading.Event(), sleeper)
+        return StreamingWorker(collector, channel, controls)
 
 
 class _PausableStreamCollector:
@@ -51,13 +77,13 @@ class _PausableStreamCollector:
 
 
 @pytest.fixture
-def sink(tmp_path):
+def sink(tmp_path: Path):
     # File-based SQLite — required because StreamingWorker runs in a
     # background thread that opens its own connection, and ``:memory:``
     # DBs are private per-connection.
     db = tmp_path / "stream.db"
     engine = create_engine(f"sqlite:///{db}", connect_args={"check_same_thread": False})
-    s = Sink(engine)
+    s = Sink.create(engine)
     s.setup()
     return s
 
@@ -81,38 +107,38 @@ def _make_row(action="login_ok", user="alice"):
 
 
 class TestLifecycle:
-    def test_start_creates_thread(self, sink):
+    def test_start_creates_thread(self, sink: Sink) -> None:
         c = _PausableStreamCollector([], pause_after=1)
         # Need at least one row so stream() blocks rather than returning
         # immediately.
         c._rows = [_make_row()]
-        w = StreamingWorker(c, sink, "h")
+        w = _WorkerKit(sink).build(c)
         w.start()
         assert w.thread is not None
         assert w.thread.is_alive()
         w.stop()
         assert not w.thread.is_alive()
 
-    def test_double_start_is_idempotent(self, sink):
+    def test_double_start_is_idempotent(self, sink: Sink) -> None:
         c = _PausableStreamCollector([_make_row()], pause_after=1)
-        w = StreamingWorker(c, sink, "h")
+        w = _WorkerKit(sink).build(c)
         w.start()
         thread1 = w.thread
         w.start()  # no-op when thread alive
         assert w.thread is thread1
         w.stop()
 
-    def test_stop_sets_stop_event(self, sink):
+    def test_stop_sets_stop_event(self, sink: Sink) -> None:
         c = _PausableStreamCollector([_make_row()], pause_after=1)
-        w = StreamingWorker(c, sink, "h")
+        w = _WorkerKit(sink).build(c)
         w.start()
         w.stop()
         assert w.stop_event.is_set()
         assert c.observed_stop.is_set()
 
-    def test_stop_without_start_is_safe(self, sink):
+    def test_stop_without_start_is_safe(self, sink: Sink) -> None:
         c = _PausableStreamCollector([], pause_after=0)
-        w = StreamingWorker(c, sink, "h")
+        w = _WorkerKit(sink).build(c)
         # No start() called — stop() should be a no-op, not crash.
         w.stop()
 
@@ -123,31 +149,32 @@ class TestLifecycle:
 
 
 class TestFlushing:
-    def test_flushes_full_batch(self, sink):
+    def test_flushes_full_batch(self, sink: Sink) -> None:
         rows = [_make_row(user=f"u{i}") for i in range(5)]
         c = _PausableStreamCollector(rows, pause_after=5)
-        w = StreamingWorker(
-            c, sink, "h", SupervisionPolicy(batch_size=5, flush_interval_s=99)
+        w = _WorkerKit(sink).build(
+            c,
+            SupervisionPolicy(
+                listener=_RecordingListener(), batch_size=5, flush_interval_s=99
+            ),
         )
         w.start()
         # Wait for the worker to consume + flush.
         time.sleep(0.2)
         w.stop()
 
-        from sqlalchemy import func, select
-        from sqlalchemy.orm import Session
-
-        with Session(sink.engine) as s:
-            n = s.execute(select(func.count()).select_from(AuthEventRow)).scalar()
-        assert n == 5
+        assert _row_count(sink) == 5
         assert w._rows_written == 5
 
-    def test_flushes_on_interval_below_batch_size(self, sink):
+    def test_flushes_on_interval_below_batch_size(self, sink: Sink) -> None:
         rows = [_make_row(user=f"u{i}") for i in range(2)]
         c = _PausableStreamCollector(rows, pause_after=2)
         # Big batch, fast interval → should flush by interval.
-        w = StreamingWorker(
-            c, sink, "h", SupervisionPolicy(batch_size=999, flush_interval_s=0.1)
+        w = _WorkerKit(sink).build(
+            c,
+            SupervisionPolicy(
+                listener=_RecordingListener(), batch_size=999, flush_interval_s=0.1
+            ),
         )
         w.start()
         time.sleep(0.4)
@@ -156,17 +183,20 @@ class TestFlushing:
         from sqlalchemy import func, select
         from sqlalchemy.orm import Session
 
-        with Session(sink.engine) as s:
-            n = s.execute(select(func.count()).select_from(AuthEventRow)).scalar()
+        with Session(sink.engine) as session:
+            n = session.execute(select(func.count()).select_from(AuthEventRow)).scalar()
         assert n == 2
 
-    def test_final_flush_on_shutdown_drains_buffer(self, sink):
+    def test_final_flush_on_shutdown_drains_buffer(self, sink: Sink) -> None:
         # 3 rows, batch size 10 → buffer has 3 at stop time. The final
         # flush in the worker's `finally` should write them.
         rows = [_make_row(user=f"u{i}") for i in range(3)]
         c = _PausableStreamCollector(rows, pause_after=3)
-        w = StreamingWorker(
-            c, sink, "h", SupervisionPolicy(batch_size=100, flush_interval_s=99)
+        w = _WorkerKit(sink).build(
+            c,
+            SupervisionPolicy(
+                listener=_RecordingListener(), batch_size=100, flush_interval_s=99
+            ),
         )
         w.start()
         time.sleep(0.2)
@@ -174,8 +204,8 @@ class TestFlushing:
         from sqlalchemy import func, select
         from sqlalchemy.orm import Session
 
-        with Session(sink.engine) as s:
-            n = s.execute(select(func.count()).select_from(AuthEventRow)).scalar()
+        with Session(sink.engine) as session:
+            n = session.execute(select(func.count()).select_from(AuthEventRow)).scalar()
         assert n == 3
 
 
@@ -215,6 +245,9 @@ class _RecordingListener:
         self.session_ends: list[int] = []
         self.stop_at = stop_at
         self.stop_event: threading.Event | None = None
+        self.started_run_ids: list[str] = []
+        self.write_failures: list[BaseException] = []
+        self.pool_changes: list[tuple[str, int]] = []
 
     def report_crash(self, collector, attempt, exc):
         self.crashes.append(attempt)
@@ -230,6 +263,15 @@ class _RecordingListener:
 
     def report_session_end(self, collector, rows):
         self.session_ends.append(rows)
+
+    def report_session_start(self, collector: str, run_id: str) -> None:
+        self.started_run_ids.append(run_id)
+
+    def report_write_failure(self, collector: str, exc: BaseException) -> None:
+        self.write_failures.append(exc)
+
+    def report_pool(self, change: str, workers: int) -> None:
+        self.pool_changes.append((change, workers))
 
 
 def _row_count(sink) -> int:
@@ -281,23 +323,21 @@ class _AlwaysCrash:
 
 
 class TestSupervision:
-    def test_crash_then_recover_restarts_without_escalating(self, sink):
+    def test_crash_then_recover_restarts_without_escalating(self, sink: Sink) -> None:
         # A transient crash is restarted: the pre-crash row AND the recovered
         # session's row are both persisted, and the single crash is reported
         # below the escalation threshold.
         c = _CrashOnceThenStream()
         listener = _RecordingListener()
-        w = StreamingWorker(
+        w = _WorkerKit(sink).build(
             c,
-            sink,
-            "h",
             SupervisionPolicy(
                 batch_size=10,
                 flush_interval_s=99,
                 backoff=_RecordingBackoff(),
                 listener=listener,
             ),
-            sleeper=_ImmediateSleep(),
+            _ImmediateSleep(),
         )
         w.start()
         time.sleep(0.2)
@@ -307,16 +347,14 @@ class TestSupervision:
         assert listener.crashes == [1]  # one transient crash, attempt 1
         assert _row_count(sink) == 2
 
-    def test_finite_stream_completes_without_restart(self, sink):
+    def test_finite_stream_completes_without_restart(self, sink: Sink) -> None:
         # A stream that ends on its own is not respawned (no busy-loop).
         c = _PausableStreamCollector([_make_row(), _make_row()], pause_after=0)
         listener = _RecordingListener()
-        w = StreamingWorker(
+        w = _WorkerKit(sink).build(
             c,
-            sink,
-            "h",
             SupervisionPolicy(batch_size=1, flush_interval_s=99, listener=listener),
-            sleeper=_ImmediateSleep(),
+            _ImmediateSleep(),
         )
         w.start()
         time.sleep(0.2)
@@ -326,20 +364,18 @@ class TestSupervision:
         assert len(listener.session_ends) == 1  # exactly one session ran
         assert _row_count(sink) == 2
 
-    def test_persistent_flap_escalates_once(self, sink):
+    def test_persistent_flap_escalates_once(self, sink: Sink) -> None:
         # Every session crashes: the worker backs off and retries, reporting
         # each attempt; the listener halts it once the escalation threshold
         # is reached so the test is deterministic.
         backoff = _RecordingBackoff()
         listener = _RecordingListener(stop_at=3)
-        w = StreamingWorker(
+        w = _WorkerKit(sink).build(
             _AlwaysCrash(),
-            sink,
-            "h",
             SupervisionPolicy(
                 batch_size=10, flush_interval_s=99, backoff=backoff, listener=listener
             ),
-            sleeper=_ImmediateSleep(),
+            _ImmediateSleep(),
         )
         listener.stop_event = w.stop_event
         w.start()
@@ -350,14 +386,13 @@ class TestSupervision:
         assert backoff.attempts == [1, 2, 3]
         assert [a for a in listener.crashes if a >= 3] == [3]  # escalated once
 
-    def test_stop_aborts_pending_backoff(self, sink):
+    def test_stop_aborts_pending_backoff(self, sink: Sink) -> None:
         # A long backoff must not delay shutdown: stop() aborts the wait and
         # the thread joins promptly via the real InterruptibleSleep.
-        w = StreamingWorker(
+        w = _WorkerKit(sink).build(
             _AlwaysCrash(),
-            sink,
-            "h",
             SupervisionPolicy(
+                listener=_RecordingListener(),
                 batch_size=10,
                 flush_interval_s=99,
                 backoff=ExponentialBackoff(30.0, 30.0, 1.0),
@@ -378,12 +413,12 @@ class TestSupervision:
 
 
 class TestSupervisionSeams:
-    def test_exponential_backoff_curve(self):
+    def test_exponential_backoff_curve(self) -> None:
         b = ExponentialBackoff(1.0, 5.0, 2.0)
         assert [b.delay_for(a) for a in (1, 2, 3, 4, 5)] == [1.0, 2.0, 4.0, 5.0, 5.0]
 
-    def test_logging_listener_escalates_at_threshold(self, caplog):
-        listener = LoggingSupervisionListener(escalate_threshold=3)
+    def test_logging_listener_escalates_at_threshold(self, caplog: pytest.LogCaptureFixture) -> None:
+        listener = LoggingSupervisionListener(logging.getLogger("host_monitor"), 3)
         with caplog.at_level(logging.WARNING, logger="host_monitor"):
             for attempt in (1, 2, 3):
                 listener.report_crash("auth_events", attempt, RuntimeError("boom"))

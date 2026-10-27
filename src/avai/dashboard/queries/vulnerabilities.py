@@ -2,272 +2,290 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any, NamedTuple
 
-from sqlalchemy import (
-    select,
-)
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from avai.host_monitor import (
-    Base,
-    ListeningPortRow,
-    ProcessRow,
-)
+from avai.enrichers.cache import EnrichmentSchema
+from avai.host_monitor import Base, ListeningPortRow, ProcessRow
 
-from .collection import latest_run
-from .common import Page, _existing_tables, _parse_json_obj
+from .collection import RunQueries
+from .panel_reads import Page, SchemaProbe, StoredJson
 
-_VULN_SOURCES = ("osv", "nvd", "cisa_kev", "github_advisory", "endoflife")
+VULN_SOURCES = ("osv", "nvd", "cisa_kev", "github_advisory", "endoflife")
 
 
-# Severity buckets, most-severe first. The rank doubles as the primary sort key
-# for the vulnerabilities panel ("always sort by severity") and as the set of
-# values the severity filter accepts.
-SEVERITY_ORDER = ("critical", "high", "medium", "low", "none")
+class CvssSeverity(StrEnum):
+    """Severity buckets, most severe first. The rank is the panel's primary
+    sort key ("always sort by severity")."""
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    NONE = "none"
 
 
-_SEVERITY_RANK = {label: i for i, label in enumerate(SEVERITY_ORDER)}
+class Severity:
+    # CVSS base score to qualitative severity (CVSS v3.1 rating bands).
+    BANDS = (
+        (9.0, CvssSeverity.CRITICAL),
+        (7.0, CvssSeverity.HIGH),
+        (4.0, CvssSeverity.MEDIUM),
+        (0.1, CvssSeverity.LOW),
+    )
 
+    def rank(self, label: str | None) -> int:
+        """Upstream labels outside the buckets (e.g. "moderate") sort last."""
+        order = tuple(CvssSeverity)
+        return order.index(label) if label in order else len(order)
 
-# CVSS base-score → qualitative severity (CVSS v3.1 rating bands).
-_SEVERITY_BANDS = ((9.0, "critical"), (7.0, "high"), (4.0, "medium"), (0.1, "low"))
+    def from_cvss(self, score: float | None) -> CvssSeverity | None:
+        """A CVSS base score's qualitative band, or None when unscored."""
+        if score is None:
+            return None
+        bands = (label for threshold, label in self.BANDS if score >= threshold)
+        return next(bands, CvssSeverity.NONE)
 
-
-def _severity_from_cvss(score: float | None) -> str | None:
-    """Map a CVSS base score to its qualitative band, or None when unscored."""
-    if score is None:
-        return None
-    for threshold, label in _SEVERITY_BANDS:
-        if score >= threshold:
-            return label
-    return "none"
-
-
-def _item_severity(cvss: float | None, cves: list[dict], kev: bool) -> str:
-    """Worst severity for a vulnerable-software item: the CVSS band if scored,
-    else the most-severe per-CVE label, else 'critical' for an unscored but
-    actively-exploited (KEV) item, else 'none'."""
-    label = _severity_from_cvss(cvss)
-    if label is None:
-        labelled = [c["severity"] for c in cves if c.get("severity")]
+    def of_item(self, cvss: float | None, cves: list[dict[str, Any]]) -> str:
+        """Worst severity for a vulnerable-software item: the CVSS band if
+        scored, else the most-severe per-CVE label, else 'critical' for an
+        unscored but actively-exploited (KEV) item, else 'none'."""
+        scored = self.from_cvss(cvss)
+        if scored is not None:
+            return scored.value
+        labelled = [cve["severity"] for cve in cves if cve.get("severity")]
         if labelled:
-            label = min(labelled, key=lambda s: _SEVERITY_RANK.get(s, 99))
-    if label is None:
-        return "critical" if kev else "none"
-    return label
+            return min(labelled, key=self.rank)
+        exploited = any(cve.get("kev") for cve in cves)
+        return CvssSeverity.CRITICAL.value if exploited else CvssSeverity.NONE.value
 
 
-def _normalize_software(name: str) -> str:
-    """Reduce a software/package/exe string to a comparable base token:
-    drop the ``@version`` suffix, take the path basename, strip a ``.app``
-    suffix. ``"openssl@3.0.2"`` → ``"openssl"``; ``"/usr/sbin/nginx"`` →
-    ``"nginx"``; ``"Firefox.app"`` → ``"firefox"``."""
-    base = str(name or "").split("@", 1)[0].strip().lower()
-    base = base.rsplit("/", 1)[-1]
-    if base.endswith(".app"):
-        base = base[:-4]
-    return base
+class SoftwareName:
+    def normalize(self, name: str | None) -> str:
+        """A software/package/exe string as a comparable base token: no
+        ``@version`` suffix, the path basename, no ``.app`` suffix.
+        ``"openssl@3.0.2"`` -> ``"openssl"``; ``"/usr/sbin/nginx"`` ->
+        ``"nginx"``; ``"Firefox.app"`` -> ``"firefox"``."""
+        base = str(name or "").split("@", 1)[0].strip().lower()
+        return base.rsplit("/", 1)[-1].removesuffix(".app")
 
 
-def _software_presence(session: Session, run_id) -> tuple[set, set]:
-    """``(running, exposed)`` normalized software names for ``run_id``:
-    ``running`` from the process snapshot (name + exe basename), ``exposed``
-    from the listening-port owners. Used to tell whether a vulnerable package
-    is actually present and reachable on the host, not just installed."""
-    running: set = set()
-    exposed: set = set()
-    if run_id is None:
-        return running, exposed
-    present = _existing_tables(session)
-    if "processes" in present:
-        for name, exe in session.execute(
-            select(ProcessRow.name, ProcessRow.exe).where(ProcessRow.run_id == run_id)
-        ).all():
-            if name:
-                running.add(_normalize_software(name))
-            if exe:
-                running.add(_normalize_software(exe))
-    if "listening_ports" in present:
-        for pname in session.execute(
-            select(ListeningPortRow.process_name).where(
-                ListeningPortRow.run_id == run_id
-            )
-        ).scalars():
-            if pname:
-                exposed.add(_normalize_software(pname))
-    running.discard("")
-    exposed.discard("")
-    return running, exposed
+class SoftwarePresence:
+    """``(running, exposed)`` software names for a run: ``running`` from the
+    process snapshot (name + exe basename), ``exposed`` from the
+    listening-port owners. Tells whether a vulnerable package is actually
+    present and reachable, not just installed."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def for_run(self, run_id: str | None) -> tuple[set[str], set[str]]:
+        if run_id is None:
+            return set(), set()
+        present = SchemaProbe(self._session).tables()
+        running = self._running(run_id) if "processes" in present else set()
+        exposed = self._exposed(run_id) if "listening_ports" in present else set()
+        return running - {""}, exposed - {""}
+
+    def _running(self, run_id: str) -> set[str]:
+        statement = select(ProcessRow.name, ProcessRow.exe).where(
+            ProcessRow.run_id == run_id
+        )
+        names = SoftwareName()
+        rows = self._session.execute(statement).all()
+        return {names.normalize(value) for row in rows for value in row if value}
+
+    def _exposed(self, run_id: str) -> set[str]:
+        statement = select(ListeningPortRow.process_name).where(
+            ListeningPortRow.run_id == run_id
+        )
+        names = SoftwareName()
+        found = self._session.execute(statement).scalars()
+        return {names.normalize(name) for name in found if name}
 
 
-class _Evidence(NamedTuple):
+class Evidence(NamedTuple):
     source: str
     indicator_type: str
     indicator_value: str
     verdict_hint: str | None
     summary: str | None
-    details: dict
+    details: dict[str, Any]
 
 
-def _vuln_evidence(session: Session) -> list[_Evidence]:
-    from avai.enrichers.cache import register_schema
+class CveDetails:
+    """CVE id -> {kev, cvss, severity}, merged across the forward-chained CVE
+    rows: KEV if any source lists it, the highest CVSS, the first severity."""
 
-    model = register_schema(Base)
-    rows = session.execute(
-        select(
+    def merge(self, evidence: list[Evidence]) -> dict[str, dict[str, Any]]:
+        detail: dict[str, dict[str, Any]] = {}
+        for found in (row for row in evidence if row.indicator_type == "cve"):
+            merged = detail.setdefault(found.indicator_value.upper(), self.empty())
+            merged["kev"] = merged["kev"] or found.source == "cisa_kev"
+            score = self.cvss(found.details)
+            if score is not None and (merged["cvss"] is None or score > merged["cvss"]):
+                merged["cvss"] = score
+            severity = self._severity(found.details)
+            if severity and not merged["severity"]:
+                merged["severity"] = str(severity).lower()
+        return detail
+
+    def empty(self) -> dict[str, Any]:
+        return {"kev": False, "cvss": None, "severity": None}
+
+    def cvss(self, details: dict[str, Any]) -> float | None:
+        score = (details.get("cvss31") or {}).get("baseScore")
+        if score is None:
+            score = (details.get("cvss") or {}).get("score")
+        try:
+            return float(score) if score is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _severity(self, details: dict[str, Any]) -> Any:
+        return (details.get("cvss31") or {}).get("baseSeverity") or details.get(
+            "severity"
+        )
+
+
+class VulnItem:
+    """Builds the patch-me row for a package or end-of-life product."""
+
+    def __init__(
+        self, cve_detail: dict[str, dict[str, Any]], presence: tuple[set[str], set[str]]
+    ) -> None:
+        self._cve_detail = cve_detail
+        self._presence = presence
+
+    def of(self, evidence: Evidence) -> dict[str, Any] | None:
+        """None for a row that only feeds CVE detail (shown attached to its
+        parent package)."""
+        ids = evidence.details.get("vuln_ids") or []
+        if not ids and not self._eol(evidence):
+            return None
+        return self._row(evidence, [{"id": cve, **self._cve(cve)} for cve in ids])
+
+    def _eol(self, evidence: Evidence) -> bool:
+        return evidence.source == "endoflife" and evidence.verdict_hint != "benign"
+
+    def _row(self, evidence: Evidence, cves: list[dict[str, Any]]) -> dict[str, Any]:
+        cvss = max(
+            (cve["cvss"] for cve in cves if cve["cvss"] is not None), default=None
+        )
+        base = SoftwareName().normalize(evidence.indicator_value)
+        running, exposed = self._presence
+        return {
+            "software": evidence.indicator_value,
+            "source": evidence.source,
+            "cves": cves,
+            "kev": any(cve["kev"] for cve in cves),
+            "cvss": cvss,
+            "severity": Severity().of_item(cvss, cves),
+            "eol": self._eol(evidence),
+            "summary": evidence.summary or "",
+            # Is this vulnerable software actually present on the host?
+            "running": base in running,
+            "exposed": base in exposed,
+        }
+
+    def _cve(self, cve: Any) -> dict[str, Any]:
+        return self._cve_detail.get(str(cve).upper(), CveDetails().empty())
+
+
+@dataclass(frozen=True)
+class VulnQuery:
+    search: str = ""
+    severity: str = ""
+    source: str = ""
+    page: Page = field(default_factory=Page)
+
+    def echoed(self) -> dict[str, str]:
+        return {"q": self.search, "severity": self.severity, "source": self.source}
+
+    def keep(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        needle = self.search.lower()
+        return [
+            item
+            for item in items
+            if (not needle or self._mentions(item, needle))
+            and (not self.severity or item["severity"] == self.severity)
+            and (not self.source or item["source"] == self.source)
+        ]
+
+    def _mentions(self, item: dict[str, Any], needle: str) -> bool:
+        return (
+            needle in item["software"].lower()
+            or needle in item["summary"].lower()
+            or any(needle in str(cve["id"]).lower() for cve in item["cves"])
+        )
+
+
+class VulnerabilitiesPanel:
+    """The CVE / EOL evidence the enrichment chain collected, as a
+    prioritised 'patch me' list. Each item carries its worst ``severity``
+    and whether the software is ``running`` and/or ``exposed``; the same
+    empty shape comes back when the evidence table is absent."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def vulnerabilities(self, query: VulnQuery) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        if "enrichment_evidence" in SchemaProbe(self._session).tables():
+            items = sorted(query.keep(self._items()), key=self._priority)
+        page_rows, paging = query.page.slice(items)
+        return {
+            "rows": page_rows,
+            **paging,
+            **query.echoed(),
+            "sources": list(VULN_SOURCES),
+            "summary": self._summary(items),
+        }
+
+    def _items(self) -> list[dict[str, Any]]:
+        latest = RunQueries(self._session).latest_run()
+        presence = SoftwarePresence(self._session).for_run(
+            latest.run_id if latest else None
+        )
+        evidence = self._evidence()
+        builder = VulnItem(CveDetails().merge(evidence), presence)
+        built = (builder.of(row) for row in evidence)
+        return [item for item in built if item is not None]
+
+    def _evidence(self) -> list[Evidence]:
+        model = EnrichmentSchema(Base).model()
+        statement = select(
             model.source,
             model.indicator_type,
             model.indicator_value,
             model.verdict_hint,
             model.summary,
             model.details_json,
-        ).where(model.source.in_(_VULN_SOURCES))
-    ).all()
-    return [
-        _Evidence(src, itype, ival, hint, summary, _parse_json_obj(dj))
-        for src, itype, ival, hint, summary, dj in rows
-    ]
+        ).where(model.source.in_(VULN_SOURCES))
+        rows = self._session.execute(statement).all()
+        return [Evidence(*row[:-1], StoredJson().as_dict(row[-1])) for row in rows]
 
-
-def _cvss_score(details: dict) -> float | None:
-    score = (details.get("cvss31") or {}).get("baseScore")
-    if score is None:
-        score = (details.get("cvss") or {}).get("score")
-    try:
-        return float(score) if score is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _no_cve_detail() -> dict:
-    return {"kev": False, "cvss": None, "severity": None}
-
-
-def _cve_details(evidence: list[_Evidence]) -> dict[str, dict]:
-    """CVE id -> {kev, cvss, severity}, merged across the forward-chained
-    CVE rows: KEV if any source lists it, the highest CVSS, the first
-    severity."""
-    detail: dict[str, dict] = {}
-    for ev in evidence:
-        if ev.indicator_type != "cve":
-            continue
-        d = detail.setdefault(ev.indicator_value.upper(), _no_cve_detail())
-        d["kev"] = d["kev"] or ev.source == "cisa_kev"
-        score = _cvss_score(ev.details)
-        if score is not None and (d["cvss"] is None or score > d["cvss"]):
-            d["cvss"] = score
-        sev = (ev.details.get("cvss31") or {}).get("baseSeverity") or ev.details.get(
-            "severity"
+    def _priority(self, item: dict[str, Any]) -> tuple[Any, ...]:
+        """Severity first (critical -> none), then actively exploited (KEV)
+        -> reachable (exposed) -> present (running) -> highest CVSS -> name."""
+        return (
+            Severity().rank(item["severity"]),
+            not item["kev"],
+            not item["exposed"],
+            not item["running"],
+            -(item["cvss"] or 0.0),
+            item["software"],
         )
-        if sev and not d["severity"]:
-            d["severity"] = str(sev).lower()
-    return detail
 
-
-def _vuln_item(ev: _Evidence, cve_detail: dict, running: set, exposed: set):
-    """One patch-me row for a package or end-of-life product, or None for a
-    row that only feeds CVE detail (shown attached to its parent package)."""
-    eol = ev.source == "endoflife" and ev.verdict_hint != "benign"
-    ids = ev.details.get("vuln_ids") or []
-    if not ids and not eol:
-        return None
-    cves = [
-        {"id": cid, **cve_detail.get(str(cid).upper(), _no_cve_detail())} for cid in ids
-    ]
-    kev = any(c["kev"] for c in cves)
-    cvss = max((c["cvss"] for c in cves if c["cvss"] is not None), default=None)
-    base = _normalize_software(ev.indicator_value)
-    return {
-        "software": ev.indicator_value,
-        "source": ev.source,
-        "cves": cves,
-        "kev": kev,
-        "cvss": cvss,
-        "severity": _item_severity(cvss, cves, kev),
-        "eol": eol,
-        "summary": ev.summary or "",
-        # Is this vulnerable software actually present on the host?
-        "running": base in running,
-        "exposed": base in exposed,
-    }
-
-
-def _mentions(item: dict, needle: str) -> bool:
-    return (
-        needle in item["software"].lower()
-        or needle in item["summary"].lower()
-        or any(needle in str(c["id"]).lower() for c in item["cves"])
-    )
-
-
-def _patch_priority(item: dict) -> tuple:
-    """Severity first (critical -> none), then actively exploited (KEV) ->
-    reachable (exposed) -> present (running) -> highest CVSS -> name."""
-    return (
-        _SEVERITY_RANK.get(item["severity"], 99),
-        not item["kev"],
-        not item["exposed"],
-        not item["running"],
-        -(item["cvss"] or 0.0),
-        item["software"],
-    )
-
-
-def vulnerabilities(
-    session: Session,
-    *,
-    q: str = "",
-    severity: str = "",
-    source: str = "",
-    page: Page = Page(),
-) -> dict:
-    """Aggregate the CVE / EOL evidence the enrichment chain already collected
-    into a prioritised 'patch me' list. Each item carries its worst
-    ``severity`` (CVSS band) and whether the vulnerable software is actually
-    ``running`` and/or ``exposed`` (listening) on the host, and is ordered by
-    :func:`_patch_priority`. Supports a text search (``q`` over software /
-    CVE id / summary) and ``severity`` / ``source`` filters, and paginates the
-    result. Returns a dict with ``rows`` plus the pagination + echoed-filter
-    fields the panel template expects; an empty result (same shape) if the
-    evidence table is absent."""
-    echoed = {"q": q, "severity": severity, "source": source}
-    if "enrichment_evidence" not in _existing_tables(session):
+    def _summary(self, items: list[dict[str, Any]]) -> dict[str, int]:
+        severities = [item["severity"] for item in items]
         return {
-            "rows": [],
-            **page.fields(0),
-            **echoed,
-            "sources": list(_VULN_SOURCES),
-            "summary": {"critical": 0, "high": 0, "kev": 0, "exposed": 0},
+            CvssSeverity.CRITICAL.value: severities.count(CvssSeverity.CRITICAL),
+            CvssSeverity.HIGH.value: severities.count(CvssSeverity.HIGH),
+            "kev": sum(1 for item in items if item["kev"]),
+            "exposed": sum(1 for item in items if item["exposed"]),
         }
-    latest = latest_run(session)
-    running, exposed = _software_presence(session, latest.run_id if latest else None)
-    evidence = _vuln_evidence(session)
-    cve_detail = _cve_details(evidence)
-    items = [
-        item
-        for ev in evidence
-        if (item := _vuln_item(ev, cve_detail, running, exposed)) is not None
-    ]
-    if q:
-        items = [i for i in items if _mentions(i, q.lower())]
-    if severity:
-        items = [i for i in items if i["severity"] == severity]
-    if source:
-        items = [i for i in items if i["source"] == source]
-    items.sort(key=_patch_priority)
-
-    summary = {
-        "critical": sum(1 for i in items if i["severity"] == "critical"),
-        "high": sum(1 for i in items if i["severity"] == "high"),
-        "kev": sum(1 for i in items if i["kev"]),
-        "exposed": sum(1 for i in items if i["exposed"]),
-    }
-    page_rows, paging = page.slice(items)
-    return {
-        "rows": page_rows,
-        **paging,
-        **echoed,
-        "sources": list(_VULN_SOURCES),
-        "summary": summary,
-    }

@@ -7,169 +7,171 @@ import errno
 import sys
 import threading
 import webbrowser
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
+import waitress
 from flask import Flask
 from sqlalchemy import create_engine
 
-from .app import create_app
+from avai.host_monitor import Sink
+from avai.hostsfile import DASHBOARD_HOSTNAME, HostsError, HostsRegistrar, Outcome
+
+from .app import DashboardApp
 from .config import DEFAULT_DB_PATH, DashboardConfig
 
+DEFAULT_PORT = 8765
 # Below this, binding a TCP port needs root/Administrator. Reaching the
 # dashboard at http://avai.local (no port) means serving on 80, which is
-# privileged — so a clean-bind failure here gets an actionable message.
-_PRIVILEGED_PORT_CEILING = 1024
-_DEFAULT_HTTP_PORT = 80
+# privileged, so a clean-bind failure here gets an actionable message.
+PRIVILEGED_PORT_CEILING = 1024
+DEFAULT_HTTP_PORT = 80
 
 
-def _http_url(host: str, port: int) -> str:
-    """A browser URL, omitting the port when it's the implicit HTTP 80 — so
-    ``--port 80`` advertises ``http://avai.local`` rather than ``...:80``."""
-    return f"http://{host}" if port == _DEFAULT_HTTP_PORT else f"http://{host}:{port}"
+class DashboardUrl:
+    def http(self, host: str, port: int) -> str:
+        """A browser URL, omitting the port when it's the implicit HTTP 80, so
+        ``--port 80`` advertises ``http://avai.local`` rather than ``...:80``."""
+        if port == DEFAULT_HTTP_PORT:
+            return f"http://{host}"
+        return f"http://{host}:{port}"
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="avai — read-only Flask + HTMX dashboard for the host monitor DB"
-    )
-    # Bare `avai dashboard` reads ~/.avai/avai.db on :8765 (the monitor's
-    # defaults) so it Just Works without flags.
-    parser.add_argument("--db", default=str(DEFAULT_DB_PATH))
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--debug", action="store_true")
-    parser.add_argument(
-        "--open",
-        action="store_true",
-        help="open the dashboard in your default browser once it's serving",
-    )
-    return parser
-
-
-def main() -> int:
-    args = _build_parser().parse_args()
-
-    _ensure_db_exists(args.db)
-    app = create_app(DashboardConfig.from_env(args.db))
-    _serve(app, args.host, args.port, args.debug, args.open)
-    return 0
-
-
-def _open_browser(host: str, port: int) -> None:
-    """Open the dashboard in the default browser after a short delay so the
-    server has time to bind the socket. 0.0.0.0/:: aren't routable from a
-    browser, so point at loopback instead."""
-    url_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
-    url = _http_url(url_host, port)
-    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-
-
-def _hosts_notice(port: int) -> list[str]:
-    """Best-effort hostname mapping for the launch banner: map avai.local when
-    the dashboard already runs elevated, otherwise tell the user how. A
-    hosts-file problem (unsupported OS, missing privilege) must never stop the
-    dashboard from serving on loopback, so all of it degrades to a quiet line."""
-    from avai.hostsfile import DASHBOARD_HOSTNAME, HostsError, HostsRegistrar, Outcome
-
-    try:
-        registrar = HostsRegistrar.for_current_platform()
-        outcome = registrar.ensure_reachable()
-    except HostsError:
-        return []
-    url = _http_url(DASHBOARD_HOSTNAME, port)
-    if outcome is Outcome.CREATED:
-        return [
-            f" * mapped {DASHBOARD_HOSTNAME} -> 127.0.0.1 — also reachable at {url}"
-        ]
-    if outcome is Outcome.NEEDS_PRIVILEGE:
-        return [
-            f" * tip: `sudo avai install-hosts` makes the dashboard reachable at {url}"
-        ]
-    return [f" * also reachable at {url}"]
-
-
-def _serve(
-    app: Flask, host: str, port: int, debug: bool, open_browser: bool = False
-) -> None:
-    """Serve the dashboard. In normal use we run on waitress, a real
-    (pure-Python, cross-platform) WSGI server, so there's no "this is a
-    development server" warning. ``--debug`` falls back to Werkzeug's
-    reloader/debugger (dev only), and if waitress somehow isn't installed
-    we degrade to the dev server rather than failing to start."""
-    if open_browser:
-        _open_browser(host, port)
-    for line in _hosts_notice(port):
-        print(line, flush=True)
-    try:
-        _run_server(app, host, port, debug)
-    except OSError as e:
-        raise SystemExit(_bind_error_message(host, port, e)) from e
-
-
-def _run_server(app: Flask, host: str, port: int, debug: bool) -> None:
-    if not debug:
-        try:
-            from waitress import serve
-
-            print(
-                f" * avai dashboard on {_http_url(host, port)}  (Ctrl-C to quit)",
-                flush=True,
-            )
-            # ~10 HTMX fragments fire in parallel on every page load/poll
-            # (7 × every-30s + 3 × every-60s + JS alerts). 16 threads absorbs
-            # that burst without queuing; extras sit idle otherwise.
-            serve(app, host=host, port=port, threads=16)
-            return
-        except ImportError:
-            print(
-                " * waitress not installed — falling back to the dev server",
-                file=sys.stderr,
-            )
-    app.run(host=host, port=port, debug=debug)
-
-
-def _bind_error_message(host: str, port: int, err: OSError) -> str:
-    """Turn a socket-bind failure into one actionable line. The common case is
-    forgetting that http://avai.local (port 80) needs privilege to bind."""
-    if err.errno in (errno.EACCES, errno.EPERM) and port < _PRIVILEGED_PORT_CEILING:
-        return (
-            f"avai: binding port {port} needs elevated privileges — "
-            f"re-run with `sudo avai dashboard --port {port}`, or use the "
-            "default unprivileged port (`avai dashboard`)."
+class DashboardArgs:
+    def parser(self) -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser(
+            description="avai: read-only Flask + HTMX dashboard for the host monitor DB"
         )
-    if err.errno == errno.EADDRINUSE:
-        return f"avai: port {port} on {host} is already in use by another process."
-    return f"avai: could not bind {host}:{port}: {err}"
+        # Bare `avai dashboard` reads ~/.avai/avai.db on :8765 (the monitor's
+        # defaults) so it works without flags.
+        parser.add_argument("--db", default=str(DEFAULT_DB_PATH))
+        parser.add_argument("--host", default="127.0.0.1")
+        parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+        parser.add_argument("--debug", action="store_true")
+        parser.add_argument(
+            "--open",
+            action="store_true",
+            help="open the dashboard in your default browser once it's serving",
+        )
+        return parser
 
 
-def _ensure_db_exists(db_path: str) -> None:
+class DashboardSchema:
     """Bring the dashboard's DB up to the current schema, on every start.
 
-    The dashboard opens the DB read-only and so can't create or migrate
-    tables at query time. We run the monitor's own schema bootstrap
-    (:meth:`Sink.setup` = ``create_all`` + Alembic upgrade) here instead.
-    Crucially this is NOT gated on "file missing": ``create_all`` only
-    issues ``CREATE TABLE`` for tables that don't exist yet and never
-    touches existing data, so running it against a DB written by an OLDER
-    monitor — one lacking a newly-added table such as ``control_state`` —
-    simply adds the missing table. That's what stops every panel 500ing
-    after a version that introduces a new table. Reusing ``Sink.setup``
-    keeps the dashboard's schema bootstrap in lockstep with the monitor's
-    (one source of truth), so future tables/migrations are covered too.
+    The dashboard opens the DB read-only, so it can't create or migrate
+    tables at query time; the monitor's own bootstrap (``Sink.setup`` =
+    ``create_all`` + Alembic upgrade) runs here instead. Not gated on "file
+    missing": ``create_all`` only creates absent tables and never touches
+    existing data, so a DB written by an OLDER monitor gains the new tables
+    (e.g. ``control_state``) instead of every panel 500ing. Reusing
+    ``Sink.setup`` keeps the two bootstraps in lockstep, and a dashboard
+    started before the monitor ever ran renders empty panels."""
 
-    It also lets a dashboard launched before the monitor has ever run
-    render empty panels (every table exists, every query returns zero rows).
-    """
-    from avai.host_monitor import Sink
+    def ensure(self, db_path: str) -> None:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        engine = create_engine(f"sqlite:///{db_path}")
+        try:
+            Sink.create(engine).setup()
+        finally:
+            engine.dispose()
 
-    db_file = Path(db_path)
-    db_file.parent.mkdir(parents=True, exist_ok=True)
-    write_engine = create_engine(f"sqlite:///{db_path}")
-    try:
-        Sink(write_engine).setup()
-    finally:
-        write_engine.dispose()
+
+@dataclass(frozen=True)
+class ServeOptions:
+    host: str
+    port: int
+    debug: bool = False
+    open_browser: bool = False
+
+
+class DashboardServer:
+    """Serves the dashboard on waitress, a pure-Python production WSGI server
+    (no "development server" warning); ``--debug`` uses Werkzeug's reloader
+    and debugger instead."""
+
+    # ~10 HTMX fragments fire in parallel on every page load/poll; 16 threads
+    # absorbs that burst without queuing.
+    THREADS = 16
+    BROWSER_DELAY_S = 1.0
+
+    def __init__(self, app: Flask, out: TextIO) -> None:
+        self._app = app
+        self._out = out
+
+    def serve(self, options: ServeOptions) -> None:
+        if options.open_browser:
+            self._open_browser(options)
+        for line in self._hosts_notice(options.port):
+            self._say(line)
+        try:
+            self._run(options)
+        except OSError as exc:
+            raise SystemExit(self.bind_error_message(options, exc)) from exc
+
+    def _run(self, options: ServeOptions) -> None:
+        if options.debug:
+            self._app.run(host=options.host, port=options.port, debug=True)
+            return
+        url = DashboardUrl().http(options.host, options.port)
+        self._say(f" * avai dashboard on {url}  (Ctrl-C to quit)")
+        waitress.serve(
+            self._app, host=options.host, port=options.port, threads=self.THREADS
+        )
+
+    def _open_browser(self, options: ServeOptions) -> None:
+        """Open the dashboard after a short delay so the server has bound the
+        socket. 0.0.0.0/:: aren't routable from a browser: use loopback."""
+        host = "127.0.0.1" if options.host in ("0.0.0.0", "::", "") else options.host
+        url = DashboardUrl().http(host, options.port)
+        threading.Timer(self.BROWSER_DELAY_S, webbrowser.open, args=(url,)).start()
+
+    def _hosts_notice(self, port: int) -> list[str]:
+        """Map avai.local when already elevated, otherwise say how. A
+        hosts-file problem must never stop the dashboard serving on
+        loopback, so any of it degrades to a quiet line."""
+        try:
+            outcome = HostsRegistrar.for_current_platform().ensure_reachable()
+        except HostsError:
+            return []
+        url = DashboardUrl().http(DASHBOARD_HOSTNAME, port)
+        notices = {
+            Outcome.CREATED: f" * mapped {DASHBOARD_HOSTNAME} -> 127.0.0.1 — also reachable at {url}",
+            Outcome.NEEDS_PRIVILEGE: f" * tip: `sudo avai install-hosts` makes the dashboard reachable at {url}",
+        }
+        return [notices.get(outcome, f" * also reachable at {url}")]
+
+    def bind_error_message(self, options: ServeOptions, err: OSError) -> str:
+        """One actionable line for a socket-bind failure. The common case is
+        forgetting that http://avai.local (port 80) needs privilege."""
+        host, port = options.host, options.port
+        denied = err.errno in (errno.EACCES, errno.EPERM)
+        if denied and port < PRIVILEGED_PORT_CEILING:
+            return (
+                f"avai: binding port {port} needs elevated privileges — "
+                f"re-run with `sudo avai dashboard --port {port}`, or use the "
+                "default unprivileged port (`avai dashboard`)."
+            )
+        if err.errno == errno.EADDRINUSE:
+            return f"avai: port {port} on {host} is already in use by another process."
+        return f"avai: could not bind {host}:{port}: {err}"
+
+    def _say(self, line: str) -> None:
+        self._out.write(line + "\n")
+        self._out.flush()
+
+
+class DashboardCli:
+    @classmethod
+    def main(cls) -> int:
+        args = DashboardArgs().parser().parse_args()
+        DashboardSchema().ensure(args.db)
+        app = DashboardApp(DashboardConfig.from_env(args.db)).build()
+        options = ServeOptions(args.host, args.port, args.debug, args.open)
+        DashboardServer(app, sys.stdout).serve(options)
+        return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(DashboardCli.main())

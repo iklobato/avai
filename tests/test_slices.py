@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from collections import Counter
 
-from avai.enrichers.indicators import EXTRACTORS
+from avai.enrichers.indicators import IndicatorExtraction
 from avai.host_monitor import (
     collectors,
     exposure_collectors,
     net_collectors,
     persistence_collectors,
-    slices,
 )
+from avai.host_monitor.slices import Slices
 from avai.host_monitor.collectors import Collector, StreamingCollector
 from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
 from avai.host_monitor.hosts import windows
@@ -29,7 +29,7 @@ _COLLECTOR_MODULES = (
     persistence_collectors,
     windows,
 )
-SLICE_NAMES = {s.name for s in slices.ALL}
+SLICE_NAMES = {s.name for s in Slices.ALL}
 
 
 def _collector_classes() -> set[type[Collector]]:
@@ -52,21 +52,21 @@ def _row_models() -> set[type[_RowBase]]:
     return found
 
 
-def test_every_row_model_has_exactly_one_slice():
-    per_model = Counter(s.model for s in slices.ALL)
+def test_every_row_model_has_exactly_one_slice() -> None:
+    per_model = Counter(s.model for s in Slices.ALL)
 
     assert set(per_model) == _row_models()
     assert max(per_model.values()) == 1
-    assert len(SLICE_NAMES) == len(slices.ALL)
+    assert len(SLICE_NAMES) == len(Slices.ALL)
 
 
-def test_every_slice_is_written_by_a_collector_and_only_catalogued_ones():
+def test_every_slice_is_written_by_a_collector_and_only_catalogued_ones() -> None:
     written = {cls.slice for cls in _collector_classes()}
 
-    assert written == set(slices.ALL)
+    assert written == set(Slices.ALL)
 
 
-def test_streaming_flag_matches_the_collector_kind():
+def test_streaming_flag_matches_the_collector_kind() -> None:
     mismatched = [
         cls.__name__
         for cls in _collector_classes()
@@ -76,7 +76,7 @@ def test_streaming_flag_matches_the_collector_kind():
     assert mismatched == []
 
 
-def test_every_judged_collector_has_a_prompt_hint():
+def test_every_judged_collector_has_a_prompt_hint() -> None:
     hints = Prompts.load(DEFAULT_PROMPTS_PATH).collector_hints
     unhinted = sorted(
         cls.slice.name
@@ -88,5 +88,5 @@ def test_every_judged_collector_has_a_prompt_hint():
     assert set(hints) <= SLICE_NAMES
 
 
-def test_extractor_keys_are_catalogued_slices():
-    assert set(EXTRACTORS) <= SLICE_NAMES
+def test_extractor_keys_are_catalogued_slices() -> None:
+    assert IndicatorExtraction.default().collectors <= SLICE_NAMES

@@ -7,6 +7,7 @@ Runner can be split into smaller parts without changing behaviour.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -20,6 +21,7 @@ from avai.enrichers import (
     EnrichmentChain,
     Evidence,
     EvidenceCache,
+    Indicator,
     IndicatorType,
     VerdictHint,
 )
@@ -39,10 +41,10 @@ from avai.host_monitor.models import (
     RiskScoreRow,
     YaraCoverageRow,
 )
-from avai.host_monitor.runner import Runner
-from avai.host_monitor.sink import Sink
-from avai.host_monitor.runner import RunnerConfig
+from avai.host_monitor.runner import Runner, RunnerConfig
 from avai.host_monitor.runtime import Digest
+from avai.host_monitor.sink import Sink
+from avai.host_monitor.sink_admin import ControlSeed
 
 PROC_FIELDS = ("name", "exe")
 AUTH_FIELDS = ("process", "event_message")
@@ -56,13 +58,13 @@ def sink():
         # One shared connection, so streaming worker threads see the same db.
         poolclass=StaticPool,
     )
-    s = Sink(engine)
+    s = Sink.create(engine)
     s.setup()
     return s
 
 
 def _runner(sink, snapshot=(), streaming=(), judge=None, **options) -> Runner:
-    return Runner(
+    return Runner.create(
         RunnerConfig(
             sink,
             list(snapshot),
@@ -75,7 +77,7 @@ def _runner(sink, snapshot=(), streaming=(), judge=None, **options) -> Runner:
 
 
 def _proc_hash(name: str) -> str:
-    return Digest.of_row({"name": name, "exe": f"/bin/{name}"}, PROC_FIELDS)
+    return Digest().of_row({"name": name, "exe": f"/bin/{name}"}, PROC_FIELDS)
 
 
 class _Procs:
@@ -262,13 +264,17 @@ class _HitEnricher(Enricher):
     name = "test_hit"
     supports_types = frozenset({IndicatorType.IPV4})
     requires_token = None
+    CONFIDENCE = 0.9
 
-    def _fetch(self, indicator):
+    def __init__(self) -> None:
+        pass
+
+    def fetch(self, indicator: Indicator) -> Evidence:
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.MALICIOUS,
-            confidence=0.9,
+            confidence=self.CONFIDENCE,
             summary="flagged",
         )
 
@@ -281,7 +287,7 @@ def _judgements(sink) -> dict[str, Judgement]:
 def _set_control(sink, **values):
     from sqlalchemy import update
 
-    sink.ensure_control_row(interval=300, judge_enabled=True, enrich_enabled=True)
+    sink.ensure_control_row(ControlSeed(300, True, True))
     with Session(sink.engine) as s:
         s.execute(update(ControlState).where(ControlState.id == 1).values(**values))
         s.commit()
@@ -298,7 +304,7 @@ def _count(sink, model) -> int:
 
 
 class TestSnapshotCycle:
-    def test_rows_are_written_judged_and_marked_seen(self, sink):
+    def test_rows_are_written_judged_and_marked_seen(self, sink: Sink) -> None:
         judge = _ScriptedJudge({"evil": Verdict.SUSPICIOUS})
 
         run_id, ok, failed = _runner(
@@ -306,8 +312,8 @@ class TestSnapshotCycle:
         ).run_once()
 
         assert (ok, failed) == (1, 0)
-        with Session(sink.engine) as s:
-            rows = s.scalars(select(ProcessRow)).all()
+        with Session(sink.engine) as session:
+            rows = session.scalars(select(ProcessRow)).all()
         assert {r.name for r in rows} == {"evil", "good"}
         assert {r.run_id for r in rows} == {run_id}
         judged = _judgements(sink)
@@ -316,9 +322,9 @@ class TestSnapshotCycle:
         started = _started_at(sink, run_id)
         assert {j.last_seen_at for j in judged.values()} == {started}
 
-    def test_judge_sees_baseline_and_operator_feedback(self, sink):
-        with Session(sink.engine) as s:
-            s.add(
+    def test_judge_sees_baseline_and_operator_feedback(self, sink: Sink) -> None:
+        with Session(sink.engine) as session:
+            session.add(
                 FeedbackRow(
                     content_hash="old",
                     collector="processes",
@@ -328,7 +334,7 @@ class TestSnapshotCycle:
                     applied=1,
                 )
             )
-            s.commit()
+            session.commit()
         judge = _ScriptedJudge()
 
         _runner(sink, [_Procs("evil")], judge=judge).run_once()
@@ -340,8 +346,9 @@ class TestSnapshotCycle:
         assert entries[0]["baseline"]["times_seen"] == 1
         assert entries[0]["baseline"]["novel"] is False
 
-    def test_judge_sees_threat_intel_evidence(self, sink):
-        chain = EnrichmentChain([_HitEnricher()], EvidenceCache(sink.engine, Base))
+    def test_judge_sees_threat_intel_evidence(self, sink: Sink) -> None:
+        cache = EvidenceCache.on_base(sink.engine, Base)
+        chain = EnrichmentChain([_HitEnricher()], cache, logging.getLogger("test"))
         judge = _ScriptedJudge()
 
         _runner(sink, [_Conns()], judge=judge, enrichment_chain=chain).run_once()
@@ -350,7 +357,7 @@ class TestSnapshotCycle:
         assert evidence[0]["src"] == "test_hit"
         assert evidence[0]["value"] == "8.8.8.8"
 
-    def test_second_opinions_rewrite_verdicts_before_they_are_stored(self, sink):
+    def test_second_opinions_rewrite_verdicts_before_they_are_stored(self, sink: Sink) -> None:
         judge = _ScriptedJudge({"evil": Verdict.MALICIOUS, "odd": Verdict.UNKNOWN})
         runner = _runner(
             sink,
@@ -368,9 +375,9 @@ class TestSnapshotCycle:
         assert judged[_proc_hash("odd")].verdict == "benign"
         assert judged[_proc_hash("odd")].reasoning.startswith("[investigated]")
 
-    def test_judging_off_still_marks_known_findings_seen(self, sink):
-        with Session(sink.engine) as s:
-            s.add(
+    def test_judging_off_still_marks_known_findings_seen(self, sink: Sink) -> None:
+        with Session(sink.engine) as session:
+            session.add(
                 Judgement(
                     content_hash=_proc_hash("evil"),
                     collector="processes",
@@ -379,7 +386,7 @@ class TestSnapshotCycle:
                     created_at="2026-01-01T00:00:00Z",
                 )
             )
-            s.commit()
+            session.commit()
         _set_control(sink, judge_enabled=0)
         judge = _ScriptedJudge()
 
@@ -390,12 +397,12 @@ class TestSnapshotCycle:
         assert set(judged) == {_proc_hash("evil")}
         assert judged[_proc_hash("evil")].last_seen_at == _started_at(sink, run_id)
 
-    def test_a_failing_collector_is_recorded_and_the_cycle_goes_on(self, sink):
+    def test_a_failing_collector_is_recorded_and_the_cycle_goes_on(self, sink: Sink) -> None:
         run_id, ok, failed = _runner(sink, [_Broken(), _Procs("a")]).run_once()
 
         assert (ok, failed) == (1, 1)
-        with Session(sink.engine) as s:
-            error = s.scalars(select(CollectorErrorRow)).one()
+        with Session(sink.engine) as session:
+            error = session.scalars(select(CollectorErrorRow)).one()
         assert (error.run_id, error.collector) == (run_id, "broken")
         assert error.error_class == "OSError"
 
@@ -406,12 +413,12 @@ def _stream_row(process, message):
         **row,
         "run_id": "stream-session",
         "collected_at": "2026-01-01T00:00:00Z",
-        "content_hash": Digest.of_row(row, AUTH_FIELDS),
+        "content_hash": Digest().of_row(row, AUTH_FIELDS),
     }
 
 
 class TestStreamingJudging:
-    def test_new_streamed_rows_are_judged_each_cycle(self, sink):
+    def test_new_streamed_rows_are_judged_each_cycle(self, sink: Sink) -> None:
         sink.write(AuthEventRow, [_stream_row("sshd", "failed password")])
         judge = _ScriptedJudge({"sshd": Verdict.SUSPICIOUS})
 
@@ -422,7 +429,7 @@ class TestStreamingJudging:
         assert entries[0]["baseline"]["times_seen"] == 1
         assert [j.verdict for j in _judgements(sink).values()] == ["suspicious"]
 
-    def test_disabled_streaming_collector_is_not_judged(self, sink):
+    def test_disabled_streaming_collector_is_not_judged(self, sink: Sink) -> None:
         sink.write(AuthEventRow, [_stream_row("sshd", "failed password")])
         _set_control(sink, disabled_collectors="auth_events")
         judge = _ScriptedJudge()
@@ -431,7 +438,7 @@ class TestStreamingJudging:
 
         assert judge.calls == []
 
-    def test_a_failing_streaming_judge_does_not_fail_the_cycle(self, sink):
+    def test_a_failing_streaming_judge_does_not_fail_the_cycle(self, sink: Sink) -> None:
         sink.write(AuthEventRow, [_stream_row("sshd", "failed password")])
 
         class _Exploding(_ScriptedJudge):
@@ -449,7 +456,7 @@ class TestStreamingJudging:
 
 
 class TestEndOfCycleReports:
-    def test_reports_are_written_after_judging(self, sink):
+    def test_reports_are_written_after_judging(self, sink: Sink) -> None:
         narrator, assessor = _Narrator(), _Assessor()
         runner = _runner(
             sink,
@@ -468,13 +475,13 @@ class TestEndOfCycleReports:
         assert assessor.calls[0][1]["hostname"]
         assert _count(sink, YaraCoverageRow) == 1
 
-    def test_risk_score_is_written_without_any_llm(self, sink):
+    def test_risk_score_is_written_without_any_llm(self, sink: Sink) -> None:
         _runner(sink, [_Procs("a")]).run_once()
 
         assert _count(sink, RiskScoreRow) == 1
         assert _count(sink, IncidentNarrativeRow) == 0
 
-    def test_database_is_pruned_to_the_size_cap(self, sink, monkeypatch):
+    def test_database_is_pruned_to_the_size_cap(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         caps = []
 
         def fake_prune(max_bytes):
@@ -492,7 +499,7 @@ class TestEndOfCycleReports:
 
         assert caps == [4096]
 
-    def test_no_cap_means_no_pruning(self, sink, monkeypatch):
+    def test_no_cap_means_no_pruning(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             sink, "prune_to_size", lambda b: pytest.fail("pruned without a cap")
         )
@@ -520,7 +527,7 @@ class TestControlLoopCommands:
             ("nonsense", "unknown command: nonsense"),
         ],
     )
-    def test_command_runs_once_and_is_acknowledged(self, sink, command, result_prefix):
+    def test_command_runs_once_and_is_acknowledged(self, sink: Sink, command, result_prefix) -> None:
         _set_control(sink, command=command, command_nonce=4, command_applied=0)
 
         tripwire = _run_forever_once(sink)
@@ -530,7 +537,7 @@ class TestControlLoopCommands:
         assert control["command_result"].startswith(result_prefix)
         assert tripwire.runs == 1
 
-    def test_a_failing_command_is_acknowledged_with_the_error(self, sink, monkeypatch):
+    def test_a_failing_command_is_acknowledged_with_the_error(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         def boom():
             raise RuntimeError("disk full")
 
@@ -543,7 +550,7 @@ class TestControlLoopCommands:
             "error: RuntimeError: disk full"
         )
 
-    def test_a_failed_cycle_does_not_stop_the_loop(self, sink, monkeypatch):
+    def test_a_failed_cycle_does_not_stop_the_loop(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         tripwire = _Tripwire()
         runner = _runner(sink, [tripwire])
         tripwire.runner = runner
@@ -559,24 +566,34 @@ class TestControlLoopCommands:
 
 
 class TestStreamingWorkers:
-    def test_workers_write_streamed_rows_and_stop(self, sink):
+    WAIT_S = 5
+    POLL_S = 0.05
+
+    def _stream_threads(self) -> list[str]:
+        names = (thread.name for thread in threading.enumerate())
+        return [name for name in names if name.startswith("stream-")]
+
+    def test_workers_write_streamed_rows_and_stop(self, sink: Sink) -> None:
         runner = _runner(
             sink,
             streaming=[_AuthStream([_stream_row("sshd", "a"), _stream_row("su", "b")])],
         )
 
+        # The in-memory sink is ONE sqlite connection shared by every thread,
+        # so the test must not read it while the worker writes: a read here
+        # ends its session with a ROLLBACK on that same connection and can
+        # drop the worker's insert. Wait for the finite stream's thread to
+        # finish instead, then count.
         runner.start_streaming()
-        deadline = time.monotonic() + 5
-        while _count(sink, AuthEventRow) < 2 and time.monotonic() < deadline:
-            time.sleep(0.05)
+        deadline = time.monotonic() + self.WAIT_S
+        while self._stream_threads() and time.monotonic() < deadline:
+            time.sleep(self.POLL_S)
         runner.stop_streaming()
 
         assert _count(sink, AuthEventRow) == 2
-        assert [
-            t.name for t in threading.enumerate() if t.name.startswith("stream-")
-        ] == []
+        assert self._stream_threads() == []
 
-    def test_no_streaming_collectors_starts_nothing(self, sink):
+    def test_no_streaming_collectors_starts_nothing(self, sink: Sink) -> None:
         runner = _runner(sink)
 
         runner.start_streaming()

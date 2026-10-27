@@ -15,23 +15,27 @@ the contract between them could silently break:
 
 from __future__ import annotations
 
+import logging
+
 import json
 
 import pytest
 from sqlalchemy import create_engine
 
 from avai.host_monitor.enums import ThreatCategory, Verdict
-from avai.host_monitor.judge import Judgment, LlmJudge
+from avai.host_monitor.llm import Completion, CompletionClient, LlmSession
+from avai.host_monitor.judge import JudgeSettings, Judgment, LlmJudge
 from avai.host_monitor.prompts import Prompts
-from avai.host_monitor.sink import Sink
 from avai.host_monitor.runtime import Digest
+from avai.host_monitor.sink import Sink
+from pathlib import Path
 
 # ===========================================================================
 # 1. Enrichment evidence must reach the LLM prompt
 # ===========================================================================
 
 
-class _CapturingClient:
+class _CapturingClient(CompletionClient):
     """Captures the `user` prompt the judge sends; returns no judgments."""
 
     def __init__(self):
@@ -39,7 +43,7 @@ class _CapturingClient:
 
     def complete_structured(self, request):
         self.user_prompts.append(request.user)
-        return {"judgments": []}
+        return Completion({"judgments": []}, None)
 
 
 @pytest.fixture
@@ -57,14 +61,12 @@ class TestEvidenceReachesPrompt:
     an ``evidence`` key to each entry; the judge must serialise it into
     the user message verbatim."""
 
-    def test_evidence_field_is_serialised_into_user_prompt(self, judge_prompts):
+    def test_evidence_field_is_serialised_into_user_prompt(self, judge_prompts) -> None:
         client = _CapturingClient()
-        judge = LlmJudge(
-            prompts=judge_prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            judge_prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 0),
         )
         entry = {
             "content_hash": "a" * 64,
@@ -94,43 +96,37 @@ class TestEvidenceReachesPrompt:
         assert "38/72 engines flagged" in prompt
         assert "family=AsyncRAT" in prompt
 
-    def test_content_hash_is_stripped_from_prompt(self, judge_prompts):
+    def test_content_hash_is_stripped_from_prompt(self, judge_prompts) -> None:
         # content_hash is internal plumbing — sending it to the model
         # wastes tokens and could bias it. _call must drop it.
         client = _CapturingClient()
-        judge = LlmJudge(
-            prompts=judge_prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            judge_prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 0),
         )
         judge.judge("processes", "h", [{"content_hash": "deadbeef" * 8, "name": "x"}])
         assert "deadbeef" not in client.user_prompts[0]
 
-    def test_none_valued_fields_are_omitted_from_prompt(self, judge_prompts):
+    def test_none_valued_fields_are_omitted_from_prompt(self, judge_prompts) -> None:
         client = _CapturingClient()
-        judge = LlmJudge(
-            prompts=judge_prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            judge_prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 0),
         )
         judge.judge("processes", "h", [{"content_hash": "a", "name": "x", "exe": None}])
         # The null exe should not appear as `"exe": null` noise.
         assert '"exe"' not in client.user_prompts[0]
 
-    def test_index_is_injected_for_result_mapping(self, judge_prompts):
+    def test_index_is_injected_for_result_mapping(self, judge_prompts) -> None:
         # The model maps results back by integer index; every entry in
         # the payload must carry one.
         client = _CapturingClient()
-        judge = LlmJudge(
-            prompts=judge_prompts,
-            model="m",
-            batch_size=20,
-            max_per_collector=0,
-            client=client,
+        judge = LlmJudge.create(
+            judge_prompts,
+            LlmSession(client, logging.getLogger("test")),
+            JudgeSettings("m", 20, 0),
         )
         judge.judge(
             "processes",
@@ -147,29 +143,29 @@ class TestEvidenceReachesPrompt:
 
 
 class TestContentHashStability:
-    def test_insertion_order_does_not_change_hash(self):
+    def test_insertion_order_does_not_change_hash(self) -> None:
         # The same logical row built with keys in a different order must
         # hash identically — otherwise the same artifact dedups as two,
         # and the judge re-bills it every cycle.
-        a = Digest.of_row(
+        a = Digest().of_row(
             {"name": "x", "exe": "/bin/x", "user": "root"}, ["name", "exe", "user"]
         )
-        b = Digest.of_row(
+        b = Digest().of_row(
             {"user": "root", "exe": "/bin/x", "name": "x"}, ["name", "exe", "user"]
         )
         assert a == b
 
-    def test_field_subset_order_in_judge_fields_matters(self):
+    def test_field_subset_order_in_judge_fields_matters(self) -> None:
         # The judge_fields tuple defines the canonical order. Reordering
         # *it* is a deliberate schema change and SHOULD change the hash
         # (documents that judge_fields order is part of the contract).
-        a = Digest.of_row({"a": 1, "b": 2}, ["a", "b"])
-        b = Digest.of_row({"a": 1, "b": 2}, ["b", "a"])
+        a = Digest().of_row({"a": 1, "b": 2}, ["a", "b"])
+        b = Digest().of_row({"a": 1, "b": 2}, ["b", "a"])
         assert a != b
 
-    def test_extra_unjudged_keys_do_not_affect_hash(self):
-        base = Digest.of_row({"name": "x"}, ["name"])
-        noisy = Digest.of_row({"name": "x", "pid": 4321, "cpu": 0.5}, ["name"])
+    def test_extra_unjudged_keys_do_not_affect_hash(self) -> None:
+        base = Digest().of_row({"name": "x"}, ["name"])
+        noisy = Digest().of_row({"name": "x", "pid": 4321, "cpu": 0.5}, ["name"])
         assert base == noisy
 
 
@@ -179,21 +175,21 @@ class TestContentHashStability:
 
 
 @pytest.fixture
-def seeded_dashboard(tmp_path):
+def seeded_dashboard(tmp_path: Path):
     """A dashboard bound to a DB containing one active malicious finding
     and one benign one, with a latest run so active/resolved resolves."""
-    from avai.dashboard.app import create_app
+    from avai.dashboard.app import DashboardApp
     from avai.dashboard.config import DashboardConfig
-    from avai.dashboard.serve import _ensure_db_exists
+    from avai.dashboard.serve import DashboardSchema
 
     db = tmp_path / "seeded.db"
-    _ensure_db_exists(str(db))
+    DashboardSchema().ensure(str(db))
     engine = create_engine(f"sqlite:///{db}")
-    sink = Sink(engine)
+    sink = Sink.create(engine)
     sink.setup()
 
     run_id, started = sink.start_run("host", 5)
-    sink.end_run(ok=1, failed=0)
+    sink.end_run(run_id, ok=1, failed=0)
 
     # One malicious (active), one benign — both seen this run.
     for h, verdict, cat, reason in [
@@ -232,33 +228,33 @@ def seeded_dashboard(tmp_path):
         conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
     engine.dispose()
 
-    with create_app(DashboardConfig(db_path=str(db))).test_client() as c:
+    with DashboardApp(DashboardConfig(db_path=str(db))).build().test_client() as c:
         yield c
 
 
 class TestFindingFlowsToDashboard:
-    def test_malicious_finding_appears_in_findings_fragment(self, seeded_dashboard):
+    def test_malicious_finding_appears_in_findings_fragment(self, seeded_dashboard) -> None:
         r = seeded_dashboard.get("/fragments/findings")
         assert r.status_code == 200
         html = r.data.decode()
         # The malicious finding's reasoning must render.
         assert "launchagent drops from /tmp" in html
 
-    def test_benign_excluded_by_default(self, seeded_dashboard):
+    def test_benign_excluded_by_default(self, seeded_dashboard) -> None:
         r = seeded_dashboard.get("/fragments/findings")
         html = r.data.decode()
         # Default findings view excludes benign — the benign reasoning
         # must NOT be present.
         assert "signed apple binary" not in html
 
-    def test_verdict_filter_narrows(self, seeded_dashboard):
+    def test_verdict_filter_narrows(self, seeded_dashboard) -> None:
         # Explicitly filtering to benign surfaces it.
         r = seeded_dashboard.get("/fragments/findings?verdict=benign")
         html = r.data.decode()
         assert "signed apple binary" in html
         assert "launchagent drops from /tmp" not in html
 
-    def test_chart_counts_seeded_judgements(self, seeded_dashboard):
+    def test_chart_counts_seeded_judgements(self, seeded_dashboard) -> None:
         r = seeded_dashboard.get("/api/chart/verdicts")
         body = r.get_json()
         # Both judgements were created in this hour → the datasets must
@@ -266,7 +262,7 @@ class TestFindingFlowsToDashboard:
         assert sum(body["datasets"]["malicious"]) == 1
         assert sum(body["datasets"]["benign"]) == 1
 
-    def test_notifications_surface_malicious(self, seeded_dashboard):
+    def test_notifications_surface_malicious(self, seeded_dashboard) -> None:
         # since far in the past → the malicious judgement is "new".
         r = seeded_dashboard.get(
             "/api/notifications/new?since=2000-01-01T00:00:00+00:00"
@@ -284,37 +280,42 @@ class TestFindingFlowsToDashboard:
 
 
 class TestVirusTotalPathMapping:
-    def test_hash_maps_to_files_endpoint(self):
-        from avai.enrichers.base import Indicator, IndicatorType
-        from avai.enrichers.sources.virustotal import _path_for
+    def _path_for(self, indicator: object) -> str | None:
+        import logging
 
-        p = _path_for(Indicator(IndicatorType.SHA256, "a" * 64))
+        from avai.enrichers.http import HttpClient
+        from avai.enrichers.sources.virustotal import VirusTotalEnricher
+
+        http = HttpClient.create(logging.getLogger("test"))
+        return VirusTotalEnricher(http, "").api_path(indicator)
+
+    def test_hash_maps_to_files_endpoint(self) -> None:
+        from avai.enrichers.base import Indicator, IndicatorType
+
+        p = self._path_for(Indicator(IndicatorType.SHA256, "a" * 64))
         assert p == "/files/" + "a" * 64
 
-    def test_ip_maps_to_ip_addresses_endpoint(self):
+    def test_ip_maps_to_ip_addresses_endpoint(self) -> None:
         from avai.enrichers.base import Indicator, IndicatorType
-        from avai.enrichers.sources.virustotal import _path_for
 
-        p = _path_for(Indicator(IndicatorType.IPV4, "8.8.8.8"))
+        p = self._path_for(Indicator(IndicatorType.IPV4, "8.8.8.8"))
         assert p == "/ip_addresses/8.8.8.8"
 
-    def test_domain_maps_to_domains_endpoint(self):
+    def test_domain_maps_to_domains_endpoint(self) -> None:
         from avai.enrichers.base import Indicator, IndicatorType
-        from avai.enrichers.sources.virustotal import _path_for
 
-        p = _path_for(Indicator(IndicatorType.DOMAIN, "evil.test"))
+        p = self._path_for(Indicator(IndicatorType.DOMAIN, "evil.test"))
         assert p == "/domains/evil.test"
 
-    def test_url_is_base64url_without_padding(self):
+    def test_url_is_base64url_without_padding(self) -> None:
         # VT's URL endpoint ID is base64url(url) with '=' padding
         # stripped. A wrong encoding silently 404s every URL lookup.
         import base64
 
         from avai.enrichers.base import Indicator, IndicatorType
-        from avai.enrichers.sources.virustotal import _path_for
 
         url = "https://evil.test/path?x=1"
-        p = _path_for(Indicator(IndicatorType.URL, url))
+        p = self._path_for(Indicator(IndicatorType.URL, url))
         expected = base64.urlsafe_b64encode(url.encode()).rstrip(b"=").decode()
         assert p == f"/urls/{expected}"
         assert "=" not in p  # padding must be stripped

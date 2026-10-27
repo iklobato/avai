@@ -7,7 +7,39 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
 
+from pydantic import BaseModel, ConfigDict
+
 from .enums import ThreatCategory, Verdict
+
+
+class PromptTable(BaseModel):
+    """One ``[stage]`` table of the prompts file."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    system: str = ""
+    user_template: str = ""
+
+    def rendered_system(self) -> str:
+        """``$verdicts`` and ``$categories`` filled with the enum values the
+        schemas accept."""
+        return Template(self.system).safe_substitute(
+            verdicts=" | ".join(str(verdict) for verdict in Verdict),
+            categories=", ".join(str(category) for category in ThreatCategory),
+        )
+
+
+class PromptFile(BaseModel):
+    """The prompts TOML file, checked when it is read."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    judge: PromptTable = PromptTable()
+    narrator: PromptTable = PromptTable()
+    yara_coverage: PromptTable = PromptTable()
+    verifier: PromptTable = PromptTable()
+    investigator: PromptTable = PromptTable()
+    collector_hints: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -32,38 +64,22 @@ class Prompts:
     investigator_user_template: str = ""
 
     @classmethod
-    def load(cls, path: Path) -> "Prompts":
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-        judge = data.get("judge") or {}
-        raw_system = judge.get("system", "")
-        system = Template(raw_system).safe_substitute(
-            verdicts=" | ".join(str(v) for v in Verdict),
-            categories=", ".join(str(c) for c in ThreatCategory),
-        )
-        narrator = data.get("narrator") or {}
-        narrator_system = Template(narrator.get("system", "")).safe_substitute(
-            categories=", ".join(str(c) for c in ThreatCategory),
-        )
-        coverage = data.get("yara_coverage") or {}
-        verifier = data.get("verifier") or {}
-        investigator = data.get("investigator") or {}
-        investigator_system = Template(investigator.get("system", "")).safe_substitute(
-            verdicts=" | ".join(str(v) for v in Verdict),
-            categories=", ".join(str(c) for c in ThreatCategory),
-        )
+    def load(cls, path: Path) -> Prompts:
+        with open(path, "rb") as stream:
+            document = PromptFile.model_validate(tomllib.load(stream))
+        coverage, verifier = document.yara_coverage, document.verifier
         return cls(
-            system=system,
-            user_template=judge.get("user_template", ""),
-            collector_hints=dict(data.get("collector_hints") or {}),
-            narrator_system=narrator_system,
-            narrator_user_template=narrator.get("user_template", ""),
-            coverage_system=coverage.get("system", ""),
-            coverage_user_template=coverage.get("user_template", ""),
-            verifier_system=verifier.get("system", ""),
-            verifier_user_template=verifier.get("user_template", ""),
-            investigator_system=investigator_system,
-            investigator_user_template=investigator.get("user_template", ""),
+            system=document.judge.rendered_system(),
+            user_template=document.judge.user_template,
+            collector_hints=dict(document.collector_hints),
+            narrator_system=document.narrator.rendered_system(),
+            narrator_user_template=document.narrator.user_template,
+            coverage_system=coverage.system,
+            coverage_user_template=coverage.user_template,
+            verifier_system=verifier.system,
+            verifier_user_template=verifier.user_template,
+            investigator_system=document.investigator.rendered_system(),
+            investigator_user_template=document.investigator.user_template,
         )
 
     def hint_for(self, collector_name: str) -> str:

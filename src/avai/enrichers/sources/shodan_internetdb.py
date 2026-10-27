@@ -5,64 +5,81 @@ API; this is a free read-only view of their last-scan snapshot.
 
 https://internetdb.shodan.io/
 """
+
 from __future__ import annotations
 
-from http import HTTPStatus
-from typing import ClassVar, Optional
+from typing import Any, ClassVar
 
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
     Indicator,
     IndicatorType,
+    Verdict,
     VerdictHint,
 )
-from avai.enrichers.http import HttpClient
 
-_BASE = "https://internetdb.shodan.io"
+BASE_URL = "https://internetdb.shodan.io"
+BAD_TAGS = frozenset({"honeypot", "tor", "proxy", "compromised", "malware"})
+SUSPICIOUS_CONFIDENCE = 0.6
+UNKNOWN_CONFIDENCE = 0.3
+LISTED_PORTS = 6
+LISTED_TAGS = 4
+
+
+class ShodanHost(ApiReply):
+    """An InternetDB record; every field is shown as given."""
+
+    ports: object = None
+    vulns: object = None
+    tags: object = None
+    hostnames: object = None
+    cpes: object = None
+
+    def details(self) -> dict[str, Any]:
+        return {
+            "ports": self.ports or [],
+            "vulns": self.vulns or [],
+            "tags": self.tags or [],
+            "hostnames": self.hostnames or [],
+            "cpes": self.cpes,
+        }
 
 
 class ShodanInternetDBEnricher(Enricher):
-    name           = "shodan_internetdb"
+    name = "shodan_internetdb"
     supports_types = frozenset({IndicatorType.IPV4})
-    requires_token: ClassVar[Optional[str]] = None
-    ttl_hours      = 24
+    requires_token: ClassVar[str | None] = None
+    ttl_hours = 24
+    rate_host = "internetdb.shodan.io"
+    rate_per_second = 1.0
 
-    def __init__(self, http: Optional[HttpClient] = None):
-        self._http = http or HttpClient()
-        self._http.set_rate("internetdb.shodan.io", 1.0)
-
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
-        resp = self._http.get(f"{_BASE}/{indicator.value}")
-        if resp.status_code == HTTPStatus.NOT_FOUND:
+    def fetch(self, indicator: Indicator) -> Evidence | None:
+        response = self._http.get(f"{BASE_URL}/{indicator.value}")
+        if not self.answered(response):
             return None
-        if resp.status_code != HTTPStatus.OK:
-            return None
-        body = resp.json()
-        ports = body.get("ports") or []
-        cves  = body.get("vulns") or []
-        tags  = body.get("tags") or []
-        hostnames = body.get("hostnames") or []
+        return self._evidence(indicator, ShodanHost.model_validate(response.json()))
 
-        # Heuristic verdict: any known CVE on the IP → suspicious;
-        # honeypot/tor/proxy tags → suspicious; otherwise just informational.
-        bad_tags = {"honeypot", "tor", "proxy", "compromised", "malware"}
-        is_bad = bool(cves) or any(t in bad_tags for t in tags)
-
+    def _evidence(self, indicator: Indicator, host: ShodanHost) -> Evidence:
+        details = host.details()
+        ports, cves, tags = details["ports"], details["vulns"], details["tags"]
+        verdict = self._verdict(cves, tags)
         return Evidence(
-            source       = self.name,
-            indicator    = indicator,
-            verdict_hint = VerdictHint.SUSPICIOUS if is_bad else VerdictHint.UNKNOWN,
-            confidence   = 0.6 if is_bad else 0.3,
-            summary      = (
-                f"Shodan: ports={ports[:6]} cves={len(cves)} "
-                f"tags={tags[:4]} host={hostnames[:1]}"
+            source=self.name,
+            indicator=indicator,
+            verdict_hint=verdict.hint,
+            confidence=verdict.confidence,
+            summary=(
+                f"Shodan: ports={ports[:LISTED_PORTS]} cves={len(cves)} "
+                f"tags={tags[:LISTED_TAGS]} host={details['hostnames'][:1]}"
             ),
-            details      = {
-                "ports":     ports,
-                "vulns":     cves,
-                "tags":      tags,
-                "hostnames": hostnames,
-                "cpes":      body.get("cpes"),
-            },
+            details=details,
         )
+
+    def _verdict(self, cves: list[str], tags: list[str]) -> Verdict:
+        """Any known CVE on the IP → suspicious; honeypot/tor/proxy tags →
+        suspicious; otherwise just informational."""
+        if cves or any(tag in BAD_TAGS for tag in tags):
+            return Verdict(VerdictHint.SUSPICIOUS, SUSPICIOUS_CONFIDENCE)
+        return Verdict(VerdictHint.UNKNOWN, UNKNOWN_CONFIDENCE)

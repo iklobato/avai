@@ -11,10 +11,11 @@ Public API:
     Enricher                        — strategy base class
     EnrichmentChain                 — composes all enabled enrichers
     EvidenceCache                   — SQLite-backed TTL cache
-    EnrichmentRow                   — ORM persistence
-    build_default_chain()           — factory that reads env for keys
-    extract_indicators(coll, row)   — per-collector indicator extraction
+    EnrichmentSchema                — ORM persistence of the evidence
+    ChainBuilder                    — factory that reads env for keys
+    IndicatorExtraction             — per-collector indicator extraction
 """
+
 from __future__ import annotations
 
 from avai.enrichers.base import (
@@ -24,20 +25,22 @@ from avai.enrichers.base import (
     IndicatorType,
     VerdictHint,
 )
-from avai.enrichers.cache import EnrichmentRow, EvidenceCache
+from avai.enrichers.cache import EnrichmentSchema, EvidenceCache
 from avai.enrichers.chain import EnrichmentChain
-from avai.enrichers.indicators import extract_indicators
-from avai.enrichers.registry import build_default_chain
+from avai.enrichers.indicators import IndicatorExtraction
+from avai.enrichers.registry import ChainBuilder, ChainRequest, EnricherCatalog
 
 __all__ = [
+    "ChainBuilder",
+    "ChainRequest",
     "Enricher",
+    "EnricherCatalog",
     "EnrichmentChain",
-    "EnrichmentRow",
+    "EnrichmentSchema",
     "Evidence",
     "EvidenceCache",
     "Indicator",
+    "IndicatorExtraction",
     "IndicatorType",
     "VerdictHint",
-    "build_default_chain",
-    "extract_indicators",
 ]

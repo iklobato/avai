@@ -10,17 +10,21 @@ from __future__ import annotations
 
 import pytest
 
-from avai.host_monitor.runtime import tri_or
-from avai.host_monitor.security_controls import NetworkServiceControl, ServiceSpec
+from avai.host_monitor.runtime import TriState
+from avai.host_monitor.security_controls import (
+    NetworkServiceControl,
+    ServiceProbes,
+    ServiceSpec,
+)
 
 SSH = ServiceSpec("remote_login", "com.openssh.sshd", 22, "sshd")
 
 
-class FakeServiceManager:
-    def __init__(self, enabled=None):
+class FakeServiceSupervisor:
+    def __init__(self, enabled: int | None = None) -> None:
         self._enabled = enabled
 
-    def enabled(self, unit):
+    def enabled(self, unit: str) -> int | None:
         return self._enabled
 
 
@@ -45,12 +49,12 @@ class FakeProcessInspector:
 
 
 def _control(svc=None, listening=None, established=None, running=None):
-    return NetworkServiceControl(
-        SSH,
-        FakeServiceManager(svc),
+    probes = ServiceProbes(
+        FakeServiceSupervisor(svc),
         FakePortInspector(listening=listening, established=established),
         FakeProcessInspector(running=running),
     )
+    return NetworkServiceControl(SSH, probes)
 
 
 # ---- tri_or -------------------------------------------------------------
@@ -67,14 +71,14 @@ def _control(svc=None, listening=None, established=None, running=None):
         ((None, 1), 1),
     ],
 )
-def test_tri_or(values, expected):
-    assert tri_or(*values) == expected
+def test_tri_or(values, expected) -> None:
+    assert TriState().any_on(values) == expected
 
 
 # ---- NetworkServiceControl ---------------------------------------------
 
 
-def test_enabled_but_idle_is_reported_enabled_not_off():
+def test_enabled_but_idle_is_reported_enabled_not_off() -> None:
     # The regression: launchd holds the socket (port listening) but the
     # daemon process isn't spawned and there's no peer. The old pgrep-only
     # check reported this as "off"; it must now be enabled=ON, active=OFF.
@@ -83,7 +87,7 @@ def test_enabled_but_idle_is_reported_enabled_not_off():
     assert f.active == 0
 
 
-def test_enabled_via_service_manager_without_ports():
+def test_enabled_via_service_manager_without_ports() -> None:
     # No port visibility (non-root → None) but the service manager says
     # enabled — still enabled.
     f = _control(svc=1, listening=None, established=None, running=0).inspect()
@@ -91,45 +95,45 @@ def test_enabled_via_service_manager_without_ports():
     assert f.active == 0
 
 
-def test_genuinely_off():
+def test_genuinely_off() -> None:
     f = _control(svc=0, listening=0, established=0, running=0).inspect()
     assert f.enabled == 0
     assert f.active == 0
 
 
-def test_active_session():
+def test_active_session() -> None:
     # A live peer + running daemon → enabled and active.
     f = _control(svc=1, listening=1, established=1, running=1).inspect()
     assert f.enabled == 1
     assert f.active == 1
 
 
-def test_all_unknown_stays_unknown():
+def test_all_unknown_stays_unknown() -> None:
     f = _control(svc=None, listening=None, established=None, running=None).inspect()
     assert f.enabled is None
     assert f.active is None
 
 
-def test_topic_is_exposed():
+def test_topic_is_exposed() -> None:
     assert _control().topic == "remote_login"
 
 
 # ---- collector wiring (end-to-end regression) ---------------------------
 
 
-def test_macos_collector_maps_enabled_idle_service_to_on():
-    """The macOS collector, given an enabled-but-idle service, writes
-    ``..._enabled = 1`` (not 0) and keeps the live-session signal in
-    raw_json. Mac-only config commands degrade gracefully off-platform."""
+def test_macos_collector_maps_enabled_idle_service_to_on() -> None:
+    """Enabled-but-idle writes ``_enabled = 1``; the session signal stays in raw_json."""
     import json
 
     from avai.host_monitor.collectors import SystemIntegrityCollector
+    from avai.host_monitor.runtime import CommandRunner, HostIo, HostPaths
 
-    col = SystemIntegrityCollector(
-        services=FakeServiceManager(1),
-        ports=FakePortInspector(listening=0, established=0),
-        processes=FakeProcessInspector(running=0),
+    probes = ServiceProbes(
+        FakeServiceSupervisor(1),
+        FakePortInspector(listening=0, established=0),
+        FakeProcessInspector(running=0),
     )
+    col = SystemIntegrityCollector(HostIo(CommandRunner(), HostPaths("")), probes)
     row = list(col.collect())[0]
     assert row["remote_login_enabled"] == 1
     assert row["screen_sharing_enabled"] == 1

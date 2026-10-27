@@ -7,72 +7,80 @@ package.
 
 https://www.cisa.gov/known-exploited-vulnerabilities-catalog
 """
+
 from __future__ import annotations
 
-import threading
-import time
-from typing import ClassVar, Optional
+from typing import Any, ClassVar
 
-from avai.enrichers.base import (
-    Enricher,
-    Evidence,
-    Indicator,
-    IndicatorType,
-    VerdictHint,
+from pydantic import Field, field_validator
+
+from avai.enrichers.base import Evidence, Indicator, IndicatorType, VerdictHint
+from avai.enrichers.feed import FeedEnricher
+from avai.enrichers.reply import ApiReply
+
+URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+MALICIOUS_CONFIDENCE = 0.98
+DETAIL_FIELDS = (
+    "product",
+    "vendorProject",
+    "vulnerabilityName",
+    "dateAdded",
+    "shortDescription",
+    "requiredAction",
+    "knownRansomwareCampaignUse",
 )
-from avai.enrichers.http import HttpClient
-
-_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 
 
-class CisaKevEnricher(Enricher):
-    name           = "cisa_kev"
+class KevEntry(ApiReply):
+    """One known-exploited vulnerability."""
+
+    cve_id: object = Field("", alias="cveID")
+    product: object = None
+    date_added: object = Field(None, alias="dateAdded")
+    ransomware: object = Field(None, alias="knownRansomwareCampaignUse")
+
+
+class KevFeed(ApiReply):
+    vulnerabilities: list[KevEntry] = []
+
+    @field_validator("vulnerabilities", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or []
+
+
+class CisaKevEnricher(FeedEnricher[KevEntry]):
+    name = "cisa_kev"
     supports_types = frozenset({IndicatorType.CVE})
-    requires_token: ClassVar[Optional[str]] = None
-    ttl_hours      = 12
+    requires_token: ClassVar[str | None] = None
+    ttl_hours = 12
+    rate_host = "www.cisa.gov"
+    rate_per_second = 1.0
+    feed_url = URL
 
-    _catalog: dict[str, dict] = {}
-    _catalog_ts: float = 0.0
-    _lock = threading.Lock()
-    _FEED_FRESH_SECS = 60 * 60
+    def index(self, body: Any) -> dict[str, KevEntry]:
+        feed = KevFeed.model_validate(body or {})
+        return {
+            entry.cve_id.upper(): entry
+            for entry in feed.vulnerabilities
+            if entry.cve_id
+        }
 
-    def __init__(self, http: Optional[HttpClient] = None):
-        self._http = http or HttpClient()
-        self._http.set_rate("www.cisa.gov", 1.0)
-
-    def _ensure_catalog(self) -> None:
-        now = time.monotonic()
-        with self._lock:
-            if self._catalog and (now - self._catalog_ts) < self._FEED_FRESH_SECS:
-                return
-            resp = self._http.get(_URL)
-            resp.raise_for_status()
-            body = resp.json() or {}
-            CisaKevEnricher._catalog = {
-                v.get("cveID", "").upper(): v
-                for v in body.get("vulnerabilities") or []
-                if v.get("cveID")
-            }
-            CisaKevEnricher._catalog_ts = now
-
-    def _fetch(self, indicator: Indicator) -> Optional[Evidence]:
-        self._ensure_catalog()
-        hit = self._catalog.get(indicator.value.upper())
+    def fetch(self, indicator: Indicator) -> Evidence | None:
+        hit = self.entry(indicator.value.upper())
         if hit is None:
             return None
-        product = hit.get("product") or "?"
-        added   = hit.get("dateAdded") or ""
-        ransom  = hit.get("knownRansomwareCampaignUse") or "?"
+        product = hit.product or "?"
+        added = hit.date_added or ""
+        ransomware = hit.ransomware or "?"
         return Evidence(
-            source       = self.name,
-            indicator    = indicator,
-            verdict_hint = VerdictHint.MALICIOUS,
-            confidence   = 0.98,
-            summary      = (f"CISA KEV: actively exploited "
-                            f"product={product} added={added} ransomware={ransom}"),
-            details      = {k: hit.get(k) for k in (
-                "product", "vendorProject", "vulnerabilityName",
-                "dateAdded", "shortDescription", "requiredAction",
-                "knownRansomwareCampaignUse",
-            )},
+            source=self.name,
+            indicator=indicator,
+            verdict_hint=VerdictHint.MALICIOUS,
+            confidence=MALICIOUS_CONFIDENCE,
+            summary=(
+                f"CISA KEV: actively exploited "
+                f"product={product} added={added} ransomware={ransomware}"
+            ),
+            details=hit.given(DETAIL_FIELDS),
         )

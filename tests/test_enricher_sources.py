@@ -9,12 +9,18 @@ HTTP client with a fake.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from typing import Any
+import logging
+import os
+from http import HTTPStatus
+from typing import Any, NoReturn
 
 import pytest
 
-from avai.enrichers.base import Indicator, IndicatorType, VerdictHint
+from avai.enrichers import EnricherCatalog
+from avai.enrichers.base import EnricherError, Indicator, IndicatorType, VerdictHint
+from avai.enrichers.http import DEFAULT_TIMEOUT_S, RequestOptions
 
 # ---------------------------------------------------------------------------
 # Fake HTTP client — mimics requests.Response just enough for the
@@ -55,12 +61,12 @@ class _FakeHttp:
             return self._fixed
         raise AssertionError("FakeHttp ran out of canned responses")
 
-    def get(self, url, **kw):
-        self.calls.append(("GET", url, kw))
+    def get(self, url: str, options: RequestOptions | None = None) -> _FakeResp:
+        self.calls.append(("GET", url, (options or RequestOptions()).as_kwargs()))
         return self._next()
 
-    def post(self, url, **kw):
-        self.calls.append(("POST", url, kw))
+    def post(self, url: str, options: RequestOptions | None = None) -> _FakeResp:
+        self.calls.append(("POST", url, (options or RequestOptions()).as_kwargs()))
         return self._next()
 
     def set_rate(self, host, rate):  # noqa: D401
@@ -76,9 +82,11 @@ class TestMalwareBazaar:
     def _enricher(self, http):
         from avai.enrichers.sources.malware_bazaar import MalwareBazaarEnricher
 
-        return MalwareBazaarEnricher(http=http)
+        return MalwareBazaarEnricher.create(http, dict(os.environ))
 
-    def test_hit_returns_malicious_verdict(self, monkeypatch):
+    def test_hit_returns_malicious_verdict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
         http = _FakeHttp(
             _FakeResp(
@@ -97,23 +105,38 @@ class TestMalwareBazaar:
             )
         )
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.SHA256, "a" * 64))
+        ev = e.fetch(Indicator(IndicatorType.SHA256, "a" * 64))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
         assert ev.confidence > 0.9
         assert "AsyncRAT" in ev.summary
 
-    def test_no_results_returns_none(self, monkeypatch):
+    def test_no_results_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
         http = _FakeHttp(_FakeResp(json_body={"query_status": "no_results"}))
         e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.SHA256, "a" * 64)) is None
+        assert e.fetch(Indicator(IndicatorType.SHA256, "a" * 64)) is None
 
-    def test_unauthorized_returns_none(self, monkeypatch):
+    def test_a_miss_with_text_data_is_no_opinion_not_an_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
-        http = _FakeHttp(_FakeResp(status=401, text="Unauthorized"))
-        e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.SHA256, "a" * 64)) is None
+        miss = {"query_status": "hash_not_found", "data": "Hash not found"}
+        enricher = self._enricher(_FakeHttp(_FakeResp(json_body=miss)))
+        sha = hashlib.sha256().hexdigest()
+        assert enricher.fetch(Indicator(IndicatorType.SHA256, sha)) is None
+
+    def test_unauthorized_is_an_error_not_a_silent_no_opinion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
+        unauthorized = _FakeResp(status=HTTPStatus.UNAUTHORIZED, text="Unauthorized")
+        enricher = self._enricher(_FakeHttp(unauthorized))
+        with pytest.raises(EnricherError) as excinfo:
+            enricher.fetch(
+                Indicator(IndicatorType.SHA256, hashlib.sha256().hexdigest())
+            )
+        assert str(excinfo.value) == "malware_bazaar returned 401"
 
 
 # ---------------------------------------------------------------------------
@@ -125,9 +148,9 @@ class TestCirclHashlookup:
     def _enricher(self, http):
         from avai.enrichers.sources.circl_hashlookup import CirclHashlookupEnricher
 
-        return CirclHashlookupEnricher(http=http)
+        return CirclHashlookupEnricher.create(http, dict(os.environ))
 
-    def test_high_trust_hit_returns_benign(self):
+    def test_high_trust_hit_returns_benign(self) -> None:
         # Real CIRCL response: trust signal is "hashlookup:trust" (0-100).
         http = _FakeHttp(
             _FakeResp(
@@ -139,17 +162,17 @@ class TestCirclHashlookup:
             )
         )
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.SHA1, "a" * 40))
+        ev = e.fetch(Indicator(IndicatorType.SHA1, "a" * 40))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.BENIGN
         assert "notepad.exe" in ev.summary
 
-    def test_not_found_returns_none(self):
+    def test_not_found_returns_none(self) -> None:
         http = _FakeHttp(_FakeResp(status=404))
         e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.SHA1, "a" * 40)) is None
+        assert e.fetch(Indicator(IndicatorType.SHA1, "a" * 40)) is None
 
-    def test_low_trust_hit_is_not_whitelisted(self):
+    def test_low_trust_hit_is_not_whitelisted(self) -> None:
         # Regression: the source used to emit BENIGN (conf 0.9) for ANY 200
         # response. A low hashlookup:trust score means the hash is known but
         # untrusted — whitelisting it could suppress the judge on a bad
@@ -163,13 +186,13 @@ class TestCirclHashlookup:
             )
         )
         e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.SHA1, "b" * 40)) is None
+        assert e.fetch(Indicator(IndicatorType.SHA1, "b" * 40)) is None
 
-    def test_missing_trust_field_is_not_whitelisted(self):
+    def test_missing_trust_field_is_not_whitelisted(self) -> None:
         # No trust field at all -> trust 0 -> no benign whitelist.
         http = _FakeHttp(_FakeResp(json_body={"FileName": "x.exe"}))
         e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.SHA1, "c" * 40)) is None
+        assert e.fetch(Indicator(IndicatorType.SHA1, "c" * 40)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -181,9 +204,9 @@ class TestShodanInternetDB:
     def _enricher(self, http):
         from avai.enrichers.sources.shodan_internetdb import ShodanInternetDBEnricher
 
-        return ShodanInternetDBEnricher(http=http)
+        return ShodanInternetDBEnricher.create(http, dict(os.environ))
 
-    def test_cve_hit_yields_suspicious(self):
+    def test_cve_hit_yields_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -195,11 +218,11 @@ class TestShodanInternetDB:
             )
         )
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
+        ev = e.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_honeypot_tag_yields_suspicious(self):
+    def test_honeypot_tag_yields_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -211,11 +234,11 @@ class TestShodanInternetDB:
             )
         )
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
+        ev = e.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_clean_host_yields_unknown(self):
+    def test_clean_host_yields_unknown(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -227,14 +250,14 @@ class TestShodanInternetDB:
             )
         )
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
+        ev = e.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.UNKNOWN
 
-    def test_404_returns_none(self):
+    def test_404_returns_none(self) -> None:
         http = _FakeHttp(_FakeResp(status=404))
         e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.IPV4, "1.2.3.4")) is None
+        assert e.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4")) is None
 
 
 # ---------------------------------------------------------------------------
@@ -246,9 +269,9 @@ class TestIpwhoisGeo:
     def _enricher(self, http):
         from avai.enrichers.sources.ipwhois_geo import IpwhoisGeoEnricher
 
-        return IpwhoisGeoEnricher(http=http)
+        return IpwhoisGeoEnricher.create(http, dict(os.environ))
 
-    def test_success_returns_geo_details_and_unknown_hint(self):
+    def test_success_returns_geo_details_and_unknown_hint(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -264,7 +287,7 @@ class TestIpwhoisGeo:
             )
         )
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.IPV4, "8.8.8.8"))
+        ev = e.fetch(Indicator(IndicatorType.IPV4, "8.8.8.8"))
         assert ev is not None
         # purely informational — must not raise a threat verdict
         assert ev.verdict_hint is VerdictHint.UNKNOWN
@@ -275,7 +298,7 @@ class TestIpwhoisGeo:
         assert ev.details["org"] == "Google LLC"
         assert "Mountain View" in ev.summary and "AS15169" in ev.summary
 
-    def test_unsuccessful_body_returns_none(self):
+    def test_unsuccessful_body_returns_none(self) -> None:
         # bogon / reserved address → ipwho.is answers success=false
         http = _FakeHttp(
             _FakeResp(
@@ -286,14 +309,16 @@ class TestIpwhoisGeo:
             )
         )
         e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.IPV4, "10.0.0.1")) is None
+        assert e.fetch(Indicator(IndicatorType.IPV4, "10.0.0.1")) is None
 
-    def test_non_200_returns_none(self):
-        http = _FakeHttp(_FakeResp(status=503))
-        e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.IPV4, "8.8.8.8")) is None
+    def test_a_server_error_is_raised_for_the_chain_to_log(self) -> None:
+        unavailable = _FakeResp(status=HTTPStatus.SERVICE_UNAVAILABLE)
+        enricher = self._enricher(_FakeHttp(unavailable))
+        with pytest.raises(EnricherError) as excinfo:
+            enricher.fetch(Indicator(IndicatorType.IPV4, "8.8.8.8"))
+        assert str(excinfo.value) == "ipwhois_geo returned 503"
 
-    def test_ipv6_indicator_supported_and_parsed(self):
+    def test_ipv6_indicator_supported_and_parsed(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -310,7 +335,7 @@ class TestIpwhoisGeo:
         e = self._enricher(http)
         ind = Indicator(IndicatorType.IPV6, "2606:4700:4700::1111")
         assert e.supports(ind)
-        ev = e._fetch(ind)
+        ev = e.fetch(ind)
         assert ev is not None
         assert ev.details["city"] == "San Francisco"
         assert ev.details["asn"] == 13335
@@ -328,11 +353,9 @@ class TestCisaKev:
         from avai.enrichers.sources.cisa_kev import CisaKevEnricher
 
         # Reset class-level cache so tests don't bleed into each other.
-        CisaKevEnricher._catalog = {}
-        CisaKevEnricher._catalog_ts = 0.0
-        return CisaKevEnricher(http=http)
+        return CisaKevEnricher.create(http, dict(os.environ))
 
-    def test_known_exploited_cve_returns_malicious(self):
+    def test_known_exploited_cve_returns_malicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -351,15 +374,15 @@ class TestCisaKev:
             )
         )
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.CVE, "CVE-2024-99999"))
+        ev = e.fetch(Indicator(IndicatorType.CVE, "CVE-2024-99999"))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
         assert "WidgetServer" in ev.summary
 
-    def test_cve_not_in_catalog_returns_none(self):
+    def test_cve_not_in_catalog_returns_none(self) -> None:
         http = _FakeHttp(_FakeResp(json_body={"vulnerabilities": []}))
         e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.CVE, "CVE-1999-0000")) is None
+        assert e.fetch(Indicator(IndicatorType.CVE, "CVE-1999-0000")) is None
 
 
 # ---------------------------------------------------------------------------
@@ -371,9 +394,18 @@ class TestOSV:
     def _enricher(self, http):
         from avai.enrichers.sources.osv import OSVEnricher
 
-        return OSVEnricher(http=http)
+        return OSVEnricher.create(http, dict(os.environ))
 
-    def test_package_with_advisory_returns_suspicious(self):
+    def test_a_bare_app_name_is_not_sent_since_osv_rejects_it(self) -> None:
+        # No version and no known ecosystem: OSV answers 400 "invalid query".
+        http = _FakeHttp(_FakeResp(status=HTTPStatus.BAD_REQUEST))
+        assert (
+            self._enricher(http).fetch(Indicator(IndicatorType.PACKAGE, "Safari"))
+            is None
+        )
+        assert http.calls == []
+
+    def test_package_with_advisory_returns_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -384,29 +416,29 @@ class TestOSV:
             )
         )
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.PACKAGE, "openssl@1.0.0"))
+        ev = e.fetch(Indicator(IndicatorType.PACKAGE, "openssl@1.0.0"))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
         assert "GHSA-1234-aaaa-bbbb" in ev.summary
 
-    def test_clean_package_returns_none(self):
+    def test_clean_package_returns_none(self) -> None:
         http = _FakeHttp(_FakeResp(json_body={"vulns": []}))
         e = self._enricher(http)
-        assert e._fetch(Indicator(IndicatorType.PACKAGE, "ok@1.0")) is None
+        assert e.fetch(Indicator(IndicatorType.PACKAGE, "ok@1.0")) is None
 
-    def test_cve_indicator_uses_get_vulns_endpoint(self):
+    def test_cve_indicator_uses_get_vulns_endpoint(self) -> None:
         # CVE lookups must GET /v1/vulns/{id}; POST /v1/query {"id":...}
         # returns HTTP 400 against the real API. The GET returns a single
         # vuln object (not a {"vulns": [...]} envelope).
         http = _FakeHttp(_FakeResp(json_body={"id": "CVE-2024-1", "summary": "x"}))
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.CVE, "CVE-2024-1"))
+        ev = e.fetch(Indicator(IndicatorType.CVE, "CVE-2024-1"))
         assert ev is not None
         method, url, _ = http.calls[0]
         assert method == "GET"
         assert url.endswith("/v1/vulns/CVE-2024-1")
 
-    def test_cve_alias_is_surfaced_for_forward_chain(self):
+    def test_cve_alias_is_surfaced_for_forward_chain(self) -> None:
         # Regression: OSV's primary id is often GHSA-/PYSEC-, with the CVE
         # only in aliases. details["vuln_ids"] used to carry the primary id
         # only, so the chain's CVE forward-enrichment (NVD CVSS, CISA KEV)
@@ -425,7 +457,7 @@ class TestOSV:
             )
         )
         e = self._enricher(http)
-        ev = e._fetch(Indicator(IndicatorType.PACKAGE, "pkg@1.0"))
+        ev = e.fetch(Indicator(IndicatorType.PACKAGE, "pkg@1.0"))
         assert ev is not None
         vuln_ids = ev.details["vuln_ids"]
         assert "CVE-2024-9999" in vuln_ids  # alias surfaced
@@ -435,27 +467,29 @@ class TestOSV:
         "value,payload",
         [
             ("openssl@1.0.0", {"package": {"name": "openssl"}, "version": "1.0.0"}),
-            ("openssl", {"package": {"name": "openssl"}}),
             (
                 "pip@24.0",
                 {"package": {"name": "pip", "ecosystem": "PyPI"}, "version": "24.0"},
             ),
         ],
     )
-    def test_package_query_payload(self, value, payload):
+    def test_package_query_payload(self, value, payload) -> None:
         http = _FakeHttp(_FakeResp(json_body={"vulns": []}))
-        self._enricher(http)._fetch(Indicator(IndicatorType.PACKAGE, value))
+        self._enricher(http).fetch(Indicator(IndicatorType.PACKAGE, value))
         assert http.calls == [
-            ("POST", "https://api.osv.dev/v1/query", {"json": payload})
+            (
+                "POST",
+                "https://api.osv.dev/v1/query",
+                {"json": payload, "timeout": DEFAULT_TIMEOUT_S},
+            )
         ]
 
-    def test_package_without_name_is_not_queried(self):
+    def test_package_without_name_is_not_queried(self) -> None:
         http = _FakeHttp(_FakeResp(json_body={"vulns": [{"id": "X"}]}))
-        ev = self._enricher(http)._fetch(Indicator(IndicatorType.PACKAGE, "@1.0"))
+        ev = self._enricher(http).fetch(Indicator(IndicatorType.PACKAGE, "@1.0"))
         assert ev is None
         assert http.calls == []
 
-    @pytest.mark.parametrize("status", [404, 500])
     @pytest.mark.parametrize(
         "indicator",
         [
@@ -463,15 +497,30 @@ class TestOSV:
             Indicator(IndicatorType.PACKAGE, "pkg@1.0"),
         ],
     )
-    def test_non_ok_status_returns_none(self, status, indicator):
+    def test_not_found_returns_none(self, indicator: Indicator) -> None:
         body = {"id": "CVE-2024-1", "vulns": [{"id": "CVE-2024-1"}]}
-        http = _FakeHttp(_FakeResp(status=status, json_body=body))
-        assert self._enricher(http)._fetch(indicator) is None
+        http = _FakeHttp(_FakeResp(status=HTTPStatus.NOT_FOUND, json_body=body))
+        assert self._enricher(http).fetch(indicator) is None
 
-    def test_ids_are_deduped_across_the_first_five_vulns(self):
+    @pytest.mark.parametrize(
+        "indicator",
+        [
+            Indicator(IndicatorType.CVE, "CVE-2024-1"),
+            Indicator(IndicatorType.PACKAGE, "pkg@1.0"),
+        ],
+    )
+    def test_a_server_error_is_raised(self, indicator: Indicator) -> None:
+        http = _FakeHttp(
+            _FakeResp(status=HTTPStatus.INTERNAL_SERVER_ERROR, json_body={})
+        )
+        with pytest.raises(EnricherError) as excinfo:
+            self._enricher(http).fetch(indicator)
+        assert str(excinfo.value) == "osv returned 500"
+
+    def test_ids_are_deduped_across_the_first_five_vulns(self) -> None:
         vulns = [{"id": f"GHSA-{n}", "aliases": ["CVE-2024-1"]} for n in range(7)]
         http = _FakeHttp(_FakeResp(json_body={"vulns": vulns}))
-        ev = self._enricher(http)._fetch(Indicator(IndicatorType.PACKAGE, "pkg@1.0"))
+        ev = self._enricher(http).fetch(Indicator(IndicatorType.PACKAGE, "pkg@1.0"))
         expected = ["GHSA-0", "CVE-2024-1", "GHSA-1", "GHSA-2", "GHSA-3", "GHSA-4"]
         assert ev.details["vuln_ids"] == expected
         assert len(ev.details["summaries"]) == 5
@@ -484,11 +533,11 @@ class TestOSV:
 
 
 class TestVirusTotal:
-    def _enricher(self, http, monkeypatch):
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("VT_API_KEY", "fake")
         from avai.enrichers.sources.virustotal import VirusTotalEnricher
 
-        return VirusTotalEnricher(http=http)
+        return VirusTotalEnricher.create(http, dict(os.environ))
 
     def _vt_body(self, *, malicious=0, suspicious=0, harmless=0, undetected=0):
         return {
@@ -504,25 +553,31 @@ class TestVirusTotal:
             }
         }
 
-    def test_many_malicious_engines_yields_malicious(self, monkeypatch):
+    def test_many_malicious_engines_yields_malicious(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         http = _FakeHttp(
             _FakeResp(json_body=self._vt_body(malicious=30, harmless=20, undetected=15))
         )
         e = self._enricher(http, monkeypatch)
-        ev = e._fetch(Indicator(IndicatorType.SHA256, "a" * 64))
+        ev = e.fetch(Indicator(IndicatorType.SHA256, "a" * 64))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
 
-    def test_few_malicious_engines_yields_suspicious(self, monkeypatch):
+    def test_few_malicious_engines_yields_suspicious(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         http = _FakeHttp(
             _FakeResp(json_body=self._vt_body(malicious=2, harmless=50, undetected=20))
         )
         e = self._enricher(http, monkeypatch)
-        ev = e._fetch(Indicator(IndicatorType.SHA256, "a" * 64))
+        ev = e.fetch(Indicator(IndicatorType.SHA256, "a" * 64))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_zero_malicious_with_many_engines_yields_benign(self, monkeypatch):
+    def test_zero_malicious_with_many_engines_yields_benign(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body=self._vt_body(
@@ -531,14 +586,14 @@ class TestVirusTotal:
             )
         )
         e = self._enricher(http, monkeypatch)
-        ev = e._fetch(Indicator(IndicatorType.SHA256, "a" * 64))
+        ev = e.fetch(Indicator(IndicatorType.SHA256, "a" * 64))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.BENIGN
 
-    def test_404_returns_none(self, monkeypatch):
+    def test_404_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(_FakeResp(status=404))
         e = self._enricher(http, monkeypatch)
-        assert e._fetch(Indicator(IndicatorType.SHA256, "a" * 64)) is None
+        assert e.fetch(Indicator(IndicatorType.SHA256, "a" * 64)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -547,13 +602,16 @@ class TestVirusTotal:
 
 
 class TestAbuseIpDb:
-    def _enricher(self, http, monkeypatch):
+    FRACTIONAL_SCORE = 90.7
+    REPORTS = 50
+
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("ABUSEIPDB_API_KEY", "fake")
         from avai.enrichers.sources.abuseipdb import AbuseIpDbEnricher
 
-        return AbuseIpDbEnricher(http=http)
+        return AbuseIpDbEnricher.create(http, dict(os.environ))
 
-    def test_high_score_yields_malicious(self, monkeypatch):
+    def test_high_score_yields_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -567,11 +625,25 @@ class TestAbuseIpDb:
             )
         )
         e = self._enricher(http, monkeypatch)
-        ev = e._fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
+        ev = e.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
 
-    def test_low_score_yields_unknown(self, monkeypatch):
+    def test_a_fractional_score_is_truncated_as_before(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = {
+            "data": {
+                "abuseConfidenceScore": self.FRACTIONAL_SCORE,
+                "totalReports": self.REPORTS,
+            }
+        }
+        enricher = self._enricher(_FakeHttp(_FakeResp(json_body=body)), monkeypatch)
+        evidence = enricher.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
+        assert evidence is not None
+        assert evidence.summary.startswith("AbuseIPDB: score=90 reports=50 ")
+
+    def test_low_score_yields_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -583,7 +655,7 @@ class TestAbuseIpDb:
             )
         )
         e = self._enricher(http, monkeypatch)
-        ev = e._fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
+        ev = e.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.UNKNOWN
 
@@ -603,8 +675,8 @@ class _RecordingHttp:
     def __init__(self):
         self.calls: list[dict] = []
 
-    def get(self, url, **kw):
-        self.calls.append({"url": url, **kw})
+    def get(self, url: str, options: RequestOptions | None = None) -> NoReturn:
+        self.calls.append({"url": url, **(options or RequestOptions()).as_kwargs()})
         raise _RequestSeen
 
     post = get
@@ -623,17 +695,16 @@ _SAMPLE_VALUES = {
 
 
 def _keyed_sources():
-    from avai.enrichers.registry import discover_enricher_classes
-
-    return [c for c in discover_enricher_classes() if c.requires_token]
+    catalog = EnricherCatalog.of_sources(logging.getLogger("test"))
+    return [c for c in catalog.classes() if c.requires_token]
 
 
 @pytest.mark.parametrize("cls", _keyed_sources(), ids=lambda c: c.name)
-def test_keyed_source_sends_its_env_key(cls, monkeypatch):
+def test_keyed_source_sends_its_env_key(cls, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(cls.requires_token, "k-secret-123")
     http = _RecordingHttp()
-    source = cls(http=http)
+    source = cls.create(http, dict(os.environ))
     itype = next(t for t in _SAMPLE_VALUES if t in cls.supports_types)
     with pytest.raises(_RequestSeen):
-        source._fetch(Indicator(itype, _SAMPLE_VALUES[itype]))
+        source.fetch(Indicator(itype, _SAMPLE_VALUES[itype]))
     assert "k-secret-123" in repr(http.calls[0])

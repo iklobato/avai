@@ -1,7 +1,7 @@
 """Security-control detection — the proper-abstraction layer for the
 system-integrity topics.
 
-A :class:`SecurityControl` answers two questions about one topic:
+A :class:`NetworkServiceControl` answers two questions about one topic:
 
 * ``enabled`` — *posture*: is the service configured to be reachable? (the
   thing a security panel must never miss — an exposed SSH that's idle).
@@ -9,7 +9,7 @@ A :class:`SecurityControl` answers two questions about one topic:
   "webcam-in-use" signal — a live session).
 
 Each control composes small injected capabilities (a
-:class:`ServiceManager`, :class:`PortInspector`, :class:`ProcessInspector`)
+:class:`ServiceSupervisor`, :class:`PortInspector`, :class:`ProcessInspector`)
 rather than shelling out itself, so the OS differences live entirely in the
 injected strategy and the same control class works on macOS / Linux /
 Windows. Topics are assembled per OS at the composition root (the host
@@ -22,9 +22,7 @@ the existing ``system_integrity`` columns and probe convention.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Protocol
-
-from .runtime import PortInspector, ProcessInspector, ServiceManager, tri_or
+from .runtime import PortInspector, ProcessInspector, ServiceSupervisor, TriState
 
 
 @dataclass(frozen=True)
@@ -32,17 +30,9 @@ class IntegrityFinding:
     """One topic's posture + behaviour, with the signal that decided it."""
 
     topic: str
-    enabled: Optional[int]
-    active: Optional[int]
+    enabled: int | None
+    active: int | None
     source: str
-
-
-class SecurityControl(Protocol):
-    """Detects exactly one security topic. Substitutable across platforms."""
-
-    topic: str
-
-    def inspect(self) -> IntegrityFinding: ...
 
 
 @dataclass(frozen=True)
@@ -58,6 +48,19 @@ class ServiceSpec:
     process: str
 
 
+@dataclass(frozen=True)
+class ServiceProbes:
+    """The OS-specific mechanisms a network-service control combines:
+    service enablement, the port table and the process table."""
+
+    services: ServiceSupervisor
+    ports: PortInspector
+    processes: ProcessInspector
+
+    def control(self, spec: ServiceSpec) -> NetworkServiceControl:
+        return NetworkServiceControl(spec, self)
+
+
 class NetworkServiceControl:
     """Posture + behaviour for a socket-activated network service (SSH,
     Screen Sharing, ARD/RDP), on any OS.
@@ -70,35 +73,23 @@ class NetworkServiceControl:
     and therefore hid idle-but-exposed services.
     """
 
-    def __init__(
-        self,
-        spec: ServiceSpec,
-        services: ServiceManager,
-        ports: PortInspector,
-        processes: ProcessInspector,
-    ) -> None:
+    def __init__(self, spec: ServiceSpec, probes: ServiceProbes) -> None:
         self._spec = spec
-        self._services = services
-        self._ports = ports
-        self._processes = processes
+        self._probes = probes
 
     @property
     def topic(self) -> str:
         return self._spec.topic
 
     def inspect(self) -> IntegrityFinding:
-        spec = self._spec
-        enabled = tri_or(
-            self._services.enabled(spec.unit),
-            self._ports.listening(spec.port),
-        )
-        active = tri_or(
-            self._processes.running(spec.process),
-            self._ports.established(spec.port),
-        )
+        spec, probes = self._spec, self._probes
+        ports = probes.ports
+        serving = (probes.services.enabled(spec.unit), ports.listening(spec.port))
+        in_use = (probes.processes.running(spec.process), ports.established(spec.port))
+        signals = TriState()
         return IntegrityFinding(
             topic=spec.topic,
-            enabled=enabled,
-            active=active,
+            enabled=signals.any_on(serving),
+            active=signals.any_on(in_use),
             source="service+port+process",
         )

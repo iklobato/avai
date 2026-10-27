@@ -7,8 +7,8 @@ import threading
 from abc import ABC, abstractmethod
 from typing import ClassVar, Iterable
 
-from .. import slices
 from ..models import _RowBase
+from ..slices import Slice
 
 
 class Collector(ABC):
@@ -20,11 +20,11 @@ class Collector(ABC):
     via ``judge_hints`` (sourced from the external prompts TOML file).
     """
 
-    slice: ClassVar[slices.Slice]
+    slice: ClassVar[Slice]
     judge_enabled: ClassVar[bool] = True
     judge_fields: ClassVar[tuple[str, ...]] = ()
 
-    def __init__(self, judge_hints: str = ""):
+    def __init__(self, judge_hints: str = "") -> None:
         self.judge_hints = judge_hints
 
     @property

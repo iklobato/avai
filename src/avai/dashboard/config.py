@@ -11,6 +11,19 @@ from typing import Optional
 DEFAULT_DB_PATH = Path.home() / ".avai" / "avai.db"
 
 
+class EnvToggle:
+    """An on/off environment variable. Only an explicit "on" value turns it
+    on, so ``AVAI_CONTROL_OPEN=0`` keeps control closed (fail closed)."""
+
+    ON_VALUES = frozenset({"1", "true", "yes", "on"})
+
+    def __init__(self, environ: Mapping[str, str]) -> None:
+        self._environ = environ
+
+    def is_on(self, name: str) -> bool:
+        return self._environ.get(name, "").strip().lower() in self.ON_VALUES
+
+
 @dataclass(frozen=True)
 class DashboardConfig:
     db_path: str
@@ -29,11 +42,12 @@ class DashboardConfig:
     def from_env(
         cls, db_path: str, environ: Mapping[str, str] = os.environ
     ) -> DashboardConfig:
+        toggle = EnvToggle(environ)
         return cls(
             db_path=db_path,
             control_token=environ.get("AVAI_CONTROL_TOKEN") or None,
-            control_open=bool(environ.get("AVAI_CONTROL_OPEN")),
-            app_mode=bool(environ.get("AVAI_APP_MODE")),
+            control_open=toggle.is_on("AVAI_CONTROL_OPEN"),
+            app_mode=toggle.is_on("AVAI_APP_MODE"),
             query_log_path=environ.get("AVAI_QUERY_LOG") or None,
         )
 

@@ -10,6 +10,8 @@ container's startup. These tests pin that behaviour.
 
 from __future__ import annotations
 
+import logging
+
 import os
 import stat
 
@@ -19,11 +21,8 @@ from sqlalchemy.exc import OperationalError
 
 from avai.host_monitor.sink import Sink
 from avai.host_monitor.models import Base
-from avai.host_monitor.sink import (
-    _is_benign_concurrent_ddl,
-    _migrate_add_columns,
-    _relax_db_permissions,
-)
+from avai.host_monitor.db_bootstrap import ColumnMigration, DbPermissions, DdlRace
+from pathlib import Path
 
 
 class TestBenignConcurrentDDL:
@@ -35,8 +34,8 @@ class TestBenignConcurrentDDL:
             "duplicate column name: cost_usd",
         ],
     )
-    def test_recognised_as_benign(self, msg):
-        assert _is_benign_concurrent_ddl(OperationalError(msg, None, Exception(msg)))
+    def test_recognised_as_benign(self, msg) -> None:
+        assert DdlRace().is_benign(OperationalError(msg, None, Exception(msg)))
 
     @pytest.mark.parametrize(
         "msg",
@@ -46,36 +45,34 @@ class TestBenignConcurrentDDL:
             "(sqlite3.OperationalError) disk I/O error",
         ],
     )
-    def test_other_errors_not_benign(self, msg):
-        assert not _is_benign_concurrent_ddl(
-            OperationalError(msg, None, Exception(msg))
-        )
+    def test_other_errors_not_benign(self, msg) -> None:
+        assert not DdlRace().is_benign(OperationalError(msg, None, Exception(msg)))
 
 
 class TestSetupTolerance:
-    def test_setup_is_idempotent(self, tmp_path):
+    def test_setup_is_idempotent(self, tmp_path: Path) -> None:
         """Running setup twice on the same DB (the steady-state case) is a
         no-op the second time, not a crash."""
         db = tmp_path / "t.db"
         engine = create_engine(f"sqlite:///{db}")
-        Sink(engine).setup()
-        Sink(engine).setup()  # must not raise
+        Sink.create(engine).setup()
+        Sink.create(engine).setup()  # must not raise
 
-    def test_create_all_race_is_swallowed(self, tmp_path, monkeypatch):
+    def test_create_all_race_is_swallowed(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A benign 'already exists' from create_all (a second process won the
         race, so the schema already exists) is tolerated; setup still completes
         and migrations run against the already-present tables."""
         db = tmp_path / "t.db"
         engine = create_engine(f"sqlite:///{db}")
-        Sink(engine).setup()  # the winner already built the schema
+        Sink.create(engine).setup()  # the winner already built the schema
 
         def _raise_exists(*_a, **_k):
             raise OperationalError("table runs already exists", None, Exception())
 
         monkeypatch.setattr(Base.metadata, "create_all", _raise_exists)
-        Sink(engine).setup()  # must not raise
+        Sink.create(engine).setup()  # must not raise
 
-    def test_create_all_real_error_propagates(self, tmp_path, monkeypatch):
+    def test_create_all_real_error_propagates(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         db = tmp_path / "t.db"
         engine = create_engine(f"sqlite:///{db}")
 
@@ -84,9 +81,9 @@ class TestSetupTolerance:
 
         monkeypatch.setattr(Base.metadata, "create_all", _raise_locked)
         with pytest.raises(OperationalError):
-            Sink(engine).setup()
+            Sink.create(engine).setup()
 
-    def test_migrate_add_columns_tolerates_lost_alter_race(self, tmp_path):
+    def test_migrate_add_columns_tolerates_lost_alter_race(self, tmp_path: Path) -> None:
         """Simulate the duplicate-column race: a table is missing one ORM
         column on inspect, but the ALTER fails with 'duplicate column name'
         (another process added it first). _migrate_add_columns must skip it
@@ -116,7 +113,9 @@ class TestSetupTolerance:
                 # collides while 'b' should still succeed.
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN a VARCHAR"))
 
-            _migrate_add_columns(engine)  # must not raise
+            ColumnMigration(
+                engine, logging.getLogger("test")
+            ).add_missing()  # must not raise
 
             cols = {c["name"] for c in inspect(engine).get_columns(table_name)}
             assert {"id", "a", "b"} <= cols
@@ -129,23 +128,23 @@ class TestRelaxDbPermissions:
     both write the same SQLite file. setup() makes the dir + db files
     group-writable so a same-group dashboard can write the control_state row."""
 
-    def test_setup_makes_db_group_writable(self, tmp_path):
+    def test_setup_makes_db_group_writable(self, tmp_path: Path) -> None:
         db = tmp_path / "t.db"
-        Sink(create_engine(f"sqlite:///{db}")).setup()
+        Sink.create(create_engine(f"sqlite:///{db}")).setup()
         assert stat.S_IMODE(db.stat().st_mode) & stat.S_IWGRP
         assert stat.S_IMODE(tmp_path.stat().st_mode) & stat.S_IWGRP
 
-    def test_relax_covers_wal_and_shm_siblings(self, tmp_path):
+    def test_relax_covers_wal_and_shm_siblings(self, tmp_path: Path) -> None:
         db = tmp_path / "t.db"
         db.write_bytes(b"")
         for sibling in ("t.db-wal", "t.db-shm"):
             (tmp_path / sibling).write_bytes(b"")
             (tmp_path / sibling).chmod(0o600)
-        _relax_db_permissions(db)
+        DbPermissions().relax(db)
         for sibling in ("t.db-wal", "t.db-shm"):
             assert stat.S_IMODE((tmp_path / sibling).stat().st_mode) & stat.S_IWGRP
 
-    def test_tolerates_permission_error_for_non_owner(self, tmp_path, monkeypatch):
+    def test_tolerates_permission_error_for_non_owner(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """A dashboard running as a different user can't chmod the root-owned
         DB; the failed chmod must be swallowed, not crash startup."""
         db = tmp_path / "t.db"
@@ -155,4 +154,4 @@ class TestRelaxDbPermissions:
             raise PermissionError("not the owner")
 
         monkeypatch.setattr(os, "chmod", _denied)
-        _relax_db_permissions(db)  # must not raise
+        DbPermissions().relax(db)  # must not raise
