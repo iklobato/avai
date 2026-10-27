@@ -67,10 +67,6 @@ class UnknownFindingInvestigator:
         )
         return cls(StructuredCall("investigator", session, request))
 
-    @property
-    def model(self) -> str:
-        return self._llm.request.model
-
     def investigate(
         self, collector: str, finding: dict[str, Any]
     ) -> dict[str, Any] | None:

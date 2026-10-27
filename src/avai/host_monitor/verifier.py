@@ -55,10 +55,6 @@ class MaliciousVerdictVerifier:
         )
         return cls(StructuredCall("verifier", session, request))
 
-    @property
-    def model(self) -> str:
-        return self._llm.request.model
-
     def verify(self, finding: dict[str, Any]) -> dict[str, Any] | None:
         """Return ``{"refuted": bool, "reasoning": str}`` or None on failure.
         A verification failure leaves the original verdict untouched rather
