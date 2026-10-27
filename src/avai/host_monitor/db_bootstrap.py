@@ -16,6 +16,7 @@ from sqlalchemy.schema import Column, Table
 
 from avai import db_migrate
 from avai.enrichers.cache import EnrichmentSchema
+from avai.errors import AvaiError
 
 from .models import Base
 
@@ -123,7 +124,7 @@ class ColumnMigration:
         self._logger.info("schema migration: added %s.%s", table.name, column.name)
 
 
-class SchemaMigrationError(RuntimeError):
+class SchemaMigrationError(AvaiError, RuntimeError):
     """The Alembic upgrade to head failed, so the DB would serve on a stale
     schema."""
 

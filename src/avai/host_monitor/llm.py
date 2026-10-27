@@ -15,10 +15,12 @@ from typing import Any
 from anthropic import Anthropic
 from anthropic import APIError as AnthropicApiError
 
+from avai.errors import AvaiError
+
 from .constants import DEFAULT_JUDGE_TIMEOUT_S
 
 
-class CompletionError(RuntimeError):
+class CompletionError(AvaiError, RuntimeError):
     """An LLM call failed or returned a response with no usable result."""
 
 

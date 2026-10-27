@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from avai.errors import UnsupportedPlatformError
 from avai.hostsfile import (
     DASHBOARD_HOSTNAME,
     LOOPBACK_ADDRESSES,
@@ -25,7 +26,6 @@ from avai.hostsfile import (
     HostsRegistrar,
     HostsTable,
     Outcome,
-    UnsupportedPlatformError,
     PlatformResolver,
     _WindowsPlatform,
 )

@@ -6,6 +6,8 @@ import subprocess
 from collections.abc import Iterable
 from typing import Any, NamedTuple
 
+from avai.errors import AvaiError
+
 # Per-method default timeouts (seconds); they match the historical
 # free-function defaults so behaviour is unchanged across the migration.
 JSON_TIMEOUT_S = 60
@@ -14,7 +16,7 @@ QUICK_TIMEOUT_S = 10
 STDERR_EXCERPT_CHARS = 200
 
 
-class CommandFailedError(RuntimeError):
+class CommandFailedError(AvaiError, RuntimeError):
     """A command exited non-zero; the message carries a stderr excerpt."""
 
 

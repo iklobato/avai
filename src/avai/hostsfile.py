@@ -33,6 +33,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from avai.errors import AvaiError, UnsupportedPlatformError
+
 DASHBOARD_HOSTNAME = "avai.local"
 LOOPBACK_IPV4 = "127.0.0.1"
 LOOPBACK_IPV6 = "::1"
@@ -57,14 +59,11 @@ _HOSTNAME_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})*$")
 _MAX_HOSTNAME_LEN = 253  # RFC 1035, as text without the trailing dot
 
 
-class HostsError(RuntimeError):
+class HostsError(AvaiError, RuntimeError):
     """Base class for hosts-file management failures."""
 
 
-class UnsupportedPlatformError(HostsError):
-    def __init__(self, system: str) -> None:
-        self.system = system
-
+class UnsupportedHostsPlatformError(HostsError, UnsupportedPlatformError):
     def __str__(self) -> str:
         return f"avai cannot manage the hosts file on platform {self.system!r}"
 
@@ -139,7 +138,7 @@ class PlatformResolver:
             return _PosixPlatform()
         if system == self.WINDOWS_SYSTEM:
             return _WindowsPlatform()
-        raise UnsupportedPlatformError(system)
+        raise UnsupportedHostsPlatformError(system)
 
 
 @dataclass(frozen=True)

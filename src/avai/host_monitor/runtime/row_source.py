@@ -4,12 +4,14 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Protocol
 
+from avai.errors import AvaiError
+
 from .command_runner import CommandRunner
 
 SNAPSHOT_TIMEOUT_S = 30
 
 
-class MissingToolError(RuntimeError):
+class MissingToolError(AvaiError, RuntimeError):
     """The command a snapshot needs is not installed on this host."""
 
 

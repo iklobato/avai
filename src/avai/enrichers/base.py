@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum, unique
 from typing import TYPE_CHECKING, Any, ClassVar, Mapping
 
+from avai.errors import AvaiError
+
 if TYPE_CHECKING:
     from avai.enrichers.http import HttpClient
 
@@ -137,7 +139,7 @@ class Evidence:
     fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class EnricherError(Exception):
+class EnricherError(AvaiError):
     """Base of all enricher-side problems. Chain catches and logs."""
 
 
