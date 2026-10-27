@@ -96,46 +96,65 @@ class HttpCall:
             return self.url
 
 
+class Waiter:
+    """The time the client waits on: sleeps, a clock that never goes back
+    and the backoff jitter. Tests pass a fake that records every wait."""
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def jitter(self) -> float:
+        return random.random()
+
+
 class TokenBucket:
     """Per-host rate limiter. Sleeps the calling thread to stay under
     the configured rate; never returns ``False``. Simple, intentionally
     coarse — we're targeting "don't get banned", not microsecond-level
     pacing."""
 
-    def __init__(self, period_s: float, lock: threading.Lock) -> None:
+    def __init__(self, period_s: float, lock: threading.Lock, waiter: Waiter) -> None:
         self._period_s = period_s
         self._lock = lock
+        self._waiter = waiter
         self._last = BUCKET_START
 
     @classmethod
-    def for_rate(cls, rate_per_second: float) -> TokenBucket:
+    def for_rate(cls, rate_per_second: float, waiter: Waiter) -> TokenBucket:
         period_s = 1.0 / max(rate_per_second, MIN_RATE_PER_SECOND)
-        return cls(period_s, threading.Lock())
+        return cls(period_s, threading.Lock(), waiter)
 
     def take(self) -> None:
         with self._lock:
-            wait = (self._last + self._period_s) - time.monotonic()
+            wait = (self._last + self._period_s) - self._waiter.monotonic()
             if wait > 0:
-                time.sleep(wait)
-            self._last = time.monotonic()
+                self._waiter.sleep(wait)
+            self._last = self._waiter.monotonic()
 
 
 class HostRateLimits:
     """One token bucket per host, created on first use at the default rate."""
 
-    def __init__(self, default_rate: float, lock: threading.Lock) -> None:
+    def __init__(
+        self, default_rate: float, lock: threading.Lock, waiter: Waiter
+    ) -> None:
         self._default_rate = default_rate
         self._lock = lock
+        self._waiter = waiter
         self._buckets: dict[str, TokenBucket] = {}
 
     def set_rate(self, host: str, rate_per_second: float) -> None:
         with self._lock:
-            self._buckets[host] = TokenBucket.for_rate(rate_per_second)
+            self._buckets[host] = TokenBucket.for_rate(rate_per_second, self._waiter)
 
     def bucket_for(self, host: str) -> TokenBucket:
         with self._lock:
             if host not in self._buckets:
-                self._buckets[host] = TokenBucket.for_rate(self._default_rate)
+                bucket = TokenBucket.for_rate(self._default_rate, self._waiter)
+                self._buckets[host] = bucket
             return self._buckets[host]
 
 
@@ -158,31 +177,61 @@ class RetryAfter:
         return 0 < self.wait_s() <= MAX_RETRY_AFTER_S
 
 
+@dataclass(frozen=True)
+class HttpPacing:
+    """How fast the client may call each host and how it waits."""
+
+    rates: HostRateLimits
+    waiter: Waiter
+
+
+class SessionTransport:
+    """Sends one call through a requests session. Tests pass a fake that
+    hands out canned replies."""
+
+    def __init__(self, session: requests.Session) -> None:
+        self._session = session
+
+    @classmethod
+    def identified(cls) -> SessionTransport:
+        return cls(cls.identified_session())
+
+    @classmethod
+    def identified_session(cls) -> requests.Session:
+        """A session that names avai in its User-Agent."""
+        session = requests.Session()
+        session.headers["User-Agent"] = USER_AGENT
+        return session
+
+    def send(self, call: HttpCall) -> requests.Response:
+        return self._session.request(call.method, call.url, **call.options.as_kwargs())
+
+
 class HttpClient:
     """One per process. Pass to enrichers via constructor; never
     instantiate per-call."""
 
     def __init__(
         self,
-        session: requests.Session,
-        rates: HostRateLimits,
+        transport: SessionTransport,
+        pacing: HttpPacing,
         logger: logging.Logger,
     ) -> None:
-        self._session = session
-        self._rates = rates
+        self._transport = transport
+        self._pacing = pacing
         self._logger = logger
 
     @classmethod
     def create(
         cls, logger: logging.Logger, default_rate: float = DEFAULT_RATE_PER_SECOND
     ) -> HttpClient:
-        session = requests.Session()
-        session.headers["User-Agent"] = USER_AGENT
-        return cls(session, HostRateLimits(default_rate, threading.Lock()), logger)
+        waiter = Waiter()
+        rates = HostRateLimits(default_rate, threading.Lock(), waiter)
+        return cls(SessionTransport.identified(), HttpPacing(rates, waiter), logger)
 
     def set_rate(self, host: str, rate_per_second: float) -> None:
         """Override the per-host rate (call once at registry time)."""
-        self._rates.set_rate(host, rate_per_second)
+        self._pacing.rates.set_rate(host, rate_per_second)
 
     def get(self, url: str, options: RequestOptions | None = None) -> requests.Response:
         return self._request(HttpMethod.GET, url, options or RequestOptions())
@@ -196,7 +245,7 @@ class HttpClient:
         self, method: HttpMethod, url: str, options: RequestOptions
     ) -> requests.Response:
         call = HttpCall(method, url, options)
-        bucket = self._rates.bucket_for(call.host)
+        bucket = self._pacing.rates.bucket_for(call.host)
         last_error: requests.RequestException | None = None
         for attempt, backoff in enumerate((NO_WAIT_S, *RETRY_BACKOFFS_S)):
             self._sleep_jittered(backoff)
@@ -212,9 +261,7 @@ class HttpClient:
 
     def _attempt(self, call: HttpCall, attempt: int) -> requests.Response:
         """One request; raises ``HTTPError`` on a status worth retrying."""
-        response = self._session.request(
-            call.method, call.url, **call.options.as_kwargs()
-        )
+        response = self._transport.send(call)
         if self._should_retry_rate_limit(response, call.host, attempt):
             raise requests.HTTPError(f"{response.status_code} from {call.host}")
         if response.status_code in RETRY_STATUS:
@@ -223,7 +270,8 @@ class HttpClient:
 
     def _sleep_jittered(self, backoff: float) -> None:
         if backoff:
-            time.sleep(backoff * (JITTER_FLOOR + random.random() * JITTER_SPAN))
+            factor = JITTER_FLOOR + self._pacing.waiter.jitter() * JITTER_SPAN
+            self._pacing.waiter.sleep(backoff * factor)
 
     def _should_retry_rate_limit(
         self, response: requests.Response, host: str, attempt: int
@@ -234,6 +282,6 @@ class HttpClient:
             return False
         retry_after = RetryAfter(response)
         if retry_after.is_worth_waiting() and attempt < len(RETRY_BACKOFFS_S):
-            time.sleep(retry_after.wait_s())
+            self._pacing.waiter.sleep(retry_after.wait_s())
             return True
         raise RateLimitedError(f"{host} returned 429")
