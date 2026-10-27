@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import and_, func, select
@@ -27,8 +28,6 @@ from .panel_reads import (
 
 PROTOCOL_BY_SOCKET = (("SOCK_STREAM", "TCP"), ("SOCK_DGRAM", "UDP"))
 FAMILY_LABELS = (("AF_INET", "IPv4"), ("AF_INET6", "IPv6"))
-# Bind scopes, most exposed first.
-SCOPE_ORDER = ("all", "specific", "unknown", "loopback")
 PORT_SEARCH = ("process", "port")
 PROCESS_COLUMNS = (
     "ppid",
@@ -44,25 +43,38 @@ PROCESS_COLUMNS = (
 )
 
 
+class BindReach(StrEnum):
+    """Who can reach a listening socket, most exposed first."""
+
+    ALL = "all"
+    SPECIFIC = "specific"
+    UNKNOWN = "unknown"
+    LOOPBACK = "loopback"
+
+    @property
+    def exposed(self) -> bool:
+        return self in (BindReach.ALL, BindReach.SPECIFIC)
+
+
 class BindScope:
     """Classify a listening bind address, the dominant threat signal: ``all``
     (0.0.0.0 / ::, reachable from any interface), ``loopback`` (127.0.0.0/8 /
     ::1, local-only), ``specific`` (a routable/LAN IP), or ``unknown``."""
 
-    def of(self, ip: str | None) -> str:
+    def of(self, ip: str | None) -> BindReach:
         if not ip:
-            return "unknown"
+            return BindReach.UNKNOWN
         if ip in ("0.0.0.0", "::"):
-            return "all"
+            return BindReach.ALL
         try:
             loopback = ipaddress.ip_address(ip).is_loopback
         except ValueError:
-            return "unknown"
-        return "loopback" if loopback else "specific"
+            return BindReach.UNKNOWN
+        return BindReach.LOOPBACK if loopback else BindReach.SPECIFIC
 
-    def widest(self, addresses: list[str]) -> str:
-        scopes = {self.of(address) for address in addresses} or {"unknown"}
-        return min(scopes, key=SCOPE_ORDER.index)
+    def widest(self, addresses: list[str]) -> BindReach:
+        scopes = {self.of(address) for address in addresses} or {BindReach.UNKNOWN}
+        return min(scopes, key=tuple(BindReach).index)
 
 
 class Cmdline:
@@ -96,8 +108,8 @@ class SocketGroup:
             "pid": first.pid,
             "process": first.process_name or "—",
             "addrs": addresses,
-            "scope": scope,
-            "exposed": scope in ("all", "specific"),
+            "scope": scope.value,
+            "exposed": scope.exposed,
             "proto": self._labels(PROTOCOL_BY_SOCKET, "type"),
             "family": self._labels(FAMILY_LABELS, "family"),
             "conns": conns.get(first.laddr_port, 0),

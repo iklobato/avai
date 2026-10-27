@@ -26,7 +26,7 @@ from .panel_reads import (
 from .ports import BindScope, PortQuery, PortsPanel
 from .posture import IntegrityPosture, PersistencePages, PersistencePanel, YaraPanels
 from .resources import DiskOrder, MountTree, ResourceQueries
-from .vulnerabilities import SEVERITY_ORDER, VulnerabilitiesPanel, VulnQuery
+from .vulnerabilities import VulnerabilitiesPanel, VulnQuery
 
 __all__ = [
     "AUTH_SUBSYSTEM_OPTIONS",
@@ -34,7 +34,6 @@ __all__ = [
     "DISPLAY_FIELDS",
     "LOG_LEVELS",
     "PER_PAGE_OPTIONS",
-    "SEVERITY_ORDER",
     "AuthEventsPanel",
     "AuthQuery",
     "BindScope",

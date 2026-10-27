@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, NamedTuple
 
 from sqlalchemy import select
@@ -16,41 +17,51 @@ from .panel_reads import Page, SchemaProbe, StoredJson
 
 VULN_SOURCES = ("osv", "nvd", "cisa_kev", "github_advisory", "endoflife")
 
-# Severity buckets, most-severe first. The rank doubles as the primary sort
-# key for the panel ("always sort by severity") and as the set of values the
-# severity filter accepts.
-SEVERITY_ORDER = ("critical", "high", "medium", "low", "none")
 
-# CVSS base-score to qualitative severity (CVSS v3.1 rating bands).
-SEVERITY_BANDS = ((9.0, "critical"), (7.0, "high"), (4.0, "medium"), (0.1, "low"))
+class CvssSeverity(StrEnum):
+    """Severity buckets, most severe first. The rank is the panel's primary
+    sort key ("always sort by severity")."""
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    NONE = "none"
 
 
 class Severity:
-    def rank(self, label: str | None) -> int:
-        return (
-            SEVERITY_ORDER.index(label)
-            if label in SEVERITY_ORDER
-            else len(SEVERITY_ORDER)
-        )
+    # CVSS base score to qualitative severity (CVSS v3.1 rating bands).
+    BANDS = (
+        (9.0, CvssSeverity.CRITICAL),
+        (7.0, CvssSeverity.HIGH),
+        (4.0, CvssSeverity.MEDIUM),
+        (0.1, CvssSeverity.LOW),
+    )
 
-    def from_cvss(self, score: float | None) -> str | None:
+    def rank(self, label: str | None) -> int:
+        """Upstream labels outside the buckets (e.g. "moderate") sort last."""
+        order = tuple(CvssSeverity)
+        return order.index(label) if label in order else len(order)
+
+    def from_cvss(self, score: float | None) -> CvssSeverity | None:
         """A CVSS base score's qualitative band, or None when unscored."""
         if score is None:
             return None
-        bands = (label for threshold, label in SEVERITY_BANDS if score >= threshold)
-        return next(bands, "none")
+        bands = (label for threshold, label in self.BANDS if score >= threshold)
+        return next(bands, CvssSeverity.NONE)
 
     def of_item(self, cvss: float | None, cves: list[dict[str, Any]]) -> str:
         """Worst severity for a vulnerable-software item: the CVSS band if
         scored, else the most-severe per-CVE label, else 'critical' for an
         unscored but actively-exploited (KEV) item, else 'none'."""
-        label = self.from_cvss(cvss)
+        scored = self.from_cvss(cvss)
+        if scored is not None:
+            return scored.value
         labelled = [cve["severity"] for cve in cves if cve.get("severity")]
-        if label is None and labelled:
-            label = min(labelled, key=self.rank)
-        if label is not None:
-            return label
-        return "critical" if any(cve.get("kev") for cve in cves) else "none"
+        if labelled:
+            return min(labelled, key=self.rank)
+        exploited = any(cve.get("kev") for cve in cves)
+        return CvssSeverity.CRITICAL.value if exploited else CvssSeverity.NONE.value
 
 
 class SoftwareName:
@@ -273,8 +284,8 @@ class VulnerabilitiesPanel:
     def _summary(self, items: list[dict[str, Any]]) -> dict[str, int]:
         severities = [item["severity"] for item in items]
         return {
-            "critical": severities.count("critical"),
-            "high": severities.count("high"),
+            CvssSeverity.CRITICAL.value: severities.count(CvssSeverity.CRITICAL),
+            CvssSeverity.HIGH.value: severities.count(CvssSeverity.HIGH),
             "kev": sum(1 for item in items if item["kev"]),
             "exposed": sum(1 for item in items if item["exposed"]),
         }
