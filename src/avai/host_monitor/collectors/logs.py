@@ -9,21 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .. import constants
+from ..enums import LogLevel
 from ..slices import Slices
 from ..runtime import CommandRunner, HostPaths
 from .base import SnapshotCollector
-
-# syslog severity number -> name (RFC 5424 / journald PRIORITY).
-SYSLOG_LEVELS = (
-    ("0", "emerg"),
-    ("1", "alert"),
-    ("2", "crit"),
-    ("3", "err"),
-    ("4", "warning"),
-    ("5", "notice"),
-    ("6", "info"),
-    ("7", "debug"),
-)
 
 # Conservative level sniff for plain-text lines that carry no structured
 # priority — only the actionable severities, so most lines stay unlabelled
@@ -31,9 +20,12 @@ SYSLOG_LEVELS = (
 # colon / bracket) so a substring inside an identifier doesn't trip them:
 # e.g. a dpkg line about ``libgpg-error-dev`` is NOT an error.
 TEXT_LEVEL_PATTERNS = (
-    ("crit", ("critical", "fatal", "panic", "[crit")),
-    ("err", (" error", "error:", "[error", "[err]", " err ", " failed", "failure")),
-    ("warning", (" warning", "warning:", "[warn", " warn ")),
+    (LogLevel.CRIT, ("critical", "fatal", "panic", "[crit")),
+    (
+        LogLevel.ERR,
+        (" error", "error:", "[error", "[err]", " err ", " failed", "failure"),
+    ),
+    (LogLevel.WARNING, (" warning", "warning:", "[warn", " warn ")),
 )
 
 MICROSECONDS_PER_SECOND = 1_000_000
@@ -54,7 +46,7 @@ DEFAULT_LOG_FILES = (
 class TextLevel:
     """Severity sniffed from a plain-text log line, when it shows one."""
 
-    def sniff(self, line: str) -> str | None:
+    def sniff(self, line: str) -> LogLevel | None:
         lowered = line.lower()
         return next(
             (
@@ -82,7 +74,7 @@ class JournalLine:
             "unit": event.get("_SYSTEMD_UNIT")
             or event.get("SYSLOG_IDENTIFIER")
             or event.get("_COMM"),
-            "level": dict(SYSLOG_LEVELS).get(str(event.get("PRIORITY"))),
+            "level": LogLevel.from_priority(str(event.get("PRIORITY"))),
             "event_timestamp": self._timestamp(event.get("__REALTIME_TIMESTAMP")),
             "pid": self._pid(event.get("_PID")),
             "message": (self._message(event.get("MESSAGE")) or "").strip() or None,

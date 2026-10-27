@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 from ..slices import Slices
 from ..constants import LAUNCH_DIRS
-from ..enums import LaunchScope, PrivilegeKind
+from ..enums import LaunchScope, LinuxLaunchScope, PrivilegeKind
 from ..runtime import Coerce, Digest, HostPaths
 from .base import SnapshotCollector
 
@@ -207,7 +207,7 @@ class SystemdUnit:
         {"always", "on-failure", "on-success", "on-abnormal", "on-abort", "on-watchdog"}
     )
 
-    def __init__(self, scope: str, path: Path) -> None:
+    def __init__(self, scope: LinuxLaunchScope, path: Path) -> None:
         self._scope = scope
         self._path = path
 
@@ -218,7 +218,7 @@ class SystemdUnit:
         service = sections["Service"]
         exec_start = service.get("ExecStart") or ""
         return {
-            "scope": self._scope,
+            "scope": str(self._scope),
             "path": str(self._path),
             "label": self._path.stem,
             "program": exec_start or sections["Timer"].get("OnCalendar"),
@@ -273,15 +273,15 @@ class SystemdUnitReader:
     # later occurrences of the same unit filename are ignored (systemd
     # itself layers these dirs with /etc winning over /lib).
     UNIT_DIRS = (
-        ("system_service", "/etc/systemd/system", "*.service"),
-        ("system_service", "/run/systemd/system", "*.service"),
-        ("system_service", "/lib/systemd/system", "*.service"),
-        ("system_service", "/usr/lib/systemd/system", "*.service"),
-        ("user_service", "~/.config/systemd/user", "*.service"),
-        ("system_timer", "/etc/systemd/system", "*.timer"),
-        ("system_timer", "/lib/systemd/system", "*.timer"),
-        ("system_timer", "/usr/lib/systemd/system", "*.timer"),
-        ("user_timer", "~/.config/systemd/user", "*.timer"),
+        (LinuxLaunchScope.SYSTEM_SERVICE, "/etc/systemd/system", "*.service"),
+        (LinuxLaunchScope.SYSTEM_SERVICE, "/run/systemd/system", "*.service"),
+        (LinuxLaunchScope.SYSTEM_SERVICE, "/lib/systemd/system", "*.service"),
+        (LinuxLaunchScope.SYSTEM_SERVICE, "/usr/lib/systemd/system", "*.service"),
+        (LinuxLaunchScope.USER_SERVICE, "~/.config/systemd/user", "*.service"),
+        (LinuxLaunchScope.SYSTEM_TIMER, "/etc/systemd/system", "*.timer"),
+        (LinuxLaunchScope.SYSTEM_TIMER, "/lib/systemd/system", "*.timer"),
+        (LinuxLaunchScope.SYSTEM_TIMER, "/usr/lib/systemd/system", "*.timer"),
+        (LinuxLaunchScope.USER_TIMER, "~/.config/systemd/user", "*.timer"),
     )
 
     def rows(self) -> Iterator[dict[str, Any]]:
@@ -301,7 +301,7 @@ class SystemdUnitReader:
             if row is not None:
                 yield row
 
-    def unit_row(self, scope: str, path: Path) -> dict[str, Any] | None:
+    def unit_row(self, scope: LinuxLaunchScope, path: Path) -> dict[str, Any] | None:
         return SystemdUnit(scope, path).row()
 
     def _unit_files(self, dir_str: str, pattern: str) -> Iterator[Path]:
@@ -370,11 +370,11 @@ class CrontabReader:
     """Launch-item rows for cron: ``/etc/crontab``, the drop-ins in
     ``/etc/cron.d`` and the per-user crontabs in ``/var/spool/cron*``."""
 
-    CRON_FILE = ("system_crontab", "/etc/crontab")
-    CRON_DROP_INS = (("system_crontab_d", "/etc/cron.d"),)
+    CRON_FILE = (LinuxLaunchScope.SYSTEM_CRONTAB, "/etc/crontab")
+    CRON_DROP_INS = ((LinuxLaunchScope.SYSTEM_CRONTAB_D, "/etc/cron.d"),)
     USER_CRONS = (
-        ("user_crontab", "/var/spool/cron"),
-        ("user_crontab", "/var/spool/cron/crontabs"),
+        (LinuxLaunchScope.USER_CRONTAB, "/var/spool/cron"),
+        (LinuxLaunchScope.USER_CRONTAB, "/var/spool/cron/crontabs"),
     )
 
     def rows(self) -> Iterator[dict[str, Any]]:
@@ -392,7 +392,7 @@ class CrontabReader:
                 yield from self.file_rows(scope, path, owner=path.name)
 
     def file_rows(
-        self, scope: str, path: Path, owner: str | None = None
+        self, scope: LinuxLaunchScope, path: Path, owner: str | None = None
     ) -> Iterator[dict[str, Any]]:
         """Yield one row per job line of the crontab at ``path``. A file
         with an ``owner`` is a per-user crontab, whose lines carry no user
@@ -407,7 +407,7 @@ class CrontabReader:
         )
         for lineno, job in ((lineno, job) for lineno, job in jobs if job is not None):
             where = {"path": f"{path}:{lineno}", "label": f"cron:{path.name}:{lineno}"}
-            yield {"scope": scope, **where, **job.fields(lineno), **stamp}
+            yield {"scope": str(scope), **where, **job.fields(lineno), **stamp}
 
 
 class AuthorizedKeysParser:

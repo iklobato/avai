@@ -13,7 +13,7 @@ from .findings import (
     FindingStatus,
 )
 from .flows import FlowQuery, FlowsPanel
-from .logs import LOG_LEVELS, LogAggregateQuery, LogFilter, LogQuery, LogsPanel
+from .logs import LogAggregateQuery, LogFilter, LogQuery, LogsPanel
 from .panel_reads import (
     DEFAULT_PER_PAGE,
     DISPLAY_FIELDS,
@@ -32,7 +32,6 @@ __all__ = [
     "AUTH_SUBSYSTEM_OPTIONS",
     "DEFAULT_PER_PAGE",
     "DISPLAY_FIELDS",
-    "LOG_LEVELS",
     "PER_PAGE_OPTIONS",
     "AuthEventsPanel",
     "AuthQuery",

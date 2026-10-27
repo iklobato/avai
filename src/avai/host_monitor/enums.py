@@ -131,6 +131,41 @@ class LaunchScope(StrEnum):
     APPLE_DAEMON = "apple_daemon"
 
 
+class LinuxLaunchScope(StrEnum):
+    """Where a Linux launch item comes from (systemd unit or cron entry)."""
+
+    SYSTEM_SERVICE = "system_service"
+    USER_SERVICE = "user_service"
+    SYSTEM_TIMER = "system_timer"
+    USER_TIMER = "user_timer"
+    SYSTEM_CRONTAB = "system_crontab"
+    SYSTEM_CRONTAB_D = "system_crontab_d"
+    USER_CRONTAB = "user_crontab"
+
+
+class LogLevel(StrEnum):
+    """Syslog severities (RFC 5424), most severe first, so a member's
+    position is its syslog PRIORITY number."""
+
+    EMERG = "emerg"
+    ALERT = "alert"
+    CRIT = "crit"
+    ERR = "err"
+    WARNING = "warning"
+    NOTICE = "notice"
+    INFO = "info"
+    DEBUG = "debug"
+
+    @classmethod
+    def from_priority(cls, priority: str) -> LogLevel | None:
+        """The level of a journald PRIORITY ("0".."7"), None for anything else."""
+        return {str(number): level for number, level in enumerate(cls)}.get(priority)
+
+    @classmethod
+    def errors(cls) -> frozenset[LogLevel]:
+        return frozenset({cls.EMERG, cls.ALERT, cls.CRIT, cls.ERR})
+
+
 class Browser(StrEnum):
     CHROME = "chrome"
     CHROME_BETA = "chrome_beta"

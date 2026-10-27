@@ -11,13 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from avai.host_monitor import LogEntryRow
+from avai.host_monitor.enums import LogLevel
 
 from .panel_reads import Page, SchemaProbe
 
 # Syslog severities, most severe first: the order the level filter offers.
-LOG_LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
-
-ERROR_LEVELS = frozenset({"emerg", "alert", "crit", "err"})
 
 GROUP_DIMENSIONS = ("unit", "source", "message")
 
@@ -105,8 +103,8 @@ class LogGroup:
         return {
             "key": self._key,
             "count": len(rows),
-            "errors": sum(1 for row in rows if row.level in ERROR_LEVELS),
-            "warnings": sum(1 for row in rows if row.level == "warning"),
+            "errors": sum(1 for row in rows if row.level in LogLevel.errors()),
+            "warnings": sum(1 for row in rows if row.level == LogLevel.WARNING),
             "last": max(row.event_timestamp or "" for row in rows),
             "sample": samples[0] if samples else None,
             "unit_label": self._label({row.unit for row in rows}, "units"),
@@ -156,7 +154,7 @@ class LogsPanel:
             **paging,
             **query.filters.fields(),
             "sources": sources,
-            "levels": list(LOG_LEVELS),
+            "levels": [level.value for level in LogLevel],
             "summary": self._entry_summary(kept, sources),
         }
 
@@ -184,8 +182,12 @@ class LogsPanel:
     ) -> dict[str, int]:
         return {
             "total": len(kept),
-            "err": sum(1 for row in kept if row.level in ERROR_LEVELS),
-            "warning": sum(1 for row in kept if row.level == "warning"),
+            LogLevel.ERR.value: sum(
+                1 for row in kept if row.level in LogLevel.errors()
+            ),
+            LogLevel.WARNING.value: sum(
+                1 for row in kept if row.level == LogLevel.WARNING
+            ),
             "sources": len(sources),
         }
 
