@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import configparser
 import json
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -176,9 +177,13 @@ class QuarantineCollector(SnapshotCollector):
     )
 
     def collect(self) -> Iterator[dict[str, Any]]:
+        # os.path.expanduser leaves "~" as is when there is no home;
+        # Path.expanduser raises instead.
         path = Path(
-            "~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
-        ).expanduser()
+            os.path.expanduser(
+                "~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
+            )
+        )
         if not path.exists():
             return
         columns = dict(self.COLUMN_MAP)
@@ -235,7 +240,7 @@ class BrowserExtensionsCollector(SnapshotCollector):
     def collect(self) -> Iterator[dict[str, Any]]:
         for browser, profiles in self._profiles.items():
             reader = self._readers.for_browser(browser)
-            bases = [Path(base_str).expanduser() for base_str in profiles]
+            bases = [Path(os.path.expanduser(base_str)) for base_str in profiles]
             for base in (base for base in bases if base.is_dir()):
                 yield from reader.read(base, browser)
 
@@ -249,7 +254,7 @@ class InstalledAppsCollector(SnapshotCollector):
         self._paths = paths
 
     def collect(self) -> Iterator[dict[str, Any]]:
-        app_dirs = (Path("/Applications"), Path("~/Applications").expanduser())
+        app_dirs = (Path("/Applications"), self._paths.expand("~/Applications"))
         for app in (app for app_dir in app_dirs for app in self._apps(app_dir)):
             info_plist = app / "Contents" / "Info.plist"
             yield self._row(app, self._paths.read_plist(info_plist) or {})
