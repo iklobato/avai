@@ -6,26 +6,40 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from string import Template
-from typing import Any
+
+from pydantic import BaseModel, ConfigDict
 
 from .enums import ThreatCategory, Verdict
 
 
-class PromptSections:
-    """The tables of a prompts TOML file. ``$verdicts`` and ``$categories``
-    in a system prompt are filled with the enum values the schemas accept."""
+class PromptTable(BaseModel):
+    """One ``[stage]`` table of the prompts file."""
 
-    def __init__(self, document: dict[str, Any]) -> None:
-        self._document = document
+    model_config = ConfigDict(frozen=True, extra="ignore")
 
-    def table(self, name: str) -> dict[str, str]:
-        return dict(self._document.get(name) or {})
+    system: str = ""
+    user_template: str = ""
 
-    def rendered(self, name: str) -> str:
-        return Template(self.table(name).get("system", "")).safe_substitute(
+    def rendered_system(self) -> str:
+        """``$verdicts`` and ``$categories`` filled with the enum values the
+        schemas accept."""
+        return Template(self.system).safe_substitute(
             verdicts=" | ".join(str(verdict) for verdict in Verdict),
             categories=", ".join(str(category) for category in ThreatCategory),
         )
+
+
+class PromptFile(BaseModel):
+    """The prompts TOML file, checked when it is read."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    judge: PromptTable = PromptTable()
+    narrator: PromptTable = PromptTable()
+    yara_coverage: PromptTable = PromptTable()
+    verifier: PromptTable = PromptTable()
+    investigator: PromptTable = PromptTable()
+    collector_hints: dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -52,22 +66,20 @@ class Prompts:
     @classmethod
     def load(cls, path: Path) -> Prompts:
         with open(path, "rb") as stream:
-            sections = PromptSections(tomllib.load(stream))
-        judge, narrator = sections.table("judge"), sections.table("narrator")
-        coverage, verifier = sections.table("yara_coverage"), sections.table("verifier")
-        investigator = sections.table("investigator")
+            document = PromptFile.model_validate(tomllib.load(stream))
+        coverage, verifier = document.yara_coverage, document.verifier
         return cls(
-            system=sections.rendered("judge"),
-            user_template=judge.get("user_template", ""),
-            collector_hints=sections.table("collector_hints"),
-            narrator_system=sections.rendered("narrator"),
-            narrator_user_template=narrator.get("user_template", ""),
-            coverage_system=coverage.get("system", ""),
-            coverage_user_template=coverage.get("user_template", ""),
-            verifier_system=verifier.get("system", ""),
-            verifier_user_template=verifier.get("user_template", ""),
-            investigator_system=sections.rendered("investigator"),
-            investigator_user_template=investigator.get("user_template", ""),
+            system=document.judge.rendered_system(),
+            user_template=document.judge.user_template,
+            collector_hints=dict(document.collector_hints),
+            narrator_system=document.narrator.rendered_system(),
+            narrator_user_template=document.narrator.user_template,
+            coverage_system=coverage.system,
+            coverage_user_template=coverage.user_template,
+            verifier_system=verifier.system,
+            verifier_user_template=verifier.user_template,
+            investigator_system=document.investigator.rendered_system(),
+            investigator_user_template=document.investigator.user_template,
         )
 
     def hint_for(self, collector_name: str) -> str:
