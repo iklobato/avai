@@ -53,6 +53,10 @@ class AbuseIpDbReport(ApiReply):
     isp: object = None
 
 
+class AbuseIpDbCheck(ApiReply):
+    report: AbuseIpDbReport = Field(AbuseIpDbReport(), alias="data")
+
+
 class AbuseIpDbEnricher(Enricher):
     name = "abuseipdb"
     supports_types = frozenset({IndicatorType.IPV4})
@@ -75,7 +79,7 @@ class AbuseIpDbEnricher(Enricher):
         )
         if response.status_code != HTTPStatus.OK:
             return None
-        report = AbuseIpDbReport.model_validate(response.json().get("data", {}))
+        report = AbuseIpDbCheck.model_validate(response.json()).report
         return self._evidence(indicator, report)
 
     def _evidence(self, indicator: Indicator, report: AbuseIpDbReport) -> Evidence:
