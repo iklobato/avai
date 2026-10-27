@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..slices import Slices
-from ..runtime import Coerce, CommandRunner, HostPaths
+from ..runtime import Coerce, CommandRunner, HostIo, HostPaths
 from .base import SnapshotCollector
 
 PROFILER_TIMEOUT_S = 30
@@ -175,8 +175,12 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
         "devnum",
     )
 
+    def __init__(self, paths: HostPaths, judge_hints: str = "") -> None:
+        super().__init__(judge_hints)
+        self._paths = paths
+
     def collect(self) -> Iterator[dict[str, Any]]:
-        root = HostPaths().translate("/sys/bus/usb/devices")
+        root = self._paths.translate("/sys/bus/usb/devices")
         # USB device nodes are named like "1-1", "2-1.2", "usb1". Interfaces
         # (which carry a colon) are sub-descriptors of devices — skip them.
         devices = [
@@ -189,8 +193,7 @@ class LinuxUsbDevicesCollector(SnapshotCollector):
                 yield self._row(device.name, attrs)
 
     def _attrs(self, device: Path) -> dict[str, str]:
-        paths = HostPaths()
-        read = {attr: paths.read_sysfs(device / attr) for attr in self.ATTRS}
+        read = {attr: self._paths.read_sysfs(device / attr) for attr in self.ATTRS}
         return {attr: value for attr, value in read.items() if value is not None}
 
     def _row(self, location: str, attrs: Mapping[str, str]) -> dict[str, Any]:
@@ -264,8 +267,12 @@ class LinuxBluetoothCollector(SnapshotCollector):
     slice = Slices.BLUETOOTH_DEVICES
     judge_fields = ("name", "address", "minor_type")
 
+    def __init__(self, paths: HostPaths, judge_hints: str = "") -> None:
+        super().__init__(judge_hints)
+        self._paths = paths
+
     def collect(self) -> Iterator[dict[str, Any]]:
-        root = HostPaths().translate("/var/lib/bluetooth")
+        root = self._paths.translate("/var/lib/bluetooth")
         devices = (
             device
             for adapter in SysfsDirectory(root).children()
@@ -314,17 +321,18 @@ class LinuxWifiCollector(SnapshotCollector):
     slice = Slices.WIFI_STATE
     judge_fields = ("ssid", "bssid", "security")
 
-    def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
+    def __init__(self, io: HostIo, judge_hints: str = "") -> None:
         super().__init__(judge_hints)
-        self._runner = runner
+        self._io = io
 
     def collect(self) -> Iterator[dict[str, Any]]:
         # sysfs discovery via HOST_PREFIX; iw queries via netlink which the
         # host-network namespace (network_mode: host) already exposes to the
         # container.
-        interfaces = SysfsDirectory(HostPaths().translate("/sys/class/net")).children()
+        net = self._io.paths.translate("/sys/class/net")
+        interfaces = SysfsDirectory(net).children()
         wireless = [iface for iface in interfaces if (iface / "wireless").is_dir()]
-        iw_available = self._runner.exists("iw")
+        iw_available = self._io.runner.exists("iw")
         for iface_dir in wireless:
             link = self._link(iface_dir.name) if iw_available else {}
             yield {
@@ -337,5 +345,5 @@ class LinuxWifiCollector(SnapshotCollector):
             }
 
     def _link(self, iface: str) -> dict[str, str]:
-        text = self._runner.text(["iw", "dev", iface, "link"], timeout=IW_TIMEOUT_S)
+        text = self._io.runner.text(["iw", "dev", iface, "link"], timeout=IW_TIMEOUT_S)
         return IwLink(text).fields()

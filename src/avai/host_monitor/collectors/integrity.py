@@ -15,8 +15,8 @@ from ..slices import Slices
 from ..constants import WATCHED_FILES
 from ..runtime import (
     Coerce,
-    CommandRunner,
     Digest,
+    HostIo,
     HostPaths,
     LaunchdServiceSupervisor,
     PsutilConnections,
@@ -62,26 +62,24 @@ class SystemIntegrityCollector(SnapshotCollector):
     ALF_PLIST = Path("/Library/Preferences/com.apple.alf.plist")
 
     def __init__(
-        self, runner: CommandRunner, probes: ServiceProbes, judge_hints: str = ""
+        self, io: HostIo, probes: ServiceProbes, judge_hints: str = ""
     ) -> None:
         super().__init__(judge_hints=judge_hints)
-        self._runner = runner
+        self._io = io
         self._probes = probes
 
     @classmethod
-    def create(
-        cls, runner: CommandRunner, judge_hints: str = ""
-    ) -> SystemIntegrityCollector:
+    def create(cls, io: HostIo, judge_hints: str = "") -> SystemIntegrityCollector:
         probes = ServiceProbes(
-            LaunchdServiceSupervisor(runner),
+            LaunchdServiceSupervisor(io.runner),
             PsutilPortInspector(PsutilConnections()),
             PsutilProcessInspector(),
         )
-        return cls(runner, probes, judge_hints)
+        return cls(io, probes, judge_hints)
 
     def collect(self) -> Iterator[dict[str, Any]]:
-        filevault = self._runner.exit_code(["fdesetup", "isactive"])
-        alf = HostPaths().read_plist(self.ALF_PLIST) or {}
+        filevault = self._io.runner.exit_code(["fdesetup", "isactive"])
+        alf = self._io.paths.read_plist(self.ALF_PLIST) or {}
         # Enabled goes to the columns; the live-session signal stays in raw_json.
         signals = self._service_signals()
         yield {
@@ -116,7 +114,7 @@ class SystemIntegrityCollector(SnapshotCollector):
     def _gatekeeper_state(self) -> int | None:
         # spctl --status always exits 0; the state is in its text output.
         try:
-            output = self._runner.capture(
+            output = self._io.runner.capture(
                 ["spctl", "--status"], timeout=SPCTL_TIMEOUT_S
             )
         except FileNotFoundError:
@@ -134,14 +132,18 @@ class FileIntegrityCollector(SnapshotCollector):
     judge_fields = ("path", "sha256", "exists_flag")
 
     def __init__(
-        self, watched: Iterable[str] = WATCHED_FILES, judge_hints: str = ""
+        self,
+        paths: HostPaths,
+        watched: Iterable[str] = WATCHED_FILES,
+        judge_hints: str = "",
     ) -> None:
         super().__init__(judge_hints=judge_hints)
+        self._paths = paths
         self._watched = watched
 
     def collect(self) -> Iterator[dict[str, Any]]:
         for path_str in self._watched:
-            path = HostPaths().expand(path_str)
+            path = self._paths.expand(path_str)
             try:
                 file_stat = path.lstat()
             except FileNotFoundError:
@@ -171,19 +173,19 @@ class FileIntegrityCollector(SnapshotCollector):
 class LinuxSecurityPosture:
     """Linux security controls read from sysfs, config files and systemd."""
 
-    def __init__(self, runner: CommandRunner) -> None:
-        self._runner = runner
+    def __init__(self, io: HostIo) -> None:
+        self._io = io
 
     def selinux_state(self) -> SelinuxMode | None:
         """Returns 'Enforcing' / 'Permissive' / None (not present)."""
-        paths = HostPaths()
+        paths = self._io.paths
         flag = paths.read_sysfs(paths.translate("/sys/fs/selinux/enforce"))
         if flag is None:
             return None
         return SelinuxMode.from_flag(flag)
 
     def apparmor_state(self) -> dict[str, bool]:
-        paths = HostPaths()
+        paths = self._io.paths
         enabled = paths.read_sysfs(
             paths.translate("/sys/module/apparmor/parameters/enabled")
         )
@@ -191,7 +193,7 @@ class LinuxSecurityPosture:
 
     def ufw_active(self) -> bool:
         # /etc/ufw/ufw.conf is the canonical persistent state.
-        paths = HostPaths()
+        paths = self._io.paths
         conf = paths.read_sysfs(paths.translate("/etc/ufw/ufw.conf"))
         settings = (line.partition("=") for line in (conf or "").splitlines())
         enabled = next(
@@ -201,15 +203,15 @@ class LinuxSecurityPosture:
         return enabled is not None and enabled.strip().strip('"').lower() == "yes"
 
     def service_active(self, unit: str) -> bool:
-        state = self._runner.text(
+        state = self._io.runner.text(
             ["systemctl", "is-active", unit], timeout=SYSTEMCTL_TIMEOUT_S
         )
         return state.strip() == "active"
 
     def luks_count(self) -> int:
-        if not self._runner.exists("dmsetup"):
+        if not self._io.runner.exists("dmsetup"):
             return 0
-        mappings = self._runner.text(
+        mappings = self._io.runner.text(
             ["dmsetup", "ls", "--target", "crypt"], timeout=SYSTEMCTL_TIMEOUT_S
         )
         if "No devices found" in mappings:
@@ -257,26 +259,26 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
     SSH = ServiceSpec("remote_login", "ssh.service", 22, "sshd")
 
     def __init__(
-        self, runner: CommandRunner, probes: ServiceProbes, judge_hints: str = ""
+        self,
+        posture: LinuxSecurityPosture,
+        probes: ServiceProbes,
+        judge_hints: str = "",
     ) -> None:
         super().__init__(judge_hints=judge_hints)
-        self._runner = runner
+        self._posture = posture
         self._probes = probes
 
     @classmethod
-    def create(
-        cls, runner: CommandRunner, judge_hints: str = ""
-    ) -> LinuxSystemIntegrityCollector:
+    def create(cls, io: HostIo, judge_hints: str = "") -> LinuxSystemIntegrityCollector:
         probes = ServiceProbes(
-            SystemdServiceSupervisor(runner),
+            SystemdServiceSupervisor(io.runner),
             PsutilPortInspector(PsutilConnections()),
             PsutilProcessInspector(),
         )
-        return cls(runner, probes, judge_hints)
+        return cls(LinuxSecurityPosture(io), probes, judge_hints)
 
     def collect(self) -> Iterator[dict[str, Any]]:
-        posture = LinuxSecurityPosture(self._runner)
-        raw = self._raw(posture)
+        raw = self._raw(self._posture)
         ssh, vnc = raw["services"]["remote_login"], raw["services"]["screen_sharing"]
         yield {
             "filevault_active": int(raw["luks_mappings"] > 0),

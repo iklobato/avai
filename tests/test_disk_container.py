@@ -14,11 +14,11 @@ from __future__ import annotations
 import logging
 import sys
 from collections import namedtuple
+from pathlib import Path
 
 import pytest
 
-import avai.host_monitor.constants as constants
-from avai.host_monitor.runtime import mounts, probes
+from avai.host_monitor.runtime import HostPaths, mounts, probes
 from avai.host_monitor.runtime.mounts import (
     HostRootfs,
     MountField,
@@ -104,25 +104,23 @@ class TestStatvfsUsage:
 
 
 class TestDiskMetricsModes:
-    def metrics(self, rootfs: str | None = None) -> DiskMetrics:
-        return DiskMetrics(logging.getLogger("test"), rootfs)
+    def metrics(self, prefix: str = "") -> DiskMetrics:
+        return DiskMetrics(logging.getLogger("test"), HostPaths(prefix))
 
     def test_native_mode_uses_psutil(self, monkeypatch):
-        monkeypatch.setattr(constants, "HOST_PREFIX", "")
         sentinel = [object()]
         monkeypatch.setattr(probes.psutil, "disk_partitions", lambda all: sentinel)
         assert self.metrics().partitions() is sentinel
 
     def test_container_without_rootfs_emits_nothing(self, monkeypatch, tmp_path):
         # HOST_PREFIX set but no <prefix>/rootfs dir → skip, don't mislead.
-        monkeypatch.setattr(constants, "HOST_PREFIX", str(tmp_path))
         called = []
         monkeypatch.setattr(
             probes.psutil,
             "disk_partitions",
             lambda all: called.append(True) or [],
         )
-        assert self.metrics().partitions() == []
+        assert self.metrics(str(tmp_path)).partitions() == []
         assert called == []  # psutil must NOT be consulted in container mode
 
     def test_container_with_rootfs_reads_host_table(self, monkeypatch, tmp_path):
@@ -130,14 +128,16 @@ class TestDiskMetricsModes:
         (rootfs / "proc" / "1").mkdir(parents=True)
         mount_file = rootfs / "proc" / "1" / "mounts"
         mount_file.write_text("proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw 0 0\n")
-        monkeypatch.setattr(constants, "HOST_PREFIX", str(tmp_path))
         # <prefix>/rootfs exists → container-with-rootfs branch, which reads
         # the rootfs-mounted copy once /proc/1/mounts is unreadable.
         monkeypatch.setattr(mounts, "HOST_MOUNT_FILES", (str(tmp_path / "absent"),))
-        parts = self.metrics().partitions()
+        parts = self.metrics(str(tmp_path)).partitions()
         assert [p.mountpoint for p in parts] == ["/"]
 
-    def test_usage_translates_through_rootfs(self, monkeypatch):
+    def test_usage_translates_through_rootfs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        (tmp_path / "rootfs").mkdir()
         captured = {}
         Sv = namedtuple("Sv", "f_blocks f_bfree f_bavail f_frsize")
 
@@ -146,11 +146,10 @@ class TestDiskMetricsModes:
             return Sv(10, 2, 2, 4096)
 
         monkeypatch.setattr(mounts.os, "statvfs", _fake_statvfs)
-        self.metrics("/host/rootfs").usage("/home")
-        assert captured["path"] == "/host/rootfs/home"
+        self.metrics(str(tmp_path)).usage("/home")
+        assert captured["path"] == f"{tmp_path}/rootfs/home"
 
     def test_usage_native_uses_psutil(self, monkeypatch):
-        monkeypatch.setattr(constants, "HOST_PREFIX", "")
         marker = object()
         monkeypatch.setattr(probes.psutil, "disk_usage", lambda mp: marker)
         assert self.metrics().usage("/") is marker

@@ -18,8 +18,8 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
-from avai.host_monitor import constants
 from avai.host_monitor.collectors import (
+    HostJournal,
     BluetoothCollector,
     BrowserExtensionsCollector,
     CapturedPackets,
@@ -53,13 +53,17 @@ from avai.host_monitor.collectors import (
     UsbDevicesCollector,
     WifiCollector,
 )
-from avai.host_monitor.collectors.integrity import ServiceProbes
+from avai.host_monitor.collectors.integrity import (
+    LinuxSecurityPosture,
+    ServiceProbes,
+)
 from avai.host_monitor.collectors.logs import TAIL_BYTES, JournalReader, LogFileTail
 from avai.host_monitor.collectors.software import ExtensionReaders
 from avai.host_monitor.enums import Browser
 from avai.host_monitor.runtime import (
     CommandRunner,
     DiskMetrics,
+    HostIo,
     HostPaths,
     PsutilConnections,
     SystemMetrics,
@@ -108,7 +112,6 @@ def _fake_run(monkeypatch, answer) -> FakeRun:
 @pytest.fixture
 def host_root(tmp_path, monkeypatch):
     """A container-style host tree: every translated path lands under it."""
-    monkeypatch.setattr(constants, "HOST_PREFIX", str(tmp_path))
     return tmp_path
 
 
@@ -292,7 +295,9 @@ class TestMountsCollector:
             device="/dev/disk1s1", mountpoint="/", fstype="apfs", opts="rw"
         )
         monkeypatch.setattr(psutil, "disk_partitions", lambda all=True: [part])
-        (row,) = MountsCollector(DiskMetrics(logging.getLogger("test"))).collect()
+        (row,) = MountsCollector(
+            DiskMetrics(logging.getLogger("test"), HostPaths(""))
+        ).collect()
         assert (row["device"], row["mountpoint"]) == ("/dev/disk1s1", "/")
         assert json.loads(row["raw_json"])["maxfile"] is None
 
@@ -301,7 +306,7 @@ class TestMountsCollector:
             raise psutil.AccessDenied()
 
         monkeypatch.setattr(psutil, "disk_partitions", denied)
-        disks = DiskMetrics(logging.getLogger("test"))
+        disks = DiskMetrics(logging.getLogger("test"), HostPaths(""))
         assert list(MountsCollector(disks).collect()) == []
 
 
@@ -556,7 +561,7 @@ class TestMacSystemIntegrity:
         _fake_run(monkeypatch, answer)
         monkeypatch.setattr(HostPaths, "read_plist", staticmethod(lambda p: None))
         probes = ServiceProbes(FakeServices(0), FakePorts(), FakeProcesses())
-        col = SystemIntegrityCollector(CommandRunner(), probes)
+        col = SystemIntegrityCollector(HostIo(CommandRunner(), HostPaths("")), probes)
         (row,) = col.collect()
         assert row["gatekeeper_assessments_enabled"] == expected
         assert row["filevault_active"] == 1
@@ -570,7 +575,7 @@ class TestMacSystemIntegrity:
             staticmethod(lambda p: {"globalstate": 1, "stealthenabled": True}),
         )
         probes = ServiceProbes(FakeServices(0), FakePorts(), FakeProcesses())
-        col = SystemIntegrityCollector(CommandRunner(), probes)
+        col = SystemIntegrityCollector(HostIo(CommandRunner(), HostPaths("")), probes)
         (row,) = col.collect()
         assert row["filevault_active"] is None
         assert row["gatekeeper_assessments_enabled"] is None
@@ -609,7 +614,7 @@ class TestMacFileCollectors:
         _write(home / "Library" / "LaunchAgents" / "broken.plist", "not a plist")
         rows = [
             r
-            for r in LaunchItemsCollector().collect()
+            for r in LaunchItemsCollector(HostPaths("")).collect()
             if r["path"].startswith(str(home))
         ]
         assert [r["path"] for r in rows] == [str(agent)]
@@ -665,7 +670,7 @@ class TestMacFileCollectors:
         )
         (row,) = [
             r
-            for r in InstalledAppsCollector().collect()
+            for r in InstalledAppsCollector(HostPaths("")).collect()
             if r["path"].startswith(str(home))
         ]
         assert (row["bundle_id"], row["name"], row["version"]) == (
@@ -688,7 +693,7 @@ class TestMacFileCollectors:
             ]
         }
         monkeypatch.setattr(HostPaths, "read_plist", staticmethod(lambda p: db))
-        (row,) = SystemExtensionsCollector().collect()
+        (row,) = SystemExtensionsCollector(HostPaths("")).collect()
         assert (row["bundle_id"], row["version"], row["state"]) == (
             "com.vpn.ext",
             "7",
@@ -698,7 +703,7 @@ class TestMacFileCollectors:
 
     def test_system_extensions_without_db_yields_nothing(self, monkeypatch):
         monkeypatch.setattr(HostPaths, "read_plist", staticmethod(lambda p: None))
-        assert list(SystemExtensionsCollector().collect()) == []
+        assert list(SystemExtensionsCollector(HostPaths("")).collect()) == []
 
 
 class _Reader:
@@ -723,7 +728,11 @@ class TestFileIntegrityCollector:
     def test_present_and_missing_files(self, tmp_path):
         present = _write(tmp_path / "sudoers", "root ALL=(ALL) ALL\n")
         missing = tmp_path / "gone"
-        rows = list(FileIntegrityCollector([str(present), str(missing)]).collect())
+        rows = list(
+            FileIntegrityCollector(
+                HostPaths(""), [str(present), str(missing)]
+            ).collect()
+        )
         assert [(r["path"], r["exists_flag"]) for r in rows] == [
             (str(present), 1),
             (str(missing), 0),
@@ -819,7 +828,7 @@ class TestLinuxDevices:
         _write(devices / "1-1" / "product", "YubiKey\n")
         _write(devices / "1-1:1.0" / "idVendor", "1050\n")
         (devices / "usb1").mkdir()
-        (row,) = LinuxUsbDevicesCollector().collect()
+        (row,) = LinuxUsbDevicesCollector(HostPaths(str(host_root))).collect()
         assert (row["name"], row["vendor_id"], row["location_id"]) == (
             "YubiKey",
             "1050",
@@ -827,19 +836,22 @@ class TestLinuxDevices:
         )
 
     def test_usb_without_sysfs_yields_nothing(self, host_root):
-        assert list(LinuxUsbDevicesCollector().collect()) == []
+        assert list(LinuxUsbDevicesCollector(HostPaths(str(host_root))).collect()) == []
 
     def test_bluetooth_paired_devices_from_bluez_info(self, host_root):
         dev = host_root / "var" / "lib" / "bluetooth" / "AA_BB" / "11_22_33"
         _write(dev / "info", "[General]\nName=Keyboard\nClass=0x000540\n")
         (dev.parent / "no_info_dev").mkdir()
-        (row,) = LinuxBluetoothCollector().collect()
+        (row,) = LinuxBluetoothCollector(HostPaths(str(host_root))).collect()
         assert (row["name"], row["address"], row["paired"], row["connected"]) == (
             "Keyboard",
             "11:22:33",
             1,
             0,
         )
+
+    def _wifi(self, host_root: Path) -> LinuxWifiCollector:
+        return LinuxWifiCollector(HostIo(CommandRunner(), HostPaths(str(host_root))))
 
     def test_wifi_reads_iw_link(self, host_root, monkeypatch):
         net = host_root / "sys" / "class" / "net"
@@ -854,7 +866,7 @@ class TestLinuxDevices:
                 "",
             ),
         )
-        (row,) = LinuxWifiCollector(CommandRunner()).collect()
+        (row,) = self._wifi(host_root).collect()
         assert (row["interface"], row["ssid"], row["bssid"], row["channel"]) == (
             "wlan0",
             "home",
@@ -865,17 +877,17 @@ class TestLinuxDevices:
     def test_wifi_without_iw_still_lists_the_interface(self, host_root, monkeypatch):
         (host_root / "sys" / "class" / "net" / "wlan0" / "wireless").mkdir(parents=True)
         _on_path(monkeypatch)
-        (row,) = LinuxWifiCollector(CommandRunner()).collect()
+        (row,) = self._wifi(host_root).collect()
         assert (row["interface"], row["ssid"], row["raw_json"]) == ("wlan0", None, "{}")
 
     def test_wifi_not_connected_and_failed_iw(self, host_root, monkeypatch):
         (host_root / "sys" / "class" / "net" / "wlan0" / "wireless").mkdir(parents=True)
         _on_path(monkeypatch, "iw")
         _fake_run(monkeypatch, lambda cmd: ("Not connected.\n", 0, ""))
-        (row,) = LinuxWifiCollector(CommandRunner()).collect()
+        (row,) = self._wifi(host_root).collect()
         assert json.loads(row["raw_json"]) == {"connected": "no"}
         _fake_run(monkeypatch, lambda cmd: ("", 1, "nl80211 not found"))
-        (row,) = LinuxWifiCollector(CommandRunner()).collect()
+        (row,) = self._wifi(host_root).collect()
         assert row["raw_json"] == "{}"
 
 
@@ -899,7 +911,11 @@ class TestLinuxInstalledApps:
             host_root / "usr" / "share" / "applications" / "bad.desktop",
             "[Other]\nName=x\n",
         )
-        rows = list(LinuxInstalledAppsCollector(CommandRunner()).collect())
+        rows = list(
+            LinuxInstalledAppsCollector.create(
+                HostIo(CommandRunner(), HostPaths(str(host_root)))
+            ).collect()
+        )
         assert [(r["path"], r["name"]) for r in rows] == [
             ("dpkg:curl", "curl"),
             (str(host_root / "usr/share/applications/code.desktop"), "Code"),
@@ -914,19 +930,34 @@ class TestLinuxInstalledApps:
     def test_dpkg_failure_yields_no_package_rows(self, host_root, monkeypatch):
         _on_path(monkeypatch, "dpkg-query")
         _fake_run(monkeypatch, lambda cmd: (self.DPKG, 2, ""))
-        assert list(LinuxInstalledAppsCollector(CommandRunner()).collect()) == []
+        assert (
+            list(
+                LinuxInstalledAppsCollector.create(
+                    HostIo(CommandRunner(), HostPaths(str(host_root)))
+                ).collect()
+            )
+            == []
+        )
 
     def test_dpkg_timeout_yields_no_package_rows(self, host_root, monkeypatch):
         _on_path(monkeypatch, "dpkg-query")
         _fake_run(monkeypatch, lambda cmd: subprocess.TimeoutExpired(cmd, 30))
-        assert list(LinuxInstalledAppsCollector(CommandRunner()).collect()) == []
+        assert (
+            list(
+                LinuxInstalledAppsCollector.create(
+                    HostIo(CommandRunner(), HostPaths(str(host_root)))
+                ).collect()
+            )
+            == []
+        )
 
 
 @_posix_only
 class TestLinuxSystemIntegrity:
-    def _collect(self, **kw):
+    def _collect(self, prefix: str, **kw):
         probes = ServiceProbes(FakeServices(0), FakePorts(**kw), FakeProcesses())
-        col = LinuxSystemIntegrityCollector(CommandRunner(), probes)
+        io = HostIo(CommandRunner(), HostPaths(prefix))
+        col = LinuxSystemIntegrityCollector(LinuxSecurityPosture(io), probes)
         (row,) = col.collect()
         return row, json.loads(row["raw_json"])
 
@@ -943,7 +974,7 @@ class TestLinuxSystemIntegrity:
             return ("active\n" if active else "inactive\n", 0 if active else 3, "")
 
         _fake_run(monkeypatch, answer)
-        row, raw = self._collect()
+        row, raw = self._collect(str(host_root))
         assert (raw["selinux"], raw["apparmor"], raw["ufw_active"]) == (
             "Enforcing",
             {"enabled": True},
@@ -967,7 +998,7 @@ class TestLinuxSystemIntegrity:
             return FileNotFoundError(cmd[0])
 
         _fake_run(monkeypatch, answer)
-        row, raw = self._collect()
+        row, raw = self._collect(str(host_root))
         assert (raw["selinux"], raw["apparmor"], raw["ufw_active"]) == (
             "Permissive",
             {"enabled": False},
@@ -980,7 +1011,7 @@ class TestLinuxSystemIntegrity:
     def test_vnc_port_listening_counts_as_enabled(self, host_root, monkeypatch):
         _on_path(monkeypatch)
         _fake_run(monkeypatch, lambda cmd: subprocess.TimeoutExpired(cmd, 5))
-        row, raw = self._collect(listening=1, established=1)
+        row, raw = self._collect(str(host_root), listening=1, established=1)
         assert raw["selinux"] is None
         assert row["screen_sharing_enabled"] == 1
         assert raw["services"]["screen_sharing"] == {"enabled": 1, "active": 1}
@@ -991,7 +1022,7 @@ class TestLinuxSystemIntegrity:
 class TestLinuxStreamCommands:
     def test_auth_events_fall_back_to_the_runtime_journal(self, host_root):
         (host_root / "run" / "log" / "journal").mkdir(parents=True)
-        cmd = LinuxAuthEventsCollector().command()
+        cmd = LinuxAuthEventsCollector(HostJournal(HostPaths(str(host_root)))).command()
         assert "--priority=info" in cmd
         i = cmd.index("--directory")
         assert cmd[i + 1] == str(host_root / "run/log/journal")
@@ -999,7 +1030,9 @@ class TestLinuxStreamCommands:
 
     def test_process_exec_reads_the_host_journal(self, host_root):
         (host_root / "var" / "log" / "journal").mkdir(parents=True)
-        cmd = LinuxProcessExecCollector().command()
+        cmd = LinuxProcessExecCollector(
+            HostJournal(HostPaths(str(host_root)))
+        ).command()
         assert cmd[-3:] == ["_AUDIT_TYPE_NAME=EXECVE", "+", "_AUDIT_TYPE_NAME=SYSCALL"]
         assert cmd[cmd.index("--directory") + 1] == str(host_root / "var/log/journal")
 
@@ -1023,7 +1056,11 @@ class TestLogTailJournald:
             ]
         )
         run = _fake_run(monkeypatch, lambda cmd: (lines, 1, ""))
-        rows = list(JournalReader(CommandRunner(), logging.getLogger("test")).rows())
+        rows = list(
+            JournalReader(
+                HostIo(CommandRunner(), HostPaths("")), logging.getLogger("test")
+            ).rows()
+        )
         assert [(r["unit"], r["message"], r["pid"]) for r in rows] == [
             ("ssh.service", "Accepted key", 42),
             ("kernel", "hi", None),
@@ -1034,12 +1071,14 @@ class TestLogTailJournald:
     def test_journal_timeout_is_logged_and_skipped(self, monkeypatch, caplog):
         _on_path(monkeypatch, "journalctl")
         _fake_run(monkeypatch, lambda cmd: subprocess.TimeoutExpired(cmd, 10))
-        journal = JournalReader(CommandRunner(), logging.getLogger("avai.test"))
+        journal = JournalReader(
+            HostIo(CommandRunner(), HostPaths("")), logging.getLogger("avai.test")
+        )
         assert list(journal.rows()) == []
         assert "journalctl read failed" in caplog.text
 
     def test_tail_drops_the_partial_first_line_of_a_big_file(self, tmp_path):
         big = tmp_path / "syslog"
         big.write_text("x" * (TAIL_BYTES + 10) + "\nlast line\n")
-        rows = list(LogFileTail.on_host(str(big)).rows())
+        rows = list(LogFileTail(HostPaths("").translate(str(big))).rows())
         assert [r["message"] for r in rows] == ["last line"]

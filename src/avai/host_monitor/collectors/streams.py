@@ -6,7 +6,6 @@ from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
 from typing import Any
 
-from .. import constants
 from ..slices import Slices
 from ..constants import AUTH_LOG_PREDICATE
 from ..runtime import HostPaths, JsonLineStreamSource
@@ -47,13 +46,16 @@ class JournalEvent:
 class HostJournal:
     """Journal directory flags for journalctl in container mode."""
 
+    def __init__(self, paths: HostPaths) -> None:
+        self._paths = paths
+
     def directory_args(self, candidates: tuple[str, ...]) -> list[str]:
         """In container mode, point journalctl at the host's journal
         directory rather than the container's empty one: the first
         candidate that exists wins."""
-        if not constants.HOST_PREFIX:
+        paths = self._paths
+        if not paths.in_container():
             return []
-        paths = HostPaths()
         found = next(
             (path for path in map(paths.translate, candidates) if path.is_dir()), None
         )
@@ -121,6 +123,10 @@ class LinuxAuthEventsCollector(StreamingCollector):
         ("_COMM=login",),
     )
 
+    def __init__(self, journal: HostJournal, judge_hints: str = "") -> None:
+        super().__init__(judge_hints)
+        self._journal = journal
+
     def command(self) -> list[str]:
         cmd = ["journalctl", "-f", "--output=json", "--no-pager"]
         cmd.append(f"--priority={JOURNAL_PRIORITY}")
@@ -128,7 +134,7 @@ class LinuxAuthEventsCollector(StreamingCollector):
         # (volatile) journal — hosts with systemd Storage=volatile/auto and
         # no persistent storage keep logs only under /run/log/journal, so
         # without this fallback auth_events would silently collect nothing.
-        cmd.extend(HostJournal().directory_args(HOST_JOURNALS))
+        cmd.extend(self._journal.directory_args(HOST_JOURNALS))
         cmd.extend(self._matchers())
         return cmd
 
@@ -232,9 +238,13 @@ class LinuxProcessExecCollector(StreamingCollector):
     judge_enabled = True
     judge_fields = ("exe_path", "exe_args_json", "uid", "parent_path")
 
+    def __init__(self, journal: HostJournal, judge_hints: str = "") -> None:
+        super().__init__(judge_hints)
+        self._journal = journal
+
     def command(self) -> list[str]:
         cmd = ["journalctl", "-f", "--output=json", "--no-pager"]
-        cmd.extend(HostJournal().directory_args(HOST_JOURNALS[:1]))
+        cmd.extend(self._journal.directory_args(HOST_JOURNALS[:1]))
         cmd.extend(["_AUDIT_TYPE_NAME=EXECVE", "+", "_AUDIT_TYPE_NAME=SYSCALL"])
         return cmd
 

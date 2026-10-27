@@ -2,26 +2,45 @@ from __future__ import annotations
 
 import os
 import plistlib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from xml.parsers.expat import ExpatError
-
-from .. import constants
 
 HOME_PREFIX = "~/"
 
 
 class HostPaths:
-    """Path resolution + low-level reads under container translation."""
+    """Path resolution + low-level reads under container translation.
+
+    ``prefix`` is where the host's root is mounted inside a container
+    (``HOST_PREFIX``, e.g. ``/host``); empty when the monitor runs on the
+    host itself."""
+
+    PREFIX_ENV = "HOST_PREFIX"
+
+    def __init__(self, prefix: str) -> None:
+        self._prefix = prefix
+
+    @classmethod
+    def from_environ(cls, environ: Mapping[str, str]) -> HostPaths:
+        return cls(environ.get(cls.PREFIX_ENV, "").rstrip("/"))
+
+    def in_container(self) -> bool:
+        return bool(self._prefix)
+
+    def under_prefix(self, relative: str) -> Path:
+        """``relative`` inside the host mount (``<prefix>/<relative>``)."""
+        return Path(self._prefix) / relative
 
     def translate(self, raw: Any) -> Path:
         """Translate an absolute host path (a ``str`` or ``Path``) to its
         in-container location when HOST_PREFIX is set. Relative paths and
         the empty-prefix case are passthroughs."""
         path = Path(raw)
-        if not constants.HOST_PREFIX or not path.is_absolute():
+        if not self._prefix or not path.is_absolute():
             return path
-        return Path(constants.HOST_PREFIX + str(path))
+        return Path(self._prefix + str(path))
 
     def expand(self, raw: str) -> Path:
         return Path(os.path.expanduser(raw))
@@ -37,7 +56,7 @@ class HostPaths:
         """
         if not template.startswith(HOME_PREFIX):
             return [self.translate(template)]
-        if not constants.HOST_PREFIX:
+        if not self._prefix:
             return [self.expand(template)]
         rest = template.removeprefix(HOME_PREFIX)
         homes = self._container_homes()
@@ -61,8 +80,8 @@ class HostPaths:
         return parsed if isinstance(parsed, dict) else None
 
     def _container_homes(self) -> list[Path]:
-        homes = self._user_homes(Path(constants.HOST_PREFIX) / "home")
-        root_home = Path(constants.HOST_PREFIX) / "root"
+        homes = self._user_homes(self.under_prefix("home"))
+        root_home = self.under_prefix("root")
         if root_home.is_dir():
             homes.append(root_home)
         return homes

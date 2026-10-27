@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -61,7 +62,13 @@ from ..persistence_collectors import (
 )
 from ..enums import PrivilegeKind
 from ..prompts import Prompts
-from ..runtime import CommandRunner, CommandSnapshot, PsutilConnections
+from ..runtime import (
+    CommandRunner,
+    CommandSnapshot,
+    HostIo,
+    HostPaths,
+    PsutilConnections,
+)
 from .portable import AccountCollectors, PortableCollectors
 
 
@@ -181,19 +188,19 @@ class MacOSHost:
         "/Library/Keychains/System.keychain",
     )
 
-    def __init__(self, runner: CommandRunner, logger: logging.Logger) -> None:
-        self._runner = runner
+    def __init__(self, io: HostIo, logger: logging.Logger) -> None:
+        self._io = io
         self._logger = logger
 
     @classmethod
     def create(cls, logger: logging.Logger) -> MacOSHost:
-        return cls(CommandRunner(), logger)
+        return cls(HostIo(CommandRunner(), HostPaths.from_environ(os.environ)), logger)
 
     def snapshot_collectors(self, prompts: Prompts) -> list[SnapshotCollector]:
         fs = MacOSFilesystemLayout()
-        accounts = MacOSPrivilegedAccounts(self._runner)
+        accounts = MacOSPrivilegedAccounts(self._io.runner)
         return [
-            *PortableCollectors(self._logger).build(prompts),
+            *PortableCollectors(self._logger, self._io.paths).build(prompts),
             *AccountCollectors(fs, accounts).build(prompts),
             *self._capture(prompts, fs),
             *self._devices(prompts),
@@ -215,7 +222,7 @@ class MacOSHost:
         self, prompts: Prompts, fs: MacOSFilesystemLayout
     ) -> list[SnapshotCollector]:
         hint = prompts.hint_for
-        capture = TcpdumpCapture(self._runner, tuple(fs.tcpdump_interface_args()))
+        capture = TcpdumpCapture(self._io.runner, tuple(fs.tcpdump_interface_args()))
         resolver = ProcessConnectionResolver(PsutilConnections())
         return [
             NetworkFlowsCollector(capture, resolver, hint("network_flows")),
@@ -225,24 +232,24 @@ class MacOSHost:
     def _devices(self, prompts: Prompts) -> list[SnapshotCollector]:
         hint = prompts.hint_for
         return [
-            UsbDevicesCollector(self._runner, hint("usb_devices")),
-            BluetoothCollector(self._runner, hint("bluetooth_devices")),
-            WifiCollector(self._runner, hint("wifi_state")),
-            SystemIntegrityCollector.create(self._runner, hint("system_integrity")),
-            MdmProfilesCollector(self._runner, hint("mdm_profiles")),
-            KernelExtensionsCollector(self._runner, hint("kernel_extensions")),
-            SystemExtensionsCollector(hint("system_extensions")),
+            UsbDevicesCollector(self._io.runner, hint("usb_devices")),
+            BluetoothCollector(self._io.runner, hint("bluetooth_devices")),
+            WifiCollector(self._io.runner, hint("wifi_state")),
+            SystemIntegrityCollector.create(self._io, hint("system_integrity")),
+            MdmProfilesCollector(self._io.runner, hint("mdm_profiles")),
+            KernelExtensionsCollector(self._io.runner, hint("kernel_extensions")),
+            SystemExtensionsCollector(self._io.paths, hint("system_extensions")),
         ]
 
     def _software(self, prompts: Prompts) -> list[SnapshotCollector]:
         hint = prompts.hint_for
         return [
-            LaunchItemsCollector(hint("launch_items")),
+            LaunchItemsCollector(self._io.paths, hint("launch_items")),
             QuarantineCollector(hint("quarantine_events")),
             BrowserExtensionsCollector.create(
                 dict(BROWSER_PROFILES), hint("browser_extensions")
             ),
-            InstalledAppsCollector(hint("installed_apps")),
+            InstalledAppsCollector(self._io.paths, hint("installed_apps")),
         ]
 
     def _files(
@@ -251,14 +258,14 @@ class MacOSHost:
         hint = prompts.hint_for
         compiler = YaraRulesetCompiler(constants.YARA_RULES_DIR, self._logger)
         return [
-            FileIntegrityCollector(judge_hints=hint("file_integrity")),
+            FileIntegrityCollector(self._io.paths, judge_hints=hint("file_integrity")),
             FileScanCollector.create(fs, compiler, hint("file_scan")),
             SetuidFilesCollector(fs, hint("setuid_files")),
         ]
 
     def _neighborhood(self, prompts: Prompts) -> list[SnapshotCollector]:
         hint = prompts.hint_for
-        runner = self._runner
+        runner = self._io.runner
         arp = CommandSnapshot(runner, ["arp", "-an"], MacosArpParser())
         ndp = CommandSnapshot(runner, ["ndp", "-an"], MacosNdpParser())
         routes = CommandSnapshot(runner, ["netstat", "-rn"], MacosRouteParser())
@@ -272,7 +279,7 @@ class MacOSHost:
 
     def _exposure(self, prompts: Prompts) -> list[SnapshotCollector]:
         hint = prompts.hint_for
-        runner = self._runner
+        runner = self._io.runner
         proxy = CommandSnapshot(runner, ["scutil", "--proxy"], MacosProxyParser())
         sessions = CommandSnapshot(runner, ["who"], WhoParser())
         shares = CommandSnapshot(runner, ["mount"], MacosMountSharesParser())
@@ -290,7 +297,7 @@ class MacOSHost:
         # kernel_modules is composed out: the kernel_extensions collector
         # covers loaded kernel code on macOS.
         dyld = CommandSnapshot(
-            self._runner,
+            self._io.runner,
             ["launchctl", "getenv", "DYLD_INSERT_LIBRARIES"],
             EnvValueParser("DYLD_INSERT_LIBRARIES", "launchd"),
         )

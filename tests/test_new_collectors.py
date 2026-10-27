@@ -23,7 +23,15 @@ from sqlalchemy.orm import Session
 
 from avai.dashboard.app import DashboardApp
 from avai.dashboard.config import DashboardConfig
-from avai.dashboard.queries import DnsPanel, DnsQuery, FlowQuery, FlowsPanel, PersistencePages, PersistencePanel, RowFilter
+from avai.dashboard.queries import (
+    DnsPanel,
+    DnsQuery,
+    FlowQuery,
+    FlowsPanel,
+    PersistencePages,
+    PersistencePanel,
+    RowFilter,
+)
 from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.collectors import (
     CapturedPackets,
@@ -39,6 +47,7 @@ from avai.host_monitor.collectors.persistence import (
     HostsFileParser,
     SudoersParser,
 )
+from avai.host_monitor.runtime import HostPaths
 from avai.host_monitor.hosts.linux import LinuxPrivilegedAccounts
 from avai.host_monitor.models import (
     DnsQueryRow,
@@ -237,7 +246,7 @@ class TestPrivilegeParsers:
         assert all(r["kind"] == "sudoers" for r in rows)
 
     def test_groups_only_privileged_with_members(self):
-        rows = LinuxPrivilegedAccounts().group_rows(
+        rows = LinuxPrivilegedAccounts(HostPaths("")).group_rows(
             "sudo:x:27:alice,bob\nwheel:x:10:\nstaff:x:50:carol\n", "/etc/group"
         )
         assert len(rows) == 1
@@ -245,7 +254,7 @@ class TestPrivilegeParsers:
         assert rows[0]["detail"] == "alice,bob"
 
     def test_passwd_flags_uid0_only(self):
-        rows = LinuxPrivilegedAccounts().uid0_rows(
+        rows = LinuxPrivilegedAccounts(HostPaths("")).uid0_rows(
             "root:x:0:0:root:/root:/bin/bash\n"
             "backdoor:x:0:0::/:/bin/sh\n"
             "bob:x:1000:1000::/home/bob:/bin/bash\n",
@@ -440,7 +449,9 @@ class TestDashboardPersistence:
             run_id,
         )
         with Session(engine) as s:
-            data = PersistencePanel(s, run_id).tampering(RowFilter(), PersistencePages())
+            data = PersistencePanel(s, run_id).tampering(
+                RowFilter(), PersistencePages()
+            )
         assert data["any"] is True
         assert data["counts"]["ssh_keys"]["total"] == 1
         assert data["ssh_keys"][0]["owner"] == "x"
@@ -471,7 +482,9 @@ class TestDashboardPersistence:
     def test_empty_when_no_data(self, db):
         engine, sink, run_id, ts = db
         with Session(engine) as s:
-            data = PersistencePanel(s, run_id).tampering(RowFilter(), PersistencePages())
+            data = PersistencePanel(s, run_id).tampering(
+                RowFilter(), PersistencePages()
+            )
         assert data["any"] is False
 
 

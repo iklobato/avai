@@ -9,6 +9,7 @@ promiscuous_ifaces. They are simply not assembled, never a runtime branch.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -40,7 +41,7 @@ from ..persistence_collectors import (
 )
 from ..enums import PrivilegeKind
 from ..prompts import Prompts
-from ..runtime import CommandRunner, CommandSnapshot
+from ..runtime import CommandRunner, CommandSnapshot, HostIo, HostPaths
 from .portable import AccountCollectors, PortableCollectors
 from .windows_collectors import (
     LocalGroupParser,
@@ -168,19 +169,19 @@ class WindowsHost:
         "AppInit_DLLs,LoadAppInit_DLLs | ConvertTo-Json -Compress"
     )
 
-    def __init__(self, runner: CommandRunner, logger: logging.Logger) -> None:
-        self._runner = runner
+    def __init__(self, io: HostIo, logger: logging.Logger) -> None:
+        self._io = io
         self._logger = logger
 
     @classmethod
     def create(cls, logger: logging.Logger) -> WindowsHost:
-        return cls(CommandRunner(), logger)
+        return cls(HostIo(CommandRunner(), HostPaths.from_environ(os.environ)), logger)
 
     def snapshot_collectors(self, prompts: Prompts) -> list[SnapshotCollector]:
-        accounts = WindowsPrivilegedAccounts(self._runner)
-        shell = PowerShell(self._runner)
+        accounts = WindowsPrivilegedAccounts(self._io.runner)
+        shell = PowerShell(self._io.runner)
         return [
-            *PortableCollectors(self._logger).build(prompts),
+            *PortableCollectors(self._logger, self._io.paths).build(prompts),
             *AccountCollectors(WindowsFilesystemLayout(), accounts).build(prompts),
             *self._native(prompts, shell),
             *self._neighborhood(prompts, shell),
@@ -199,11 +200,11 @@ class WindowsHost:
         hint = prompts.hint_for
         return [
             WindowsInstalledAppsCollector(shell, hint("installed_apps")),
-            WindowsLaunchItemsCollector(self._runner, shell, hint("launch_items")),
+            WindowsLaunchItemsCollector(self._io.runner, shell, hint("launch_items")),
             WindowsSystemIntegrityCollector(shell, hint("system_integrity")),
             WindowsUsbDevicesCollector(shell, hint("usb_devices")),
             WindowsBluetoothCollector(shell, hint("bluetooth_devices")),
-            WindowsWifiCollector(self._runner, hint("wifi_state")),
+            WindowsWifiCollector(self._io.runner, hint("wifi_state")),
         ]
 
     def _neighborhood(
@@ -230,7 +231,7 @@ class WindowsHost:
     def _exposure(self, prompts: Prompts, shell: PowerShell) -> list[SnapshotCollector]:
         hint = prompts.hint_for
         sessions = CommandSnapshot(
-            self._runner, ["query", "user"], WindowsSessionParser()
+            self._io.runner, ["query", "user"], WindowsSessionParser()
         )
         return [
             ProxyConfigCollector(
@@ -253,7 +254,7 @@ class WindowsHost:
     ) -> list[SnapshotCollector]:
         hint = prompts.hint_for
         drivers = CommandSnapshot(
-            self._runner, ["driverquery", "/fo", "csv"], WindowsDriverParser()
+            self._io.runner, ["driverquery", "/fo", "csv"], WindowsDriverParser()
         )
         return [
             InjectionEnvCollector(

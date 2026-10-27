@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Iterable, Iterator
 from typing import Any, Protocol
 
 import psutil
 
-from .. import constants
 from .command_runner import CommandRunner
+from .host_paths import HostPaths
 from .mounts import HostPart, HostRootfs, HostUsage
 
 SIGNAL_ON = 1
 SIGNAL_OFF = 0
-ROOTFS_SUFFIX = "/rootfs"
+ROOTFS_DIR = "rootfs"
 
 
 class PsutilConnections:
@@ -131,23 +130,22 @@ class DiskMetrics:
     log once) rather than present misleading container-internal rows.
     """
 
-    def __init__(self, logger: logging.Logger, rootfs: str | None = None) -> None:
+    def __init__(self, logger: logging.Logger, paths: HostPaths) -> None:
         self._logger = logger
-        # Explicit override for tests; production derives it from HOST_PREFIX.
-        self._rootfs_override = rootfs
+        self._paths = paths
 
     def partitions(self) -> list[Any]:
         rootfs = self._rootfs()
         if rootfs is not None:
             return rootfs.partitions()
-        if constants.HOST_PREFIX:
+        if self._paths.in_container():
             # Container mode but the host root isn't mounted: psutil would
             # surface the container's overlay/bind mounts as host disks.
             # Skip rather than mislead.
             self._logger.warning(
-                "disk_usage: container mode but %s/rootfs is not mounted; "
+                "disk_usage: container mode but %s is not mounted; "
                 "skipping (bind-mount the host root read-only to enable)",
-                constants.HOST_PREFIX,
+                self._paths.under_prefix(ROOTFS_DIR),
             )
             return []
         try:
@@ -182,12 +180,10 @@ class DiskMetrics:
             return {}
 
     def _rootfs(self) -> HostRootfs | None:
-        if self._rootfs_override is not None:
-            return HostRootfs(self._rootfs_override)
-        if not constants.HOST_PREFIX:
+        if not self._paths.in_container():
             return None
-        candidate = constants.HOST_PREFIX + ROOTFS_SUFFIX
-        return HostRootfs(candidate) if os.path.isdir(candidate) else None
+        candidate = self._paths.under_prefix(ROOTFS_DIR)
+        return HostRootfs(str(candidate)) if candidate.is_dir() else None
 
 
 class TriState:

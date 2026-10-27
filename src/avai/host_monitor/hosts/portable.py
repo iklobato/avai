@@ -19,20 +19,27 @@ from ..collectors import (
 )
 from ..persistence_collectors import SshKnownHostsCollector
 from ..prompts import Prompts
-from ..runtime import Clock, DiskMetrics, PsutilConnections, SystemMetrics
+from ..runtime import (
+    Clock,
+    DiskMetrics,
+    HostPaths,
+    PsutilConnections,
+    SystemMetrics,
+)
 from .capabilities import FilesystemLayout, PrivilegedAccounts
 
 
 class PortableCollectors:
     """The psutil-backed collectors, identical on every OS."""
 
-    def __init__(self, logger: logging.Logger) -> None:
+    def __init__(self, logger: logging.Logger, paths: HostPaths) -> None:
         self._logger = logger
+        self._paths = paths
 
     def build(self, prompts: Prompts) -> list[SnapshotCollector]:
         hint = prompts.hint_for
         metrics, connections = SystemMetrics(), PsutilConnections()
-        disks = DiskMetrics(self._logger)
+        disks = DiskMetrics(self._logger, self._paths)
         return [
             ProcessCollector(metrics, hint("processes")),
             NetworkConnectionsCollector(connections, hint("network_connections")),

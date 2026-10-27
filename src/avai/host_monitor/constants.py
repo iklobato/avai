@@ -194,8 +194,6 @@ APP_INFO_KEYS = (
 )
 
 
-HOST_PREFIX = os.environ.get("HOST_PREFIX", "").rstrip("/")
-
 
 # --- File scanning (YARA) ---
 # Bundled + user YARA rules live here; the FileScanCollector compiles

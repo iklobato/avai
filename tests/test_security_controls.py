@@ -126,14 +126,14 @@ def test_macos_collector_maps_enabled_idle_service_to_on():
     import json
 
     from avai.host_monitor.collectors import SystemIntegrityCollector
-    from avai.host_monitor.runtime import CommandRunner
+    from avai.host_monitor.runtime import CommandRunner, HostIo, HostPaths
 
     probes = ServiceProbes(
         FakeServiceSupervisor(1),
         FakePortInspector(listening=0, established=0),
         FakeProcessInspector(running=0),
     )
-    col = SystemIntegrityCollector(CommandRunner(), probes)
+    col = SystemIntegrityCollector(HostIo(CommandRunner(), HostPaths("")), probes)
     row = list(col.collect())[0]
     assert row["remote_login_enabled"] == 1
     assert row["screen_sharing_enabled"] == 1

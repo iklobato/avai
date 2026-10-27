@@ -154,9 +154,9 @@ class TestHostPaths:
         # A GitHub macOS runner ships a system LaunchAgent like this.
         bad = tmp_path / "bad.plist"
         bad.write_bytes(b"<?xml version=1.0?>\n<plist/>")
-        assert HostPaths().read_plist(bad) is None
+        assert HostPaths("").read_plist(bad) is None
 
     def test_read_plist_reads_a_dict(self, tmp_path):
         good = tmp_path / "good.plist"
         good.write_bytes(plistlib.dumps({"Label": "com.example"}))
-        assert HostPaths().read_plist(good) == {"Label": "com.example"}
+        assert HostPaths("").read_plist(good) == {"Label": "com.example"}

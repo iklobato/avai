@@ -111,10 +111,8 @@ class LaunchPlist:
         self._scope = scope
         self._path = path
 
-    def row(self) -> dict[str, Any] | None:
-        job = HostPaths().read_plist(self._path)
-        if job is None:
-            return None
+    def row(self, job: Mapping[str, Any]) -> dict[str, Any]:
+        """The row for this plist's parsed ``job`` dict."""
         coerce = Coerce()
         return {
             "scope": str(self._scope),
@@ -150,13 +148,20 @@ class LaunchItemsCollector(SnapshotCollector):
     slice = Slices.LAUNCH_ITEMS
     judge_fields = LAUNCH_JUDGE_FIELDS
 
+    def __init__(self, paths: HostPaths, judge_hints: str = "") -> None:
+        super().__init__(judge_hints)
+        self._paths = paths
+
     def collect(self) -> Iterator[dict[str, Any]]:
-        rows = (
-            LaunchPlist(scope, path).row()
+        plists = (
+            (scope, path)
             for scope, dir_str in LAUNCH_DIRS
-            for path in self._plists(HostPaths().expand(dir_str))
+            for path in self._plists(self._paths.expand(dir_str))
         )
-        yield from (row for row in rows if row is not None)
+        for scope, path in plists:
+            job = self._paths.read_plist(path)
+            if job is not None:
+                yield LaunchPlist(scope, path).row(job)
 
     def _plists(self, directory: Path) -> list[Path]:
         if not directory.is_dir():
@@ -195,9 +200,22 @@ class LinuxLaunchItemsCollector(SnapshotCollector):
     slice = Slices.LAUNCH_ITEMS
     judge_fields = LAUNCH_JUDGE_FIELDS
 
+    def __init__(
+        self, units: SystemdUnitReader, crons: CrontabReader, judge_hints: str = ""
+    ) -> None:
+        super().__init__(judge_hints)
+        self._units = units
+        self._crons = crons
+
+    @classmethod
+    def create(
+        cls, paths: HostPaths, judge_hints: str = ""
+    ) -> LinuxLaunchItemsCollector:
+        return cls(SystemdUnitReader(paths), CrontabReader(paths), judge_hints)
+
     def collect(self) -> Iterator[dict[str, Any]]:
-        yield from SystemdUnitReader().rows()
-        yield from CrontabReader().rows()
+        yield from self._units.rows()
+        yield from self._crons.rows()
 
 
 class SystemdUnit:
@@ -284,6 +302,9 @@ class SystemdUnitReader:
         (LinuxLaunchScope.USER_TIMER, "~/.config/systemd/user", "*.timer"),
     )
 
+    def __init__(self, paths: HostPaths) -> None:
+        self._paths = paths
+
     def rows(self) -> Iterator[dict[str, Any]]:
         seen_units: set[str] = set()
         candidates = (
@@ -305,12 +326,13 @@ class SystemdUnitReader:
         return SystemdUnit(scope, path).row()
 
     def _unit_files(self, dir_str: str, pattern: str) -> Iterator[Path]:
-        # HostPaths().for_home expands a ~/... template into 0..N real dirs
+        # HostPaths.for_home expands a ~/... template into 0..N real dirs
         # (one per user home in container mode), or exactly one for an
         # absolute path. It can return [] (container mode with no /host/home
         # and no /host/root mounted), so iterate rather than index [0],
         # which raised IndexError and killed the collector.
-        directories = [path for path in HostPaths().for_home(dir_str) if path.is_dir()]
+        homes = self._paths.for_home(dir_str)
+        directories = [path for path in homes if path.is_dir()]
         for directory in directories:
             try:
                 yield from list(directory.glob(pattern))
@@ -377,8 +399,11 @@ class CrontabReader:
         (LinuxLaunchScope.USER_CRONTAB, "/var/spool/cron/crontabs"),
     )
 
+    def __init__(self, paths: HostPaths) -> None:
+        self._paths = paths
+
     def rows(self) -> Iterator[dict[str, Any]]:
-        paths = HostPaths()
+        paths = self._paths
         scope, crontab_path = self.CRON_FILE
         crontab = paths.translate(crontab_path)
         if crontab.is_file():

@@ -8,10 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import constants
 from ..enums import LogLevel
 from ..slices import Slices
-from ..runtime import CommandRunner, HostPaths
+from ..runtime import HostIo
 from .base import SnapshotCollector
 
 # Conservative level sniff for plain-text lines that carry no structured
@@ -109,15 +108,15 @@ class JournalLine:
 class JournalReader:
     """The newest journald entries, read through ``journalctl``."""
 
-    def __init__(self, runner: CommandRunner, logger: logging.Logger) -> None:
-        self._runner = runner
+    def __init__(self, io: HostIo, logger: logging.Logger) -> None:
+        self._io = io
         self._logger = logger
 
     def rows(self) -> Iterator[dict[str, Any]]:
-        if not self._runner.exists("journalctl"):
+        if not self._io.runner.exists("journalctl"):
             return
         try:
-            output = self._runner.capture(self._command(), timeout=JOURNAL_TIMEOUT_S)
+            output = self._io.runner.capture(self._command(), timeout=JOURNAL_TIMEOUT_S)
         except OSError as exc:
             self._logger.warning("journalctl read failed: %s", exc)
             return
@@ -131,8 +130,9 @@ class JournalReader:
 
     def _command(self) -> list[str]:
         cmd = ["journalctl", "-o", "json", "--no-pager", "-n", str(MAX_JOURNAL_LINES)]
-        host_journal = HostPaths().translate("/var/log/journal")
-        if constants.HOST_PREFIX and host_journal.is_dir():
+        paths = self._io.paths
+        host_journal = paths.translate("/var/log/journal")
+        if paths.in_container() and host_journal.is_dir():
             cmd.extend(["--directory", str(host_journal)])
         return cmd
 
@@ -142,10 +142,6 @@ class LogFileTail:
 
     def __init__(self, path: Path) -> None:
         self._path = path
-
-    @classmethod
-    def on_host(cls, path_str: str) -> LogFileTail:
-        return cls(HostPaths().translate(path_str))
 
     def rows(self) -> Iterator[dict[str, Any]]:
         tail = self._tail()
@@ -195,7 +191,7 @@ class LogTailCollector(SnapshotCollector):
     judge_enabled = False
 
     def __init__(
-        self, judge_hints: str, journal: JournalReader, files: tuple[str, ...]
+        self, judge_hints: str, journal: JournalReader, files: tuple[Path, ...]
     ) -> None:
         super().__init__(judge_hints)
         self._journal = journal
@@ -203,11 +199,12 @@ class LogTailCollector(SnapshotCollector):
 
     @classmethod
     def create(
-        cls, judge_hints: str, runner: CommandRunner, logger: logging.Logger
+        cls, judge_hints: str, io: HostIo, logger: logging.Logger
     ) -> LogTailCollector:
-        return cls(judge_hints, JournalReader(runner, logger), DEFAULT_LOG_FILES)
+        files = tuple(io.paths.translate(path) for path in DEFAULT_LOG_FILES)
+        return cls(judge_hints, JournalReader(io, logger), files)
 
     def collect(self) -> Iterator[dict[str, Any]]:
         yield from self._journal.rows()
-        for path_str in self._files:
-            yield from LogFileTail.on_host(path_str).rows()
+        for path in self._files:
+            yield from LogFileTail(path).rows()

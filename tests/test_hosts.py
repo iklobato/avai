@@ -21,6 +21,7 @@ from avai.host_monitor.hosts.macos import (
     MacOSPrivilegedAccounts,
 )
 from avai.host_monitor.prompts import Prompts
+from avai.host_monitor.runtime import HostPaths
 
 
 class _FakeRunner:
@@ -71,7 +72,7 @@ class TestFilesystemLayouts:
         assert Path("/usr/bin") in fs.privileged_bin_dirs()
 
     def test_linux_uses_any_interface_and_opt_in_bin_dirs(self):
-        fs = LinuxFilesystemLayout()
+        fs = LinuxFilesystemLayout(HostPaths(""))
         assert fs.tcpdump_interface_args() == ["-i", "any"]
         # Linux scans /opt too; macOS does not.
         assert Path("/opt") in fs.privileged_bin_dirs()
@@ -79,7 +80,7 @@ class TestFilesystemLayouts:
     def test_layouts_are_distinct_per_os(self):
         assert (
             MacOSFilesystemLayout().tcpdump_interface_args()
-            != LinuxFilesystemLayout().tcpdump_interface_args()
+            != LinuxFilesystemLayout(HostPaths("")).tcpdump_interface_args()
         )
 
 
@@ -119,7 +120,7 @@ class TestLinuxPrivilegedAccountsReadFiles:
         from avai.host_monitor.runtime import HostPaths
 
         monkeypatch.setattr(HostPaths, "translate", staticmethod(lambda p: group))
-        rows = list(LinuxPrivilegedAccounts().privileged_group_members())
+        rows = list(LinuxPrivilegedAccounts(HostPaths("")).privileged_group_members())
         assert len(rows) == 1
         assert rows[0]["subject"] == "sudo"
 

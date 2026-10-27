@@ -8,11 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .. import constants
 from ..slices import Slices
 from ..constants import APP_INFO_KEYS
 from ..enums import Browser
-from ..runtime import Coerce, CommandRunner, ExternalSqliteReader, HostPaths
+from ..runtime import Coerce, CommandRunner, ExternalSqliteReader, HostIo, HostPaths
 from .base import SnapshotCollector
 
 PROFILER_TIMEOUT_S = 30
@@ -177,9 +176,9 @@ class QuarantineCollector(SnapshotCollector):
     )
 
     def collect(self) -> Iterator[dict[str, Any]]:
-        path = HostPaths().expand(
+        path = Path(
             "~/Library/Preferences/com.apple.LaunchServices.QuarantineEventsV2"
-        )
+        ).expanduser()
         if not path.exists():
             return
         columns = dict(self.COLUMN_MAP)
@@ -234,10 +233,9 @@ class BrowserExtensionsCollector(SnapshotCollector):
         return cls(ExtensionReaders.standard(), profiles, judge_hints)
 
     def collect(self) -> Iterator[dict[str, Any]]:
-        paths = HostPaths()
         for browser, profiles in self._profiles.items():
             reader = self._readers.for_browser(browser)
-            bases = [paths.expand(base_str) for base_str in profiles]
+            bases = [Path(base_str).expanduser() for base_str in profiles]
             for base in (base for base in bases if base.is_dir()):
                 yield from reader.read(base, browser)
 
@@ -246,26 +244,26 @@ class InstalledAppsCollector(SnapshotCollector):
     slice = Slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
+    def __init__(self, paths: HostPaths, judge_hints: str = "") -> None:
+        super().__init__(judge_hints)
+        self._paths = paths
+
     def collect(self) -> Iterator[dict[str, Any]]:
-        app_dirs = (Path("/Applications"), HostPaths().expand("~/Applications"))
+        app_dirs = (Path("/Applications"), Path("~/Applications").expanduser())
         for app in (app for app_dir in app_dirs for app in self._apps(app_dir)):
-            bundle = HostPaths().read_plist(app / "Contents" / "Info.plist") or {}
-            details = {key: bundle.get(key) for key in APP_INFO_KEYS}
-            yield {
-                "path": str(app),
-                "bundle_id": bundle.get("CFBundleIdentifier"),
-                "name": bundle.get("CFBundleName") or bundle.get("CFBundleDisplayName"),
-                "version": bundle.get("CFBundleShortVersionString"),
-                "raw_json": json.dumps(
-                    Coerce().jsonable(
-                        {
-                            key: value
-                            for key, value in details.items()
-                            if value is not None
-                        }
-                    )
-                ),
-            }
+            info_plist = app / "Contents" / "Info.plist"
+            yield self._row(app, self._paths.read_plist(info_plist) or {})
+
+    def _row(self, app: Path, bundle: dict[str, Any]) -> dict[str, Any]:
+        details = {key: bundle.get(key) for key in APP_INFO_KEYS}
+        known = {key: value for key, value in details.items() if value is not None}
+        return {
+            "path": str(app),
+            "bundle_id": bundle.get("CFBundleIdentifier"),
+            "name": bundle.get("CFBundleName") or bundle.get("CFBundleDisplayName"),
+            "version": bundle.get("CFBundleShortVersionString"),
+            "raw_json": json.dumps(Coerce().jsonable(known)),
+        }
 
     def _apps(self, app_dir: Path) -> list[Path]:
         if not app_dir.is_dir():
@@ -280,13 +278,13 @@ class DpkgPackages:
     """Installed Debian packages, from ``dpkg-query``'s tab-separated output
     (no parsing of dpkg -l's column-aligned text)."""
 
-    def __init__(self, runner: CommandRunner) -> None:
-        self._runner = runner
+    def __init__(self, io: HostIo) -> None:
+        self._io = io
 
     def rows(self) -> Iterator[dict[str, Any]]:
-        if not self._runner.exists("dpkg-query"):
+        if not self._io.runner.exists("dpkg-query"):
             return
-        output = self._runner.text(self._command(), timeout=DPKG_TIMEOUT_S)
+        output = self._io.runner.text(self._command(), timeout=DPKG_TIMEOUT_S)
         fields = (line.split("\t") for line in output.splitlines())
         for parts in (parts for parts in fields if len(parts) >= len(DPKG_FIELDS)):
             if parts[0] == "installed":
@@ -306,10 +304,11 @@ class DpkgPackages:
     def _command(self) -> list[str]:
         # When containerised, --admindir points dpkg-query at the host's
         # package database rather than the container's.
-        host_admindir = HostPaths().translate("/var/lib/dpkg")
+        paths = self._io.paths
+        host_admindir = paths.translate("/var/lib/dpkg")
         admindir = (
             ["--admindir", str(host_admindir)]
-            if constants.HOST_PREFIX and host_admindir.is_dir()
+            if paths.in_container() and host_admindir.is_dir()
             else []
         )
         return ["dpkg-query", *admindir, "-W", "-f", DPKG_FORMAT]
@@ -356,8 +355,11 @@ class DesktopEntry:
 class DesktopEntries:
     """GUI app menu entries from the system and per-user XDG directories."""
 
+    def __init__(self, paths: HostPaths) -> None:
+        self._paths = paths
+
     def rows(self) -> Iterator[dict[str, Any]]:
-        paths = HostPaths()
+        paths = self._paths
         roots = [paths.translate(root) for root in DESKTOP_ROOTS]
         roots += [
             home for template in DESKTOP_HOME_ROOTS for home in paths.for_home(template)
@@ -392,13 +394,20 @@ class LinuxInstalledAppsCollector(SnapshotCollector):
     slice = Slices.INSTALLED_APPS
     judge_fields = ("bundle_id", "name", "path")
 
-    def __init__(self, runner: CommandRunner, judge_hints: str = "") -> None:
+    def __init__(
+        self, packages: DpkgPackages, desktop: DesktopEntries, judge_hints: str = ""
+    ) -> None:
         super().__init__(judge_hints)
-        self._runner = runner
+        self._packages = packages
+        self._desktop = desktop
+
+    @classmethod
+    def create(cls, io: HostIo, judge_hints: str = "") -> LinuxInstalledAppsCollector:
+        return cls(DpkgPackages(io), DesktopEntries(io.paths), judge_hints)
 
     def collect(self) -> Iterator[dict[str, Any]]:
-        yield from DpkgPackages(self._runner).rows()
-        yield from DesktopEntries().rows()
+        yield from self._packages.rows()
+        yield from self._desktop.rows()
 
 
 class MdmProfilesCollector(SnapshotCollector):
@@ -498,8 +507,12 @@ class SystemExtensionsCollector(SnapshotCollector):
     slice = Slices.SYSTEM_EXTENSIONS
     judge_fields = ("bundle_id", "team_id")
 
+    def __init__(self, paths: HostPaths, judge_hints: str = "") -> None:
+        super().__init__(judge_hints)
+        self._paths = paths
+
     def collect(self) -> Iterator[dict[str, Any]]:
-        db = HostPaths().read_plist(Path("/Library/SystemExtensions/db.plist"))
+        db = self._paths.read_plist(Path("/Library/SystemExtensions/db.plist"))
         if not db:
             return
         extensions = db.get("extensions", []) or []
