@@ -136,7 +136,7 @@ class NvdEnricher(Enricher):
         # silent "no opinion" on every CVE under load.
         if response.status_code == HTTPStatus.FORBIDDEN:
             raise RateLimitedError("nvd returned 403 (rate limited / over quota)")
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         reply = NvdReply.model_validate(response.json())
         if not reply.vulnerabilities:

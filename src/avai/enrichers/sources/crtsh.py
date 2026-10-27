@@ -11,7 +11,6 @@ https://crt.sh/
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import ClassVar
 
 from pydantic import TypeAdapter
@@ -56,7 +55,7 @@ class CrtShEnricher(Enricher):
                 params={"q": indicator.value, "output": "json"}, timeout=TIMEOUT_S
             ),
         )
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         try:
             body = response.json() or []

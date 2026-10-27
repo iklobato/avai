@@ -8,7 +8,6 @@ https://internetdb.shodan.io/
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from avai.enrichers.reply import ApiReply
@@ -58,7 +57,7 @@ class ShodanInternetDBEnricher(Enricher):
 
     def fetch(self, indicator: Indicator) -> Evidence | None:
         response = self._http.get(f"{BASE_URL}/{indicator.value}")
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         return self._evidence(indicator, ShodanHost.model_validate(response.json()))
 

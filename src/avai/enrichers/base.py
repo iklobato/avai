@@ -12,11 +12,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum, unique
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, ClassVar, Mapping
 
 from avai.errors import AvaiError
 
 if TYPE_CHECKING:
+    import requests
+
     from avai.enrichers.http import HttpClient
 
 # CVSS v3 severity bands: critical from 9.0, high from 7.0.
@@ -209,6 +212,16 @@ class Enricher(ABC):
         Raise any other exception for transport / parse errors — the
         chain logs them and moves on without poisoning the cache.
         """
+
+    def answered(self, response: requests.Response) -> bool:
+        """True for a 200, False for a 404 (the source has nothing on the
+        indicator). Any other status (a bad key, a server error) is raised,
+        so the chain logs it instead of reading it as "no opinion"."""
+        if response.status_code == HTTPStatus.NOT_FOUND:
+            return False
+        if response.status_code != HTTPStatus.OK:
+            raise EnricherError(f"{self.name} returned {int(response.status_code)}")
+        return True
 
     def freshness_cutoff(self) -> datetime:
         return datetime.now(timezone.utc) - timedelta(hours=self.ttl_hours)

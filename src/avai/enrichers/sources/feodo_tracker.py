@@ -48,9 +48,7 @@ class FeodoTrackerEnricher(FeedEnricher[FeodoEntry]):
     def index(self, body: Any) -> dict[str, FeodoEntry]:
         entries = TypeAdapter(list[FeodoEntry]).validate_python(body or [])
         return {
-            entry.ip_address.strip(): entry
-            for entry in entries
-            if entry.ip_address
+            entry.ip_address.strip(): entry for entry in entries if entry.ip_address
         }
 
     def fetch(self, indicator: Indicator) -> Evidence | None:

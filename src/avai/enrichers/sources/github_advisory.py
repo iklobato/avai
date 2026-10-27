@@ -6,7 +6,6 @@ https://docs.github.com/en/rest/security-advisories/global-advisories
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from pydantic import field_validator
@@ -80,7 +79,7 @@ class GitHubAdvisoryEnricher(Enricher):
                 },
             ),
         )
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         advisories = response.json() or []
         if not advisories:

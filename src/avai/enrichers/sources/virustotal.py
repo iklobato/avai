@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 from collections.abc import Mapping
 from dataclasses import dataclass
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from pydantic import Field
@@ -142,7 +141,7 @@ class VirusTotalEnricher(Enricher):
                 timeout=TIMEOUT_S,
             ),
         )
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         attributes = VtReply.model_validate(response.json()).record.attributes
         return self._evidence(indicator, attributes)

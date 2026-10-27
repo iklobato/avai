@@ -6,14 +6,12 @@ https://docs.greynoise.io/reference/get_v3-community-ip
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from pydantic import field_validator
 
 from avai.enrichers.base import (
     Enricher,
-    EnricherError,
     Evidence,
     Indicator,
     IndicatorType,
@@ -58,13 +56,9 @@ class GreyNoiseEnricher(Enricher):
             f"{BASE_URL}/{indicator.value}",
             RequestOptions(headers={"key": self._token, "Accept": "application/json"}),
         )
-        # 404 = IP not observed -> genuine no-opinion. Other non-200s
-        # (400 bad request, 401/403 bad key) are real errors; raise so the
-        # chain logs them instead of silently masking a misconfiguration.
-        if response.status_code == HTTPStatus.NOT_FOUND:
+        # 404 = IP not observed: a genuine no-opinion.
+        if not self.answered(response):
             return None
-        if response.status_code != HTTPStatus.OK:
-            raise EnricherError(f"greynoise returned {response.status_code}")
         return self._evidence(indicator, NoiseRecord.model_validate(response.json()))
 
     def _evidence(self, indicator: Indicator, record: NoiseRecord) -> Evidence:

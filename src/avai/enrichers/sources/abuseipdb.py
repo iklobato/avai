@@ -6,7 +6,6 @@ https://docs.abuseipdb.com/
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import ClassVar
 
 from pydantic import Field
@@ -77,7 +76,7 @@ class AbuseIpDbEnricher(Enricher):
                 },
             ),
         )
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         report = AbuseIpDbCheck.model_validate(response.json()).report
         return self._evidence(indicator, report)

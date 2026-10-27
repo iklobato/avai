@@ -8,7 +8,6 @@ https://osv.dev/docs/
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from pydantic import field_validator
@@ -107,7 +106,7 @@ class OSVEnricher(Enricher):
         # id lookups use GET /v1/vulns/{id}; POST /v1/query rejects a
         # top-level {"id": ...} with HTTP 400 (verified against the API).
         response = self._http.get(f"{VULN_URL}/{vuln_id.upper()}")
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return []
         return [OsvVuln.model_validate(response.json())]
 
@@ -119,7 +118,7 @@ class OSVEnricher(Enricher):
         response = self._http.post(
             QUERY_URL, RequestOptions(json=self._query(package_name, version))
         )
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return []
         return OsvQueryReply.model_validate(response.json()).vulns
 

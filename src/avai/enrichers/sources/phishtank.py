@@ -6,7 +6,6 @@ https://phishtank.org/api_info.php
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from pydantic import field_validator
@@ -70,7 +69,7 @@ class PhishTankEnricher(Enricher):
         # shared client won't catch it — surface it as a rate-limit.
         if response.status_code == BANDWIDTH_LIMIT_EXCEEDED:
             raise RateLimitedError("phishtank returned 509 (rate limited)")
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         results = PhishReply.model_validate(response.json()).results
         if not results.confirmed():

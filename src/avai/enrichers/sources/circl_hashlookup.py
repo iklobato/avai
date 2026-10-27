@@ -10,7 +10,6 @@ https://hashlookup.circl.lu/
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from pydantic import Field, field_validator
@@ -79,7 +78,7 @@ class CirclHashlookupEnricher(Enricher):
             f"{BASE_URL}/{indicator.type}/{indicator.value}",
             RequestOptions(headers={"Accept": "application/json"}),
         )
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         record = CirclRecord.model_validate(response.json())
         # Low-trust hashes are known to CIRCL but seen in untrusted/malicious

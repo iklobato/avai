@@ -9,15 +9,17 @@ HTTP client with a fake.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+from http import HTTPStatus
 from typing import Any, NoReturn
 
 import pytest
 
 from avai.enrichers import EnricherCatalog
-from avai.enrichers.base import Indicator, IndicatorType, VerdictHint
+from avai.enrichers.base import EnricherError, Indicator, IndicatorType, VerdictHint
 from avai.enrichers.http import DEFAULT_TIMEOUT_S, RequestOptions
 
 # ---------------------------------------------------------------------------
@@ -113,11 +115,17 @@ class TestMalwareBazaar:
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.SHA256, "a" * 64)) is None
 
-    def test_unauthorized_returns_none(self, monkeypatch):
+    def test_unauthorized_is_an_error_not_a_silent_no_opinion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
-        http = _FakeHttp(_FakeResp(status=401, text="Unauthorized"))
-        e = self._enricher(http)
-        assert e.fetch(Indicator(IndicatorType.SHA256, "a" * 64)) is None
+        unauthorized = _FakeResp(status=HTTPStatus.UNAUTHORIZED, text="Unauthorized")
+        enricher = self._enricher(_FakeHttp(unauthorized))
+        with pytest.raises(EnricherError) as excinfo:
+            enricher.fetch(
+                Indicator(IndicatorType.SHA256, hashlib.sha256().hexdigest())
+            )
+        assert str(excinfo.value) == "malware_bazaar returned 401"
 
 
 # ---------------------------------------------------------------------------
@@ -292,10 +300,12 @@ class TestIpwhoisGeo:
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.IPV4, "10.0.0.1")) is None
 
-    def test_non_200_returns_none(self):
-        http = _FakeHttp(_FakeResp(status=503))
-        e = self._enricher(http)
-        assert e.fetch(Indicator(IndicatorType.IPV4, "8.8.8.8")) is None
+    def test_a_server_error_is_raised_for_the_chain_to_log(self) -> None:
+        unavailable = _FakeResp(status=HTTPStatus.SERVICE_UNAVAILABLE)
+        enricher = self._enricher(_FakeHttp(unavailable))
+        with pytest.raises(EnricherError) as excinfo:
+            enricher.fetch(Indicator(IndicatorType.IPV4, "8.8.8.8"))
+        assert str(excinfo.value) == "ipwhois_geo returned 503"
 
     def test_ipv6_indicator_supported_and_parsed(self):
         http = _FakeHttp(
@@ -461,7 +471,6 @@ class TestOSV:
         assert ev is None
         assert http.calls == []
 
-    @pytest.mark.parametrize("status", [404, 500])
     @pytest.mark.parametrize(
         "indicator",
         [
@@ -469,10 +478,25 @@ class TestOSV:
             Indicator(IndicatorType.PACKAGE, "pkg@1.0"),
         ],
     )
-    def test_non_ok_status_returns_none(self, status, indicator):
+    def test_not_found_returns_none(self, indicator: Indicator) -> None:
         body = {"id": "CVE-2024-1", "vulns": [{"id": "CVE-2024-1"}]}
-        http = _FakeHttp(_FakeResp(status=status, json_body=body))
+        http = _FakeHttp(_FakeResp(status=HTTPStatus.NOT_FOUND, json_body=body))
         assert self._enricher(http).fetch(indicator) is None
+
+    @pytest.mark.parametrize(
+        "indicator",
+        [
+            Indicator(IndicatorType.CVE, "CVE-2024-1"),
+            Indicator(IndicatorType.PACKAGE, "pkg@1.0"),
+        ],
+    )
+    def test_a_server_error_is_raised(self, indicator: Indicator) -> None:
+        http = _FakeHttp(
+            _FakeResp(status=HTTPStatus.INTERNAL_SERVER_ERROR, json_body={})
+        )
+        with pytest.raises(EnricherError) as excinfo:
+            self._enricher(http).fetch(indicator)
+        assert str(excinfo.value) == "osv returned 500"
 
     def test_ids_are_deduped_across_the_first_five_vulns(self):
         vulns = [{"id": f"GHSA-{n}", "aliases": ["CVE-2024-1"]} for n in range(7)]

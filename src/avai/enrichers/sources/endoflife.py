@@ -7,7 +7,6 @@ https://endoflife.date/api
 from __future__ import annotations
 
 from datetime import datetime
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from pydantic import model_validator
@@ -67,7 +66,7 @@ class EndOfLifeEnricher(Enricher):
         if not (product and cycle):
             return None
         response = self._http.get(f"{BASE_URL}/{product}/{cycle}.json")
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         release = ReleaseCycle.model_validate(response.json())
         if not self._is_past_eol(release):

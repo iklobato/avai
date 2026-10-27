@@ -6,7 +6,6 @@ https://developers.google.com/safe-browsing/v4/lookup-api
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from avai import __version__ as AVAI_VERSION
@@ -60,7 +59,7 @@ class SafeBrowsingEnricher(Enricher):
             f"{URL}?key={self._token}",
             RequestOptions(json=self._query(indicator)),
         )
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         matches = SafeBrowsingReply.model_validate(response.json() or {}).matches
         if not matches:

@@ -10,7 +10,6 @@ https://ipwho.is/
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from pydantic import field_validator
@@ -77,7 +76,7 @@ class IpwhoisGeoEnricher(Enricher):
 
     def fetch(self, indicator: Indicator) -> Evidence | None:
         response = self._http.get(f"{BASE_URL}/{indicator.value}")
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         reply = GeoReply.model_validate(response.json() or {})
         # ipwho.is answers {"success": false, "message": ...} for bogon /

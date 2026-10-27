@@ -7,7 +7,6 @@ https://urlhaus-api.abuse.ch/
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, ClassVar
 
 from pydantic import field_validator
@@ -76,7 +75,7 @@ class URLhausEnricher(Enricher):
                 form_body={field: indicator.value}, headers={"Auth-Key": self._token}
             ),
         )
-        if response.status_code != HTTPStatus.OK:
+        if not self.answered(response):
             return None
         body = UrlhausReply.model_validate(response.json())
         if body.query_status != "ok":
