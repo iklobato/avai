@@ -3,6 +3,27 @@
 All notable changes to **avai** (PyPI: `avai-monitor`, Docker:
 `iklob1/avai`). Versions follow semantic versioning.
 
+## [0.10.0] - 2026-10-27
+
+### Fixed
+- **Listening ports and network connections work without root on macOS.** macOS refuses the system-wide socket table to a normal user, so both collectors failed every cycle. They now read each process's own socket table, which covers every process your user can see. Yes/no port checks (for example "is SSH listening") still need the full table and still say "unknown" without root, because a root-owned sshd is not in the partial view.
+- **The narrator and the coverage check follow `--judge-model`.** `--narrative-model` defaulted to a fixed Claude model, so with only `OPENAI_API_KEY` set and an OpenAI judge model, those two stages failed every cycle with "Missing Anthropic API Key". No `--narrative-model` now means the judge's model.
+- **Threat-intel sources that fail now say so.** 15 of the 18 online sources read a bad key (401) or a server error (5xx) as "nothing found" and logged nothing. Only a 404 means "nothing found" now; anything else is logged as a warning.
+- **A run's errors land on that run.** The run log kept a hidden "current run", so a second run starting could take the first one's errors.
+- **macOS collectors no longer fail on a host with no home directory.** Installed apps and quarantine events now find nothing there instead of raising.
+- `avai install-hosts` shows the "run with sudo" hint on a real permission error.
+- **Seven collectors failed in the Docker image on every cycle.** The image had no `tcpdump`, `ip` or `trust`, so `network_flows`, `dns_queries`, `arp_table`, `ndp_neighbors`, `routes`, `promiscuous_ifaces` and `trusted_roots` reported "not found on PATH". The image now installs `tcpdump`, `iproute2` and `p11-kit`; a first cycle in the container ends `ok=35 failed=0`.
+
+### Changed
+- **95 YARA rule files that need a crypto-enabled yara make one info line, not 95 warnings.** The PyPI yara-python wheel is built without OpenSSL, so these files are skipped on purpose (see `avai/rules/NOTICE`). 13 of them use `pe.number_of_signatures` and were counted as "other"; all 95 are counted right now.
+- A normal stop (SIGTERM from launchd, systemd or the app) logs at info, not as a warning. A second signal (force quit) is still a warning.
+- `pydantic` (`>=2.7,<3`) is now a direct dependency, and the `psutil` floor is now 6.0.
+- The Docker image is now built and pushed by CI on every version tag, for `linux/amd64` and `linux/arm64`.
+
+### Internal
+- **The code follows one set of design rules.** Every function lives in a class, collaborators are injected (clock, host paths, command runner, HTTP transport), categories are Enums, every own error derives from `AvaiError`, outside data (CLI options, LLM replies, all threat-intel replies, the prompts file) is read through pydantic models, and dead code is gone. Dashboard pages render the same bytes as before apart from the fixes above.
+- `docs/KNOWLEDGE.md` describes the project for anyone (or any agent) picking it up.
+
 ## [0.9.2] - 2026-09-18
 
 ### Internal
