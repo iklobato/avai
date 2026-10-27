@@ -11,14 +11,14 @@ from avai.host_monitor.runtime import HostPaths
 
 @pytest.fixture
 def homeless(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The passwd lookup only exists on Unix; Windows has no such case.
-    passwd = pytest.importorskip("pwd")
+    # The user-database lookup only exists on Unix; Windows has no such case.
+    user_database = pytest.importorskip("pwd")
     monkeypatch.delenv("HOME", raising=False)
 
     def no_entry(uid: int) -> object:
         raise KeyError(f"getpwuid(): uid not found: {uid}")
 
-    monkeypatch.setattr(passwd, "getpwuid", no_entry)
+    monkeypatch.setattr(user_database, "getpwuid", no_entry)
 
 
 class TestNoHomeDirectory:
