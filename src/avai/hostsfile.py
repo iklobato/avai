@@ -69,6 +69,10 @@ class UnsupportedPlatformError(HostsError):
         return f"avai cannot manage the hosts file on platform {self.system!r}"
 
 
+class HostsAccessDeniedError(HostsError):
+    """The OS refused the write (no privilege); the registrar adds the hint."""
+
+
 class HostsPermissionError(HostsError):
     """The hosts file exists but can't be written without more privilege."""
 
@@ -271,15 +275,21 @@ class AtomicFile:
                 dir=str(self._path.parent), prefix=self.STAGING_PREFIX
             )
         except OSError as err:
-            raise HostsError(f"could not update {self._path}: {err}") from err
+            raise self._failure(err) from err
         try:
             self._fill(fd, text)
             os.chmod(staging, mode)
             os.replace(staging, self._path)
         except OSError as err:
-            raise HostsError(f"could not update {self._path}: {err}") from err
+            raise self._failure(err) from err
         finally:
             Path(staging).unlink(missing_ok=True)
+
+    def _failure(self, err: OSError) -> HostsError:
+        message = f"could not update {self._path}: {err}"
+        if isinstance(err, PermissionError):
+            return HostsAccessDeniedError(message)
+        return HostsError(message)
 
     def _mode(self) -> int:
         if not self._path.exists():
@@ -356,5 +366,5 @@ class HostsRegistrar:
         path = self.hosts_path
         try:
             AtomicFile(path).write(text)
-        except PermissionError as e:
+        except HostsAccessDeniedError as e:
             raise HostsPermissionError(path, self._platform.elevation_hint(path)) from e

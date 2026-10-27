@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,26 @@ from avai.hostsfile import (
     PlatformResolver,
     _WindowsPlatform,
 )
+
+# A read-only directory only blocks writes for a non-root POSIX user.
+UNWRITABLE_DIRS = pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="needs a non-root POSIX user for a read-only directory",
+)
+READ_ONLY_DIR = 0o555
+WRITABLE_DIR = 0o755
+
+
+@pytest.fixture
+def locked_hosts(tmp_path: Path) -> Iterator[Path]:
+    """A hosts file in a directory the test user cannot write to."""
+    folder = tmp_path / "etc"
+    folder.mkdir()
+    hosts = folder / "hosts"
+    hosts.write_text("127.0.0.1\tlocalhost\n")
+    folder.chmod(READ_ONLY_DIR)
+    yield hosts
+    folder.chmod(WRITABLE_DIR)
 
 
 class FakePlatform:
@@ -164,19 +185,19 @@ class TestRegistrar:
         with pytest.raises(HostsError):
             registrar.install("not a hostname")
 
-    def test_permission_error_is_translated_with_a_hint(self, tmp_path, monkeypatch):
-        hosts = tmp_path / "hosts"
-        hosts.write_text("127.0.0.1\tlocalhost\n")
-        registrar = HostsRegistrar(FakePlatform(hosts))
+    @UNWRITABLE_DIRS
+    def test_permission_error_is_translated_with_a_hint(
+        self, locked_hosts: Path
+    ) -> None:
+        registrar = HostsRegistrar(FakePlatform(locked_hosts))
 
-        def _denied(*_a, **_k):
-            raise PermissionError("not the owner")
-
-        monkeypatch.setattr("avai.hostsfile.AtomicFile.write", _denied)
         with pytest.raises(HostsPermissionError) as excinfo:
             registrar.install()
+
         assert excinfo.value.hint == "use sudo"
-        assert excinfo.value.path == hosts
+        assert excinfo.value.path == locked_hosts
+        assert str(excinfo.value) == f"cannot write {locked_hosts}: use sudo"
+        assert "avai.local" not in locked_hosts.read_text()
 
     def test_ensure_reachable_maps_when_writable(self, tmp_path):
         hosts = tmp_path / "hosts"
@@ -190,17 +211,12 @@ class TestRegistrar:
             HostsRegistrar(FakePlatform(hosts)).ensure_reachable() is Outcome.UNCHANGED
         )
 
+    @UNWRITABLE_DIRS
     def test_ensure_reachable_reports_needs_privilege_instead_of_raising(
-        self, tmp_path, monkeypatch
-    ):
-        hosts = tmp_path / "hosts"
-        hosts.write_text("127.0.0.1\tlocalhost\n")
-        registrar = HostsRegistrar(FakePlatform(hosts))
+        self, locked_hosts: Path
+    ) -> None:
+        registrar = HostsRegistrar(FakePlatform(locked_hosts))
 
-        def _denied(*_a, **_k):
-            raise PermissionError("not the owner")
-
-        monkeypatch.setattr("avai.hostsfile.AtomicFile.write", _denied)
         assert registrar.ensure_reachable() is Outcome.NEEDS_PRIVILEGE
 
 
@@ -222,24 +238,23 @@ class TestCli:
         assert cli.AvaiCli.main(["install-hosts", "--remove"]) == 0
         assert "avai.local" not in hosts.read_text()
 
+    @UNWRITABLE_DIRS
     def test_install_hosts_command_reports_permission_failure(
-        self, tmp_path, monkeypatch
-    ):
+        self,
+        locked_hosts: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         from avai import cli, hostsfile
 
-        hosts = tmp_path / "hosts"
-        hosts.write_text("127.0.0.1\tlocalhost\n")
         monkeypatch.setattr(
             hostsfile.HostsRegistrar,
             "for_current_platform",
-            classmethod(lambda c: hostsfile.HostsRegistrar(FakePlatform(hosts))),
+            classmethod(lambda c: hostsfile.HostsRegistrar(FakePlatform(locked_hosts))),
         )
 
-        def _denied(*_a, **_k):
-            raise PermissionError("nope")
-
-        monkeypatch.setattr("avai.hostsfile.AtomicFile.write", _denied)
         assert cli.AvaiCli.main(["install-hosts"]) == 1  # non-zero, no traceback
+        assert capsys.readouterr().err == "avai: use sudo\n"
 
 
 def test_atomic_write_replaces_content(tmp_path):
