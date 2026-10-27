@@ -6,10 +6,12 @@ https://phishtank.org/api_info.php
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
 
+from pydantic import field_validator
+
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -25,6 +27,32 @@ URL = "https://checkurl.phishtank.com/checkurl/"
 BANDWIDTH_LIMIT_EXCEEDED = 509
 MALICIOUS_CONFIDENCE = 0.93
 DETAIL_FIELDS = ("phish_id", "phish_detail_page", "verified_at", "submitted_at")
+
+
+class PhishResult(ApiReply):
+    """The ``results`` object of a URL check."""
+
+    in_database: bool = False
+    verified: bool = False
+    valid: bool = False
+    phish_id: object = None
+
+    @field_validator("in_database", "verified", "valid", mode="before")
+    @classmethod
+    def _truthy(cls, value: Any) -> bool:
+        return bool(value)
+
+    def confirmed(self) -> bool:
+        return self.in_database and self.verified and self.valid
+
+
+class PhishReply(ApiReply):
+    results: PhishResult = PhishResult()
+
+    @field_validator("results", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or {}
 
 
 class PhishTankEnricher(Enricher):
@@ -44,19 +72,14 @@ class PhishTankEnricher(Enricher):
             raise RateLimitedError("phishtank returned 509 (rate limited)")
         if response.status_code != HTTPStatus.OK:
             return None
-        results = response.json().get("results") or {}
-        if not self._is_confirmed_phish(results):
+        results = PhishReply.model_validate(response.json()).results
+        if not results.confirmed():
             return None
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.MALICIOUS,
             confidence=MALICIOUS_CONFIDENCE,
-            summary=f"PhishTank: known-phishing URL (id={results.get('phish_id')})",
-            details={field: results.get(field) for field in DETAIL_FIELDS},
-        )
-
-    def _is_confirmed_phish(self, results: Mapping[str, Any]) -> bool:
-        return all(
-            bool(results.get(flag)) for flag in ("in_database", "verified", "valid")
+            summary=f"PhishTank: known-phishing URL (id={results.phish_id})",
+            details=results.given(DETAIL_FIELDS),
         )

@@ -10,6 +10,9 @@ from http import HTTPStatus
 from typing import Any, ClassVar
 
 from avai import __version__ as AVAI_VERSION
+from pydantic import Field, field_validator
+
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -31,6 +34,19 @@ LISTED_MATCHES = 5
 MALICIOUS_CONFIDENCE = 0.95
 
 
+class SafeBrowsingMatch(ApiReply):
+    threat_type: object = Field(None, alias="threatType")
+
+
+class SafeBrowsingReply(ApiReply):
+    matches: list[SafeBrowsingMatch] = []
+
+    @field_validator("matches", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or []
+
+
 class SafeBrowsingEnricher(Enricher):
     name = "safe_browsing"
     supports_types = frozenset({IndicatorType.URL})
@@ -46,16 +62,16 @@ class SafeBrowsingEnricher(Enricher):
         )
         if response.status_code != HTTPStatus.OK:
             return None
-        matches = (response.json() or {}).get("matches") or []
+        matches = SafeBrowsingReply.model_validate(response.json() or {}).matches
         if not matches:
             return None
         return self._evidence(indicator, matches)
 
     def _evidence(
-        self, indicator: Indicator, matches: list[dict[str, Any]]
+        self, indicator: Indicator, matches: list[SafeBrowsingMatch]
     ) -> Evidence:
         threat_types = sorted(
-            {match.get("threatType") for match in matches if match.get("threatType")}
+            {match.threat_type for match in matches if match.threat_type}
         )
         return Evidence(
             source=self.name,
@@ -63,7 +79,9 @@ class SafeBrowsingEnricher(Enricher):
             verdict_hint=VerdictHint.MALICIOUS,
             confidence=MALICIOUS_CONFIDENCE,
             summary=f"Google Safe Browsing: matches={threat_types}",
-            details={"matches": matches[:LISTED_MATCHES]},
+            details={
+                "matches": [match.as_given() for match in matches[:LISTED_MATCHES]]
+            },
         )
 
     def _query(self, indicator: Indicator) -> dict[str, Any]:

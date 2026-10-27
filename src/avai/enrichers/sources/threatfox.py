@@ -7,10 +7,12 @@ https://threatfox-api.abuse.ch/
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
 
+from pydantic import Field, field_validator
+
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -31,6 +33,24 @@ DETAIL_FIELDS = (
     "tags",
     "confidence_level",
 )
+
+
+class ThreatFoxIoc(ApiReply):
+    """One IOC record."""
+
+    malware: object = None
+    malware_alias: object = None
+    threat_type: object = None
+
+
+class ThreatFoxReply(ApiReply):
+    query_status: object = None
+    iocs: list[ThreatFoxIoc] = Field([], alias="data")
+
+    @field_validator("iocs", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or []
 
 
 class ThreatFoxEnricher(Enricher):
@@ -60,22 +80,19 @@ class ThreatFoxEnricher(Enricher):
         )
         if response.status_code != HTTPStatus.OK:
             return None
-        body = response.json()
-        if body.get("query_status") != "ok":
+        reply = ThreatFoxReply.model_validate(response.json())
+        if reply.query_status != "ok" or not reply.iocs:
             return None
-        iocs = body.get("data") or []
-        if not iocs:
-            return None
-        return self._evidence(indicator, iocs[0])
+        return self._evidence(indicator, reply.iocs[0])
 
-    def _evidence(self, indicator: Indicator, ioc: Mapping[str, Any]) -> Evidence:
-        malware = ioc.get("malware") or ioc.get("malware_alias") or "?"
-        threat = ioc.get("threat_type") or "?"
+    def _evidence(self, indicator: Indicator, ioc: ThreatFoxIoc) -> Evidence:
+        malware = ioc.malware or ioc.malware_alias or "?"
+        threat = ioc.threat_type or "?"
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.MALICIOUS,
             confidence=MALICIOUS_CONFIDENCE,
             summary=f"ThreatFox: known IOC, malware={malware} type={threat}",
-            details={field: ioc.get(field) for field in DETAIL_FIELDS},
+            details=ioc.given(DETAIL_FIELDS),
         )

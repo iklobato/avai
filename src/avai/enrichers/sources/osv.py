@@ -8,10 +8,12 @@ https://osv.dev/docs/
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
 
+from pydantic import field_validator
+
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -27,6 +29,23 @@ VULN_URL = "https://api.osv.dev/v1/vulns"
 MAX_LISTED_VULNS = 5
 ADVISORY_CONFIDENCE = 0.75
 PYPI_NAMES = frozenset({"pip", "python"})
+
+
+class OsvVuln(ApiReply):
+    """One OSV vulnerability record."""
+
+    id: object = None
+    aliases: object = None
+    summary: object = None
+
+
+class OsvQueryReply(ApiReply):
+    vulns: list[OsvVuln] = []
+
+    @field_validator("vulns", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or []
 
 
 class OSVEnricher(Enricher):
@@ -46,7 +65,7 @@ class OSVEnricher(Enricher):
             return None
         return self._evidence(indicator, vulns)
 
-    def _evidence(self, indicator: Indicator, vulns: list[dict[str, Any]]) -> Evidence:
+    def _evidence(self, indicator: Indicator, vulns: list[OsvVuln]) -> Evidence:
         listed = vulns[:MAX_LISTED_VULNS]
         ids = self.advisory_ids(listed)
         # Treat severity-tagged vulns as suspicious. Without severity
@@ -59,11 +78,11 @@ class OSVEnricher(Enricher):
             summary=f"OSV: {len(vulns)} advisory hit(s): {','.join(ids)}",
             details={
                 "vuln_ids": ids,
-                "summaries": [vuln.get("summary") for vuln in listed],
+                "summaries": [vuln.summary for vuln in listed],
             },
         )
 
-    def advisory_ids(self, vulns: list[Mapping[str, Any]]) -> list[str]:
+    def advisory_ids(self, vulns: list[OsvVuln]) -> list[str]:
         """Each vuln's primary id AND its aliases, deduplicated. OSV's primary
         id is often a GHSA-/PYSEC-/OSV- id with the CVE only in aliases; the
         chain forward-enriches CVE-/GHSA- ids (CVSS, KEV), so a CVE buried in
@@ -71,7 +90,7 @@ class OSVEnricher(Enricher):
         ids = (
             candidate
             for vuln in vulns
-            for candidate in (vuln.get("id"), *(vuln.get("aliases") or []))
+            for candidate in (vuln.id, *(vuln.aliases or []))
         )
         return list(dict.fromkeys(candidate for candidate in ids if candidate))
 
@@ -84,15 +103,15 @@ class OSVEnricher(Enricher):
             return "PyPI"
         return ""
 
-    def _vuln_by_id(self, vuln_id: str) -> list[dict[str, Any]]:
+    def _vuln_by_id(self, vuln_id: str) -> list[OsvVuln]:
         # id lookups use GET /v1/vulns/{id}; POST /v1/query rejects a
         # top-level {"id": ...} with HTTP 400 (verified against the API).
         response = self._http.get(f"{VULN_URL}/{vuln_id.upper()}")
         if response.status_code != HTTPStatus.OK:
             return []
-        return [response.json()]
+        return [OsvVuln.model_validate(response.json())]
 
-    def _vulns_for_package(self, package: str) -> list[dict[str, Any]]:
+    def _vulns_for_package(self, package: str) -> list[OsvVuln]:
         # PACKAGE is "<name>@<version>". Either piece may be missing.
         package_name, _, version = package.partition("@")
         if not package_name:
@@ -102,7 +121,7 @@ class OSVEnricher(Enricher):
         )
         if response.status_code != HTTPStatus.OK:
             return []
-        return response.json().get("vulns") or []
+        return OsvQueryReply.model_validate(response.json()).vulns
 
     def _query(self, package_name: str, version: str) -> dict[str, Any]:
         package_spec = {"name": package_name}

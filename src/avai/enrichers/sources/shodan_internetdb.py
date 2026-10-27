@@ -8,10 +8,10 @@ https://internetdb.shodan.io/
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
 
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -29,6 +29,25 @@ LISTED_PORTS = 6
 LISTED_TAGS = 4
 
 
+class ShodanHost(ApiReply):
+    """An InternetDB record; every field is shown as given."""
+
+    ports: object = None
+    vulns: object = None
+    tags: object = None
+    hostnames: object = None
+    cpes: object = None
+
+    def details(self) -> dict[str, Any]:
+        return {
+            "ports": self.ports or [],
+            "vulns": self.vulns or [],
+            "tags": self.tags or [],
+            "hostnames": self.hostnames or [],
+            "cpes": self.cpes,
+        }
+
+
 class ShodanInternetDBEnricher(Enricher):
     name = "shodan_internetdb"
     supports_types = frozenset({IndicatorType.IPV4})
@@ -41,10 +60,10 @@ class ShodanInternetDBEnricher(Enricher):
         response = self._http.get(f"{BASE_URL}/{indicator.value}")
         if response.status_code != HTTPStatus.OK:
             return None
-        return self._evidence(indicator, response.json())
+        return self._evidence(indicator, ShodanHost.model_validate(response.json()))
 
-    def _evidence(self, indicator: Indicator, body: Mapping[str, Any]) -> Evidence:
-        details = self._details(body)
+    def _evidence(self, indicator: Indicator, host: ShodanHost) -> Evidence:
+        details = host.details()
         ports, cves, tags = details["ports"], details["vulns"], details["tags"]
         verdict = self._verdict(cves, tags)
         return Evidence(
@@ -58,15 +77,6 @@ class ShodanInternetDBEnricher(Enricher):
             ),
             details=details,
         )
-
-    def _details(self, body: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "ports": body.get("ports") or [],
-            "vulns": body.get("vulns") or [],
-            "tags": body.get("tags") or [],
-            "hostnames": body.get("hostnames") or [],
-            "cpes": body.get("cpes"),
-        }
 
     def _verdict(self, cves: list[str], tags: list[str]) -> Verdict:
         """Any known CVE on the IP → suspicious; honeypot/tor/proxy tags →
