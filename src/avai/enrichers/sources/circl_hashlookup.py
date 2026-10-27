@@ -10,9 +10,10 @@ https://hashlookup.circl.lu/
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from avai.enrichers.base import (
     Enricher,
@@ -42,6 +43,32 @@ DETAIL_FIELDS = (
 )
 
 
+class CirclRecord(BaseModel):
+    """A hashlookup hit; fields other than the ones read stay as given."""
+
+    model_config = ConfigDict(frozen=True, extra="allow", populate_by_name=True)
+
+    trust: int = Field(NO_TRUST, alias="hashlookup:trust")
+    file_name: str | None = Field(None, alias="FileName")
+    product_code: str | None = Field(None, alias="ProductCode")
+
+    @field_validator("trust", mode="before")
+    @classmethod
+    def _trust(cls, value: Any) -> int:
+        """A missing or non-numeric score counts as no trust."""
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return NO_TRUST
+
+    def label(self) -> str:
+        return self.file_name or self.product_code or "?"
+
+    def details(self) -> dict[str, Any]:
+        given = self.model_dump(by_alias=True)
+        return {field: given.get(field) for field in DETAIL_FIELDS}
+
+
 class CirclHashlookupEnricher(Enricher):
     name = "circl_hashlookup"
     supports_types = frozenset(
@@ -59,32 +86,23 @@ class CirclHashlookupEnricher(Enricher):
         )
         if response.status_code != HTTPStatus.OK:
             return None
-        body = response.json()
-        trust = self._trust(body)
+        record = CirclRecord.model_validate(response.json())
         # Low-trust hashes are known to CIRCL but seen in untrusted/malicious
         # contexts — not a whitelist hit. Give no opinion rather than benign.
-        if trust < MIN_TRUST:
+        if record.trust < MIN_TRUST:
             return None
-        return self._evidence(indicator, body, trust)
+        return self._evidence(indicator, record)
 
-    def _trust(self, body: Mapping[str, Any]) -> int:
-        try:
-            return int(body.get("hashlookup:trust"))
-        except (TypeError, ValueError):
-            return NO_TRUST
-
-    def _evidence(
-        self, indicator: Indicator, body: Mapping[str, Any], trust: int
-    ) -> Evidence:
+    def _evidence(self, indicator: Indicator, record: CirclRecord) -> Evidence:
         # Real CIRCL fields (verified against the live API): FileName,
         # FileSize, ProductCode, OpSystemCode, source, and the trust score
         # "hashlookup:trust" (0-100). There is no ProductName/KnownMalicious.
-        file_name = body.get("FileName") or body.get("ProductCode") or "?"
+        trust = record.trust
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.BENIGN,
             confidence=BENIGN_CONFIDENCE,
-            summary=f"CIRCL/NSRL: known-good binary ({file_name}, trust={trust})",
-            details={field: body.get(field) for field in DETAIL_FIELDS},
+            summary=f"CIRCL/NSRL: known-good binary ({record.label()}, trust={trust})",
+            details=record.details(),
         )

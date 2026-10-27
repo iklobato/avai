@@ -6,9 +6,10 @@ https://docs.abuseipdb.com/
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from avai.enrichers.base import (
     Enricher,
@@ -42,6 +43,21 @@ DETAIL_FIELDS = (
 )
 
 
+class AbuseIpDbReport(BaseModel):
+    """The ``data`` object of a check reply; other fields are kept as given."""
+
+    model_config = ConfigDict(frozen=True, extra="allow", populate_by_name=True)
+
+    score: int = Field(0, alias="abuseConfidenceScore")
+    reports: int = Field(0, alias="totalReports")
+    country: str | None = Field(None, alias="countryCode")
+    isp: str | None = None
+
+    def details(self) -> dict[str, Any]:
+        given = self.model_dump(by_alias=True)
+        return {field: given.get(field) for field in DETAIL_FIELDS}
+
+
 class AbuseIpDbEnricher(Enricher):
     name = "abuseipdb"
     supports_types = frozenset({IndicatorType.IPV4})
@@ -64,11 +80,11 @@ class AbuseIpDbEnricher(Enricher):
         )
         if response.status_code != HTTPStatus.OK:
             return None
-        return self._evidence(indicator, response.json().get("data", {}))
+        report = AbuseIpDbReport.model_validate(response.json().get("data", {}))
+        return self._evidence(indicator, report)
 
-    def _evidence(self, indicator: Indicator, report: Mapping[str, Any]) -> Evidence:
-        score = int(report.get("abuseConfidenceScore", 0))
-        reports = int(report.get("totalReports", 0))
+    def _evidence(self, indicator: Indicator, report: AbuseIpDbReport) -> Evidence:
+        score, reports = report.score, report.reports
         verdict = self._verdict(score, reports)
         return Evidence(
             source=self.name,
@@ -77,10 +93,10 @@ class AbuseIpDbEnricher(Enricher):
             confidence=verdict.confidence,
             summary=(
                 f"AbuseIPDB: score={score} reports={reports} "
-                f"country={report.get('countryCode')} "
-                f"isp={report.get('isp')}"
+                f"country={report.country} "
+                f"isp={report.isp}"
             ),
-            details={field: report.get(field) for field in DETAIL_FIELDS},
+            details=report.details(),
         )
 
     def _verdict(self, score: int, reports: int) -> Verdict:

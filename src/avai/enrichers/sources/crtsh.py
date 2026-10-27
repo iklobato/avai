@@ -11,9 +11,10 @@ https://crt.sh/
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
-from typing import Any, ClassVar
+from typing import ClassVar
+
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from avai.enrichers.base import (
     Enricher,
@@ -29,6 +30,15 @@ TIMEOUT_S = 12.0
 LISTED_ISSUERS = 3
 NO_CERTS_CONFIDENCE = 0.5
 CERTS_CONFIDENCE = 0.4
+
+
+class CertificateEntry(BaseModel):
+    """One certificate-transparency entry crt.sh lists for a domain."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    issuer_name: str = ""
+    not_before: str | None = None
 
 
 class CrtShEnricher(Enricher):
@@ -50,9 +60,10 @@ class CrtShEnricher(Enricher):
         if response.status_code != HTTPStatus.OK:
             return None
         try:
-            entries = response.json() or []
+            body = response.json() or []
         except ValueError:
             return None
+        entries = TypeAdapter(list[CertificateEntry]).validate_python(body)
         if not entries:
             return self._no_certificates(indicator)
         return self._certificates(indicator, entries)
@@ -69,10 +80,10 @@ class CrtShEnricher(Enricher):
         )
 
     def _certificates(
-        self, indicator: Indicator, entries: list[Mapping[str, Any]]
+        self, indicator: Indicator, entries: list[CertificateEntry]
     ) -> Evidence:
         oldest = self._earliest_not_before(entries)
-        issuers = sorted({entry.get("issuer_name", "") for entry in entries})
+        issuers = sorted({entry.issuer_name for entry in entries})
         listed = issuers[:LISTED_ISSUERS]
         return Evidence(
             source=self.name,
@@ -87,9 +98,7 @@ class CrtShEnricher(Enricher):
             },
         )
 
-    def _earliest_not_before(self, entries: list[Mapping[str, Any]]) -> str:
+    def _earliest_not_before(self, entries: list[CertificateEntry]) -> str:
         """Earliest "not_before" across the certs, as a domain-age proxy."""
-        not_befores = [
-            entry.get("not_before") for entry in entries if entry.get("not_before")
-        ]
+        not_befores = [entry.not_before for entry in entries if entry.not_before]
         return min(not_befores) if not_befores else ""

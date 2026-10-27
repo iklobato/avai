@@ -6,10 +6,11 @@ https://endoflife.date/api
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime
 from http import HTTPStatus
 from typing import Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from avai.enrichers.base import (
     Enricher,
@@ -33,6 +34,31 @@ DETAIL_FIELDS = (
 )
 
 
+class ReleaseCycle(BaseModel):
+    """One endoflife.date release cycle. ``eol`` is either a bool ("has it
+    ended") or an ISO date; it is split into ``eol_flag`` and ``eol_date``
+    and kept as given among the other fields."""
+
+    model_config = ConfigDict(frozen=True, extra="allow")
+
+    eol_flag: bool = False
+    eol_date: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _split_eol(cls, raw_cycle: Any) -> Any:
+        if not isinstance(raw_cycle, dict):
+            return raw_cycle
+        eol = raw_cycle.get("eol")
+        flag = eol if isinstance(eol, bool) else False
+        date = eol if isinstance(eol, str) else ""
+        return {**raw_cycle, "eol_flag": flag, "eol_date": date}
+
+    def details(self) -> dict[str, Any]:
+        given = self.model_dump()
+        return {field: given.get(field) for field in DETAIL_FIELDS}
+
+
 class EndOfLifeEnricher(Enricher):
     name = "endoflife"
     supports_types = frozenset({IndicatorType.OS_VERSION})
@@ -49,31 +75,29 @@ class EndOfLifeEnricher(Enricher):
         response = self._http.get(f"{BASE_URL}/{product}/{cycle}.json")
         if response.status_code != HTTPStatus.OK:
             return None
-        body = response.json()
-        if not self._is_past_eol(body.get("eol")):
+        release = ReleaseCycle.model_validate(response.json())
+        if not self._is_past_eol(release):
             return None
-        return self._evidence(indicator, body)
+        return self._evidence(indicator, release)
 
-    def _evidence(self, indicator: Indicator, body: Mapping[str, Any]) -> Evidence:
+    def _evidence(self, indicator: Indicator, release: ReleaseCycle) -> Evidence:
         product, _, cycle = indicator.value.partition("@")
-        eol = body.get("eol")
-        eol_date = eol if isinstance(eol, str) else ""
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=VerdictHint.SUSPICIOUS,
             confidence=PAST_EOL_CONFIDENCE,
-            summary=f"endoflife.date: {product} {cycle} is past EOL ({eol_date})",
-            details={field: body.get(field) for field in DETAIL_FIELDS},
+            summary=(
+                f"endoflife.date: {product} {cycle} is past EOL ({release.eol_date})"
+            ),
+            details=release.details(),
         )
 
-    def _is_past_eol(self, eol: object) -> bool:
-        """`eol` may be a bool ("EOL: false / true") or an ISO date."""
-        if isinstance(eol, bool):
-            return eol
-        if not isinstance(eol, str):
-            return False
+    def _is_past_eol(self, release: ReleaseCycle) -> bool:
+        if release.eol_flag or not release.eol_date:
+            return release.eol_flag
         try:
-            return datetime.fromisoformat(eol).date() < datetime.utcnow().date()
+            ends = datetime.fromisoformat(release.eol_date).date()
         except ValueError:
             return False
+        return ends < datetime.utcnow().date()
