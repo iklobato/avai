@@ -32,6 +32,7 @@ from avai.host_monitor.control_loop import (
     ControlLoop,
     ControlPlane,
     ControlSettings,
+    CycleSettings,
     Maintenance,
     MaintenanceCommand,
     ProgressHeartbeat,
@@ -88,7 +89,9 @@ _NO_BASELINE = HostBaseline(total_runs=0, established=False, cutoff_at=None)
 
 
 def _batch(collector, entries, rows=(), run_id="run", baseline=_NO_BASELINE):
-    return FindingBatch(collector, entries, BatchOrigin(list(rows), run_id, baseline))
+    all_on = CycleSettings({}, ControlDefaults(judge=True, enrich=True))
+    origin = BatchOrigin(list(rows), run_id, baseline, all_on)
+    return FindingBatch(collector, entries, origin)
 
 
 def _runner(sink, snapshot=(), judge=None, **options):
@@ -148,12 +151,10 @@ def chain(sink):
 # ---------------------------------------------------------------------------
 
 
-def _evidence_stage(sink, chain, enrich_on=True):
+def _evidence_stage(sink, chain):
     intel = ThreatIntel(chain, IndicatorExtraction.default())
     return EvidenceStage(
-        intel,
-        _settings(sink, enrich_on=enrich_on),
-        ProgressHeartbeat(sink, logging.getLogger("test"), Clock()),
+        intel, ProgressHeartbeat(sink, logging.getLogger("test"), Clock())
     )
 
 
@@ -225,7 +226,7 @@ class TestEvidenceStage:
         source = _AlwaysHitEnricher()
         cache = EvidenceCache.on_base(sink.engine, Base)
         chain = EnrichmentChain([source], cache, logging.getLogger("test"))
-        stage = _evidence_stage(sink, chain, enrich_on=False)
+        stage = _evidence_stage(sink, chain)
         from avai.host_monitor.models import NetworkConnectionRow
 
         collector = _StubCollector()
@@ -234,12 +235,12 @@ class TestEvidenceStage:
         collector.judge_fields = ("raddr",)
 
         rows = [{"content_hash": "x", "raddr": "8.8.8.8:53"}]
-        unjudged = [{"content_hash": "x", "raddr": "8.8.8.8:53"}]
-        batch = _batch(collector, unjudged, rows)
-        batch = stage.apply(batch)
-        unjudged = batch.entries
+        batch = _batch(collector, [{"content_hash": "x", "raddr": "8.8.8.8:53"}], rows)
+        enrich_off = replace(batch.origin.settings, row={"enrich_enabled": 0})
+        origin = replace(batch.origin, settings=enrich_off)
+        batch = stage.apply(replace(batch, origin=origin))
         assert batch.indicators_looked_up == 0
-        assert "evidence" not in unjudged[0]
+        assert "evidence" not in batch.entries[0]
         assert source.calls == []
 
     def test_no_indicators_means_no_evidence_field(self, sink, chain):
@@ -1401,26 +1402,38 @@ class TestControlSettingsGating:
     def test_judge_and_enrich_toggles(self, sink):
         settings = _settings(sink, judge_on=False, enrich_on=False)
         _set_control(sink, judge_enabled=0, enrich_enabled=0)
-        settings.refresh()
-        assert settings.judge_on() is False and settings.enrich_on() is False
+        current = settings.current()
+        assert current.judge_on() is False and current.enrich_on() is False
         _set_control(sink, judge_enabled=1, enrich_enabled=1)
-        settings.refresh()
-        assert settings.judge_on() is True and settings.enrich_on() is True
+        current = settings.current()
+        assert current.judge_on() is True and current.enrich_on() is True
+
+    def test_a_cycle_keeps_the_settings_it_started_with(self, sink: Sink) -> None:
+        settings = _settings(sink)
+        _set_control(sink, judge_enabled=1, disabled_collectors="a")
+        started_with = settings.current()
+
+        _set_control(sink, judge_enabled=0, disabled_collectors="b")
+
+        assert (started_with.judge_on(), started_with.disabled_collectors()) == (
+            True,
+            {"a"},
+        )
+        assert settings.current().disabled_collectors() == {"b"}
 
     @pytest.mark.parametrize("default", [True, False])
     def test_settings_default_to_startup_state_when_unset(self, sink, default):
         settings = _settings(sink, judge_on=default, enrich_on=not default)
         _set_control(sink, judge_enabled=None, enrich_enabled=None)
-        settings.refresh()
+        current = settings.current()
         # None => fall back to what the monitor was started with.
-        assert settings.judge_on() is default
-        assert settings.enrich_on() is (not default)
+        assert current.judge_on() is default
+        assert current.enrich_on() is (not default)
 
     def test_disabled_collectors_are_read_from_the_csv(self, sink):
         settings = _settings(sink)
         _set_control(sink, disabled_collectors=" a, ,b ")
-        settings.refresh()
-        assert settings.disabled_collectors() == {"a", "b"}
+        assert settings.current().disabled_collectors() == {"a", "b"}
 
 
 def _loop_once(sink, cycle=None, max_db_bytes=0):

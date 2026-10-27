@@ -17,6 +17,7 @@ from .control_loop import (
     ControlLoop,
     ControlPlane,
     ControlSettings,
+    CycleSettings,
     ProgressHeartbeat,
 )
 from .coverage import YaraCoverageAssessor
@@ -95,6 +96,7 @@ class CycleStamp:
     run_id: str
     started: str
     baseline: HostBaseline
+    settings: CycleSettings
 
 
 @dataclass(frozen=True)
@@ -130,7 +132,7 @@ class CollectionCycle:
         sink = self.config.sink
         # Refresh toggles set from the dashboard, then apply operator
         # corrections so this cycle's narrative and risk see fixed verdicts.
-        self.controls.settings.refresh()
+        settings = self.controls.settings.current()
         self._apply_feedback()
         hostname = self.config.identity.hostname
         run_id, started = sink.start_run(hostname, self.config.lookback_min)
@@ -138,7 +140,7 @@ class CollectionCycle:
         # Measured once: it can't change mid-cycle, and every collector shares
         # the same cutoff.
         baseline = HostBaseline.measure(sink, self.config.baseline_min_runs)
-        stamp = CycleStamp(run_id, started, baseline)
+        stamp = CycleStamp(run_id, started, baseline, settings)
         ok, failed = self._collect_all(stamp)
         # No point starting a fresh round of LLM calls on the way out.
         if not self.controls.shutdown_event.is_set():
@@ -148,12 +150,12 @@ class CollectionCycle:
         return run_id, ok, failed
 
     def _report(self, stamp: CycleStamp) -> None:
-        self._judge_streaming(stamp.baseline)
+        self._judge_streaming(stamp)
         for step in self.plan.steps:
             step.report(stamp.run_id, stamp.started)
 
     def _collect_all(self, stamp: CycleStamp) -> tuple[int, int]:
-        disabled = self.controls.settings.disabled_collectors()
+        disabled = stamp.settings.disabled_collectors()
         ok = failed = 0
         for collector in self.config.snapshot_collectors:
             # The first cycle judges every collector via the LLM, which can
@@ -233,32 +235,30 @@ class CollectionCycle:
         stamp: CycleStamp,
     ) -> tuple[int, int]:
         unjudged = self.config.sink.unjudged(stamp.run_id, collector)
-        if not unjudged or not self.controls.settings.judge_on():
+        if not unjudged or not stamp.settings.judge_on():
             return 0, 0
-        origin = BatchOrigin(rows, stamp.run_id, stamp.baseline)
+        origin = BatchOrigin(rows, stamp.run_id, stamp.baseline, stamp.settings)
         pending = FindingBatch(collector, unjudged, origin)
         batch = self.plan.snapshot_pipeline.process(pending)
         self.config.sink.write_judgments(batch.judgments, context=batch.context())
         return len(batch.judgments), batch.indicators_looked_up
 
-    def _judge_streaming(self, baseline: HostBaseline) -> None:
+    def _judge_streaming(self, stamp: CycleStamp) -> None:
         """Classify the content_hashes streaming collectors produced since the
         previous cycle. Streaming rows aren't tied to a CollectionRun, so
         ``unjudged_all`` finds them."""
-        if not self.controls.settings.judge_on():
+        if not stamp.settings.judge_on():
             return
-        for collector in self._judged_streams():
+        origin = BatchOrigin([], None, stamp.baseline, stamp.settings)
+        for collector in self._judged_streams(stamp.settings):
             unjudged = self._unjudged_stream(collector)
             if unjudged:
-                batch = FindingBatch(
-                    collector, unjudged, BatchOrigin([], None, baseline)
-                )
-                self._judge_stream(batch)
+                self._judge_stream(FindingBatch(collector, unjudged, origin))
 
-    def _judged_streams(self) -> list[StreamingCollector]:
+    def _judged_streams(self, settings: CycleSettings) -> list[StreamingCollector]:
         # A disabled streaming collector keeps its worker running (workers
         # start once at boot) but is no longer judged.
-        disabled = self.controls.settings.disabled_collectors()
+        disabled = settings.disabled_collectors()
         return [
             collector
             for collector in self.config.streaming_collectors
@@ -322,24 +322,20 @@ class CyclePlanner:
     def __init__(self, config: RunnerConfig) -> None:
         self._config = config
 
-    def plan(
-        self, settings: ControlSettings, heartbeat: ProgressHeartbeat
-    ) -> CyclePlan:
+    def plan(self, heartbeat: ProgressHeartbeat) -> CyclePlan:
         return CyclePlan(
-            FindingPipeline(self._snapshot_stages(settings, heartbeat)),
+            FindingPipeline(self._snapshot_stages(heartbeat)),
             FindingPipeline(self._streaming_stages()),
             tuple(self._cycle_steps()),
         )
 
-    def _snapshot_stages(
-        self, settings: ControlSettings, heartbeat: ProgressHeartbeat
-    ) -> list[FindingStage]:
+    def _snapshot_stages(self, heartbeat: ProgressHeartbeat) -> list[FindingStage]:
         config, io = self._config, self._io()
         behavior = ProcessBehavior(io)
         stages: list[FindingStage] = []
         if config.enrichment_chain is not None:
             intel = ThreatIntel(config.enrichment_chain, IndicatorExtraction.default())
-            stages.append(EvidenceStage(intel, settings, heartbeat))
+            stages.append(EvidenceStage(intel, heartbeat))
         stages += [
             BaselineStage(io),
             CorrelationStage(io, behavior),
@@ -406,9 +402,7 @@ class Runner:
         settings = ControlSettings(sink, defaults)
         heartbeat = ProgressHeartbeat(sink, config.logger, config.clock)
         controls = CycleControls(settings, heartbeat, threading.Event())
-        cycle = CollectionCycle(
-            config, controls, CyclePlanner(config).plan(settings, heartbeat)
-        )
+        cycle = CollectionCycle(config, controls, CyclePlanner(config).plan(heartbeat))
         plane = cls._control_plane(config, controls.shutdown_event)
         control = ControlLoop(plane, settings, cycle.scan)
         return cls(config, RunnerParts(cycle, control, cls._streaming(config)))

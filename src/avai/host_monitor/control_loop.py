@@ -26,32 +26,38 @@ class ControlDefaults:
     enrich: bool
 
 
-class ControlSettings:
-    """The control row cached once per cycle, read as effective settings.
+@dataclass(frozen=True)
+class CycleSettings:
+    """The control row as read at one moment, read as effective settings.
     A None column means "unset", which falls back to the defaults."""
 
-    def __init__(self, sink: Sink, defaults: ControlDefaults) -> None:
-        self._sink = sink
-        self._defaults = defaults
-        self._row: dict[str, Any] = {}
-
-    def refresh(self) -> dict[str, Any]:
-        self._row = self._sink.read_control() or {}
-        return self._row
+    row: dict[str, Any]
+    defaults: ControlDefaults
 
     def disabled_collectors(self) -> set[str]:
-        raw = self._row.get("disabled_collectors")
+        raw = self.row.get("disabled_collectors")
         if not raw:
             return set()
         return {name.strip() for name in raw.split(",") if name.strip()}
 
     def judge_on(self) -> bool:
-        value = self._row.get("judge_enabled")
-        return self._defaults.judge if value is None else bool(value)
+        value = self.row.get("judge_enabled")
+        return self.defaults.judge if value is None else bool(value)
 
     def enrich_on(self) -> bool:
-        value = self._row.get("enrich_enabled")
-        return self._defaults.enrich if value is None else bool(value)
+        value = self.row.get("enrich_enabled")
+        return self.defaults.enrich if value is None else bool(value)
+
+
+class ControlSettings:
+    """Reads the control row the dashboard writes."""
+
+    def __init__(self, sink: Sink, defaults: ControlDefaults) -> None:
+        self._sink = sink
+        self._defaults = defaults
+
+    def current(self) -> CycleSettings:
+        return CycleSettings(self._sink.read_control() or {}, self._defaults)
 
 
 class ProgressHeartbeat:
@@ -161,7 +167,7 @@ class ControlLoop:
 
     def _tick(self, interval: int, next_scan: float) -> float:
         """Handle one poll and return when the next scheduled scan is due."""
-        control = self._settings.refresh()
+        control = self._settings.current().row
         self._run_pending_command(control)  # one-shot maintenance, even if paused
         effective = control.get("interval_override") or interval
         paused = bool(control.get("paused"))

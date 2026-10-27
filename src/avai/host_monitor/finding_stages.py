@@ -15,7 +15,7 @@ from typing import Any, Protocol
 from avai.enrichers import EnrichmentChain, Indicator, IndicatorExtraction
 
 from .collectors import Collector
-from .control_loop import ControlSettings, ProgressHeartbeat
+from .control_loop import CycleSettings, ProgressHeartbeat
 from .enums import BehaviorKind, FeedbackLabel, Verdict
 from .failures import HOST_FAILURES
 from .investigator import UnknownFindingInvestigator
@@ -89,11 +89,13 @@ class HostBaseline:
 class BatchOrigin:
     """Where a batch came from. ``rows`` are the collector's raw rows this
     cycle (empty for streaming), richer than the unjudged projection;
-    ``run_id`` is None for streaming."""
+    ``run_id`` is None for streaming; ``settings`` are the ones the cycle
+    started with."""
 
     rows: list[dict[str, Any]]
     run_id: str | None
     baseline: HostBaseline
+    settings: CycleSettings
 
 
 @dataclass(frozen=True)
@@ -195,18 +197,12 @@ class EvidenceStage:
 
     EVIDENCE_PRECISION = 2
 
-    def __init__(
-        self,
-        intel: ThreatIntel,
-        settings: ControlSettings,
-        heartbeat: ProgressHeartbeat,
-    ) -> None:
+    def __init__(self, intel: ThreatIntel, heartbeat: ProgressHeartbeat) -> None:
         self._intel = intel
-        self._settings = settings
         self._heartbeat = heartbeat
 
     def apply(self, batch: FindingBatch) -> FindingBatch:
-        if not self._settings.enrich_on():
+        if not batch.origin.settings.enrich_on():
             return batch
         rows_by_hash = batch.rows_by_hash()
         extras: dict[str, dict[str, Any]] = {}
