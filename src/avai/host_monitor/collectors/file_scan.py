@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Iterator, NamedTuple
 import yara
 
 from .. import constants
+from ..enums import ScanSource, YaraSkipReason
 from ..slices import Slices
 from ..runtime import Clock, Digest
 from .base import SnapshotCollector
@@ -236,7 +237,8 @@ class YaraRulesetCompiler:
             return yara.compile(filepath=str(path), externals=self.externals())
         except yara.Error as exc:
             hint = CryptoHint().of(exc)
-            reason = "needs crypto-enabled yara" if hint else "other"
+            skipped = YaraSkipReason.NEEDS_CRYPTO if hint else YaraSkipReason.OTHER
+            reason = skipped.value
             skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
             self._logger.warning(
                 "yara: skipping uncompilable rules %s: %s%s", path, exc, hint
@@ -294,12 +296,12 @@ class ScanTargets:
         self._fs = fs
         self._clock = clock
 
-    def paths(self) -> Iterator[tuple[Path, str]]:
+    def paths(self) -> Iterator[tuple[Path, ScanSource]]:
         """Yield ``(path, scan_source)``; the caller applies the cycle cap."""
         sources = (
-            ("bin_dirs", self._bin_dir_files()),
-            ("app_bundle", self._fs.app_executables()),
-            ("downloads", self._recent_downloads()),
+            (ScanSource.BIN_DIRS, self._bin_dir_files()),
+            (ScanSource.APP_BUNDLE, self._fs.app_executables()),
+            (ScanSource.DOWNLOADS, self._recent_downloads()),
         )
         labelled = ((path, label) for label, paths in sources for path in paths)
         seen: set[str] = set()
@@ -344,7 +346,7 @@ class ScanTargets:
 class ScannedFile:
     path: Path
     file_stat: os.stat_result
-    source: str
+    source: ScanSource
 
     def externals(self) -> dict[str, str]:
         """Per-file values for the scanner externals signature-base rules
@@ -373,7 +375,7 @@ class ScannedFile:
             "strings_json": json.dumps(MatchRedactor().strings(match)),
             "size": self.file_stat.st_size,
             "mtime": self.file_stat.st_mtime,
-            "scan_source": self.source,
+            "scan_source": self.source.value,
         }
 
     def _owner(self) -> str:
@@ -436,7 +438,7 @@ class FileScanCollector(SnapshotCollector):
         return self._rules
 
     def _scan_file(
-        self, path: Path, source: str, rules: yara.Rules
+        self, path: Path, source: ScanSource, rules: yara.Rules
     ) -> Iterator[dict[str, Any]]:
         file_stat = self._scannable_stat(path)
         if file_stat is None:

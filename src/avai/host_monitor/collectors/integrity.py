@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..hosts.capabilities import FilesystemLayout
 
+from ..enums import SelinuxMode
 from ..slices import Slices
 from ..constants import WATCHED_FILES
 from ..runtime import (
@@ -29,7 +30,6 @@ from .base import SnapshotCollector
 
 SPCTL_TIMEOUT_S = 10
 SYSTEMCTL_TIMEOUT_S = 5
-SELINUX_MODES = (("0", "Permissive"), ("1", "Enforcing"))
 VNC_UNITS = ("x11vnc", "vncserver", "xrdp")
 VNC_PORT = 5900
 FILE_STAT_FIELDS = ("size", "mtime", "mode", "uid", "gid")
@@ -174,13 +174,13 @@ class LinuxSecurityPosture:
     def __init__(self, runner: CommandRunner) -> None:
         self._runner = runner
 
-    def selinux_state(self) -> str | None:
+    def selinux_state(self) -> SelinuxMode | None:
         """Returns 'Enforcing' / 'Permissive' / None (not present)."""
         paths = HostPaths()
         flag = paths.read_sysfs(paths.translate("/sys/fs/selinux/enforce"))
         if flag is None:
             return None
-        return dict(SELINUX_MODES).get(flag, "Unknown")
+        return SelinuxMode.from_flag(flag)
 
     def apparmor_state(self) -> dict[str, bool]:
         paths = HostPaths()
@@ -284,7 +284,8 @@ class LinuxSystemIntegrityCollector(SnapshotCollector):
             "firewall_stealth": None,
             "firewall_logging": None,
             "gatekeeper_assessments_enabled": int(
-                raw["selinux"] == "Enforcing" or raw["apparmor"].get("enabled") is True
+                raw["selinux"] == SelinuxMode.ENFORCING
+                or raw["apparmor"].get("enabled") is True
             ),
             "remote_login_enabled": ssh["enabled"],
             "screen_sharing_enabled": vnc["enabled"],

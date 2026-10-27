@@ -5,6 +5,7 @@ import socket
 from collections.abc import Iterator, Mapping
 from typing import Any, NamedTuple
 
+from ..enums import DnsQueryType
 from ..slices import Slices
 from ..runtime import Clock, CommandRunner, PsutilConnections, SystemMetrics
 from ..runtime.row_source import MissingToolError
@@ -508,10 +509,10 @@ class DnsQueriesCollector(SnapshotCollector):
             if port != DOH_PORT or ip not in resolvers:
                 continue
             provider = resolvers[ip]
-            yield (provider, "DoH", ip), {
+            yield (provider, DnsQueryType.DNS_OVER_HTTPS.value, ip), {
                 "iface": None,
                 "qname": provider,
-                "qtype": "DoH",
+                "qtype": DnsQueryType.DNS_OVER_HTTPS.value,
                 "server_ip": ip,
                 "process": process,
                 "count": 1,

@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from avai.host_monitor.enums import Verdict
+from avai.host_monitor.enums import DnsQueryType, Verdict
 
 from .panel_reads import Page, RowFilter, VerdictRank, VerdictTable
 
@@ -29,7 +29,7 @@ class DnsLevel:
     """
 
     def of(self, server_ip: str | None, qtype: str | None) -> str:
-        if qtype == "DoH":
+        if qtype == DnsQueryType.DNS_OVER_HTTPS:
             return "DoH (encrypted)"
         if not server_ip:
             return "unknown"
@@ -89,7 +89,9 @@ class DnsPanel:
         return {
             "domains": len({row["qname"] for row in rows}),
             "queries": sum(row["count"] or 0 for row in rows),
-            "doh": sum(1 for row in rows if row["qtype"] == "DoH"),
+            "doh": sum(
+                1 for row in rows if row["qtype"] == DnsQueryType.DNS_OVER_HTTPS
+            ),
             Verdict.MALICIOUS.value: verdicts.count(Verdict.MALICIOUS),
             Verdict.SUSPICIOUS.value: verdicts.count(Verdict.SUSPICIOUS),
         }

@@ -166,6 +166,39 @@ class LogLevel(StrEnum):
         return frozenset({cls.EMERG, cls.ALERT, cls.CRIT, cls.ERR})
 
 
+class SelinuxMode(StrEnum):
+    ENFORCING = "Enforcing"
+    PERMISSIVE = "Permissive"
+    UNKNOWN = "Unknown"
+
+    @classmethod
+    def from_flag(cls, flag: str) -> SelinuxMode:
+        """The mode of /sys/fs/selinux/enforce ("0" or "1")."""
+        return {"0": cls.PERMISSIVE, "1": cls.ENFORCING}.get(flag, cls.UNKNOWN)
+
+
+class ScanSource(StrEnum):
+    """Which bounded file set a YARA-scanned file came from."""
+
+    BIN_DIRS = "bin_dirs"
+    APP_BUNDLE = "app_bundle"
+    DOWNLOADS = "downloads"
+
+
+class YaraSkipReason(StrEnum):
+    """Why a rules file was left out of the compiled ruleset."""
+
+    NEEDS_CRYPTO = "needs crypto-enabled yara"
+    OTHER = "other"
+
+
+class DnsQueryType(StrEnum):
+    """The dns_queries.qtype values avai writes itself; captured queries
+    carry the wire type (A, AAAA, ...) as given."""
+
+    DNS_OVER_HTTPS = "DoH"
+
+
 class Browser(StrEnum):
     CHROME = "chrome"
     CHROME_BETA = "chrome_beta"
