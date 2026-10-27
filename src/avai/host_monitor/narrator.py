@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from .constants import DEFAULT_NARRATIVE_MODEL
+from .enums import ActionPriority, IncidentSeverity, Verdict
 from .llm import CompletionRequest, LlmSession, ParsedReply, StructuredCall
 from .prompts import Prompts
 
@@ -20,13 +21,11 @@ class IncidentNarrator:
     SCHEMA_NAME = "submit_incident"
     TEMPERATURE = 0.3
     MAX_TOKENS = 2048
-    SEVERITIES = ("informational", "low", "medium", "high", "critical")
-    PRIORITIES = ("immediate", "high", "medium", "low")
     # Bound the prompt: a host with hundreds of active findings would
     # otherwise produce a user message that can blow the context window and
     # fail the digest every cycle. Keep the most severe/confident findings.
     MAX_FINDINGS = 40
-    _VERDICT_RANK = {"malicious": 2, "suspicious": 1}
+    _VERDICT_RANK = {Verdict.MALICIOUS: 2, Verdict.SUSPICIOUS: 1}
 
     @classmethod
     def _narrative_schema(cls) -> dict[str, Any]:
@@ -34,7 +33,10 @@ class IncidentNarrator:
             "type": "object",
             "properties": {
                 "headline": {"type": "string"},
-                "severity": {"type": "string", "enum": list(cls.SEVERITIES)},
+                "severity": {
+                    "type": "string",
+                    "enum": [severity.value for severity in IncidentSeverity],
+                },
                 "summary": {"type": "string"},
                 "timeline": {"type": "array", "items": cls._event_schema()},
                 "actions": {"type": "array", "items": cls._action_schema()},
@@ -56,7 +58,10 @@ class IncidentNarrator:
         return {
             "type": "object",
             "properties": {
-                "priority": {"type": "string", "enum": list(cls.PRIORITIES)},
+                "priority": {
+                    "type": "string",
+                    "enum": [priority.value for priority in ActionPriority],
+                },
                 "title": {"type": "string"},
                 "command": {"type": "string"},
                 "detail": {"type": "string"},
@@ -137,7 +142,7 @@ class IncidentNarrator:
             return None
         return {
             "headline": headline,
-            "severity": reply.choice("severity", self.SEVERITIES, "low"),
+            "severity": reply.choice("severity", IncidentSeverity.LOW),
             "summary": summary,
             "timeline": timeline,
             "actions": self._actions(reply),
@@ -157,7 +162,7 @@ class IncidentNarrator:
     def _actions(self, reply: ParsedReply) -> list[dict[str, str]]:
         return [
             {
-                "priority": action.choice("priority", self.PRIORITIES, "medium"),
+                "priority": action.choice("priority", ActionPriority.MEDIUM),
                 "title": action.text("title", self.TITLE_CHARS),
                 "command": action.text("command", self.COMMAND_CHARS),
                 "detail": action.text("detail", self.ACTION_DETAIL_CHARS),

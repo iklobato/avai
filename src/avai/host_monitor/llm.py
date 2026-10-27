@@ -9,6 +9,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from string import Template
 from typing import Any
 
@@ -247,9 +248,11 @@ class ParsedReply:
     def keyword(self, key: str) -> str:
         return str(self._fields.get(key) or "").strip().lower()
 
-    def choice(self, key: str, allowed: tuple[str, ...], fallback: str) -> str:
+    def choice(self, key: str, fallback: StrEnum) -> str:
+        """The reply's value when it is a member of ``fallback``'s enum,
+        else ``fallback``'s value."""
         value = self.keyword(key)
-        return value if value in allowed else fallback
+        return value if value in tuple(type(fallback)) else fallback.value
 
     def flag(self, key: str) -> bool:
         return bool(self._fields.get(key))

@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 from .constants import DEFAULT_NARRATIVE_MODEL
+from .enums import CoveragePosture
 from .llm import CompletionRequest, LlmSession, ParsedReply, StructuredCall
 from .prompts import Prompts
 
@@ -22,9 +23,15 @@ class YaraCoverageAssessor:
     and returns a structured coverage assessment."""
 
     SCHEMA_NAME = "submit_coverage"
-    POSTURES = ("well_covered", "partial", "thin")
     TEMPERATURE = 0.2
     MAX_TOKENS = 1024
+
+    @classmethod
+    def _posture_schema(cls) -> dict[str, Any]:
+        return {
+            "type": "string",
+            "enum": [posture.value for posture in CoveragePosture],
+        }
 
     @classmethod
     def _coverage_schema(cls) -> dict[str, Any]:
@@ -39,7 +46,7 @@ class YaraCoverageAssessor:
         return {
             "type": "object",
             "properties": {
-                "posture": {"type": "string", "enum": list(cls.POSTURES)},
+                "posture": cls._posture_schema(),
                 "headline": {"type": "string"},
                 "summary": {"type": "string"},
                 "gaps": {"type": "array", "items": item},
@@ -98,7 +105,7 @@ class YaraCoverageAssessor:
         if not headline or not (summary or gaps):
             return None
         return {
-            "posture": reply.choice("posture", self.POSTURES, "partial"),
+            "posture": reply.choice("posture", CoveragePosture.PARTIAL),
             "headline": headline,
             "summary": summary,
             "gaps": gaps,

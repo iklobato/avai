@@ -26,6 +26,43 @@ class Verdict(StrEnum):
         return (cls.MALICIOUS, cls.SUSPICIOUS)
 
 
+class IncidentSeverity(StrEnum):
+    """How bad the narrator judges an incident, least severe first."""
+
+    INFORMATIONAL = "informational"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class ActionPriority(StrEnum):
+    """How soon a narrated remediation should run, most urgent first."""
+
+    IMMEDIATE = "immediate"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class CoveragePosture(StrEnum):
+    """How well the loaded YARA rules cover this host."""
+
+    WELL_COVERED = "well_covered"
+    PARTIAL = "partial"
+    THIN = "thin"
+
+
+class RiskGrade(StrEnum):
+    """The posture score as a school letter grade."""
+
+    EXCELLENT = "A"
+    GOOD = "B"
+    FAIR = "C"
+    POOR = "D"
+    FAILING = "F"
+
+
 class ThreatCategory(StrEnum):
     NONE = "none"
     PERSISTENCE = "persistence"

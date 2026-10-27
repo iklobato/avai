@@ -7,6 +7,9 @@ from operator import itemgetter
 from typing import Any
 
 
+from .enums import RiskGrade
+
+
 @dataclass(frozen=True)
 class RiskCounts:
     malicious: int = 0
@@ -25,7 +28,13 @@ class RiskScorer:
     never silently tanks the score."""
 
     PERFECT_SCORE = 100
-    GRADES = ((90, "A"), (80, "B"), (70, "C"), (60, "D"), (0, "F"))
+    GRADES = (
+        (90, RiskGrade.EXCELLENT),
+        (80, RiskGrade.GOOD),
+        (70, RiskGrade.FAIR),
+        (60, RiskGrade.POOR),
+        (0, RiskGrade.FAILING),
+    )
     # Integrity fields that cost points when explicitly off:
     # (field, points, driver label).
     PROTECTIONS = (
@@ -63,7 +72,7 @@ class RiskScorer:
 
     def grade(self, score: int) -> str:
         grades = (grade for threshold, grade in self.GRADES if score >= threshold)
-        return next(grades, "F")
+        return next(grades, RiskGrade.FAILING).value
 
     def _protection_drivers(self, facts: dict[str, Any]) -> list[dict[str, Any]]:
         # None means unknown, which is free.
