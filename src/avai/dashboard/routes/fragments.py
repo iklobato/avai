@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from flask import Blueprint, render_template, request
-from flask.views import View
 from sqlalchemy.orm import Session
 
 from avai.host_monitor.enums import Verdict
@@ -50,7 +49,7 @@ from ..queries import (
     VulnQuery,
     YaraPanels,
 )
-from . import ServiceLookup
+from . import DashboardServices, ServiceView
 
 
 class RequestArgs:
@@ -117,7 +116,7 @@ class RiskView:
         }
 
 
-class StaticFragment(View):
+class StaticFragment(ServiceView):
     """A panel that renders a fixed template (its tabs lazy-load the rest)."""
 
     methods: ClassVar[list[str]] = ["GET"]
@@ -127,7 +126,7 @@ class StaticFragment(View):
         return render_template(self.TEMPLATE)
 
 
-class LatestRunFragment(View):
+class LatestRunFragment(ServiceView):
     """A panel built from the latest run; ``EMPTY`` when there is none."""
 
     methods: ClassVar[list[str]] = ["GET"]
@@ -136,7 +135,7 @@ class LatestRunFragment(View):
     EMPTY: ClassVar[Any] = None
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             latest = RunQueries(session).latest_run()
             value = self.EMPTY if latest is None else self.build(session, latest.run_id)
             context = {self.KEY: value, "per_page_options": PER_PAGE_OPTIONS}
@@ -146,23 +145,22 @@ class LatestRunFragment(View):
         raise NotImplementedError
 
 
-class IndexView(View):
+class IndexView(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        app_mode = ServiceLookup().services().config.app_mode
+        app_mode = self._services.config.app_mode
         return render_template("dashboard.html", app_mode=app_mode)
 
 
-class TriageFragment(View):
+class TriageFragment(ServiceView):
     """Above-the-fold triage strip: posture grade, active malicious /
     suspicious finding counts, and monitor liveness."""
 
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        lookup = ServiceLookup()
-        with lookup.read_session() as session:
+        with self._services.read_session() as session:
             state = ControlReader().read(session)  # for both alive and the ctrl chips
             risk = RiskView(session).fields()
             return render_template(
@@ -174,7 +172,7 @@ class TriageFragment(View):
                 ctrl=state,
                 latest_run=RunQueries(session).latest_run(),
                 drivers=risk["drivers"],
-                app_mode=lookup.services().config.app_mode,
+                app_mode=self._services.config.app_mode,
             )
 
     def _active(self, session: Session, verdict: Verdict) -> int:
@@ -182,20 +180,20 @@ class TriageFragment(View):
         return FindingsPanel(session).findings(query)["total"]
 
 
-class HeaderMetaFragment(View):
+class HeaderMetaFragment(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             latest = RunQueries(session).latest_run()
             return render_template("partials/_header_meta.html", latest_run=latest)
 
 
-class OverviewFragment(View):
+class OverviewFragment(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             runs, verdicts = RunQueries(session), VerdictQueries(session)
             latest = runs.latest_run()
             started = latest.started_at if latest else None
@@ -209,19 +207,19 @@ class OverviewFragment(View):
             )
 
 
-class RiskFragment(View):
+class RiskFragment(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             return render_template("partials/_risk.html", **RiskView(session).fields())
 
 
-class IncidentFragment(View):
+class IncidentFragment(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             row = ReportQueries(session).latest_narrative()
             parse = StoredJson()
             return render_template(
@@ -245,13 +243,13 @@ class NetworkFragment(StaticFragment):
     TEMPLATE = "partials/_network.html"
 
 
-class PostureFragment(View):
+class PostureFragment(ServiceView):
     """Merged posture panel: risk score + system-integrity checklist."""
 
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             latest = RunQueries(session).latest_run()
             sysint = (
                 IntegrityPosture(session).for_run(latest.run_id) if latest else None
@@ -261,13 +259,13 @@ class PostureFragment(View):
             )
 
 
-class CollectionFragment(View):
+class CollectionFragment(ServiceView):
     """Merged collection-health panel: row counts + recent runs + errors."""
 
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             runs = RunQueries(session)
             latest = runs.latest_run()
             return render_template(
@@ -294,7 +292,7 @@ class RowCountsView:
         return RowCounts(self._session).for_runs(current, previous)
 
 
-class VulnerabilitiesFragment(View):
+class VulnerabilitiesFragment(ServiceView):
     """CVE / EOL 'protect yourself' panel from collected enrichment evidence."""
 
     methods: ClassVar[list[str]] = ["GET"]
@@ -304,7 +302,7 @@ class VulnerabilitiesFragment(View):
         query = VulnQuery(
             args.text("q"), args.text("severity"), args.text("source"), args.page()
         )
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             return render_template(
                 "partials/_vulnerabilities.html",
                 vulns=VulnerabilitiesPanel(session).vulnerabilities(query),
@@ -320,14 +318,14 @@ class SysintFragment(LatestRunFragment):
         return IntegrityPosture(session).for_run(run_id)
 
 
-class ResourcesFragment(View):
+class ResourcesFragment(ServiceView):
     """System resources: memory/swap/CPU/load/uptime/tasks, the per-filesystem
     disk tree and the trend-chart canvases."""
 
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             latest = RunQueries(session).latest_run()
             resources = ResourceQueries(session)
             disks = resources.disk_usage(latest.run_id) if latest else []
@@ -437,7 +435,7 @@ class ErrorsFragment(LatestRunFragment):
         return RunQueries(session).collector_errors(run_id)
 
 
-class AuthEventsFragment(View):
+class AuthEventsFragment(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
@@ -448,7 +446,7 @@ class AuthEventsFragment(View):
             args.text("sort", "count"),
             args.page(),
         )
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             return render_template(
                 "partials/_auth_events.html",
                 events=AuthEventsPanel(session).aggregated(query),
@@ -456,7 +454,7 @@ class AuthEventsFragment(View):
             )
 
 
-class FindingsFragment(View):
+class FindingsFragment(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
     FILTER_ARGS = ("verdict", "collector", "category", "q")
 
@@ -470,7 +468,7 @@ class FindingsFragment(View):
             args.text("order", "desc"),
             args.page(),
         )
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             return self._render(session, query)
 
     def _render(self, session: Session, query: FindingsQuery) -> str:
@@ -502,20 +500,20 @@ class FindingsFragment(View):
         }
 
 
-class RowCountsFragment(View):
+class RowCountsFragment(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             counts = RowCountsView(session).for_latest()
             return render_template("partials/_row_counts.html", row_counts=counts)
 
 
-class RunsFragment(View):
+class RunsFragment(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        with ServiceLookup().read_session() as session:
+        with self._services.read_session() as session:
             runs = RunQueries(session).recent_runs()
             return render_template("partials/_runs.html", recent_runs=runs)
 
@@ -569,8 +567,13 @@ class FragmentRoutes:
         ("/fragments/runs", "fragment_runs", RunsFragment),
     )
 
+    def __init__(self, services: DashboardServices) -> None:
+        self._services = services
+
     def blueprint(self) -> Blueprint:
         blueprint = Blueprint("fragments", __name__)
         for path, endpoint, view in self.ROUTES:
-            blueprint.add_url_rule(path, view_func=view.as_view(endpoint))
+            blueprint.add_url_rule(
+                path, view_func=view.as_view(endpoint, self._services)
+            )
         return blueprint

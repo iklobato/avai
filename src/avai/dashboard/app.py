@@ -61,8 +61,12 @@ class DashboardApp:
         app.jinja_env.auto_reload = True
         app.after_request(SecurityHeaders().apply)
         TemplateFilters().register(app)
-        self._services().install(app)
-        routes = (FragmentRoutes(), ApiRoutes(), ControlRoutes())
+        services = self._services()
+        routes = (
+            FragmentRoutes(services),
+            ApiRoutes(services),
+            ControlRoutes(services),
+        )
         for route_set in routes:
             app.register_blueprint(route_set.blueprint())
         return app

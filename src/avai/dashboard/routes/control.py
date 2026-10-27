@@ -10,7 +10,6 @@ from http import HTTPStatus
 from typing import ClassVar
 
 from flask import Blueprint, abort, render_template, request
-from flask.views import View
 
 from avai.host_monitor import FeedbackLabel
 from avai.host_monitor.enums import MaintenanceCommand
@@ -23,7 +22,7 @@ from ..control import (
     SettingsChange,
 )
 from ..queries import CollectorTables
-from . import ServiceLookup
+from . import DashboardServices, ServiceView
 
 TRUTHY_FORM_VALUES = ("1", "true", "on", "yes")
 
@@ -35,8 +34,11 @@ class TokenGate:
     it doubles as the CSRF defence. Open mode (see
     ``DashboardConfig.control_open``) skips the check."""
 
+    def __init__(self, services: DashboardServices) -> None:
+        self._services = services
+
     def check(self) -> None:
-        config = ServiceLookup().services().config
+        config = self._services.config
         if config.control_open:
             return
         supplied = request.headers.get("X-Avai-Token", "")
@@ -46,10 +48,12 @@ class TokenGate:
 
 
 class ControlPanel:
+    def __init__(self, services: DashboardServices) -> None:
+        self._services = services
+
     def render(self) -> str:
-        lookup = ServiceLookup()
-        config = lookup.services().config
-        with lookup.read_session() as session:
+        config = self._services.config
+        with self._services.read_session() as session:
             state = ControlReader().read(session)
         return render_template(
             "partials/_control.html",
@@ -61,42 +65,42 @@ class ControlPanel:
         )
 
 
-class GuardedAction(View):
+class GuardedAction(ServiceView):
     """A token-guarded POST that changes the control row, then re-renders the
     control panel."""
 
     methods: ClassVar[list[str]] = ["POST"]
 
     def store(self) -> ControlStore:
-        return ServiceLookup().services().control
+        return self._services.control
 
 
-class ControlFragment(View):
+class ControlFragment(ServiceView):
     methods: ClassVar[list[str]] = ["GET"]
 
     def dispatch_request(self) -> str:
-        return ControlPanel().render()
+        return ControlPanel(self._services).render()
 
 
 class PauseAction(GuardedAction):
     def dispatch_request(self) -> str:
-        TokenGate().check()
+        TokenGate(self._services).check()
         self.store().pause()
-        return ControlPanel().render()
+        return ControlPanel(self._services).render()
 
 
 class ResumeAction(GuardedAction):
     def dispatch_request(self) -> str:
-        TokenGate().check()
+        TokenGate(self._services).check()
         self.store().resume()
-        return ControlPanel().render()
+        return ControlPanel(self._services).render()
 
 
 class ScanNowAction(GuardedAction):
     def dispatch_request(self) -> str:
-        TokenGate().check()
+        TokenGate(self._services).check()
         self.store().bump_scan_now()
-        return ControlPanel().render()
+        return ControlPanel(self._services).render()
 
 
 class CollectorSwitch(StrEnum):
@@ -106,7 +110,7 @@ class CollectorSwitch(StrEnum):
 
 class CollectorAction(GuardedAction):
     def dispatch_request(self, name: str, state: str) -> str:
-        TokenGate().check()
+        TokenGate(self._services).check()
         if CollectorTables().model(name) is None or state not in tuple(CollectorSwitch):
             abort(HTTPStatus.BAD_REQUEST)
         store = self.store()
@@ -115,19 +119,19 @@ class CollectorAction(GuardedAction):
             CollectorSwitch.OFF: store.disable_collector,
         }
         switches[CollectorSwitch(state)](name)
-        return ControlPanel().render()
+        return ControlPanel(self._services).render()
 
 
 class SettingsAction(GuardedAction):
     def dispatch_request(self) -> str:
-        TokenGate().check()
+        TokenGate(self._services).check()
         change = SettingsChange(
             interval=self._number("interval"),
             judge=self._flag("judge"),
             enrich=self._flag("enrich"),
         )
         self.store().set_settings(change)
-        return ControlPanel().render()
+        return ControlPanel(self._services).render()
 
     def _number(self, field: str) -> int | None:
         value = request.form.get(field, "").strip()
@@ -140,11 +144,11 @@ class SettingsAction(GuardedAction):
 
 class MaintenanceAction(GuardedAction):
     def dispatch_request(self, action: str) -> str:
-        TokenGate().check()
+        TokenGate(self._services).check()
         if action not in tuple(MaintenanceCommand):
             abort(HTTPStatus.BAD_REQUEST)
         self.store().queue_command(MaintenanceCommand(action))
-        return ControlPanel().render()
+        return ControlPanel(self._services).render()
 
 
 class FeedbackAction(GuardedAction):
@@ -158,7 +162,7 @@ class FeedbackAction(GuardedAction):
     )
 
     def dispatch_request(self, collector: str, content_hash: str, label: str) -> str:
-        TokenGate().check()
+        TokenGate(self._services).check()
         if CollectorTables().model(collector) is None or label not in tuple(
             FeedbackLabel
         ):
@@ -187,8 +191,13 @@ class ControlRoutes:
         ),
     )
 
+    def __init__(self, services: DashboardServices) -> None:
+        self._services = services
+
     def blueprint(self) -> Blueprint:
         blueprint = Blueprint("control", __name__)
         for path, endpoint, view in self.ROUTES:
-            blueprint.add_url_rule(path, view_func=view.as_view(endpoint))
+            blueprint.add_url_rule(
+                path, view_func=view.as_view(endpoint, self._services)
+            )
         return blueprint
