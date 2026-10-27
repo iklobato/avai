@@ -6,9 +6,9 @@ https://docs.abuseipdb.com/
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import Any, ClassVar
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from avai.enrichers.base import (
     Enricher,
@@ -50,6 +50,12 @@ class AbuseIpDbReport(ApiReply):
     reports: int = Field(0, alias="totalReports")
     country: object = Field(None, alias="countryCode")
     isp: object = None
+
+    @field_validator("score", "reports", mode="before")
+    @classmethod
+    def _whole(cls, value: Any) -> int:
+        """Cut a fractional count the way int() did before the model."""
+        return int(value)
 
 
 class AbuseIpDbCheck(ApiReply):

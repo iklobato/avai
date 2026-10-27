@@ -84,7 +84,9 @@ class TestMalwareBazaar:
 
         return MalwareBazaarEnricher.create(http, dict(os.environ))
 
-    def test_hit_returns_malicious_verdict(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_hit_returns_malicious_verdict(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
         http = _FakeHttp(
             _FakeResp(
@@ -114,6 +116,15 @@ class TestMalwareBazaar:
         http = _FakeHttp(_FakeResp(json_body={"query_status": "no_results"}))
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.SHA256, "a" * 64)) is None
+
+    def test_a_miss_with_text_data_is_no_opinion_not_an_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
+        miss = {"query_status": "hash_not_found", "data": "Hash not found"}
+        enricher = self._enricher(_FakeHttp(_FakeResp(json_body=miss)))
+        sha = hashlib.sha256().hexdigest()
+        assert enricher.fetch(Indicator(IndicatorType.SHA256, sha)) is None
 
     def test_unauthorized_is_an_error_not_a_silent_no_opinion(
         self, monkeypatch: pytest.MonkeyPatch
@@ -385,6 +396,15 @@ class TestOSV:
 
         return OSVEnricher.create(http, dict(os.environ))
 
+    def test_a_bare_app_name_is_not_sent_since_osv_rejects_it(self) -> None:
+        # No version and no known ecosystem: OSV answers 400 "invalid query".
+        http = _FakeHttp(_FakeResp(status=HTTPStatus.BAD_REQUEST))
+        assert (
+            self._enricher(http).fetch(Indicator(IndicatorType.PACKAGE, "Safari"))
+            is None
+        )
+        assert http.calls == []
+
     def test_package_with_advisory_returns_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
@@ -447,7 +467,6 @@ class TestOSV:
         "value,payload",
         [
             ("openssl@1.0.0", {"package": {"name": "openssl"}, "version": "1.0.0"}),
-            ("openssl", {"package": {"name": "openssl"}}),
             (
                 "pip@24.0",
                 {"package": {"name": "pip", "ecosystem": "PyPI"}, "version": "24.0"},
@@ -534,7 +553,9 @@ class TestVirusTotal:
             }
         }
 
-    def test_many_malicious_engines_yields_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_many_malicious_engines_yields_malicious(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         http = _FakeHttp(
             _FakeResp(json_body=self._vt_body(malicious=30, harmless=20, undetected=15))
         )
@@ -543,7 +564,9 @@ class TestVirusTotal:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
 
-    def test_few_malicious_engines_yields_suspicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_few_malicious_engines_yields_suspicious(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         http = _FakeHttp(
             _FakeResp(json_body=self._vt_body(malicious=2, harmless=50, undetected=20))
         )
@@ -552,7 +575,9 @@ class TestVirusTotal:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_zero_malicious_with_many_engines_yields_benign(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_zero_malicious_with_many_engines_yields_benign(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body=self._vt_body(
@@ -577,6 +602,9 @@ class TestVirusTotal:
 
 
 class TestAbuseIpDb:
+    FRACTIONAL_SCORE = 90.7
+    REPORTS = 50
+
     def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("ABUSEIPDB_API_KEY", "fake")
         from avai.enrichers.sources.abuseipdb import AbuseIpDbEnricher
@@ -600,6 +628,20 @@ class TestAbuseIpDb:
         ev = e.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
+
+    def test_a_fractional_score_is_truncated_as_before(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = {
+            "data": {
+                "abuseConfidenceScore": self.FRACTIONAL_SCORE,
+                "totalReports": self.REPORTS,
+            }
+        }
+        enricher = self._enricher(_FakeHttp(_FakeResp(json_body=body)), monkeypatch)
+        evidence = enricher.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4"))
+        assert evidence is not None
+        assert evidence.summary.startswith("AbuseIPDB: score=90 reports=50 ")
 
     def test_low_score_yields_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(

@@ -113,7 +113,8 @@ class OSVEnricher(Enricher):
     def _vulns_for_package(self, package: str) -> list[OsvVuln]:
         # PACKAGE is "<name>@<version>". Either piece may be missing.
         package_name, _, version = package.partition("@")
-        if not package_name:
+        # OSV answers 400 to a bare name with neither version nor ecosystem.
+        if not package_name or not (version or self.ecosystem_for(package_name)):
             return []
         response = self._http.post(
             QUERY_URL, RequestOptions(json=self._query(package_name, version))

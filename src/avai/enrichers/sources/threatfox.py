@@ -49,7 +49,8 @@ class ThreatFoxReply(ApiReply):
     @field_validator("iocs", mode="before")
     @classmethod
     def _present(cls, value: Any) -> Any:
-        return value or []
+        # A miss sends a sentence in "data" instead of a list.
+        return value if isinstance(value, list) else []
 
 
 class ThreatFoxEnricher(Enricher):
