@@ -43,6 +43,7 @@ from .judge import Judge, JudgeSettings, LlmJudge, NullJudge
 from .llm import LlmCredentials, LlmSession
 from .models import Base
 from .narrator import IncidentNarrator
+from .options import MonitorOptions
 from .prompts import Prompts
 from .runner import Runner, RunnerConfig
 from .sink import Sink
@@ -70,7 +71,7 @@ class LlmStages:
 class LlmStageBuilder:
     """Builds the LLM stages the parsed flags and the prompts file allow."""
 
-    def __init__(self, args: argparse.Namespace, logger: logging.Logger) -> None:
+    def __init__(self, args: MonitorOptions, logger: logging.Logger) -> None:
         self._args = args
         self._logger = logger
 
@@ -162,6 +163,10 @@ class LlmStageBuilder:
 class MonitorArgs:
     """The ``avai monitor`` argument parser. Bare ``avai monitor`` uses
     ~/.avai/avai.db, a 300s interval and a 25-per-collector judge cap."""
+
+    def options(self, argv: list[str] | None) -> MonitorOptions:
+        """The flags in ``argv`` (``None`` reads ``sys.argv``), checked."""
+        return MonitorOptions.from_namespace(self.parser().parse_args(argv))
 
     def parser(self) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
@@ -327,7 +332,7 @@ class MonitorWiring:
     drives ``start_streaming`` / ``run_forever`` and disposes the engine.
     """
 
-    def __init__(self, args: argparse.Namespace, logger: logging.Logger) -> None:
+    def __init__(self, args: MonitorOptions, logger: logging.Logger) -> None:
         self._args = args
         self._logger = logger
 
@@ -403,9 +408,9 @@ class MonitorWiring:
             streaming,
             llm.judge,
             args.lookback_min,
-            max_db_bytes=max(0, args.max_db_mb) * BYTES_PER_MB,
+            max_db_bytes=args.max_db_mb * BYTES_PER_MB,
             enrichment_chain=self._enrichment(sink.engine),
-            baseline_min_runs=max(1, args.baseline_runs),
+            baseline_min_runs=args.baseline_runs,
             narrator=llm.narrator,
             coverage=llm.coverage,
             verifier=llm.verifier,
@@ -474,7 +479,7 @@ class MonitorApp:
 
     @classmethod
     def main(cls) -> int:
-        args = MonitorArgs().parser().parse_args()
+        args = MonitorArgs().options(None)
         logging.basicConfig(
             level=logging.DEBUG if args.verbose else logging.INFO,
             format="%(asctime)sZ %(levelname)s %(message)s",
@@ -487,7 +492,7 @@ class MonitorApp:
         finally:
             engine.dispose()
 
-    def serve(self, args: argparse.Namespace) -> int:
+    def serve(self, args: MonitorOptions) -> int:
         if args.once:
             run_id, ok, failed = self._runner.run_once()
             self._logger.info(

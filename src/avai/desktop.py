@@ -107,7 +107,7 @@ class EmbeddedMonitor:
         # No key yet -> viz-only (NullJudge); the settings screen enables the
         # judge.
         argv = ["--db", self._db] if api_key else ["--db", self._db, "--no-judge"]
-        args = MonitorArgs().parser().parse_args(argv)
+        args = MonitorArgs().options(argv)
         runner, engine = MonitorWiring(args, logging.getLogger(LOGGER_NAME)).build()
         loop = MonitorLoop(runner, engine.dispose)
         threading.Thread(

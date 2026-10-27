@@ -70,7 +70,7 @@ def test_build_runner_constructs_without_network(tmp_path):
 
     db = str(tmp_path / "m.db")
     flags = ["--db", db, "--no-judge", "--no-enrich", "--no-streaming"]
-    args = MonitorArgs().parser().parse_args(flags)
+    args = MonitorArgs().options(flags)
     runner, engine = MonitorWiring(args, logging.getLogger("test")).build()
     try:
         assert runner.config.snapshot_collectors  # collectors wired

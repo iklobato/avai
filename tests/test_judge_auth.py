@@ -79,7 +79,7 @@ class _StubCredentials:
 
 
 def _args(*flags):
-    return MonitorArgs().parser().parse_args(list(flags))
+    return MonitorArgs().options(list(flags))
 
 
 def _stages(*flags, prompts=None, credentials=None):
