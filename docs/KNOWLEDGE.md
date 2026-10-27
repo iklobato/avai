@@ -22,7 +22,8 @@ one SQLite file (default `~/.avai/avai.db`). `avai dashboard` is a read-only
 Flask + HTMX page on that file (default port 8765). `avai app` wraps both in a
 desktop window.
 
-- Package: `avai-monitor` on PyPI, version 0.9.2 in `pyproject.toml`.
+- Package: `avai-monitor` on PyPI, current release 0.10.0 (2026-10-27): https://pypi.org/project/avai-monitor/0.10.0/
+- Docker image: `iklob1/avai` on Docker Hub, https://hub.docker.com/r/iklob1/avai
 - Repo: https://github.com/iklobato/avai
 - Branches: `main` is released, `dev` is the integration branch. Never commit to
   either; open a branch and a PR into `dev`.
@@ -98,7 +99,7 @@ strings, own exceptions, no magic numbers, type hints everywhere.
 
 ## 5. What was done
 
-### 5.1 Refactor to the immutable rules: PR https://github.com/iklobato/avai/pull/39 (open, base `dev`, 77 commits)
+### 5.1 Refactor to the immutable rules: PR https://github.com/iklobato/avai/pull/39 (merged into `dev` 2026-10-27, released in 0.10.0)
 
 - Part 1 brought the mechanical rule scan to 0 on `src`, `scripts`, `tools`, `packaging`.
 - Part 2 covered the judgment rules:
@@ -120,7 +121,7 @@ strings, own exceptions, no magic numbers, type hints everywhere.
   - All 403 dashboard routes render the same bytes as before, except the intended changes.
   - 124 canned threat-intel replies give the same evidence as before.
 
-### 5.2 Sentry fixes: PR https://github.com/iklobato/avai/pull/40 (open, base `refactor/immutable-rules`, merge after PR 39)
+### 5.2 Sentry fixes: PR https://github.com/iklobato/avai/pull/40 (merged into `dev` 2026-10-27, released in 0.10.0)
 
 | Commit | Sentry issue | Cause | Fix |
 |---|---|---|---|
@@ -157,6 +158,25 @@ Each one says what it costs if it turns out wrong.
 - `AVAI_APP_MODE` turns on only for 1/true/yes/on.
 - The unprivileged socket view (5.2) is partial. Collectors use it; any yes/no answer must use `PsutilConnections.inet()` and handle `PermissionError`.
 
+### 5.4 How a release works (first used for 0.10.0, 2026-10-27)
+
+1. Branch `release/vX.Y.Z` from `dev`. Bump `version` in `pyproject.toml` and `__version__` in `src/avai/__init__.py`, run `uv lock`, and add a `CHANGELOG.md` entry.
+2. Open a PR into `main` and merge it once CI is green (example: https://github.com/iklobato/avai/pull/41).
+3. Push an annotated tag: `git tag -a vX.Y.Z <main merge sha> -m "..."` then `git push origin vX.Y.Z`. The tag starts three workflows:
+   - `publish.yml` uploads the wheel and sdist to PyPI. It uses trusted publishing, so no token is stored anywhere. The publisher (owner `iklobato`, repo `avai`, workflow `publish.yml`, no environment) was added on PyPI on 2026-10-27. Before that every tag failed with `invalid-publisher`, which is why 0.9.x never reached PyPI.
+   - `docker.yml` (new in 0.10.0) pushes `iklob1/avai:X.Y.Z` and `:latest` for `linux/amd64` and `linux/arm64`. It uses the repo secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`, set on 2026-10-27. Before that the image was pushed by hand and stopped at 0.8.0, amd64 only.
+   - `release.yml` builds the desktop installers and attaches them to the GitHub Release. The macOS job fails until the signing secrets exist (see `packaging/README.md`).
+
+   Result for v0.10.0:
+   - PyPI: published (wheel and sdist; the wheel holds 750 `.yar` files).
+   - Docker Hub: `0.10.0` and `latest` for amd64 and arm64, both started and checked.
+   - GitHub Release https://github.com/iklobato/avai/releases/tag/v0.10.0: Windows `.exe` and Linux `.deb` attached; the macOS job failed at signing as expected.
+4. Bring `main` back into `dev` (the release branch commits exist only on `main` otherwise).
+
+Known noise: GitGuardian flags a "Generic Password" in an old commit of `tests/test_home_lookup.py` (incident https://dashboard.gitguardian.com/workspace/697954/incidents/17490324). It was the variable name `passwd` for the stdlib `pwd` module, renamed since. No secret was ever there. It turns the GitGuardian check red on any PR whose range includes commit 8a6193b, until someone marks the incident as a false positive in the GitGuardian dashboard.
+
+The Docker image installs `tcpdump`, `iproute2` and `p11-kit` since 0.10.0. Without them 7 collectors failed every cycle in the container. In a local build of 0.10.0 the first cycle ended `ok=35 failed=0`.
+
 ## 6. Sentry
 
 - Org `iklobato`, project `avai-cli`.
@@ -175,7 +195,7 @@ Each one says what it costs if it turns out wrong.
    - Run the suite with those versions before pushing.
    - Read file paths from `engine.url.database`, never by slicing `str(engine.url)`. SQLAlchemy 2.1 percent-encodes the path.
 4. **sudo changes the DB:** `sudo avai monitor` uses `/root/.avai/avai.db`, a different file from the user dashboard's. Pass `--db /home/<user>/.avai/avai.db` and the full path to the binary.
-5. **YARA pack:** `src/avai/rules/vendor/` is gitignored but force-included in the wheel (`[tool.hatch.build] artifacts`). The machine that builds a release must fetch it first with `python scripts/update_rules.py`. The `publish` workflow has a "Fetch the YARA pack" step for this. Without it, only EICAR ships.
+5. **YARA pack:** `src/avai/rules/vendor/` is gitignored but force-included in the wheel (`[tool.hatch.build] artifacts`). The machine that builds a release must fetch it first with `python scripts/update_rules.py`. The `publish` and `docker` workflows both have a "Fetch the YARA pack" step for this. Without it, only EICAR ships. The 0.10.0 wheel on PyPI was checked: it holds 750 `.yar` files.
 6. **Stock yara has no crypto:** the PyPI yara-python wheel has no OpenSSL. 95 of 751 signature-base files are skipped (`pe.imphash`, `pe.number_of_signatures`, `hash.*`). That leaves 5292 rules from 656 files. Expected; see `src/avai/rules/NOTICE`.
 7. **Windows:** has no `pwd` module. Tests that patch it use `pytest.importorskip("pwd")`.
 8. **Two `avai` installs on the maintainer's Mac:**
@@ -210,14 +230,7 @@ Linux and Windows hosts, a PyInstaller build, and sending to Sentry.
 
 ## 9. Open work and next steps
 
-In order:
-
-1. Review and merge https://github.com/iklobato/avai/pull/39 into `dev`.
-   - It is big (77 commits).
-   - It needs a reviewer; nobody has reviewed it yet.
-2. Rebase https://github.com/iklobato/avai/pull/40 onto `dev` once 39 lands, then merge.
-3. Release a version with both, then watch Sentry (section 10).
-4. Not done, and worth a separate decision:
+Not done, and worth a separate decision:
    - **avai logs its own noise.** Found in the 2026-10-27 run, 79 min, 31 cycles:
      - Every cycle, `kernel_extensions` runs `system_profiler -json SPExtensionsDataType`.
      - That makes macOS `securityd` log exactly 4048 `MacOS error: -67062` lines (process `/usr/sbin/system_profiler`, category `security_exception`). Each run of the child is a new pid.
@@ -231,10 +244,11 @@ In order:
    - The test-suite debt: 2685 mechanical findings in `tests/`.
    - Untested: the Linux and Windows collectors on real machines, and the socket fallback outside macOS. psutil's docs say only macOS and AIX need root for the system table.
 
-## 10. What to monitor after the next release
+## 10. What to monitor now that 0.10.0 is out
 
 - Sentry `avai-cli`:
-  - AVAI-CLI-B, G, H and D should get no new events from the new release. If one does, the fix did not reach that path.
+  - AVAI-CLI-B, G, H and D should get no new events with release `avai@0.10.0`. If one does, the fix did not reach that path.
+  - Three `avai@0.10.0` events on 2026-10-27 around 14:44 UTC came from a local Docker smoke test run without `AVAI_TELEMETRY=0` ("no usable LLM credentials" and two "tcpdump not found"). They are test noise, not users.
   - E, F and C can keep coming; they come from machine setup.
 - Any new `collector=... status=failed` warning: it is a new Sentry issue, read it.
 - DB size against `--max-db-mb` on long runs. Look for `db_rotation: pruned` lines in the monitor log.

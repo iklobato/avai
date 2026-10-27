@@ -35,6 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         dmsetup \
         bluez \
         dpkg \
+        tcpdump \
+        iproute2 \
+        p11-kit \
         ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 

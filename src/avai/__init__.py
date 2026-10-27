@@ -14,4 +14,4 @@ Or programmatically:
     dashboard_app = DashboardApp(DashboardConfig(db_path=...)).build()
 """
 
-__version__ = "0.9.2"
+__version__ = "0.10.0"
