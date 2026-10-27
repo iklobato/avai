@@ -93,17 +93,19 @@ class YaraPanels:
     def file_scan(self, run_id: str, filters: RowFilter) -> dict[str, Any]:
         """The ruleset summary plus this run's YARA matches, each carrying the
         matched rule's author (from its meta) for attribution."""
-        matches = self.FILE_SCAN_TABLE.rows(self._session, run_id)
-        for match in matches:
-            match["author"] = (
-                StoredJson().as_dict(match.get("meta_json")).get("author") or ""
-            )
+        matches = [
+            {**match, "author": self._author(match)}
+            for match in self.FILE_SCAN_TABLE.rows(self._session, run_id)
+        ]
         return {
             "status": self.status(),
             "coverage": self.coverage(),
             "matches": filters.keep(matches, self.FILE_SCAN_TABLE.search),
             **filters.fields(),
         }
+
+    def _author(self, match: dict[str, Any]) -> str:
+        return StoredJson().as_dict(match.get("meta_json")).get("author") or ""
 
 
 class PersistencePages(NamedTuple):

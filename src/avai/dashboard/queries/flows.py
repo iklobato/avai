@@ -64,11 +64,9 @@ class DestinationGroup:
         }
 
     def _worst(self) -> dict[str, Any]:
-        worst: dict[str, Any] = {"verdict": None, "confidence": None, "reasoning": ""}
-        rank = VerdictRank()
-        for flow in self._flows:
-            rank.take_worse(worst, (flow.verdict, flow.confidence, flow.reasoning))
-        return worst
+        return VerdictRank().worst(
+            (flow.verdict, flow.confidence, flow.reasoning) for flow in self._flows
+        )
 
 
 @dataclass(frozen=True)
@@ -101,7 +99,7 @@ class FlowsPanel:
         rows = self._by_destination(self._flows())
         # Geolocation + resolved hostname per destination, from the evidence
         # cache the monitor already populated.
-        IpEnrichment(self._session).attach(rows)
+        rows = IpEnrichment(self._session).attached(rows)
         rows = query.filters.keep(sorted(rows, key=self._order), FLOW_SEARCH)
         page_rows, paging = query.page.slice(rows)
         return {

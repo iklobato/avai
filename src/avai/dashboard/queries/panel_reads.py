@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, replace
+from collections.abc import Iterable
 from typing import Any, ClassVar, NamedTuple
 
 from sqlalchemy import and_, literal, select, text
@@ -151,16 +152,26 @@ class VerdictRank:
         ranks = Verdict.ranks()
         return ranks.get(verdict or "", len(ranks))
 
-    def take_worse(
-        self, group: dict[str, Any], judged: tuple[str | None, Any, str | None]
-    ) -> None:
-        """Keep the worst ``(verdict, confidence, reasoning)`` a grouped row
-        has seen."""
-        verdict, confidence, reasoning = judged
-        if self.rank(verdict) < self.rank(group["verdict"]):
-            group["verdict"] = verdict
-            group["confidence"] = confidence
-            group["reasoning"] = reasoning or ""
+    def worst(
+        self, judged: Iterable[tuple[str | None, Any, str | None]]
+    ) -> dict[str, Any]:
+        """The worst ``(verdict, confidence, reasoning)`` a grouped row has
+        seen; the first one wins a tie. Unranked verdicts never count."""
+        ranked = [item for item in judged if self._ranked(item)]
+        if not ranked:
+            return {"verdict": None, "confidence": None, "reasoning": ""}
+        verdict, confidence, reasoning = min(ranked, key=self._rank_of)
+        return {
+            "verdict": verdict,
+            "confidence": confidence,
+            "reasoning": reasoning or "",
+        }
+
+    def _rank_of(self, judged: tuple[str | None, Any, str | None]) -> int:
+        return self.rank(judged[0])
+
+    def _ranked(self, judged: tuple[str | None, Any, str | None]) -> bool:
+        return self._rank_of(judged) < self.rank(None)
 
 
 @dataclass(frozen=True)

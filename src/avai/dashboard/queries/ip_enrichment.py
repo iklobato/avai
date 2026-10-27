@@ -62,19 +62,24 @@ class IpEnrichment:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def attach(self, rows: list[dict[str, Any]]) -> None:
-        for row in rows:
-            row["geo"] = None
-            row["hostname"] = None
+    def attached(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Copies of ``rows`` carrying ``geo`` and ``hostname``."""
         ips = [row["dst_ip"] for row in rows if row.get("dst_ip")]
         if not ips or "enrichment_evidence" not in SchemaProbe(self._session).tables():
-            return
+            return [{**row, "geo": None, "hostname": None} for row in rows]
         geo_by_ip, hosts_by_ip = self._evidence(ips)
-        for row in rows:
-            row["geo"] = geo_by_ip.get(row["dst_ip"])
-            hosts = hosts_by_ip.get(row["dst_ip"])
-            # Deterministic pick when several sources name different hosts.
-            row["hostname"] = sorted(hosts)[0] if hosts else None
+        return [
+            {
+                **row,
+                "geo": geo_by_ip.get(row["dst_ip"]),
+                "hostname": self._hostname(hosts_by_ip.get(row["dst_ip"])),
+            }
+            for row in rows
+        ]
+
+    def _hostname(self, hosts: set[str] | None) -> str | None:
+        # Deterministic pick when several sources name different hosts.
+        return sorted(hosts)[0] if hosts else None
 
     def _evidence(
         self, ips: list[str]

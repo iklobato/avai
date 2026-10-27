@@ -123,13 +123,10 @@ class SocketGroup:
         return sorted(filter(None, {known.get(value, value) for value in raw}))
 
     def _worst(self) -> dict[str, Any]:
-        worst: dict[str, Any] = {"verdict": None, "confidence": None, "reasoning": ""}
-        rank = VerdictRank()
-        for socket in self._sockets:
-            rank.take_worse(
-                worst, (socket.verdict, socket.confidence, socket.reasoning)
-            )
-        return worst
+        return VerdictRank().worst(
+            (socket.verdict, socket.confidence, socket.reasoning)
+            for socket in self._sockets
+        )
 
 
 @dataclass(frozen=True)

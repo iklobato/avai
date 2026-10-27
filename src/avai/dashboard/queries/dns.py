@@ -65,10 +65,11 @@ class DnsPanel:
         self._run_id = run_id
 
     def queries(self, query: DnsQuery) -> dict[str, Any]:
-        rows = self.TABLE.rows(self._session, self._run_id)
         levels = DnsLevel()
-        for row in rows:
-            row["level"] = levels.of(row["server_ip"], row["qtype"])
+        rows = [
+            {**row, "level": levels.of(row["server_ip"], row["qtype"])}
+            for row in self.TABLE.rows(self._session, self._run_id)
+        ]
         rows = query.filters.keep(sorted(rows, key=self._order), self.TABLE.search)
         if query.level:
             rows = [row for row in rows if row.get("level") == query.level]
