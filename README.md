@@ -176,6 +176,9 @@ Full reference below: [What's collected](#whats-collected-one-line-summary) ·
 | Full host visibility (Linux) | `docker run --pid=host --network=host ... iklob1/avai` | **Linux hosts** — the in-container monitor sees the real host |
 | Single role | `docker run ... iklob1/avai avai dashboard` (or `avai monitor`) | run just one role (e.g. dashboard against an existing `avai.db`, or a monitor-only container) |
 
+The image is published for `linux/amd64` and `linux/arm64` (Apple Silicon,
+Raspberry Pi), tagged with the version and `latest`.
+
 The image's default `CMD` runs both roles together via supervisord (they
 share `/data/avai.db` — the monitor writes, the dashboard reads it live —
 and either is auto-restarted if it exits). Override the command to run a
