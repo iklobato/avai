@@ -39,14 +39,13 @@ NON_BENIGN = (str(Verdict.SUSPICIOUS), str(Verdict.MALICIOUS))
 
 class RunLog:
     """Run lifecycle, row writes and the run-history lookups the judge's
-    baseline needs. Holds the current run id between start and end."""
+    baseline needs. Keeps no current run: every call names its run."""
 
     ERROR_MESSAGE_CHARS = 1000
 
     def __init__(self, engine: Engine, clock: Clock) -> None:
         self._engine = engine
         self._clock = clock
-        self.run_id: str | None = None
 
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
         run_id, started = str(uuid.uuid4()), self._clock.now_iso()
@@ -59,13 +58,12 @@ class RunLog:
         with Session(self._engine) as session:
             session.add(run)
             session.commit()
-        self.run_id = run_id
         return run_id, started
 
-    def end_run(self, ok: int, failed: int) -> None:
+    def end_run(self, run_id: str, ok: int, failed: int) -> None:
         statement = (
             update(CollectionRun)
-            .where(CollectionRun.run_id == self.run_id)
+            .where(CollectionRun.run_id == run_id)
             .values(
                 finished_at=self._clock.now_iso(),
                 collectors_ok=ok,
@@ -83,9 +81,9 @@ class RunLog:
             session.execute(sqlite_insert(model), rows)
             session.commit()
 
-    def write_error(self, collector: str, exc: BaseException) -> None:
+    def write_error(self, run_id: str, collector: str, exc: BaseException) -> None:
         error = CollectorErrorRow(
-            run_id=self.run_id,
+            run_id=run_id,
             collector=collector,
             error_class=type(exc).__name__,
             message=str(exc)[: self.ERROR_MESSAGE_CHARS],
@@ -95,13 +93,12 @@ class RunLog:
             session.add(error)
             session.commit()
 
-    def unjudged(self, collector: Collector) -> list[dict[str, Any]]:
-        """One entry per distinct, unjudged content_hash for the current run
+    def unjudged(self, run_id: str, collector: Collector) -> list[dict[str, Any]]:
+        """One entry per distinct, unjudged content_hash for ``run_id``
         (judge_fields drive what's selected)."""
-        if self.run_id is None or not collector.judge_fields:
+        if not collector.judge_fields:
             return []
-        model = collector.model
-        return self._unjudged(collector, model.run_id == self.run_id)
+        return self._unjudged(collector, collector.model.run_id == run_id)
 
     def unjudged_all(self, collector: Collector) -> list[dict[str, Any]]:
         """Same as ``unjudged`` but with no run filter: streaming rows

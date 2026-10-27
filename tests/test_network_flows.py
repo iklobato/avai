@@ -724,8 +724,8 @@ class TestMissingTableGraceful:
         )
         sink = Sink.create(engine)
         sink.setup()
-        sink.start_run("h", 5)
-        sink.end_run(ok=1, failed=0)
+        run_id, _ = sink.start_run("h", 5)
+        sink.end_run(run_id, ok=1, failed=0)
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE network_flows"))
         return engine, db

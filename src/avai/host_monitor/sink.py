@@ -66,10 +66,6 @@ class Sink:
         )
         return cls(engine, stores, logger)
 
-    @property
-    def run_id(self) -> str | None:
-        return self._stores.runs.run_id
-
     def setup(self) -> None:
         SchemaBootstrap(self.engine, self._logger).setup()
 
@@ -78,17 +74,17 @@ class Sink:
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
         return self._stores.runs.start_run(hostname, lookback_min)
 
-    def end_run(self, ok: int, failed: int) -> None:
-        self._stores.runs.end_run(ok, failed)
+    def end_run(self, run_id: str, ok: int, failed: int) -> None:
+        self._stores.runs.end_run(run_id, ok, failed)
 
     def write(self, model: type[_RowBase], rows: list[dict[str, Any]]) -> None:
         self._stores.runs.write(model, rows)
 
-    def write_error(self, collector: str, exc: BaseException) -> None:
-        self._stores.runs.write_error(collector, exc)
+    def write_error(self, run_id: str, collector: str, exc: BaseException) -> None:
+        self._stores.runs.write_error(run_id, collector, exc)
 
-    def unjudged(self, collector: Collector) -> list[dict[str, Any]]:
-        return self._stores.runs.unjudged(collector)
+    def unjudged(self, run_id: str, collector: Collector) -> list[dict[str, Any]]:
+        return self._stores.runs.unjudged(run_id, collector)
 
     def unjudged_all(self, collector: Collector) -> list[dict[str, Any]]:
         return self._stores.runs.unjudged_all(collector)

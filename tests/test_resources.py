@@ -255,7 +255,7 @@ def _seed(db):
         ts,
         run_id,
     )
-    sink.end_run(ok=2, failed=0)
+    sink.end_run(run_id, ok=2, failed=0)
 
 
 class TestQueries:

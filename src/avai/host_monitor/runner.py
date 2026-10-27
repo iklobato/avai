@@ -143,7 +143,7 @@ class CollectionCycle:
         # No point starting a fresh round of LLM calls on the way out.
         if not self.controls.shutdown_event.is_set():
             self._report(stamp)
-        sink.end_run(ok, failed)
+        sink.end_run(run_id, ok, failed)
         self._rotate()
         return run_id, ok, failed
 
@@ -172,7 +172,7 @@ class CollectionCycle:
         try:
             self._collect(collector, stamp)
         except HOST_FAILURES as exc:
-            self.config.sink.write_error(collector.name, exc)
+            self.config.sink.write_error(stamp.run_id, collector.name, exc)
             self._log.warning(
                 "collector=%s status=failed error=%s message=%s",
                 collector.name,
@@ -232,7 +232,7 @@ class CollectionCycle:
         rows: list[dict[str, Any]],
         stamp: CycleStamp,
     ) -> tuple[int, int]:
-        unjudged = self.config.sink.unjudged(collector)
+        unjudged = self.config.sink.unjudged(stamp.run_id, collector)
         if not unjudged or not self.controls.settings.judge_on():
             return 0, 0
         origin = BatchOrigin(rows, stamp.run_id, stamp.baseline)

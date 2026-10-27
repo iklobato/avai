@@ -258,7 +258,7 @@ class TestSinkLifecycle:
     def test_start_and_end_run_round_trip(self, sink):
         run_id, started = sink.start_run("host-x", 5)
         assert isinstance(run_id, str) and len(run_id) == 36  # UUID4
-        sink.end_run(ok=3, failed=0)
+        sink.end_run(run_id, ok=3, failed=0)
         # Run row should exist and carry both timestamps.
         from sqlalchemy import select
         from sqlalchemy.orm import Session
@@ -319,7 +319,7 @@ class TestSinkUnjudged:
         ]
         sink.write(ProcessRow, rows)
 
-        unjudged = sink.unjudged(collector)
+        unjudged = sink.unjudged(run_id, collector)
         assert len(unjudged) == 2
         names = sorted(e["name"] for e in unjudged)
         assert names == ["a", "b"]
@@ -335,17 +335,19 @@ class TestSinkUnjudged:
         sink.write(ProcessRow, [{**row, **stamp, "content_hash": h}])
         # Pre-seed the judgement so this hash is "already judged".
         sink.write_judgments([TestSinkWriteJudgments().benign_judgment(h)])
-        unjudged = sink.unjudged(collector)
+        unjudged = sink.unjudged(run_id, collector)
         assert unjudged == []
 
     def test_returns_empty_when_collector_has_no_judge_fields(self, sink):
         # A collector with judge_fields=() opts out of judging.
-        sink.start_run("h", 5)
+        run_id, _ = sink.start_run("h", 5)
         collector = _StubCollector("processes", ProcessRow, judge_fields=())
-        assert sink.unjudged(collector) == []
+        assert sink.unjudged(run_id, collector) == []
 
 
 class TestSinkWriteJudgments:
+    LOOKBACK_MIN = 5
+
     CONFIDENCE = 0.5
 
     def benign_judgment(self, content_hash: str) -> Judgment:
@@ -374,13 +376,12 @@ class TestSinkWriteJudgments:
         assert n == 1
 
     def test_write_error_records_collector_failure(self, sink):
-        # write_error references self.run_id (NOT NULL FK); contract
-        # requires a prior start_run() in the same cycle.
-        sink.start_run("h", 5)
+        # write_error's run_id is a NOT NULL FK, so the run must exist.
+        run_id, _ = sink.start_run("h", 5)
         try:
             raise RuntimeError("boom")
         except RuntimeError as exc:
-            sink.write_error("processes", exc)
+            sink.write_error(run_id, "processes", exc)
 
         from sqlalchemy import select
         from sqlalchemy.orm import Session
@@ -392,6 +393,27 @@ class TestSinkWriteJudgments:
         assert row.collector == "processes"
         assert row.error_class == "RuntimeError"
         assert "boom" in row.message
+
+    def test_error_lands_on_the_run_it_names_after_a_newer_run_started(
+        self, sink: Sink
+    ) -> None:
+        from sqlalchemy import select
+        from sqlalchemy.orm import Session
+
+        from avai.host_monitor.models import CollectorErrorRow
+
+        first_run, _ = sink.start_run("h", self.LOOKBACK_MIN)
+        sink.start_run("h", self.LOOKBACK_MIN)
+
+        sink.write_error(first_run, "processes", RuntimeError("boom"))
+
+        with Session(sink.engine) as session:
+            row = session.execute(select(CollectorErrorRow)).scalar_one()
+        assert (row.run_id, row.collector, row.message) == (
+            first_run,
+            "processes",
+            "boom",
+        )
 
 
 # ---------------------------------------------------------------------------

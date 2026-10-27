@@ -188,7 +188,7 @@ def seeded_dashboard(tmp_path):
     sink.setup()
 
     run_id, started = sink.start_run("host", 5)
-    sink.end_run(ok=1, failed=0)
+    sink.end_run(run_id, ok=1, failed=0)
 
     # One malicious (active), one benign — both seen this run.
     for h, verdict, cat, reason in [

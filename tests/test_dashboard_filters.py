@@ -88,8 +88,8 @@ def judged(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'f.db'}")
     sink = Sink.create(engine)
     sink.setup()
-    _, started = sink.start_run("h", 5)
-    sink.end_run(ok=1, failed=0)
+    run_id, started = sink.start_run("h", 5)
+    sink.end_run(run_id, ok=1, failed=0)
     for content_hash, reasoning, seen_at in (
         ("a" * 64, "beacon to a raw IP", started),
         ("b" * 64, "unsigned launch agent", _LONG_AGO),

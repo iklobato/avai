@@ -1441,7 +1441,7 @@ class TestLatestRunFallback:
     def test_prefers_completed_over_newer_in_progress(self, tmp_path):
         sink = self._sink(tmp_path)
         done_id, _ = sink.start_run("h", 5)
-        sink.end_run(ok=3, failed=0)  # completed (older)
+        sink.end_run(done_id, ok=3, failed=0)  # completed (older)
         sink.start_run("h", 5)  # newer, in-progress
         with Session(sink.engine) as s:
             run = RunQueries(s).latest_run()
