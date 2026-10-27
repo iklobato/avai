@@ -10,8 +10,9 @@ from datetime import datetime
 from http import HTTPStatus
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import model_validator
 
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -34,12 +35,9 @@ DETAIL_FIELDS = (
 )
 
 
-class ReleaseCycle(BaseModel):
+class ReleaseCycle(ApiReply):
     """One endoflife.date release cycle. ``eol`` is either a bool ("has it
-    ended") or an ISO date; it is split into ``eol_flag`` and ``eol_date``
-    and kept as given among the other fields."""
-
-    model_config = ConfigDict(frozen=True, extra="allow")
+    ended") or an ISO date; it is read into ``eol_flag`` and ``eol_date``."""
 
     eol_flag: bool = False
     eol_date: str = ""
@@ -53,10 +51,6 @@ class ReleaseCycle(BaseModel):
         flag = eol if isinstance(eol, bool) else False
         date = eol if isinstance(eol, str) else ""
         return {**raw_cycle, "eol_flag": flag, "eol_date": date}
-
-    def details(self) -> dict[str, Any]:
-        given = self.model_dump()
-        return {field: given.get(field) for field in DETAIL_FIELDS}
 
 
 class EndOfLifeEnricher(Enricher):
@@ -90,7 +84,7 @@ class EndOfLifeEnricher(Enricher):
             summary=(
                 f"endoflife.date: {product} {cycle} is past EOL ({release.eol_date})"
             ),
-            details=release.details(),
+            details=release.given(DETAIL_FIELDS),
         )
 
     def _is_past_eol(self, release: ReleaseCycle) -> bool:

@@ -11,6 +11,8 @@ from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
 
+from pydantic import Field, field_validator
+
 from avai.enrichers.base import (
     CVSS_CRITICAL,
     CVSS_HIGH,
@@ -21,6 +23,7 @@ from avai.enrichers.base import (
     RateLimitedError,
     VerdictHint,
 )
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.http import HttpClient, RequestOptions
 
 URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -32,6 +35,76 @@ CVSS_CONFIDENCE = 0.7
 # Slow lane without a key; the key buys a faster rate lane.
 KEYED_RATE_PER_SECOND = 1.5
 KEYLESS_RATE_PER_SECOND = 0.15
+
+
+class CvssData(ApiReply):
+    """CVSS v3.1 numbers."""
+
+    base_score: object = Field(None, alias="baseScore")
+    base_severity: object = Field(None, alias="baseSeverity")
+
+
+class CvssMetric(ApiReply):
+    cvss_data: CvssData = Field(default_factory=CvssData, alias="cvssData")
+
+    @field_validator("cvss_data", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or {}
+
+
+class CveMetrics(ApiReply):
+    cvss_v31: list[CvssMetric] = Field([], alias="cvssMetricV31")
+
+    @field_validator("cvss_v31", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or []
+
+    def cvss(self) -> CvssData:
+        """The first v3.1 metric's numbers, empty when NVD lists none."""
+        return self.cvss_v31[0].cvss_data if self.cvss_v31 else CvssData()
+
+
+class CveText(ApiReply):
+    lang: object = None
+    value: object = None
+
+
+class CveRecord(ApiReply):
+    """The ``cve`` object of one NVD vulnerability."""
+
+    published: object = None
+    last_modified: object = Field(None, alias="lastModified")
+    descriptions: list[CveText] = []
+    metrics: CveMetrics = Field(default_factory=CveMetrics)
+
+    @field_validator("metrics", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or {}
+
+    def english_description(self) -> str:
+        english = (entry.value for entry in self.descriptions if entry.lang == "en")
+        return next(english, "")[:DESCRIPTION_WIDTH]
+
+
+class NvdVulnerability(ApiReply):
+    cve: CveRecord = Field(default_factory=CveRecord)
+
+    @field_validator("cve", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or {}
+
+
+class NvdReply(ApiReply):
+    vulnerabilities: list[NvdVulnerability] = []
+
+    @field_validator("vulnerabilities", mode="before")
+    @classmethod
+    def _present(cls, value: Any) -> Any:
+        return value or []
 
 
 class NvdEnricher(Enricher):
@@ -65,36 +138,30 @@ class NvdEnricher(Enricher):
             raise RateLimitedError("nvd returned 403 (rate limited / over quota)")
         if response.status_code != HTTPStatus.OK:
             return None
-        vulnerabilities = response.json().get("vulnerabilities") or []
-        if not vulnerabilities:
+        reply = NvdReply.model_validate(response.json())
+        if not reply.vulnerabilities:
             return None
-        return self._evidence(indicator, vulnerabilities[0].get("cve") or {})
+        return self._evidence(indicator, reply.vulnerabilities[0].cve)
 
-    def _evidence(self, indicator: Indicator, cve: Mapping[str, Any]) -> Evidence:
-        metrics = cve.get("metrics") or {}
-        cvss31 = (metrics.get("cvssMetricV31") or [{}])[0].get("cvssData") or {}
-        score = cvss31.get("baseScore")
-        description = self._english_description(cve)
+    def _evidence(self, indicator: Indicator, cve: CveRecord) -> Evidence:
+        cvss31 = cve.metrics.cvss()
+        score = cvss31.base_score
+        description = cve.english_description()
         return Evidence(
             source=self.name,
             indicator=indicator,
             verdict_hint=self._hint(score),
             confidence=CVSS_CONFIDENCE,
-            summary=f"NVD: CVSS={score} {cvss31.get('baseSeverity') or '?'} — {description}",
+            summary=(
+                f"NVD: CVSS={score} {cvss31.base_severity or '?'} — {description}"
+            ),
             details={
-                "cvss31": cvss31,
+                "cvss31": cvss31.as_given(),
                 "description": description,
-                "published": cve.get("published"),
-                "modified": cve.get("lastModified"),
+                "published": cve.published,
+                "modified": cve.last_modified,
             },
         )
-
-    def _english_description(self, cve: Mapping[str, Any]) -> str:
-        descriptions = cve.get("descriptions", [])
-        english = (
-            entry.get("value") for entry in descriptions if entry.get("lang") == "en"
-        )
-        return next(english, "")[:DESCRIPTION_WIDTH]
 
     def _hint(self, score: float | None) -> VerdictHint:
         if score and score >= CVSS_CRITICAL:

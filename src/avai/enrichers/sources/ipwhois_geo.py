@@ -13,8 +13,9 @@ from __future__ import annotations
 from http import HTTPStatus
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import field_validator
 
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.base import (
     Enricher,
     Evidence,
@@ -28,27 +29,28 @@ ONE_WEEK_HOURS = 24 * 7
 INFORMATIONAL_CONFIDENCE = 0.0
 
 
-class GeoConnection(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
-    asn: int | None = None
-    org: str | None = None
-    isp: str | None = None
+class GeoConnection(ApiReply):
+    asn: object = None
+    org: object = None
+    isp: object = None
 
 
-class GeoReply(BaseModel):
+class GeoReply(ApiReply):
     """An ipwho.is lookup; ``success`` is false for bogon/reserved IPs."""
 
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
-    success: bool = False
-    country: str | None = None
-    country_code: str | None = None
-    region: str | None = None
-    city: str | None = None
-    latitude: float | None = None
-    longitude: float | None = None
+    success: object = False
+    country: object = None
+    country_code: object = None
+    region: object = None
+    city: object = None
+    latitude: object = None
+    longitude: object = None
     connection: GeoConnection | None = None
+
+    @field_validator("connection", mode="before")
+    @classmethod
+    def _connection(cls, value: Any) -> Any:
+        return value or {}
 
     def details(self) -> dict[str, Any]:
         connection = self.connection or GeoConnection()

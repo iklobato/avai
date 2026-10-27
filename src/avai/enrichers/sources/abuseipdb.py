@@ -7,9 +7,9 @@ https://docs.abuseipdb.com/
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import Any, ClassVar
+from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from avai.enrichers.base import (
     Enricher,
@@ -19,6 +19,7 @@ from avai.enrichers.base import (
     Verdict,
     VerdictHint,
 )
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.http import RequestOptions
 
 URL = "https://api.abuseipdb.com/api/v2/check"
@@ -43,19 +44,13 @@ DETAIL_FIELDS = (
 )
 
 
-class AbuseIpDbReport(BaseModel):
-    """The ``data`` object of a check reply; other fields are kept as given."""
-
-    model_config = ConfigDict(frozen=True, extra="allow", populate_by_name=True)
+class AbuseIpDbReport(ApiReply):
+    """The ``data`` object of a check reply."""
 
     score: int = Field(0, alias="abuseConfidenceScore")
     reports: int = Field(0, alias="totalReports")
-    country: str | None = Field(None, alias="countryCode")
-    isp: str | None = None
-
-    def details(self) -> dict[str, Any]:
-        given = self.model_dump(by_alias=True)
-        return {field: given.get(field) for field in DETAIL_FIELDS}
+    country: object = Field(None, alias="countryCode")
+    isp: object = None
 
 
 class AbuseIpDbEnricher(Enricher):
@@ -96,7 +91,7 @@ class AbuseIpDbEnricher(Enricher):
                 f"country={report.country} "
                 f"isp={report.isp}"
             ),
-            details=report.details(),
+            details=report.given(DETAIL_FIELDS),
         )
 
     def _verdict(self, score: int, reports: int) -> Verdict:

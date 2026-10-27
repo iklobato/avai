@@ -9,7 +9,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import field_validator
 
 from avai.enrichers.base import (
     CVSS_CRITICAL,
@@ -21,6 +21,7 @@ from avai.enrichers.base import (
     Verdict,
     VerdictHint,
 )
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.http import RequestOptions
 
 URL = "https://api.github.com/advisories"
@@ -39,19 +40,15 @@ DETAIL_FIELDS = (
 )
 
 
-class AdvisoryCvss(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="allow")
-
-    score: float | None = None
+class AdvisoryCvss(ApiReply):
+    score: object = None
 
 
-class Advisory(BaseModel):
-    """One GitHub advisory; fields not read here are kept as given."""
-
-    model_config = ConfigDict(frozen=True, extra="allow")
+class Advisory(ApiReply):
+    """One GitHub advisory."""
 
     severity: str = ""
-    summary: str | None = None
+    summary: object = None
     cvss: AdvisoryCvss | None = None
 
     @field_validator("severity", mode="before")
@@ -59,12 +56,8 @@ class Advisory(BaseModel):
     def _severity(cls, value: Any) -> str:
         return (value or "").lower()
 
-    def score(self) -> float | None:
+    def score(self) -> object:
         return self.cvss.score if self.cvss else None
-
-    def details(self) -> dict[str, Any]:
-        given = self.model_dump()
-        return {field: given.get(field) for field in DETAIL_FIELDS}
 
 
 class GitHubAdvisoryEnricher(Enricher):
@@ -106,7 +99,7 @@ class GitHubAdvisoryEnricher(Enricher):
                 f"GH Advisory: severity={severity} score={score} — "
                 f"{advisory.summary!s:.{SUMMARY_WIDTH}}"
             ),
-            details=advisory.details(),
+            details=advisory.given(DETAIL_FIELDS),
         )
 
     def _verdict(self, severity: str, score: float | None) -> Verdict:

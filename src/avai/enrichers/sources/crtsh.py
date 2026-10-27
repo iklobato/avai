@@ -14,7 +14,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter
+from pydantic import TypeAdapter
 
 from avai.enrichers.base import (
     Enricher,
@@ -23,6 +23,7 @@ from avai.enrichers.base import (
     IndicatorType,
     VerdictHint,
 )
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.http import RequestOptions
 
 URL = "https://crt.sh/"
@@ -32,13 +33,11 @@ NO_CERTS_CONFIDENCE = 0.5
 CERTS_CONFIDENCE = 0.4
 
 
-class CertificateEntry(BaseModel):
+class CertificateEntry(ApiReply):
     """One certificate-transparency entry crt.sh lists for a domain."""
 
-    model_config = ConfigDict(frozen=True, extra="ignore")
-
-    issuer_name: str = ""
-    not_before: str | None = None
+    issuer_name: object = ""
+    not_before: object = None
 
 
 class CrtShEnricher(Enricher):

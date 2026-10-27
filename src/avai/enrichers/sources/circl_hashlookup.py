@@ -13,7 +13,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import Field, field_validator
 
 from avai.enrichers.base import (
     Enricher,
@@ -22,6 +22,7 @@ from avai.enrichers.base import (
     IndicatorType,
     VerdictHint,
 )
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.http import RequestOptions
 
 BASE_URL = "https://hashlookup.circl.lu/lookup"
@@ -43,14 +44,12 @@ DETAIL_FIELDS = (
 )
 
 
-class CirclRecord(BaseModel):
-    """A hashlookup hit; fields other than the ones read stay as given."""
-
-    model_config = ConfigDict(frozen=True, extra="allow", populate_by_name=True)
+class CirclRecord(ApiReply):
+    """A hashlookup hit."""
 
     trust: int = Field(NO_TRUST, alias="hashlookup:trust")
-    file_name: str | None = Field(None, alias="FileName")
-    product_code: str | None = Field(None, alias="ProductCode")
+    file_name: object = Field(None, alias="FileName")
+    product_code: object = Field(None, alias="ProductCode")
 
     @field_validator("trust", mode="before")
     @classmethod
@@ -61,12 +60,8 @@ class CirclRecord(BaseModel):
         except (TypeError, ValueError):
             return NO_TRUST
 
-    def label(self) -> str:
+    def label(self) -> object:
         return self.file_name or self.product_code or "?"
-
-    def details(self) -> dict[str, Any]:
-        given = self.model_dump(by_alias=True)
-        return {field: given.get(field) for field in DETAIL_FIELDS}
 
 
 class CirclHashlookupEnricher(Enricher):
@@ -104,5 +99,5 @@ class CirclHashlookupEnricher(Enricher):
             verdict_hint=VerdictHint.BENIGN,
             confidence=BENIGN_CONFIDENCE,
             summary=f"CIRCL/NSRL: known-good binary ({record.label()}, trust={trust})",
-            details=record.details(),
+            details=record.given(DETAIL_FIELDS),
         )

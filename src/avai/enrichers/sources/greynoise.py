@@ -9,7 +9,7 @@ from __future__ import annotations
 from http import HTTPStatus
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import field_validator
 
 from avai.enrichers.base import (
     Enricher,
@@ -20,6 +20,7 @@ from avai.enrichers.base import (
     Verdict,
     VerdictHint,
 )
+from avai.enrichers.reply import ApiReply
 from avai.enrichers.http import RequestOptions
 
 BASE_URL = "https://api.greynoise.io/v3/community"
@@ -30,24 +31,18 @@ UNKNOWN_CONFIDENCE = 0.3
 DETAIL_FIELDS = ("classification", "noise", "riot", "name", "last_seen", "link")
 
 
-class NoiseRecord(BaseModel):
-    """A GreyNoise community lookup; other fields are kept as given."""
+class NoiseRecord(ApiReply):
+    """A GreyNoise community lookup."""
 
-    model_config = ConfigDict(frozen=True, extra="allow")
-
-    classification: str | None = None
+    classification: object = None
     noise: bool = False
     riot: bool = False
-    name: str | None = None
+    name: object = None
 
     @field_validator("noise", "riot", mode="before")
     @classmethod
     def _truthy(cls, value: Any) -> bool:
         return bool(value)
-
-    def details(self) -> dict[str, Any]:
-        given = self.model_dump()
-        return {field: given.get(field) for field in DETAIL_FIELDS}
 
 
 class GreyNoiseEnricher(Enricher):
@@ -85,7 +80,7 @@ class GreyNoiseEnricher(Enricher):
                 f"GreyNoise: classification={classification} "
                 f"noise={noise} riot={riot} name={record.name or ''}"
             ),
-            details=record.details(),
+            details=record.given(DETAIL_FIELDS),
         )
 
     def _verdict(self, record: NoiseRecord) -> Verdict:
