@@ -194,7 +194,6 @@ APP_INFO_KEYS = (
 )
 
 
-
 # --- File scanning (YARA) ---
 # Bundled + user YARA rules live here; the FileScanCollector compiles
 # every *.yar / *.yara found, once per process. Override via the env var.

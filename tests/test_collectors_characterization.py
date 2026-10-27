@@ -63,6 +63,7 @@ from avai.host_monitor.enums import Browser
 from avai.host_monitor.runtime import (
     CommandRunner,
     DiskMetrics,
+    FrozenClock,
     HostIo,
     HostPaths,
     PsutilConnections,
@@ -317,12 +318,20 @@ class TestTcpdumpCapture:
     def flows(self, iface_args: tuple[str, ...] = ()) -> NetworkFlowsCollector:
         resolver = ProcessConnectionResolver(PsutilConnections())
         return NetworkFlowsCollector(
-            TcpdumpCapture(CommandRunner(), iface_args), resolver
+            TcpdumpCapture(
+                CommandRunner(), iface_args, FrozenClock("2026-01-01T00:00:00+00:00")
+            ),
+            resolver,
         )
 
     def dns(self) -> DnsQueriesCollector:
         resolver = ProcessConnectionResolver(PsutilConnections())
-        return DnsQueriesCollector(TcpdumpCapture(CommandRunner(), ()), resolver)
+        return DnsQueriesCollector(
+            TcpdumpCapture(
+                CommandRunner(), (), FrozenClock("2026-01-01T00:00:00+00:00")
+            ),
+            resolver,
+        )
 
     def test_flows_capture_needs_tcpdump(self, monkeypatch):
         _on_path(monkeypatch)
@@ -339,8 +348,9 @@ class TestTcpdumpCapture:
                 "listening on en0, link",
             ),
         )
-        stdout, iface = self.flows(("-k", "I")).capture()
+        stdout, iface, captured_at = self.flows(("-k", "I")).capture()
         assert iface == "en0"
+        assert captured_at == "2026-01-01T00:00:00+00:00"
         assert stdout.startswith("IP 1.1.1.1.5")
         assert run.calls[0][:7] == ["tcpdump", "-n", "-q", "-l", "-t", "-c", "2000"]
         assert run.calls[0][7:] == ["-k", "I", "tcp", "or", "udp"]
@@ -353,7 +363,7 @@ class TestTcpdumpCapture:
                 cmd, 8, output=b"partial", stderr=b"listening on pktap, link"
             ),
         )
-        assert self.flows().capture() == ("partial", None)
+        assert self.flows().capture() == ("partial", None, "2026-01-01T00:00:00+00:00")
 
     def test_dns_capture_filters_port_53_and_keeps_partial_output(self, monkeypatch):
         _on_path(monkeypatch, "tcpdump")
@@ -363,7 +373,7 @@ class TestTcpdumpCapture:
                 cmd, 8, output=None, stderr="listening on eth0, link"
             ),
         )
-        assert self.dns().capture() == ("", "eth0")
+        assert self.dns().capture() == ("", "eth0", "2026-01-01T00:00:00+00:00")
         assert run.calls[0][-7:] == ["udp", "port", "53", "or", "tcp", "port", "53"]
 
     def test_dns_capture_needs_tcpdump(self, monkeypatch):
@@ -378,7 +388,7 @@ class _FakeCapture:
     def record(
         self, flags: list[str], bpf_filter: list[str], timeout: int
     ) -> CapturedPackets:
-        return CapturedPackets("", None)
+        return CapturedPackets("", None, "2026-01-01T00:00:00+00:00")
 
 
 class _FakeResolver:

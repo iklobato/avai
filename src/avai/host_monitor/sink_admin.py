@@ -68,8 +68,9 @@ class ReportStore:
         ("listening_ports", ListeningPortRow),
     )
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, clock: Clock) -> None:
         self._engine = engine
+        self._clock = clock
 
     def add(self, row: Any) -> None:
         with Session(self._engine) as session:
@@ -123,7 +124,7 @@ class ReportStore:
         can show what's loaded."""
         status = YaraStatusRow(
             id=SINGLE_ROW_ID,
-            compiled_at=Clock().now_iso(),
+            compiled_at=self._clock.now_iso(),
             rules_loaded=stats.get("rules_loaded"),
             files_loaded=stats.get("files_loaded"),
             files_skipped=stats.get("files_skipped"),
@@ -380,9 +381,20 @@ class ControlStore:
     """The single control row (see models.ControlState): the dashboard's
     intent and the monitor's heartbeat."""
 
-    def __init__(self, engine: Engine, logger: logging.Logger) -> None:
+    def __init__(self, engine: Engine, logger: logging.Logger, clock: Clock) -> None:
         self._engine = engine
         self._logger = logger
+        self._clock = clock
+
+    def write_heartbeat(self, pid: int, status: str, current_interval: int) -> None:
+        now = self._clock.now_iso()
+        self.set_values(
+            {"pid": pid, "status": status, "current_interval": current_interval}
+            | {"last_seen_at": now, "applied_at": now}
+        )
+
+    def touch_heartbeat(self) -> None:
+        self.set_values({"last_seen_at": self._clock.now_iso()})
 
     def ensure_control_row(self, seed: ControlSeed) -> None:
         """Seed the control row with the startup settings. No-op if it

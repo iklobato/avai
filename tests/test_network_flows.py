@@ -18,6 +18,7 @@ from avai.dashboard.config import DashboardConfig
 from avai.dashboard.queries import FlowQuery, FlowsPanel, RowFilter
 from avai.enrichers import Indicator, IndicatorExtraction, IndicatorType
 from avai.host_monitor.collectors import (
+    CapturedPackets,
     FlowTable,
     PacketFlow,
     PayloadSize,
@@ -157,7 +158,9 @@ class TestNormalizeDefaultIface:
 
 class TestAggregate:
     def test_macos_uses_default_iface_and_counts(self):
-        flows = FlowTable().aggregate(SAMPLE_MACOS, "en0")
+        flows = FlowTable().aggregate(
+            CapturedPackets(SAMPLE_MACOS, "en0", "2026-01-01T00:00:00+00:00")
+        )
         assert len(flows) == 3  # google:443 (x2), mdns, dns
         g = flows[("en0", "tcp", "142.250.80.46", 443)]
         assert g["packets"] == 2
@@ -165,13 +168,20 @@ class TestAggregate:
         assert g["iface"] == "en0"
 
     def test_linux_per_line_interface(self):
-        flows = FlowTable().aggregate(SAMPLE_LINUX, None)
+        flows = FlowTable().aggregate(
+            CapturedPackets(SAMPLE_LINUX, None, "2026-01-01T00:00:00+00:00")
+        )
         # same dst:port but different interfaces → two distinct flows
         assert ("eth0", "tcp", "1.2.3.4", 443) in flows
         assert ("wlan0", "tcp", "1.2.3.4", 443) in flows
 
     def test_empty(self):
-        assert FlowTable().aggregate("", "en0") == {}
+        assert (
+            FlowTable().aggregate(
+                CapturedPackets("", "en0", "2026-01-01T00:00:00+00:00")
+            )
+            == {}
+        )
 
 
 class TestFlowIndicators:

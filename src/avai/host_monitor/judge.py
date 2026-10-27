@@ -127,9 +127,12 @@ class LlmJudge(Judge):
     ERROR_EXCERPT_CHARS = 200
     REQUIRED = ("index", "verdict", "category", "confidence", "reasoning")
 
-    def __init__(self, llm: StructuredCall, settings: JudgeSettings) -> None:
+    def __init__(
+        self, llm: StructuredCall, settings: JudgeSettings, clock: Clock
+    ) -> None:
         self._llm = llm
         self._settings = settings
+        self._clock = clock
 
     @classmethod
     def create(
@@ -144,7 +147,7 @@ class LlmJudge(Judge):
             max_tokens=cls.MAX_TOKENS,
             temperature=cls.TEMPERATURE,
         )
-        return cls(StructuredCall("judge", session, request), settings)
+        return cls(StructuredCall("judge", session, request), settings, Clock())
 
     @classmethod
     def _judgment_schema(cls) -> dict[str, Any]:
@@ -188,7 +191,7 @@ class LlmJudge(Judge):
     def judge(
         self, collector: str, hints: str, entries: list[dict[str, Any]]
     ) -> list[Judgment]:
-        request = JudgeRequest(collector, hints, Clock().now_iso())
+        request = JudgeRequest(collector, hints, self._clock.now_iso())
         results: list[Judgment] = []
         for batch in self._batches(self._capped(collector, entries)):
             try:

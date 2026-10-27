@@ -66,6 +66,7 @@ from ..persistence_collectors import (
 )
 from ..prompts import Prompts
 from ..runtime import (
+    Clock,
     CommandRunner,
     CommandSnapshot,
     FileSnapshot,
@@ -231,7 +232,8 @@ class LinuxHost:
         self, prompts: Prompts, fs: LinuxFilesystemLayout
     ) -> list[SnapshotCollector]:
         hint = prompts.hint_for
-        capture = TcpdumpCapture(self._io.runner, tuple(fs.tcpdump_interface_args()))
+        iface_args = tuple(fs.tcpdump_interface_args())
+        capture = TcpdumpCapture(self._io.runner, iface_args, Clock())
         resolver = ProcessConnectionResolver(PsutilConnections())
         return [
             NetworkFlowsCollector(capture, resolver, hint("network_flows")),

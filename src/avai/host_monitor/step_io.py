@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypeVar
 
 from .failures import HOST_FAILURES
+from .runtime import Clock
 from .sink import Sink
 
 Value = TypeVar("Value")
@@ -19,6 +20,7 @@ class StepIO:
 
     sink: Sink
     logger: logging.Logger
+    clock: Clock = field(default_factory=Clock)
 
     def read(self, label: str, action: Callable[[], Value]) -> Value | None:
         try:

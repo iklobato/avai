@@ -68,6 +68,7 @@ class DnsQuestion(NamedTuple):
 class CapturedPackets(NamedTuple):
     stdout: str
     default_iface: str | None
+    captured_at: str
 
 
 class PayloadSize:
@@ -200,9 +201,12 @@ class TcpdumpCapture:
     macOS '-k I' prints the real per-packet interface (otherwise every flow
     is labelled with the 'pktap' aggregating pseudo-device)."""
 
-    def __init__(self, runner: CommandRunner, iface_args: tuple[str, ...]) -> None:
+    def __init__(
+        self, runner: CommandRunner, iface_args: tuple[str, ...], clock: Clock
+    ) -> None:
         self._runner = runner
         self._iface_args = iface_args
+        self._clock = clock
 
     def record(
         self, flags: list[str], bpf_filter: list[str], timeout: int
@@ -215,9 +219,8 @@ class TcpdumpCapture:
             raise MissingToolError("tcpdump not found on PATH")
         cmd = ["tcpdump", *flags, *self._iface_args, *bpf_filter]
         output = self._runner.capture(cmd, timeout)
-        return CapturedPackets(
-            output.stdout, TcpdumpBanner(output.stderr).default_iface()
-        )
+        default_iface = TcpdumpBanner(output.stderr).default_iface()
+        return CapturedPackets(output.stdout, default_iface, self._clock.now_iso())
 
 
 class PortService:
@@ -272,13 +275,14 @@ class FlowTable:
     flows with packet and byte counts."""
 
     def aggregate(
-        self, output: str, default_iface: str | None
+        self, captured: CapturedPackets
     ) -> dict[tuple[Any, ...], dict[str, Any]]:
-        now = Clock().now_iso()
+        now = captured.captured_at
         flows: dict[tuple[Any, ...], dict[str, Any]] = {}
-        packets = (TcpdumpLine.of(line).flow() for line in output.splitlines())
+        lines = captured.stdout.splitlines()
+        packets = (TcpdumpLine.of(line).flow() for line in lines)
         for packet in (packet for packet in packets if packet is not None):
-            iface = packet.iface or default_iface
+            iface = packet.iface or captured.default_iface
             key = (iface, packet.proto, packet.dst_ip, packet.dst_port)
             if key not in flows:
                 flows[key] = self._new_flow(packet, iface, now)
@@ -308,15 +312,17 @@ class QueryTable:
     """DNS questions aggregated by ``(qname, qtype, resolver)`` with a count."""
 
     def aggregate(
-        self, output: str, default_iface: str | None, owners: Owners
+        self, captured: CapturedPackets, owners: Owners
     ) -> dict[tuple[Any, ...], dict[str, Any]]:
-        now = Clock().now_iso()
+        now = captured.captured_at
         queries: dict[tuple[Any, ...], dict[str, Any]] = {}
-        parsed = (TcpdumpLine.of(line).dns_question() for line in output.splitlines())
+        lines = captured.stdout.splitlines()
+        parsed = (TcpdumpLine.of(line).dns_question() for line in lines)
         for question in (question for question in parsed if question is not None):
             key = (question.qname, question.qtype, question.server_ip)
             if key not in queries:
-                located = question._replace(iface=question.iface or default_iface)
+                iface = question.iface or captured.default_iface
+                located = question._replace(iface=iface)
                 owner = owners.get((question.server_ip, DNS_PORT))
                 queries[key] = self._new_query(located, owner, now)
                 continue
@@ -433,7 +439,7 @@ class NetworkFlowsCollector(SnapshotCollector):
 
     def collect(self) -> Iterator[dict[str, Any]]:
         packets = self.capture()
-        flows = FlowTable().aggregate(packets.stdout, packets.default_iface)
+        flows = FlowTable().aggregate(packets)
         owners = self._resolver.snapshot()
         ranked = sorted(flows.values(), key=lambda flow: flow["packets"], reverse=True)
         for flow in ranked[: self.MAX_FLOWS]:
@@ -490,10 +496,10 @@ class DnsQueriesCollector(SnapshotCollector):
     def collect(self) -> Iterator[dict[str, Any]]:
         packets = self.capture()
         owners = self._resolver.snapshot()
-        queries = QueryTable().aggregate(packets.stdout, packets.default_iface, owners)
+        queries = QueryTable().aggregate(packets, owners)
         # DoH: connections to known DoH endpoints on :443 bypass plaintext
         # DNS visibility entirely — surface them alongside the queries.
-        for key, row in self._doh_rows(owners):
+        for key, row in self._doh_rows(owners, packets.captured_at):
             queries.setdefault(key, row)
         ranked = sorted(
             queries.values(), key=lambda query: query["count"], reverse=True
@@ -501,10 +507,9 @@ class DnsQueriesCollector(SnapshotCollector):
         yield from ranked[: self.MAX_QUERIES]
 
     def _doh_rows(
-        self, owners: Owners
+        self, owners: Owners, now: str
     ) -> Iterator[tuple[tuple[Any, ...], dict[str, Any]]]:
         resolvers = dict(DOH_RESOLVERS)
-        now = Clock().now_iso()
         for (ip, port), (process, _pid) in owners.items():
             if port != DOH_PORT or ip not in resolvers:
                 continue

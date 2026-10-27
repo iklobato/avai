@@ -14,7 +14,6 @@ from .enums import Verdict
 from .models import RiskScoreRow
 from .narrator import IncidentNarrator
 from .risk import RiskCounts, RiskScorer
-from .runtime import Clock
 from .step_io import StepIO
 
 
@@ -68,7 +67,7 @@ class NarrativeStep:
         self, run_id: str, digest_reply: dict[str, Any], findings: list[dict[str, Any]]
     ) -> dict[str, Any]:
         return {
-            "created_at": Clock().now_iso(),
+            "created_at": self._io.clock.now_iso(),
             "run_id": run_id,
             "model": self._narrator.model,
             "severity": digest_reply["severity"],
@@ -137,7 +136,7 @@ class RiskScoreStep:
         self, run_id: str, score: dict[str, Any], prev: RiskScoreRow | None
     ) -> dict[str, Any]:
         return {
-            "created_at": Clock().now_iso(),
+            "created_at": self._io.clock.now_iso(),
             "run_id": run_id,
             "score": score["score"],
             "grade": score["grade"],
@@ -232,7 +231,7 @@ class CoverageStep:
         self, run_id: str, assessment: dict[str, Any], fingerprint: str
     ) -> dict[str, Any]:
         return {
-            "created_at": Clock().now_iso(),
+            "created_at": self._io.clock.now_iso(),
             "run_id": run_id,
             "model": self._assessor.model,
             "posture": assessment["posture"],

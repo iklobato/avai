@@ -58,7 +58,7 @@ from avai.host_monitor.finding_stages import (
 from avai.host_monitor.judge import NullJudge
 from avai.host_monitor.models import Base, CollectionRun, FileScanRow, ProcessRow
 from avai.host_monitor.runner import Runner, RunnerConfig
-from avai.host_monitor.runtime import Clock, Digest, FrozenClock
+from avai.host_monitor.runtime import Clock, Digest
 from avai.host_monitor.sink import Sink
 from avai.host_monitor.sink_admin import ControlSeed
 
@@ -325,6 +325,19 @@ class TestShutdownResponsiveness:
         assert _CountingCollector.calls == ["a"]
 
 
+class _SteppingClock(Clock):
+    """Hands out the given instants in order, one per call."""
+
+    def __init__(self, instants: list[str]) -> None:
+        self._instants = instants
+        self._calls = 0
+
+    def now_iso(self) -> str:
+        instant = self._instants[self._calls]
+        self._calls += 1
+        return instant
+
+
 class TestProgressHeartbeat:
     """run_once must keep the control row's last_seen_at fresh *during* a
     scan, not only between scans. Regression: a first cycle that ran longer
@@ -332,17 +345,17 @@ class TestProgressHeartbeat:
     enrichment over many indicators) left last_seen_at frozen, so the
     dashboard reported the live, busy monitor as 'monitor offline'."""
 
-    def test_touch_heartbeat_refreshes_only_last_seen_at(self, sink, monkeypatch):
-        import avai.host_monitor.sink as sink_mod
-
-        sink.ensure_control_row(ControlSeed(300, False, False))
+    def test_touch_heartbeat_refreshes_only_last_seen_at(self) -> None:
         start = "2026-06-23T23:07:51+00:00"
-        monkeypatch.setattr(sink_mod, "Clock", lambda: FrozenClock(start))
+        later = "2026-06-23T23:20:00+00:00"
+        clock = _SteppingClock([start, later])
+        engine = create_engine("sqlite:///:memory:")
+        sink = Sink.create_with_clock(engine, clock)
+        sink.setup()
+        sink.ensure_control_row(ControlSeed(300, False, False))
+
         sink.write_heartbeat(pid=42, status="scanning", current_interval=300)
         before = sink.read_control()
-
-        later = "2026-06-23T23:20:00+00:00"
-        monkeypatch.setattr(sink_mod, "Clock", lambda: FrozenClock(later))
         sink.touch_heartbeat()
         after = sink.read_control()
 

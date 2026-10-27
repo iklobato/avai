@@ -55,6 +55,7 @@ class StreamChannel:
 
     sink: Sink
     hostname: str
+    clock: Clock = field(default_factory=Clock)
 
 
 @dataclass(frozen=True)
@@ -243,10 +244,11 @@ class StreamingWorker:
         return None
 
     def _stamped(self, row: dict[str, Any]) -> dict[str, Any]:
-        row["run_id"] = self.run_id
-        row["collected_at"] = Clock().now_iso()
-        row["content_hash"] = Digest().of_row(row, self.collector.judge_fields)
-        return row
+        """A copy of ``row`` with this session's run id, time and hash."""
+        clock = self._channel.clock
+        stamped = {**row, "run_id": self.run_id, "collected_at": clock.now_iso()}
+        content_hash = Digest().of_row(stamped, self.collector.judge_fields)
+        return stamped | {"content_hash": content_hash}
 
     def _flush_if_due(self, buffer: list[dict[str, Any]], last_flush: float) -> float:
         now = time.monotonic()

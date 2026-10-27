@@ -50,15 +50,19 @@ class Sink:
 
     @classmethod
     def create(cls, engine: Engine) -> Sink:
+        return cls.create_with_clock(engine, Clock())
+
+    @classmethod
+    def create_with_clock(cls, engine: Engine, clock: Clock) -> Sink:
         logger = logging.getLogger(LOGGER_NAME)
         event.listen(engine, "connect", SqlitePragmas().apply)
         stores = SinkStores(
-            RunLog(engine),
+            RunLog(engine, clock),
             BehaviorReader(engine),
             JudgmentStore(engine),
-            ReportStore(engine),
+            ReportStore(engine, clock),
             Retention(engine, logger),
-            ControlStore(engine, logger),
+            ControlStore(engine, logger, clock),
         )
         return cls(engine, stores, logger)
 
@@ -218,16 +222,12 @@ class Sink:
         return self._stores.control.read_control()
 
     def write_heartbeat(self, *, pid: int, status: str, current_interval: int) -> None:
-        now = Clock().now_iso()
-        self._stores.control.set_values(
-            {"pid": pid, "status": status, "current_interval": current_interval}
-            | {"last_seen_at": now, "applied_at": now}
-        )
+        self._stores.control.write_heartbeat(pid, status, current_interval)
 
     def touch_heartbeat(self) -> None:
         """Refresh only ``last_seen_at``, so a long scan keeps proving
         liveness without claiming a status change."""
-        self._stores.control.set_values({"last_seen_at": Clock().now_iso()})
+        self._stores.control.touch_heartbeat()
 
     def ack_scan_now(self, nonce: int) -> None:
         self._stores.control.set_values({"scan_now_applied": nonce})

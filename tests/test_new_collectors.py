@@ -70,7 +70,9 @@ class _FakeCapture:
     def record(
         self, flags: list[str], bpf_filter: list[str], timeout: int
     ) -> CapturedPackets:
-        return CapturedPackets(self._stdout, self._default_iface)
+        return CapturedPackets(
+            self._stdout, self._default_iface, "2026-01-01T00:00:00+00:00"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +155,9 @@ class TestDnsParse:
             "(en6) IP 10.0.0.5.5.53 > 8.8.8.8.53: 1+ A? a.com. (20)\n"
             "(en6) IP 10.0.0.5.6.53 > 8.8.8.8.53: 2+ A? a.com. (20)\n"
         )
-        agg = QueryTable().aggregate(out, "en6", {})
+        agg = QueryTable().aggregate(
+            CapturedPackets(out, "en6", "2026-01-01T00:00:00+00:00"), {}
+        )
         assert agg[("a.com", "A", "8.8.8.8")]["count"] == 2
 
     def test_doh_endpoint_detected_from_connections(self, monkeypatch):

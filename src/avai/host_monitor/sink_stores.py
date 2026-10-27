@@ -43,12 +43,13 @@ class RunLog:
 
     ERROR_MESSAGE_CHARS = 1000
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, clock: Clock) -> None:
         self._engine = engine
+        self._clock = clock
         self.run_id: str | None = None
 
     def start_run(self, hostname: str, lookback_min: int) -> tuple[str, str]:
-        run_id, started = str(uuid.uuid4()), Clock().now_iso()
+        run_id, started = str(uuid.uuid4()), self._clock.now_iso()
         run = CollectionRun(
             run_id=run_id,
             started_at=started,
@@ -66,7 +67,7 @@ class RunLog:
             update(CollectionRun)
             .where(CollectionRun.run_id == self.run_id)
             .values(
-                finished_at=Clock().now_iso(),
+                finished_at=self._clock.now_iso(),
                 collectors_ok=ok,
                 collectors_failed=failed,
             )
@@ -88,7 +89,7 @@ class RunLog:
             collector=collector,
             error_class=type(exc).__name__,
             message=str(exc)[: self.ERROR_MESSAGE_CHARS],
-            occurred_at=Clock().now_iso(),
+            occurred_at=self._clock.now_iso(),
         )
         with Session(self._engine) as session:
             session.add(error)
@@ -220,7 +221,7 @@ class RunLog:
             run_id=run_id,
             collector=collector,
             hostname=hostname,
-            started_at=Clock().now_iso(),
+            started_at=self._clock.now_iso(),
         )
         with Session(self._engine) as session:
             session.add(streaming)
@@ -231,7 +232,7 @@ class RunLog:
         statement = (
             update(StreamingSession)
             .where(StreamingSession.run_id == run_id)
-            .values(finished_at=Clock().now_iso(), row_count=row_count)
+            .values(finished_at=self._clock.now_iso(), row_count=row_count)
         )
         with Session(self._engine) as session:
             session.execute(statement)
