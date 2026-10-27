@@ -73,29 +73,29 @@ class SchemaProbe:
     gracefully instead. Answers are cached per DB for a short while."""
 
     TTL_S = 30.0
-    _tables_cache: ClassVar[dict[str, tuple[float, set[str]]]] = {}
-    _columns_cache: ClassVar[dict[tuple[str, str], tuple[float, set[str]]]] = {}
+    _tables_cache: ClassVar[dict[str, tuple[float, frozenset[str]]]] = {}
+    _columns_cache: ClassVar[dict[tuple[str, str], tuple[float, frozenset[str]]]] = {}
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def tables(self) -> set[str]:
+    def tables(self) -> frozenset[str]:
         key = str(self._session.get_bind().url)
         hit = self._tables_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < self.TTL_S:
             return hit[1]
         statement = text("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = set(self._session.execute(statement).scalars())
+        tables = frozenset(self._session.execute(statement).scalars())
         self._tables_cache[key] = (time.monotonic(), tables)
         return tables
 
-    def columns(self, table: str) -> set[str]:
+    def columns(self, table: str) -> frozenset[str]:
         key = (str(self._session.get_bind().url), table)
         hit = self._columns_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < self.TTL_S:
             return hit[1]
         rows = self._session.execute(text(f"PRAGMA table_info({table})")).all()
-        columns = {row[1] for row in rows}  # row[1] is the column name
+        columns = frozenset(row[1] for row in rows)  # row[1] is the column name
         self._columns_cache[key] = (time.monotonic(), columns)
         return columns
 
@@ -227,7 +227,7 @@ class ColumnPicker:
     """Selects a model's columns, reading a column an older monitor never
     wrote as NULL instead of failing the query."""
 
-    def __init__(self, model: type[_RowBase], present: set[str]) -> None:
+    def __init__(self, model: type[_RowBase], present: frozenset[str]) -> None:
         self._model = model
         self._present = present
 
