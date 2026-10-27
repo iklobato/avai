@@ -8,6 +8,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from avai.host_monitor.enums import Verdict
+
 from .panel_reads import Page, RowFilter, VerdictRank, VerdictTable
 
 
@@ -88,6 +90,6 @@ class DnsPanel:
             "domains": len({row["qname"] for row in rows}),
             "queries": sum(row["count"] or 0 for row in rows),
             "doh": sum(1 for row in rows if row["qtype"] == "DoH"),
-            "malicious": verdicts.count("malicious"),
-            "suspicious": verdicts.count("suspicious"),
+            Verdict.MALICIOUS.value: verdicts.count(Verdict.MALICIOUS),
+            Verdict.SUSPICIOUS.value: verdicts.count(Verdict.SUSPICIOUS),
         }

@@ -8,6 +8,8 @@ from flask import Blueprint, render_template, request
 from flask.views import View
 from sqlalchemy.orm import Session
 
+from avai.host_monitor.enums import Verdict
+
 from ..control import ControlReader, MonitorLiveness
 from ..queries import (
     DEFAULT_PER_PAGE,
@@ -165,8 +167,8 @@ class TriageFragment(View):
             return render_template(
                 "partials/_triage.html",
                 risk=risk["risk"],
-                active_malicious=self._active(session, "malicious"),
-                active_suspicious=self._active(session, "suspicious"),
+                active_malicious=self._active(session, Verdict.MALICIOUS),
+                active_suspicious=self._active(session, Verdict.SUSPICIOUS),
                 alive=MonitorLiveness().alive(state),
                 ctrl=state,
                 latest_run=RunQueries(session).latest_run(),
@@ -174,7 +176,7 @@ class TriageFragment(View):
                 app_mode=lookup.services().config.app_mode,
             )
 
-    def _active(self, session: Session, verdict: str) -> int:
+    def _active(self, session: Session, verdict: Verdict) -> int:
         query = FindingsQuery(filters=FindingFilter(verdict=verdict), page=Page(1, 1))
         return FindingsPanel(session).findings(query)["total"]
 

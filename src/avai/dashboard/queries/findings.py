@@ -10,11 +10,10 @@ from sqlalchemy import Select, asc, case, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from avai.host_monitor import Judgement
+from avai.host_monitor.enums import Verdict
 
 from .collection import RunQueries
-from .panel_reads import VERDICTS, CollectorTables, FindingSource, Page, StoredJson
-
-VERDICT_RANKS = (("malicious", 0), ("suspicious", 1), ("unknown", 2), ("benign", 3))
+from .panel_reads import CollectorTables, FindingSource, Page, StoredJson
 
 
 class FindingOptions:
@@ -53,10 +52,10 @@ class FindingFilter:
     def apply(self, statement: Select[Any], latest_started: str | None) -> Select[Any]:
         """``statement`` narrowed to these filters. Benign is hidden unless
         picked."""
-        if self.verdict in VERDICTS:
+        if self.verdict in Verdict.worst_first():
             statement = statement.where(Judgement.verdict == self.verdict)
         else:
-            statement = statement.where(Judgement.verdict != "benign")
+            statement = statement.where(Judgement.verdict != Verdict.BENIGN)
         if self.collector:
             statement = statement.where(Judgement.collector == self.collector)
         if self.category:
@@ -109,8 +108,8 @@ class FindingSort:
         return statement.order_by(direction(column), Judgement.created_at.desc())
 
     def _severity(self) -> Any:
-        unranked = len(VERDICT_RANKS)
-        return case(dict(VERDICT_RANKS), value=Judgement.verdict, else_=unranked)
+        ranks = Verdict.ranks()
+        return case(ranks, value=Judgement.verdict, else_=len(ranks))
 
     def _columns(self, severity: Any) -> dict[str, Any]:
         return {

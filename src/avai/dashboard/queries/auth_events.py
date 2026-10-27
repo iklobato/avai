@@ -13,6 +13,7 @@ from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from avai.host_monitor import AuthEventRow, Judgement
+from avai.host_monitor.enums import Verdict
 
 from .panel_reads import Page, RowFilter, SchemaProbe
 
@@ -41,8 +42,6 @@ AUTH_SUBSYSTEM_OPTIONS = (
     ("Authorization", "com.apple.Authorization"),
     ("launchservices", "com.apple.launchservices"),
 )
-
-VERDICT_SEVERITY = (("malicious", 0), ("suspicious", 1), ("unknown", 2), ("benign", 3))
 
 
 class SubsystemNames:
@@ -236,8 +235,8 @@ class AuthEventsPanel:
     def _order(self, sort: str, count_column: Any) -> tuple[Any, ...]:
         if sort != "verdict":
             return (count_column.desc(),)
-        unranked = len(VERDICT_SEVERITY) * len(VERDICT_SEVERITY)
-        severity = case(dict(VERDICT_SEVERITY), value=Judgement.verdict, else_=unranked)
+        ranks = Verdict.ranks()
+        severity = case(ranks, value=Judgement.verdict, else_=len(ranks))
         return (severity.asc(), count_column.desc())
 
     def _row(self, pattern: Any) -> dict[str, Any]:

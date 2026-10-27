@@ -12,6 +12,7 @@ from sqlalchemy import and_, literal, select, text
 from sqlalchemy.orm import Session
 
 from avai.host_monitor import Judgement
+from avai.host_monitor.enums import Verdict
 from avai.host_monitor.models import _RowBase
 from avai.host_monitor.slices import Slices
 
@@ -44,8 +45,6 @@ DISPLAY_FIELDS = (
     ("host_resources", ()),
     ("disk_usage", ("mountpoint", "device", "fstype")),
 )
-
-VERDICTS = ("malicious", "suspicious", "unknown", "benign")
 
 PER_PAGE_OPTIONS = (10, 25, 50, 100)
 
@@ -149,7 +148,8 @@ class VerdictRank:
     """Orders verdicts worst first; anything unrecognised sorts last."""
 
     def rank(self, verdict: str | None) -> int:
-        return VERDICTS.index(verdict) if verdict in VERDICTS else len(VERDICTS)
+        ranks = Verdict.ranks()
+        return ranks.get(verdict or "", len(ranks))
 
     def take_worse(
         self, group: dict[str, Any], judged: tuple[str | None, Any, str | None]
@@ -316,8 +316,8 @@ class VerdictTally:
         verdicts = [row["verdict"] for row in rows]
         return {
             "total": len(rows),
-            "malicious": verdicts.count("malicious"),
-            "suspicious": verdicts.count("suspicious"),
+            Verdict.MALICIOUS.value: verdicts.count(Verdict.MALICIOUS),
+            Verdict.SUSPICIOUS.value: verdicts.count(Verdict.SUSPICIOUS),
         }
 
 

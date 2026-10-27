@@ -11,6 +11,20 @@ class Verdict(StrEnum):
     MALICIOUS = "malicious"
     UNKNOWN = "unknown"
 
+    @classmethod
+    def worst_first(cls) -> tuple[Verdict, ...]:
+        return (cls.MALICIOUS, cls.SUSPICIOUS, cls.UNKNOWN, cls.BENIGN)
+
+    @classmethod
+    def ranks(cls) -> dict[str, int]:
+        """Each verdict's position, worst first (0 = malicious)."""
+        return {verdict.value: rank for rank, verdict in enumerate(cls.worst_first())}
+
+    @classmethod
+    def flagged(cls) -> tuple[Verdict, ...]:
+        """The verdicts that raise an alert."""
+        return (cls.MALICIOUS, cls.SUSPICIOUS)
+
 
 class ThreatCategory(StrEnum):
     NONE = "none"

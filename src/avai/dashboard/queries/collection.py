@@ -16,10 +16,11 @@ from avai.host_monitor import (
     Judgement,
     RiskScoreRow,
 )
+from avai.host_monitor.enums import Verdict
 from avai.host_monitor.models import _RowBase
 from avai.host_monitor.slices import Slices
 
-from .panel_reads import VERDICTS, CollectorTables, FindingSource, SchemaProbe
+from .panel_reads import CollectorTables, FindingSource, SchemaProbe
 
 
 class RunQueries:
@@ -147,9 +148,7 @@ class VerdictQueries:
         first, each with enough context to render a self-contained toast.
         A judgement exists once per content_hash, so an artifact never
         alerts twice across runs."""
-        statement = select(Judgement).where(
-            Judgement.verdict.in_(("malicious", "suspicious"))
-        )
+        statement = select(Judgement).where(Judgement.verdict.in_(Verdict.flagged()))
         if since:
             statement = statement.where(Judgement.created_at > since)
         statement = statement.order_by(desc(Judgement.created_at)).limit(limit)
@@ -181,8 +180,8 @@ class VerdictQueries:
         buckets = self._hourly(cutoff)
         labels = sorted(buckets)
         datasets = {
-            verdict: [buckets[label].get(verdict, 0) for label in labels]
-            for verdict in VERDICTS
+            verdict.value: [buckets[label].get(verdict.value, 0) for label in labels]
+            for verdict in Verdict.worst_first()
         }
         return {"labels": labels, "datasets": datasets}
 
