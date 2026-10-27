@@ -74,6 +74,10 @@ dependencies = [
     # environment (see avai.observability.SentryReporting), so installs that never
     # set it pay no runtime cost and send nothing.
     "sentry-sdk>=2.63.0",
+    # Validates data that comes from outside (CLI options, env config, LLM
+    # and threat-intel replies) at the edge. Already pulled in by litellm and
+    # anthropic; declared because avai now imports it directly.
+    "pydantic>=2.7,<3",
 ]
 
 [project.optional-dependencies]
