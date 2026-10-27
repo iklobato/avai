@@ -33,11 +33,11 @@ _P = Prompts(system="", user_template="")
 
 
 class TestMacosProxyParser:
-    def test_all_disabled_yields_nothing(self):
+    def test_all_disabled_yields_nothing(self) -> None:
         text = "<dictionary> {\n  HTTPEnable : 0\n  HTTPSEnable : 0\n}"
         assert MacosProxyParser().parse(text) == []
 
-    def test_enabled_http_and_pac(self):
+    def test_enabled_http_and_pac(self) -> None:
         text = (
             "  HTTPEnable : 1\n  HTTPProxy : 10.0.0.9\n  HTTPPort : 8080\n"
             "  ProxyAutoConfigEnable : 1\n"
@@ -50,7 +50,7 @@ class TestMacosProxyParser:
 
 
 class TestWhoParser:
-    def test_local_and_remote(self):
+    def test_local_and_remote(self) -> None:
         text = "iklo console May 31 17:50\nbob pts/0 2026-06-05 14:43 (203.0.113.7)\n"
         rows = WhoParser().parse(text)
         assert rows[0]["source"] == "local"
@@ -60,7 +60,7 @@ class TestWhoParser:
 
 
 class TestSharesParsers:
-    def test_macos_keeps_only_network_fs(self):
+    def test_macos_keeps_only_network_fs(self) -> None:
         text = (
             "/dev/disk1s5s1 on / (apfs, sealed, local)\n"
             "//bob@nas.lan/media on /Volumes/media (smbfs, nodev, nosuid)\n"
@@ -70,7 +70,7 @@ class TestSharesParsers:
         assert rows[0]["remote"] == "//bob@nas.lan/media"
         assert rows[0]["fstype"] == "smbfs"
 
-    def test_proc_mounts_keeps_only_network_fs(self):
+    def test_proc_mounts_keeps_only_network_fs(self) -> None:
         text = (
             "/dev/sda1 / ext4 rw,relatime 0 0\n"
             "//nas/share /mnt/share cifs rw,vers=3.0 0 0\n"
@@ -81,7 +81,7 @@ class TestSharesParsers:
 
 
 class TestPromiscParsers:
-    def test_macos_flags(self):
+    def test_macos_flags(self) -> None:
         text = (
             "en6: flags=8863<UP,BROADCAST,RUNNING,MULTICAST> mtu 1500\n"
             "\tinet 192.168.1.50 netmask 0xffffff00\n"
@@ -92,7 +92,7 @@ class TestPromiscParsers:
         assert by["en6"]["promiscuous"] == 0
         assert by["en7"]["promiscuous"] == 1
 
-    def test_linux_ip_link(self):
+    def test_linux_ip_link(self) -> None:
         text = (
             "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536\n"
             "2: eth0: <BROADCAST,MULTICAST,PROMISC,UP,LOWER_UP> mtu 1500\n"
@@ -104,7 +104,7 @@ class TestPromiscParsers:
 
 
 class TestCertParsers:
-    def test_macos_pairs_hash_and_label(self):
+    def test_macos_pairs_hash_and_label(self) -> None:
         text = (
             "SHA-256 hash: ABC123\n"
             '    "alis"<blob>="Go Daddy Root"\n'
@@ -120,12 +120,12 @@ class TestCertParsers:
             }
         ]
 
-    def test_linux_trust_list_labels(self):
+    def test_linux_trust_list_labels(self) -> None:
         text = "pkcs11:id=x;type=cert\n    type: certificate\n    label: GlobalSign\n"
         rows = LinuxTrustListParser().parse(text)
         assert rows[0]["subject"] == "GlobalSign"
 
-    def test_windows_cert_json(self):
+    def test_windows_cert_json(self) -> None:
         text = '[{"Subject":"CN=Evil","Thumbprint":"DEAD"}]'
         rows = WindowsCertParser().parse(text)
         assert rows[0]["subject"] == "CN=Evil"
@@ -133,7 +133,7 @@ class TestCertParsers:
 
 
 class TestLinuxProxyEnv:
-    def test_reads_proxy_vars(self):
+    def test_reads_proxy_vars(self) -> None:
         text = '# env\nhttp_proxy="http://10.0.0.9:3128"\nLANG=en_US.UTF-8\n'
         rows = LinuxProxyEnvParser().parse(text)
         assert len(rows) == 1
@@ -142,19 +142,19 @@ class TestLinuxProxyEnv:
 
 
 class TestWindowsParsers:
-    def test_proxy_enabled(self):
+    def test_proxy_enabled(self) -> None:
         text = '{"ProxyEnable":1,"ProxyServer":"10.0.0.9:8080","AutoConfigURL":null}'
         rows = WindowsProxyParser().parse(text)
         assert rows[0]["host"] == "10.0.0.9" and rows[0]["port"] == "8080"
 
-    def test_shares(self):
+    def test_shares(self) -> None:
         text = '[{"ServerName":"nas","ShareName":"data","Dialect":"3.1.1"}]'
         rows = WindowsSharesParser().parse(text)
         assert rows[0]["remote"] == "\\\\nas\\data"
 
 
 class TestWindowsSessionParser:
-    def test_rows_carry_user_session_and_logon_time(self):
+    def test_rows_carry_user_session_and_logon_time(self) -> None:
         text = (
             " USERNAME   SESSIONNAME  ID  STATE   IDLE TIME  LOGON TIME\n"
             ">alice      console       1  Active  none   5/1/2026 9:00 AM\n"
@@ -167,7 +167,7 @@ class TestWindowsSessionParser:
             "5/1/2026 9:00 AM",
         )
 
-    def test_two_column_line_has_no_logon_time(self):
+    def test_two_column_line_has_no_logon_time(self) -> None:
         (row,) = WindowsSessionParser().parse("carol rdp-tcp#0\n")
         assert row["login_at"] is None
 
@@ -176,28 +176,28 @@ class TestEnrichment:
     def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
         return IndicatorExtraction.default().extract(collector, row)
 
-    def test_proxy_public_host_enriched(self):
+    def test_proxy_public_host_enriched(self) -> None:
         inds = self.extract("proxy_config", {"host": "8.8.8.8"})
         assert inds and inds[0].type == IndicatorType.IPV4
 
-    def test_proxy_private_host_not_enriched(self):
+    def test_proxy_private_host_not_enriched(self) -> None:
         assert self.extract("proxy_config", {"host": "10.0.0.9"}) == []
 
-    def test_share_server_extracted(self):
+    def test_share_server_extracted(self) -> None:
         inds = self.extract("network_shares", {"remote": "//files.evil.com/x"})
         assert inds and inds[0].type == IndicatorType.DOMAIN
         assert inds[0].value == "files.evil.com"
 
-    def test_login_remote_ip_enriched(self):
+    def test_login_remote_ip_enriched(self) -> None:
         inds = self.extract("login_sessions", {"source": "9.9.9.9"})
         assert inds and inds[0].type == IndicatorType.IPV4
 
-    def test_login_local_not_enriched(self):
+    def test_login_local_not_enriched(self) -> None:
         assert self.extract("login_sessions", {"source": "local"}) == []
 
 
 class TestWiring:
-    def test_macos_and_linux_assemble_all_five(self):
+    def test_macos_and_linux_assemble_all_five(self) -> None:
         want = {
             "proxy_config",
             "login_sessions",
@@ -212,7 +212,7 @@ class TestWiring:
             names = {c.name for c in host.snapshot_collectors(_P)}
             assert want <= names
 
-    def test_windows_composes_out_promiscuous(self):
+    def test_windows_composes_out_promiscuous(self) -> None:
         names = {
             c.name
             for c in WindowsHost.create(logging.getLogger("test")).snapshot_collectors(

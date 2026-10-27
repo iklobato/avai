@@ -38,16 +38,16 @@ pytestmark = pytest.mark.skipif(
 
 
 class TestUnescapeMountField:
-    def test_plain_field_unchanged(self):
+    def test_plain_field_unchanged(self) -> None:
         assert MountField("/dev/sda1").decoded() == "/dev/sda1"
 
-    def test_octal_space_and_tab_decoded(self):
+    def test_octal_space_and_tab_decoded(self) -> None:
         assert MountField(r"/mnt/My\040Disk").decoded() == "/mnt/My Disk"
         assert MountField(r"a\011b").decoded() == "a\tb"
 
 
 class TestParseMounts:
-    def test_drops_pseudo_filesystems(self):
+    def test_drops_pseudo_filesystems(self) -> None:
         text = (
             "proc /proc proc rw 0 0\n"
             "sysfs /sys sysfs rw 0 0\n"
@@ -60,7 +60,7 @@ class TestParseMounts:
         assert parts[0].device == "/dev/sda1"
         assert parts[0].fstype == "ext4"
 
-    def test_dedupes_by_mountpoint_keeping_first(self):
+    def test_dedupes_by_mountpoint_keeping_first(self) -> None:
         text = (
             "/dev/sda1 / ext4 rw 0 0\n"
             "/dev/sdb1 / ext4 ro 0 0\n"  # later bind/overlay of same point
@@ -68,25 +68,25 @@ class TestParseMounts:
         parts = MountTable(text).parts()
         assert [(p.device, p.opts) for p in parts] == [("/dev/sda1", "rw")]
 
-    def test_unescapes_mountpoint_whitespace(self):
+    def test_unescapes_mountpoint_whitespace(self) -> None:
         parts = MountTable(r"/dev/sda2 /mnt/My\040Disk ext4 rw 0 0").parts()
         assert parts[0].mountpoint == "/mnt/My Disk"
 
-    def test_short_lines_skipped(self):
+    def test_short_lines_skipped(self) -> None:
         assert MountTable("garbage\n/dev/sda1 /data\n").parts() == []
 
 
 class TestJoinRootfs:
-    def test_root_maps_to_rootfs_itself(self):
+    def test_root_maps_to_rootfs_itself(self) -> None:
         assert HostRootfs("/host/rootfs").join("/") == "/host/rootfs"
 
-    def test_subpath_appended(self):
+    def test_subpath_appended(self) -> None:
         assert HostRootfs("/host/rootfs").join("/home") == "/host/rootfs/home"
         assert HostRootfs("/host/rootfs/").join("/var/log") == "/host/rootfs/var/log"
 
 
 class TestStatvfsUsage:
-    def test_matches_psutil_style_math(self, monkeypatch):
+    def test_matches_psutil_style_math(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # 100 blocks * 4096 = 409600 total; 10 free-to-root, 5 avail-to-user.
         Sv = namedtuple("Sv", "f_blocks f_bfree f_bavail f_frsize")
         monkeypatch.setattr(mounts.os, "statvfs", lambda _p: Sv(100, 10, 5, 4096))
@@ -97,7 +97,7 @@ class TestStatvfsUsage:
         # percent against user-visible total (used + avail), reserved excluded
         assert u.percent == round((90 * 4096) / ((90 + 5) * 4096) * 100, 1)
 
-    def test_zero_total_no_division_error(self, monkeypatch):
+    def test_zero_total_no_division_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         Sv = namedtuple("Sv", "f_blocks f_bfree f_bavail f_frsize")
         monkeypatch.setattr(mounts.os, "statvfs", lambda _p: Sv(0, 0, 0, 4096))
         assert StatvfsUsage("/x").usage().percent == 0.0
@@ -107,12 +107,12 @@ class TestDiskMetricsModes:
     def metrics(self, prefix: str = "") -> DiskMetrics:
         return DiskMetrics(logging.getLogger("test"), HostPaths(prefix))
 
-    def test_native_mode_uses_psutil(self, monkeypatch):
+    def test_native_mode_uses_psutil(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sentinel = [object()]
         monkeypatch.setattr(probes.psutil, "disk_partitions", lambda all: sentinel)
         assert self.metrics().partitions() is sentinel
 
-    def test_container_without_rootfs_emits_nothing(self, monkeypatch, tmp_path):
+    def test_container_without_rootfs_emits_nothing(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         # HOST_PREFIX set but no <prefix>/rootfs dir → skip, don't mislead.
         called = []
         monkeypatch.setattr(
@@ -123,7 +123,7 @@ class TestDiskMetricsModes:
         assert self.metrics(str(tmp_path)).partitions() == []
         assert called == []  # psutil must NOT be consulted in container mode
 
-    def test_container_with_rootfs_reads_host_table(self, monkeypatch, tmp_path):
+    def test_container_with_rootfs_reads_host_table(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         rootfs = tmp_path / "rootfs"
         (rootfs / "proc" / "1").mkdir(parents=True)
         mount_file = rootfs / "proc" / "1" / "mounts"
@@ -149,7 +149,7 @@ class TestDiskMetricsModes:
         self.metrics(str(tmp_path)).usage("/home")
         assert captured["path"] == f"{tmp_path}/rootfs/home"
 
-    def test_usage_native_uses_psutil(self, monkeypatch):
+    def test_usage_native_uses_psutil(self, monkeypatch: pytest.MonkeyPatch) -> None:
         marker = object()
         monkeypatch.setattr(probes.psutil, "disk_usage", lambda mp: marker)
         assert self.metrics().usage("/") is marker

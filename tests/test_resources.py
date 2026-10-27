@@ -22,6 +22,7 @@ from avai.host_monitor.collectors import DiskUsageCollector, HostResourcesCollec
 from avai.host_monitor.models import DiskUsageRow, HostResourceRow
 from avai.host_monitor.runtime import Digest, FrozenClock
 from avai.host_monitor.sink import Sink
+from pathlib import Path
 
 # psutil-shaped fakes ---------------------------------------------------------
 
@@ -97,7 +98,7 @@ class TestHostResourcesCollector:
         )
         return list(c.collect())[0]
 
-    def test_memory_and_swap_mapping(self):
+    def test_memory_and_swap_mapping(self) -> None:
         row = self._collect([_CT_LINUX(10.0, 5.0, 83.0, 2.0)])
         assert row["mem_total"] == 16_000
         assert row["mem_used"] == 7_000
@@ -105,7 +106,7 @@ class TestHostResourcesCollector:
         assert row["mem_cached"] == 3_000
         assert row["swap_percent"] == 25.0
 
-    def test_cpu_aggregate_and_per_core(self):
+    def test_cpu_aggregate_and_per_core(self) -> None:
         # Two cores, idle 83 and 68 → busy 17 and 32; overall busy = 24.5.
         row = self._collect(
             [_CT_LINUX(10.0, 5.0, 83.0, 2.0), _CT_LINUX(20.0, 10.0, 68.0, 2.0)]
@@ -116,18 +117,18 @@ class TestHostResourcesCollector:
         assert row["cpu_per_core_json"] == "[17.0, 32.0]"
         assert row["cpu_count_logical"] == 8
 
-    def test_iowait_none_on_platforms_without_it(self):
+    def test_iowait_none_on_platforms_without_it(self) -> None:
         # macOS scputimes has no iowait attribute → column stays NULL, not 0.
         row = self._collect([_CT_MACOS(10.0, 0.0, 5.0, 85.0)])
         assert row["cpu_iowait"] is None
         assert row["cpu_percent"] == 15.0
 
-    def test_empty_sample_yields_null_cpu(self):
+    def test_empty_sample_yields_null_cpu(self) -> None:
         row = self._collect([])
         assert row["cpu_percent"] is None
         assert row["cpu_per_core_json"] == "[]"
 
-    def test_uptime_uses_injected_clock(self):
+    def test_uptime_uses_injected_clock(self) -> None:
         # Deterministic: uptime = frozen-now epoch - boot_time(1000).
         from datetime import datetime
 
@@ -135,18 +136,18 @@ class TestHostResourcesCollector:
         row = self._collect([_CT_LINUX(10.0, 5.0, 83.0, 2.0)])
         assert row["uptime_seconds"] == expected
 
-    def test_load_and_tasks(self):
+    def test_load_and_tasks(self) -> None:
         row = self._collect([_CT_LINUX(10.0, 5.0, 83.0, 2.0)])
         assert (row["load_1"], row["load_5"], row["load_15"]) == (1.0, 2.0, 3.0)
         assert row["tasks_total"] == 100
         assert row["tasks_running"] == 2
         assert row["threads_total"] == 500
 
-    def test_load_none_is_tolerated(self):
+    def test_load_none_is_tolerated(self) -> None:
         row = self._collect([_CT_LINUX(1.0, 1.0, 98.0, 0.0)], load=None)
         assert row["load_1"] is None and row["load_15"] is None
 
-    def test_not_judged(self):
+    def test_not_judged(self) -> None:
         assert HostResourcesCollector.judge_enabled is False
 
 
@@ -154,7 +155,7 @@ class TestHostResourcesCollector:
 
 
 class TestDiskUsageCollector:
-    def test_skips_unreadable_partition(self):
+    def test_skips_unreadable_partition(self) -> None:
         parts = [
             _PART("/dev/disk0", "/", "apfs", "rw"),
             _PART("tmpfs", "/bad", "tmpfs", "rw"),
@@ -164,14 +165,14 @@ class TestDiskUsageCollector:
         assert [r["mountpoint"] for r in rows] == ["/"]
         assert rows[0]["percent"] == 60.0
 
-    def test_io_matched_by_device_basename(self):
+    def test_io_matched_by_device_basename(self) -> None:
         parts = [_PART("/dev/sda1", "/", "ext4", "rw")]
         io = {"sda1": _IO(111, 222, 3, 4)}
         rows = list(DiskUsageCollector(metrics=FakeDiskMetrics(parts, io)).collect())
         assert rows[0]["io_read_bytes"] == 111
         assert rows[0]["io_write_count"] == 4
 
-    def test_io_none_when_unmatched(self):
+    def test_io_none_when_unmatched(self) -> None:
         parts = [_PART("/dev/disk5", "/data", "apfs", "rw")]
         rows = list(
             DiskUsageCollector(
@@ -185,7 +186,7 @@ class TestDiskUsageCollector:
 
 
 @pytest.fixture
-def db(tmp_path):
+def db(tmp_path: Path):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'r.db'}", connect_args={"check_same_thread": False}
     )
@@ -259,7 +260,7 @@ def _seed(db):
 
 
 class TestQueries:
-    def test_host_resources_latest_row(self, db):
+    def test_host_resources_latest_row(self, db) -> None:
         engine, _, run_id, _, _ = db
         _seed(db)
         with Session(engine) as s:
@@ -268,14 +269,14 @@ class TestQueries:
         assert res["row"].mem_percent == 42.0
         assert res["per_core"] == [10.0, 16.0]
 
-    def test_disk_usage_sorted_fullest_first(self, db):
+    def test_disk_usage_sorted_fullest_first(self, db) -> None:
         engine, _, run_id, _, _ = db
         _seed(db)
         with Session(engine) as s:
             disks = ResourceQueries(s).disk_usage(run_id)
         assert [d.mountpoint for d in disks] == ["/boot", "/"]  # 95% before 60%
 
-    def test_resource_trend_shape(self, db):
+    def test_resource_trend_shape(self, db) -> None:
         engine, _, run_id, _, _ = db
         _seed(db)
         with Session(engine) as s:
@@ -284,7 +285,7 @@ class TestQueries:
         assert trend["cpu"] == [13.0]
         assert len(trend["labels"]) == 1
 
-    def test_host_resources_none_when_table_absent(self, db):
+    def test_host_resources_none_when_table_absent(self, db) -> None:
         engine, sink, run_id, _, _ = db
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE host_resources"))
@@ -296,7 +297,7 @@ class TestQueries:
 
 
 class TestRoutes:
-    def test_fragment_renders_with_data(self, db):
+    def test_fragment_renders_with_data(self, db) -> None:
         engine, _, _, _, tmp_path = db
         _seed(db)
         engine.dispose()
@@ -309,7 +310,7 @@ class TestRoutes:
         assert "system resources" in body
         assert "/boot" in body  # disk row rendered
 
-    def test_fragment_200_on_db_without_tables(self, tmp_path):
+    def test_fragment_200_on_db_without_tables(self, tmp_path: Path) -> None:
         engine = create_engine(f"sqlite:///{tmp_path / 'e.db'}")
         Sink.create(engine).setup()
         with engine.begin() as conn:
@@ -322,7 +323,7 @@ class TestRoutes:
             r = c.get("/fragments/resources")
         assert r.status_code == 200
 
-    def test_chart_api_returns_series(self, db):
+    def test_chart_api_returns_series(self, db) -> None:
         engine, _, _, _, tmp_path = db
         _seed(db)
         engine.dispose()

@@ -32,7 +32,7 @@ def _resp(
 
 
 @pytest.fixture
-def fast_client(monkeypatch):
+def fast_client(monkeypatch: pytest.MonkeyPatch):
     """Client whose retry sleeps are reduced to zero so the suite
     runs fast even when exercising backoff paths."""
     monkeypatch.setattr("avai.enrichers.http.RETRY_BACKOFFS_S", (0.0, 0.0, 0.0))
@@ -45,29 +45,29 @@ class TestHostOf:
     def host_of(self, url: str) -> str:
         return HttpCall(HttpMethod.GET, url, RequestOptions()).host
 
-    def test_extracts_host_from_https(self):
+    def test_extracts_host_from_https(self) -> None:
         assert self.host_of("https://api.example.com/x/y") == "api.example.com"
 
-    def test_extracts_host_from_http(self):
+    def test_extracts_host_from_http(self) -> None:
         assert self.host_of("http://x.test/") == "x.test"
 
-    def test_lowercases_host(self):
+    def test_lowercases_host(self) -> None:
         assert self.host_of("https://API.Example.COM/") == "api.example.com"
 
-    def test_returns_url_when_no_scheme(self):
+    def test_returns_url_when_no_scheme(self) -> None:
         # Defensive — never raises, even on malformed input.
         assert self.host_of("not-a-url") == "not-a-url"
 
 
 class TestUserAgent:
-    def test_sets_user_agent_header(self, fast_client):
+    def test_sets_user_agent_header(self, fast_client) -> None:
         ua = fast_client._session.headers["User-Agent"]
         assert ua.startswith("avai-monitor/")
         assert "github.com/iklobato/avai" in ua
 
 
 class TestSuccessPath:
-    def test_get_returns_response(self, fast_client):
+    def test_get_returns_response(self, fast_client) -> None:
         mock = MagicMock(return_value=_resp(200, "hi"))
         fast_client._session.request = mock
         r = fast_client.get("https://api.test/")
@@ -77,7 +77,7 @@ class TestSuccessPath:
         args, kwargs = mock.call_args
         assert args == ("GET", "https://api.test/")
 
-    def test_post_forwards_json(self, fast_client):
+    def test_post_forwards_json(self, fast_client) -> None:
         mock = MagicMock(return_value=_resp(200, '{"ok":true}'))
         fast_client._session.request = mock
         fast_client.post("https://api.test/", RequestOptions(json={"a": 1}))
@@ -86,13 +86,13 @@ class TestSuccessPath:
 
 
 class TestRateLimited429:
-    def test_raises_on_429_without_retry_after(self, fast_client):
+    def test_raises_on_429_without_retry_after(self, fast_client) -> None:
         fast_client._session.request = MagicMock(return_value=_resp(429))
         with pytest.raises(RateLimitedError) as exc_info:
             fast_client.get("https://api.test/")
         assert "api.test" in str(exc_info.value)
 
-    def test_raises_on_429_with_long_retry_after(self, fast_client):
+    def test_raises_on_429_with_long_retry_after(self, fast_client) -> None:
         # Retry-After=60 is too long; we surface as RateLimited, not block.
         fast_client._session.request = MagicMock(
             return_value=_resp(429, headers={"Retry-After": "60"})
@@ -100,7 +100,7 @@ class TestRateLimited429:
         with pytest.raises(RateLimitedError):
             fast_client.get("https://api.test/")
 
-    def test_retries_on_short_retry_after(self, fast_client):
+    def test_retries_on_short_retry_after(self, fast_client) -> None:
         # Retry-After=1 within the configured ceiling → retries.
         responses = [
             _resp(429, headers={"Retry-After": "1"}),
@@ -117,7 +117,7 @@ class TestRateLimited429:
 
 
 class TestRetryOnTransient5xx:
-    def test_retries_then_succeeds(self, fast_client):
+    def test_retries_then_succeeds(self, fast_client) -> None:
         responses = [_resp(503), _resp(500), _resp(200, "ok")]
         mock = MagicMock(side_effect=responses)
         fast_client._session.request = mock
@@ -125,7 +125,7 @@ class TestRetryOnTransient5xx:
         assert r.status_code == 200
         assert mock.call_count == 3
 
-    def test_exhausts_retries_and_raises(self, fast_client):
+    def test_exhausts_retries_and_raises(self, fast_client) -> None:
         fast_client._session.request = MagicMock(return_value=_resp(503))
         with pytest.raises(requests.HTTPError) as exc_info:
             fast_client.get("https://api.test/")
@@ -133,7 +133,7 @@ class TestRetryOnTransient5xx:
 
 
 class TestNetworkErrors:
-    def test_retries_after_connection_error(self, fast_client):
+    def test_retries_after_connection_error(self, fast_client) -> None:
         mock = MagicMock(
             side_effect=[
                 requests.ConnectionError("boom"),
@@ -146,7 +146,7 @@ class TestNetworkErrors:
         assert r.status_code == 200
         assert mock.call_count == 3
 
-    def test_propagates_after_exhausting(self, fast_client):
+    def test_propagates_after_exhausting(self, fast_client) -> None:
         fast_client._session.request = MagicMock(
             side_effect=requests.ConnectionError("dead")
         )
@@ -155,7 +155,7 @@ class TestNetworkErrors:
 
 
 class TestRateLimitBucket:
-    def test_set_rate_overrides_default_per_host(self, fast_client):
+    def test_set_rate_overrides_default_per_host(self, fast_client) -> None:
         # Cheap proof the per-host bucket is wired: setting a 0.0001 rps
         # rate means the second call should be paced. We measure by
         # patching time.sleep and asserting it was called.
@@ -168,7 +168,7 @@ class TestRateLimitBucket:
         sleeps = [args[0] for args, _ in sleep.call_args_list if args[0] > 0]
         assert sleeps, "expected at least one rate-limit sleep"
 
-    def test_different_hosts_share_no_state(self, fast_client):
+    def test_different_hosts_share_no_state(self, fast_client) -> None:
         fast_client.set_rate("slow.test", 0.0001)
         fast_client.set_rate("fast.test", 1000.0)
         fast_client._session.request = MagicMock(return_value=_resp(200))

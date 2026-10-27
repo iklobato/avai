@@ -16,6 +16,7 @@ from avai.enrichers.indicators import (
     FileHasher,
     HostClassifier,
 )
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # FileHasher — file hashing used by every binary indicator
@@ -23,26 +24,26 @@ from avai.enrichers.indicators import (
 
 
 class TestSha256OfFile:
-    def test_returns_correct_hex_digest(self, tmp_path):
+    def test_returns_correct_hex_digest(self, tmp_path: Path) -> None:
         p = tmp_path / "x.bin"
         p.write_bytes(b"hello world")
         expected = hashlib.sha256(b"hello world").hexdigest()
         assert FileHasher().sha256(str(p)) == expected
 
-    def test_nonexistent_path_returns_none(self):
+    def test_nonexistent_path_returns_none(self) -> None:
         assert FileHasher().sha256("/no/such/file") is None
 
-    def test_directory_returns_none(self, tmp_path):
+    def test_directory_returns_none(self, tmp_path: Path) -> None:
         # tmp_path is a directory — not hashable as a file.
         assert FileHasher().sha256(str(tmp_path)) is None
 
-    def test_empty_file_hashes_to_empty_sha256(self, tmp_path):
+    def test_empty_file_hashes_to_empty_sha256(self, tmp_path: Path) -> None:
         p = tmp_path / "empty.bin"
         p.touch()
         expected = hashlib.sha256(b"").hexdigest()
         assert FileHasher().sha256(str(p)) == expected
 
-    def test_large_file_above_cap_returns_none(self, tmp_path):
+    def test_large_file_above_cap_returns_none(self, tmp_path: Path) -> None:
         # The helper caps at 16 MB to avoid stalling on huge binaries.
         # Verify the cap is enforced. Sparse-write a 17 MB file via
         # truncate so we don't actually allocate 17 MB.
@@ -51,7 +52,7 @@ class TestSha256OfFile:
             f.truncate(17 * 1024 * 1024)
         assert FileHasher().sha256(str(p)) is None
 
-    def test_at_cap_boundary_is_hashed(self, tmp_path):
+    def test_at_cap_boundary_is_hashed(self, tmp_path: Path) -> None:
         # Exactly 16 MB → still hashed.
         p = tmp_path / "edge.bin"
         with open(p, "wb") as f:
@@ -95,7 +96,7 @@ class TestExtensionPermissions:
 
 
 class TestDashboardEngine:
-    def test_url_is_read_only_but_not_immutable(self, tmp_path):
+    def test_url_is_read_only_but_not_immutable(self, tmp_path: Path) -> None:
         db = tmp_path / "x.db"
         DashboardSchema().ensure(str(db))
         url = str(DashboardEngines().read_only(str(db)).url)
@@ -106,7 +107,7 @@ class TestDashboardEngine:
         # made the dashboard 500 on a live DB still writing to its -wal.
         assert "immutable" not in url
 
-    def test_engine_can_open_existing_db(self, tmp_path):
+    def test_engine_can_open_existing_db(self, tmp_path: Path) -> None:
         db = tmp_path / "exists.db"
         DashboardSchema().ensure(str(db))
         with DashboardEngines().read_only(str(db)).connect() as conn:
@@ -120,7 +121,7 @@ class TestDashboardEngine:
 
 
 class TestSinkUnjudgedAll:
-    def test_returns_distinct_hashes_across_runs(self, tmp_path):
+    def test_returns_distinct_hashes_across_runs(self, tmp_path: Path) -> None:
         # The streaming variant of unjudged ignores run_id so streaming
         # rows that span runs are still classified once each.
         from avai.host_monitor.enums import ThreatCategory, Verdict
@@ -202,7 +203,7 @@ class TestSinkUnjudgedAll:
         assert len(result) == 1
         assert result[0]["event_message"] == "bob"
 
-    def test_returns_empty_when_collector_has_no_judge_fields(self, tmp_path):
+    def test_returns_empty_when_collector_has_no_judge_fields(self, tmp_path: Path) -> None:
         from avai.host_monitor.models import AuthEventRow
         from avai.host_monitor.sink import Sink
 

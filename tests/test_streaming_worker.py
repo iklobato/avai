@@ -23,6 +23,7 @@ from avai.host_monitor.streaming import (
     WorkerControls,
 )
 from avai.host_monitor.supervision import ExponentialBackoff, LoggingSupervisionListener
+from pathlib import Path
 
 
 class _WorkerKit:
@@ -76,7 +77,7 @@ class _PausableStreamCollector:
 
 
 @pytest.fixture
-def sink(tmp_path):
+def sink(tmp_path: Path):
     # File-based SQLite — required because StreamingWorker runs in a
     # background thread that opens its own connection, and ``:memory:``
     # DBs are private per-connection.
@@ -106,7 +107,7 @@ def _make_row(action="login_ok", user="alice"):
 
 
 class TestLifecycle:
-    def test_start_creates_thread(self, sink):
+    def test_start_creates_thread(self, sink: Sink) -> None:
         c = _PausableStreamCollector([], pause_after=1)
         # Need at least one row so stream() blocks rather than returning
         # immediately.
@@ -118,7 +119,7 @@ class TestLifecycle:
         w.stop()
         assert not w.thread.is_alive()
 
-    def test_double_start_is_idempotent(self, sink):
+    def test_double_start_is_idempotent(self, sink: Sink) -> None:
         c = _PausableStreamCollector([_make_row()], pause_after=1)
         w = _WorkerKit(sink).build(c)
         w.start()
@@ -127,7 +128,7 @@ class TestLifecycle:
         assert w.thread is thread1
         w.stop()
 
-    def test_stop_sets_stop_event(self, sink):
+    def test_stop_sets_stop_event(self, sink: Sink) -> None:
         c = _PausableStreamCollector([_make_row()], pause_after=1)
         w = _WorkerKit(sink).build(c)
         w.start()
@@ -135,7 +136,7 @@ class TestLifecycle:
         assert w.stop_event.is_set()
         assert c.observed_stop.is_set()
 
-    def test_stop_without_start_is_safe(self, sink):
+    def test_stop_without_start_is_safe(self, sink: Sink) -> None:
         c = _PausableStreamCollector([], pause_after=0)
         w = _WorkerKit(sink).build(c)
         # No start() called — stop() should be a no-op, not crash.
@@ -148,7 +149,7 @@ class TestLifecycle:
 
 
 class TestFlushing:
-    def test_flushes_full_batch(self, sink):
+    def test_flushes_full_batch(self, sink: Sink) -> None:
         rows = [_make_row(user=f"u{i}") for i in range(5)]
         c = _PausableStreamCollector(rows, pause_after=5)
         w = _WorkerKit(sink).build(
@@ -165,7 +166,7 @@ class TestFlushing:
         assert _row_count(sink) == 5
         assert w._rows_written == 5
 
-    def test_flushes_on_interval_below_batch_size(self, sink):
+    def test_flushes_on_interval_below_batch_size(self, sink: Sink) -> None:
         rows = [_make_row(user=f"u{i}") for i in range(2)]
         c = _PausableStreamCollector(rows, pause_after=2)
         # Big batch, fast interval → should flush by interval.
@@ -186,7 +187,7 @@ class TestFlushing:
             n = s.execute(select(func.count()).select_from(AuthEventRow)).scalar()
         assert n == 2
 
-    def test_final_flush_on_shutdown_drains_buffer(self, sink):
+    def test_final_flush_on_shutdown_drains_buffer(self, sink: Sink) -> None:
         # 3 rows, batch size 10 → buffer has 3 at stop time. The final
         # flush in the worker's `finally` should write them.
         rows = [_make_row(user=f"u{i}") for i in range(3)]
@@ -322,7 +323,7 @@ class _AlwaysCrash:
 
 
 class TestSupervision:
-    def test_crash_then_recover_restarts_without_escalating(self, sink):
+    def test_crash_then_recover_restarts_without_escalating(self, sink: Sink) -> None:
         # A transient crash is restarted: the pre-crash row AND the recovered
         # session's row are both persisted, and the single crash is reported
         # below the escalation threshold.
@@ -346,7 +347,7 @@ class TestSupervision:
         assert listener.crashes == [1]  # one transient crash, attempt 1
         assert _row_count(sink) == 2
 
-    def test_finite_stream_completes_without_restart(self, sink):
+    def test_finite_stream_completes_without_restart(self, sink: Sink) -> None:
         # A stream that ends on its own is not respawned (no busy-loop).
         c = _PausableStreamCollector([_make_row(), _make_row()], pause_after=0)
         listener = _RecordingListener()
@@ -363,7 +364,7 @@ class TestSupervision:
         assert len(listener.session_ends) == 1  # exactly one session ran
         assert _row_count(sink) == 2
 
-    def test_persistent_flap_escalates_once(self, sink):
+    def test_persistent_flap_escalates_once(self, sink: Sink) -> None:
         # Every session crashes: the worker backs off and retries, reporting
         # each attempt; the listener halts it once the escalation threshold
         # is reached so the test is deterministic.
@@ -385,7 +386,7 @@ class TestSupervision:
         assert backoff.attempts == [1, 2, 3]
         assert [a for a in listener.crashes if a >= 3] == [3]  # escalated once
 
-    def test_stop_aborts_pending_backoff(self, sink):
+    def test_stop_aborts_pending_backoff(self, sink: Sink) -> None:
         # A long backoff must not delay shutdown: stop() aborts the wait and
         # the thread joins promptly via the real InterruptibleSleep.
         w = _WorkerKit(sink).build(
@@ -412,11 +413,11 @@ class TestSupervision:
 
 
 class TestSupervisionSeams:
-    def test_exponential_backoff_curve(self):
+    def test_exponential_backoff_curve(self) -> None:
         b = ExponentialBackoff(1.0, 5.0, 2.0)
         assert [b.delay_for(a) for a in (1, 2, 3, 4, 5)] == [1.0, 2.0, 4.0, 5.0, 5.0]
 
-    def test_logging_listener_escalates_at_threshold(self, caplog):
+    def test_logging_listener_escalates_at_threshold(self, caplog: pytest.LogCaptureFixture) -> None:
         listener = LoggingSupervisionListener(logging.getLogger("host_monitor"), 3)
         with caplog.at_level(logging.WARNING, logger="host_monitor"):
             for attempt in (1, 2, 3):

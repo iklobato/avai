@@ -15,10 +15,11 @@ from avai.host_monitor.collectors import (
     UnifiedLogAuthParser,
 )
 from avai.host_monitor.runtime import JsonLineStreamSource
+import pytest
 
 
 class TestUnifiedLogAuthParser:
-    def test_maps_fields(self):
+    def test_maps_fields(self) -> None:
         row = UnifiedLogAuthParser().parse(
             {
                 "timestamp": "2026-06-03 00:00:00",
@@ -38,7 +39,7 @@ class TestUnifiedLogAuthParser:
 
 
 class TestJournalAuthParser:
-    def test_converts_microsecond_timestamp_and_pid(self):
+    def test_converts_microsecond_timestamp_and_pid(self) -> None:
         row = JournalAuthParser().parse(
             {
                 "__REALTIME_TIMESTAMP": "1700000000000000",
@@ -56,19 +57,19 @@ class TestJournalAuthParser:
         assert row["subsystem"] == "sshd.service"
         assert row["event_type"] == "priority=6"
 
-    def test_missing_pid_and_timestamp_are_none(self):
+    def test_missing_pid_and_timestamp_are_none(self) -> None:
         row = JournalAuthParser().parse({"MESSAGE": "x"})
         assert row["pid"] is None
         assert row["event_timestamp"] is None
         assert row["subsystem"] == "syslog"  # fallback
 
-    def test_bad_pid_does_not_raise(self):
+    def test_bad_pid_does_not_raise(self) -> None:
         row = JournalAuthParser().parse({"_PID": "notanint"})
         assert row["pid"] is None
 
 
 class TestEsloggerExecParser:
-    def test_extracts_nested_es_event(self):
+    def test_extracts_nested_es_event(self) -> None:
         row = EsloggerExecParser().parse(
             {
                 "time": "2026-06-03T00:00:00Z",
@@ -96,14 +97,14 @@ class TestEsloggerExecParser:
         assert row["signing_id"] == "com.apple.ls"
         assert row["exe_args_json"] == '["ls", "-la"]'
 
-    def test_empty_event_is_safe(self):
+    def test_empty_event_is_safe(self) -> None:
         row = EsloggerExecParser().parse({})
         assert row["exe_path"] is None
         assert row["event_type"] == "exec"
 
 
 class TestAuditExecParser:
-    def test_maps_audit_fields(self):
+    def test_maps_audit_fields(self) -> None:
         row = AuditExecParser().parse(
             {
                 "__REALTIME_TIMESTAMP": "1700000000000000",
@@ -118,7 +119,7 @@ class TestAuditExecParser:
         assert row["uid"] == 0
         assert row["event_type"] == "EXECVE"
 
-    def test_bad_uid_is_none(self):
+    def test_bad_uid_is_none(self) -> None:
         row = AuditExecParser().parse({"_UID": "x"})
         assert row["uid"] is None
 
@@ -129,7 +130,7 @@ class _IdentityParser:
 
 
 class TestJsonLineStreamSource:
-    def test_yields_parsed_rows_until_stream_ends(self):
+    def test_yields_parsed_rows_until_stream_ends(self) -> None:
         # A short-lived command that emits ndjson then exits; the source
         # should yield one row per valid line and skip blank/garbage.
         script = "print('{\"n\": 1}'); print(''); print('garbage'); print('{\"n\": 2}')"
@@ -137,7 +138,7 @@ class TestJsonLineStreamSource:
         rows = list(source.stream(threading.Event()))
         assert rows == [{"n": 1}, {"n": 2}]
 
-    def test_stop_event_set_before_start_yields_nothing_or_stops_early(self):
+    def test_stop_event_set_before_start_yields_nothing_or_stops_early(self) -> None:
         stop = threading.Event()
         stop.set()
         script = "import time; print('{\"n\": 1}'); time.sleep(5)"
@@ -175,11 +176,11 @@ class _FakeProc:
 
 
 class TestJsonLineStreamSourceShutdown:
-    def _stream(self, monkeypatch, proc, stop):
+    def _stream(self, monkeypatch: pytest.MonkeyPatch, proc, stop):
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: proc)
         return JsonLineStreamSource(["tool"], _IdentityParser()).stream(stop)
 
-    def test_stop_mid_stream_ends_it_and_terminates_the_child(self, monkeypatch):
+    def test_stop_mid_stream_ends_it_and_terminates_the_child(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stop = threading.Event()
         proc = _FakeProc(['{"n": 1}\n', '{"n": 2}\n'])
         rows = self._stream(monkeypatch, proc, stop)
@@ -188,21 +189,21 @@ class TestJsonLineStreamSourceShutdown:
         assert list(rows) == []
         assert "terminate" in proc.calls
 
-    def test_child_that_ignores_terminate_is_killed(self, monkeypatch):
+    def test_child_that_ignores_terminate_is_killed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stop = threading.Event()
         proc = _FakeProc([], wait_times_out=True)
         assert list(self._stream(monkeypatch, proc, stop)) == []
         assert proc.calls == ["terminate", ("wait", 2), "kill"]
         stop.set()
 
-    def test_child_that_already_exited_is_left_alone(self, monkeypatch):
+    def test_child_that_already_exited_is_left_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stop = threading.Event()
         proc = _FakeProc(['{"n": 1}\n'], exited=True)
         assert list(self._stream(monkeypatch, proc, stop)) == [{"n": 1}]
         assert proc.calls == []
         stop.set()
 
-    def test_child_gone_before_terminate_is_not_an_error(self, monkeypatch):
+    def test_child_gone_before_terminate_is_not_an_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stop = threading.Event()
         proc = _FakeProc([], gone=True)
         assert list(self._stream(monkeypatch, proc, stop)) == []

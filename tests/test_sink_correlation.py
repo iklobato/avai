@@ -48,7 +48,7 @@ def _port(pid, port):
 
 
 class TestSignals:
-    def test_each_signal_is_keyed_by_pid_and_dns_by_name(self, sink):
+    def test_each_signal_is_keyed_by_pid_and_dns_by_name(self, sink: Sink) -> None:
         _write(sink, ListeningPortRow, [_port(7, 22)])
         _write(
             sink,
@@ -101,7 +101,7 @@ class TestSignals:
             "exec": {7: {"parent": "/bin/sh", "signed": "x.y", "exe": "/usr/bin/z"}},
         }
 
-    def test_other_pids_and_names_are_left_out(self, sink):
+    def test_other_pids_and_names_are_left_out(self, sink: Sink) -> None:
         _write(sink, ListeningPortRow, [_port(8, 22)])
         _write(
             sink, DnsQueryRow, [{"process": "curl", "qname": "a.example", "qtype": "A"}]
@@ -111,7 +111,7 @@ class TestSignals:
 
         assert ctx["ports"] == {} and ctx["dns"] == {}
 
-    def test_connections_without_a_remote_address_are_skipped(self, sink):
+    def test_connections_without_a_remote_address_are_skipped(self, sink: Sink) -> None:
         _write(
             sink,
             NetworkConnectionRow,
@@ -120,7 +120,7 @@ class TestSignals:
 
         assert sink.correlation_context([7], [], CorrelationWindow(None))["conns"] == {}
 
-    def test_flows_are_ordered_busiest_first(self, sink):
+    def test_flows_are_ordered_busiest_first(self, sink: Sink) -> None:
         _write(
             sink,
             NetworkFlowRow,
@@ -146,7 +146,7 @@ class TestSignals:
 
         assert [f["packets"] for f in flows] == [50, 1]
 
-    def test_exec_keeps_the_most_recent_event_per_pid(self, sink):
+    def test_exec_keeps_the_most_recent_event_per_pid(self, sink: Sink) -> None:
         _write(
             sink,
             ProcessExecRow,
@@ -169,7 +169,7 @@ class TestSignals:
 
 
 class TestBounds:
-    def test_since_drops_rows_collected_before_it(self, sink):
+    def test_since_drops_rows_collected_before_it(self, sink: Sink) -> None:
         _write(sink, ListeningPortRow, [_port(7, 22)], collected_at=_OLD)
         _write(sink, ListeningPortRow, [_port(7, 80)], collected_at=_NEW)
         _write(
@@ -181,14 +181,14 @@ class TestBounds:
         assert ctx["ports"] == {7: ["0.0.0.0:80"]}
         assert ctx["dns"] == {}
 
-    def test_since_none_reads_the_full_history(self, sink):
+    def test_since_none_reads_the_full_history(self, sink: Sink) -> None:
         _write(sink, ListeningPortRow, [_port(7, 22)], collected_at=_OLD)
 
         assert sink.correlation_context([7], [], CorrelationWindow(None))["ports"] == {
             7: ["0.0.0.0:22"]
         }
 
-    def test_per_pid_lists_are_capped(self, sink):
+    def test_per_pid_lists_are_capped(self, sink: Sink) -> None:
         _write(sink, ListeningPortRow, [_port(7, p) for p in range(1, 6)])
 
         ports = sink.correlation_context([7], [], CorrelationWindow(None, 3))["ports"][
@@ -197,7 +197,7 @@ class TestBounds:
 
         assert len(ports) == 3
 
-    def test_dns_gets_five_more_than_the_per_pid_cap(self, sink):
+    def test_dns_gets_five_more_than_the_per_pid_cap(self, sink: Sink) -> None:
         _write(
             sink,
             DnsQueryRow,
@@ -213,14 +213,14 @@ class TestBounds:
 
 class TestEmptyInput:
     @pytest.mark.parametrize("pids,names", [([], []), ([None], [""]), ([None], [])])
-    def test_no_usable_pid_or_name_returns_empty_signals(self, sink, pids, names):
+    def test_no_usable_pid_or_name_returns_empty_signals(self, sink: Sink, pids, names) -> None:
         _write(sink, ListeningPortRow, [_port(None, 22)])
 
         ctx = sink.correlation_context(pids, names, CorrelationWindow(None))
 
         assert ctx == {"ports": {}, "flows": {}, "conns": {}, "dns": {}, "exec": {}}
 
-    def test_names_alone_still_read_dns(self, sink):
+    def test_names_alone_still_read_dns(self, sink: Sink) -> None:
         _write(sink, ListeningPortRow, [_port(7, 22)])
         _write(sink, DnsQueryRow, [{"process": "p", "qname": "q", "qtype": "A"}])
 

@@ -24,30 +24,31 @@ from avai.host_monitor.judge import Judgment
 from avai.host_monitor.models import ListeningPortRow, NetworkConnectionRow, ProcessRow
 from avai.host_monitor.runtime import Digest
 from avai.host_monitor.sink import Sink
+from pathlib import Path
 
 LP_FIELDS = ("process_name", "family", "type", "laddr_ip", "laddr_port")
 
 
 class TestAddrScope:
-    def test_wildcard_is_all_interfaces(self):
+    def test_wildcard_is_all_interfaces(self) -> None:
         assert BindScope().of("0.0.0.0") == "all"
         assert BindScope().of("::") == "all"
 
-    def test_loopback_local_only(self):
+    def test_loopback_local_only(self) -> None:
         assert BindScope().of("127.0.0.1") == "loopback"
         assert BindScope().of("::1") == "loopback"
 
-    def test_routable_is_specific(self):
+    def test_routable_is_specific(self) -> None:
         assert BindScope().of("192.168.1.10") == "specific"
 
-    def test_blank_or_garbage_unknown(self):
+    def test_blank_or_garbage_unknown(self) -> None:
         assert BindScope().of("") == "unknown"
         assert BindScope().of(None) == "unknown"
         assert BindScope().of("not-an-ip") == "unknown"
 
 
 @pytest.fixture
-def seeded(tmp_path):
+def seeded(tmp_path: Path):
     """A run with three listeners: an SSH daemon exposed on all interfaces
     (judged malicious), the same daemon's IPv6 wildcard socket on the same
     port (must collapse into the one row), and a loopback-only Postgres.
@@ -162,7 +163,7 @@ def seeded(tmp_path):
 
 
 class TestListeningPortsRollup:
-    def test_verdict_filter_uses_the_picked_verdict(self, seeded):
+    def test_verdict_filter_uses_the_picked_verdict(self, seeded) -> None:
         # Regression: the row loop reused the name ``verdict``, so the filter
         # and its echo took the last socket's verdict instead of the user's.
         engine, run_id = seeded
@@ -171,7 +172,7 @@ class TestListeningPortsRollup:
         assert [r["port"] for r in data["rows"]] == [22]
         assert data["verdict"] == "malicious"
 
-    def test_wildcard_v4_v6_collapse_to_one_row(self, seeded):
+    def test_wildcard_v4_v6_collapse_to_one_row(self, seeded) -> None:
         engine, run_id = seeded
         with Session(engine) as s:
             rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
@@ -183,7 +184,7 @@ class TestListeningPortsRollup:
         assert ssh["proto"] == ["TCP"]
         assert set(ssh["addrs"]) == {"0.0.0.0", "::"}
 
-    def test_worst_verdict_and_sort_order(self, seeded):
+    def test_worst_verdict_and_sort_order(self, seeded) -> None:
         engine, run_id = seeded
         with Session(engine) as s:
             rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
@@ -192,7 +193,7 @@ class TestListeningPortsRollup:
         assert rows[0]["verdict"] == "malicious"
         assert rows[0]["confidence"] == pytest.approx(0.88)
 
-    def test_bind_scope_signals_exposure(self, seeded):
+    def test_bind_scope_signals_exposure(self, seeded) -> None:
         engine, run_id = seeded
         with Session(engine) as s:
             rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
@@ -201,7 +202,7 @@ class TestListeningPortsRollup:
         assert ssh["scope"] == "all" and ssh["exposed"] is True
         assert pg["scope"] == "loopback" and pg["exposed"] is False
 
-    def test_process_enrichment_attached(self, seeded):
+    def test_process_enrichment_attached(self, seeded) -> None:
         engine, run_id = seeded
         with Session(engine) as s:
             rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
@@ -216,7 +217,7 @@ class TestListeningPortsRollup:
         pg = next(r for r in rows if r["port"] == 5432)
         assert pg["proc"] is None
 
-    def test_established_connection_count(self, seeded):
+    def test_established_connection_count(self, seeded) -> None:
         engine, run_id = seeded
         with Session(engine) as s:
             rows = PortsPanel(s, run_id).ports(PortQuery())["rows"]
@@ -225,7 +226,7 @@ class TestListeningPortsRollup:
         assert ssh["conns"] == 1  # only the ESTABLISHED row counts
         assert pg["conns"] == 0
 
-    def test_summary_totals(self, seeded):
+    def test_summary_totals(self, seeded) -> None:
         engine, run_id = seeded
         with Session(engine) as s:
             summary = PortsPanel(s, run_id).ports(PortQuery())["summary"]
@@ -236,7 +237,7 @@ class TestListeningPortsRollup:
 
 
 class TestFragmentRender:
-    def test_renders_port_process_and_verdict(self, seeded):
+    def test_renders_port_process_and_verdict(self, seeded) -> None:
         engine, run_id = seeded
         db = str(engine.url).replace("sqlite:///", "")
         with DashboardApp(DashboardConfig(db_path=db)).build().test_client() as c:
@@ -251,7 +252,7 @@ class TestFragmentRender:
 
 
 class TestMissingTableGraceful:
-    def _db_without_ports(self, tmp_path):
+    def _db_without_ports(self, tmp_path: Path):
         db = tmp_path / "old.db"
         engine = create_engine(
             f"sqlite:///{db}", connect_args={"check_same_thread": False}
@@ -264,14 +265,14 @@ class TestMissingTableGraceful:
             conn.execute(text("DROP TABLE listening_ports"))
         return engine, db
 
-    def test_returns_empty_when_table_absent(self, tmp_path):
+    def test_returns_empty_when_table_absent(self, tmp_path: Path) -> None:
         engine, _ = self._db_without_ports(tmp_path)
         with Session(engine) as s:
             data = PortsPanel(s, "x").ports(PortQuery())
         assert data["rows"] == []
         assert data["summary"]["ports"] == 0
 
-    def test_fragment_200_on_db_without_table(self, tmp_path):
+    def test_fragment_200_on_db_without_table(self, tmp_path: Path) -> None:
         engine, db = self._db_without_ports(tmp_path)
         engine.dispose()
         with DashboardApp(DashboardConfig(db_path=str(db))).build().test_client() as c:

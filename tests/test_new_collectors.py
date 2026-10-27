@@ -58,6 +58,7 @@ from avai.host_monitor.models import (
 )
 from avai.host_monitor.runtime import Digest, PsutilConnections
 from avai.host_monitor.sink import Sink
+from pathlib import Path
 
 
 class _FakeCapture:
@@ -89,7 +90,7 @@ class _FakeResolver:
 
 
 class TestProcessAttribution:
-    def test_resolver_maps_remote_endpoint_to_process(self, monkeypatch):
+    def test_resolver_maps_remote_endpoint_to_process(self, monkeypatch: pytest.MonkeyPatch) -> None:
         conns = [
             SimpleNamespace(raddr=SimpleNamespace(ip="8.8.8.8", port=443), pid=4321),
             SimpleNamespace(raddr=None, pid=999),  # listening — no remote, skipped
@@ -103,7 +104,7 @@ class TestProcessAttribution:
         assert snap[("8.8.8.8", 443)] == ("curl", 4321)
         assert ("1.2.3.4", 53) not in snap  # pid None skipped
 
-    def test_collect_attaches_process_to_matching_flow(self, monkeypatch):
+    def test_collect_attaches_process_to_matching_flow(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sample = "(en6) IP 10.0.0.5.55555 > 8.8.8.8.443: tcp 0"
         c = NetworkFlowsCollector(
             _FakeCapture(sample, "en6"),
@@ -114,7 +115,7 @@ class TestProcessAttribution:
         assert rows[0]["process"] == "curl"
         assert rows[0]["pid"] == 4321
 
-    def test_collect_sets_process_none_when_unresolved(self, monkeypatch):
+    def test_collect_sets_process_none_when_unresolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sample = "(en6) IP 10.0.0.5.55555 > 9.9.9.9.443: tcp 0"
         c = NetworkFlowsCollector(_FakeCapture(sample, "en6"), _FakeResolver({}))
         row = list(c.collect())[0]
@@ -131,26 +132,26 @@ class TestDnsParse:
     def parse(self, line: str) -> DnsQuestion | None:
         return TcpdumpLine.of(line).dns_question()
 
-    def test_query_line(self):
+    def test_query_line(self) -> None:
         assert self.parse(
             "(en6) IP 10.0.0.5.51000 > 8.8.8.8.53: 1234+ A? example.com. (29)"
         ) == ("en6", "example.com", "A", "8.8.8.8")
 
-    def test_aaaa_query_ipv6_resolver(self):
+    def test_aaaa_query_ipv6_resolver(self) -> None:
         out = self.parse(
             "(en6) IP6 fe80::1.51000 > 2001:4860:4860::8888.53: 5+ AAAA? host.test. (30)"
         )
         assert out == ("en6", "host.test", "AAAA", "2001:4860:4860::8888")
 
-    def test_response_is_ignored(self):
+    def test_response_is_ignored(self) -> None:
         # src port 53 → a response, not a question
         line = "(en6) IP 8.8.8.8.53 > 10.0.0.5.51000: 1234 1/0/0 A 93.184.216.34 (45)"
         assert self.parse(line) is None
 
-    def test_non_dns_line_ignored(self):
+    def test_non_dns_line_ignored(self) -> None:
         assert self.parse("ARP, Request who-has x") is None
 
-    def test_aggregate_counts_repeats(self):
+    def test_aggregate_counts_repeats(self) -> None:
         out = (
             "(en6) IP 10.0.0.5.5.53 > 8.8.8.8.53: 1+ A? a.com. (20)\n"
             "(en6) IP 10.0.0.5.6.53 > 8.8.8.8.53: 2+ A? a.com. (20)\n"
@@ -160,7 +161,7 @@ class TestDnsParse:
         )
         assert agg[("a.com", "A", "8.8.8.8")]["count"] == 2
 
-    def test_doh_endpoint_detected_from_connections(self, monkeypatch):
+    def test_doh_endpoint_detected_from_connections(self, monkeypatch: pytest.MonkeyPatch) -> None:
         c = DnsQueriesCollector(
             _FakeCapture("", None),
             _FakeResolver({("1.1.1.1", 443): ("firefox", 22)}),
@@ -182,7 +183,7 @@ _VALID_BLOB = base64.b64encode(b"raw-ed25519-public-key-bytes----").decode()
 
 
 class TestAuthorizedKeys:
-    def test_key_with_options_and_comment(self):
+    def test_key_with_options_and_comment(self) -> None:
         rows = AuthorizedKeysParser().parse(
             'from="10.0.0.0/8",no-pty ssh-ed25519 ' f"{_VALID_BLOB} admin@laptop\n",
             "/Users/x/.ssh/authorized_keys",
@@ -196,18 +197,18 @@ class TestAuthorizedKeys:
         assert r["fingerprint"].startswith("SHA256:")
         assert r["owner"] == "x"
 
-    def test_plain_key_no_options(self):
+    def test_plain_key_no_options(self) -> None:
         rows = AuthorizedKeysParser().parse(
             f"ssh-rsa {_VALID_BLOB} root\n", "/p", "root"
         )
         assert rows[0]["options"] is None
         assert rows[0]["key_type"] == "ssh-rsa"
 
-    def test_comments_and_blanks_skipped(self):
+    def test_comments_and_blanks_skipped(self) -> None:
         rows = AuthorizedKeysParser().parse("# a comment\n\n   \n", "/p", "x")
         assert rows == []
 
-    def test_invalid_base64_yields_no_fingerprint(self):
+    def test_invalid_base64_yields_no_fingerprint(self) -> None:
         rows = AuthorizedKeysParser().parse("ssh-ed25519 not!base64!! c\n", "/p", "x")
         assert rows[0]["fingerprint"] is None
 
@@ -218,7 +219,7 @@ class TestAuthorizedKeys:
 
 
 class TestHostsParse:
-    def test_parses_mappings_and_strips_comments(self):
+    def test_parses_mappings_and_strips_comments(self) -> None:
         rows = HostsFileParser().parse(
             "127.0.0.1 localhost\n# c\n6.6.6.6 my-bank.com extra # evil\n\n",
             "/etc/hosts",
@@ -228,7 +229,7 @@ class TestHostsParse:
             ("6.6.6.6", "my-bank.com extra"),
         ]
 
-    def test_lone_ip_without_name_skipped(self):
+    def test_lone_ip_without_name_skipped(self) -> None:
         assert HostsFileParser().parse("1.2.3.4\n", "/etc/hosts") == []
 
 
@@ -238,7 +239,7 @@ class TestHostsParse:
 
 
 class TestPrivilegeParsers:
-    def test_sudoers_keeps_rules_drops_defaults(self):
+    def test_sudoers_keeps_rules_drops_defaults(self) -> None:
         rows = SudoersParser().parse(
             "Defaults env_reset\n"
             "# comment\n"
@@ -249,7 +250,7 @@ class TestPrivilegeParsers:
         assert [r["subject"] for r in rows] == ["%admin", "bob"]
         assert all(r["kind"] == "sudoers" for r in rows)
 
-    def test_groups_only_privileged_with_members(self):
+    def test_groups_only_privileged_with_members(self) -> None:
         rows = LinuxPrivilegedAccounts(HostPaths("")).group_rows(
             "sudo:x:27:alice,bob\nwheel:x:10:\nstaff:x:50:carol\n", "/etc/group"
         )
@@ -257,7 +258,7 @@ class TestPrivilegeParsers:
         assert rows[0]["subject"] == "sudo"
         assert rows[0]["detail"] == "alice,bob"
 
-    def test_passwd_flags_uid0_only(self):
+    def test_passwd_flags_uid0_only(self) -> None:
         rows = LinuxPrivilegedAccounts(HostPaths("")).uid0_rows(
             "root:x:0:0:root:/root:/bin/bash\n"
             "backdoor:x:0:0::/:/bin/sh\n"
@@ -276,19 +277,19 @@ class TestNewExtractors:
     def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
         return IndicatorExtraction.default().extract(collector, row)
 
-    def test_dns_query_emits_domain(self):
+    def test_dns_query_emits_domain(self) -> None:
         out = self.extract("dns_queries", {"qname": "evil.example", "qtype": "A"})
         assert [(i.type, i.value) for i in out] == [
             (IndicatorType.DOMAIN, "evil.example")
         ]
 
-    def test_doh_row_not_a_domain(self):
+    def test_doh_row_not_a_domain(self) -> None:
         # qname is a provider label, not a domain → no indicator
         assert (
             self.extract("dns_queries", {"qname": "Cloudflare", "qtype": "DoH"}) == []
         )
 
-    def test_hosts_emits_public_ip_and_domain(self):
+    def test_hosts_emits_public_ip_and_domain(self) -> None:
         out = self.extract(
             "hosts_file", {"ip": "6.6.6.6", "hostnames": "my-bank.com localhost"}
         )
@@ -296,7 +297,7 @@ class TestNewExtractors:
         assert (IndicatorType.IPV4, "6.6.6.6") in pairs
         assert (IndicatorType.DOMAIN, "my-bank.com") in pairs
 
-    def test_hosts_skips_loopback_ip(self):
+    def test_hosts_skips_loopback_ip(self) -> None:
         out = self.extract("hosts_file", {"ip": "127.0.0.1", "hostnames": "localhost"})
         assert out == []  # private ip + non-domain name
 
@@ -307,7 +308,7 @@ class TestNewExtractors:
 
 
 @pytest.fixture
-def db(tmp_path):
+def db(tmp_path: Path):
     engine = create_engine(
         f"sqlite:///{tmp_path / 'n.db'}", connect_args={"check_same_thread": False}
     )
@@ -326,7 +327,7 @@ def _write(sink, model, rows, fields, ts, run_id):
 
 
 class TestDashboardDns:
-    def test_dns_queries_summary_and_doh(self, db):
+    def test_dns_queries_summary_and_doh(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,
@@ -366,7 +367,7 @@ class TestDashboardDns:
         assert by_name["good.com"] == "external DNS"  # public resolver
         assert by_name["Cloudflare"] == "DoH (encrypted)"
 
-    def test_resolution_level_classification(self):
+    def test_resolution_level_classification(self) -> None:
         from avai.dashboard.queries import DnsLevel
 
         assert DnsLevel().of("192.168.1.1", "A") == "local resolver"
@@ -376,7 +377,7 @@ class TestDashboardDns:
         assert DnsLevel().of(None, "A") == "unknown"
         assert DnsLevel().of("not-an-ip", "A") == "unknown"
 
-    def test_fragment_renders(self, db):
+    def test_fragment_renders(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,
@@ -404,7 +405,7 @@ class TestDashboardDns:
 
 
 class TestDashboardPersistence:
-    def test_sections_populated(self, db):
+    def test_sections_populated(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,
@@ -462,7 +463,7 @@ class TestDashboardPersistence:
         assert data["hosts"][0]["ip"] == "6.6.6.6"
         assert data["privilege"][0]["subject"] == "bob"
 
-    def test_fragment_renders(self, db):
+    def test_fragment_renders(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,
@@ -483,7 +484,7 @@ class TestDashboardPersistence:
             html = c.get("/fragments/persistence").data.decode()
         assert "my-bank.com" in html and "persistence" in html.lower()
 
-    def test_empty_when_no_data(self, db):
+    def test_empty_when_no_data(self, db) -> None:
         engine, sink, run_id, ts = db
         with Session(engine) as s:
             data = PersistencePanel(s, run_id).tampering(
@@ -493,7 +494,7 @@ class TestDashboardPersistence:
 
 
 class TestNetworkFlowProcessColumn:
-    def test_process_attached_in_dashboard(self, db):
+    def test_process_attached_in_dashboard(self, db) -> None:
         engine, sink, run_id, ts = db
         _write(
             sink,

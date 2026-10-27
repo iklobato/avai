@@ -29,6 +29,7 @@ from avai.host_monitor.collectors import (
     YaraRulesDir,
     YaraRulesetCompiler,
 )
+import pytest
 
 _MARKER = "AVAITESTMATCH"
 _RULE = 'rule avai_test {{ strings: $a = "{m}" condition: $a }}'.format(m=_MARKER)
@@ -70,7 +71,7 @@ class TestFileScanCollector:
         compiler = YaraRulesetCompiler(rules_dir, logging.getLogger("test"))
         return list(FileScanCollector.create(fs, compiler).collect())
 
-    def test_match_in_bin_dir_emits_row(self, tmp_path):
+    def test_match_in_bin_dir_emits_row(self, tmp_path: Path) -> None:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         hit = bindir / "evil.bin"
@@ -89,7 +90,7 @@ class TestFileScanCollector:
         assert row["sha256"] and len(row["sha256"]) == 64
         assert row["size"] == len(_MARKER)
 
-    def test_clean_file_emits_nothing(self, tmp_path):
+    def test_clean_file_emits_nothing(self, tmp_path: Path) -> None:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         (bindir / "clean.bin").write_text("benign content")
@@ -97,7 +98,7 @@ class TestFileScanCollector:
         rows = self._scan(fs, _rules_dir(tmp_path))
         assert rows == []
 
-    def test_no_rules_dir_yields_nothing(self, tmp_path):
+    def test_no_rules_dir_yields_nothing(self, tmp_path: Path) -> None:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         (bindir / "evil.bin").write_text(_MARKER)
@@ -108,7 +109,7 @@ class TestFileScanCollector:
         rows = self._scan(fs, empty)
         assert rows == []
 
-    def test_oversized_file_is_skipped(self, tmp_path, monkeypatch):
+    def test_oversized_file_is_skipped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         (bindir / "evil.bin").write_text(_MARKER)
@@ -117,7 +118,7 @@ class TestFileScanCollector:
         rows = self._scan(fs, _rules_dir(tmp_path))
         assert rows == []
 
-    def test_unreadable_file_does_not_abort_scan(self, tmp_path):
+    def test_unreadable_file_does_not_abort_scan(self, tmp_path: Path) -> None:
         # A file that vanishes/!is_file mid-walk must be skipped, not fatal:
         # a dangling symlink (is_file() False, stat() raises) sits beside a
         # real match; the real match must still come through.
@@ -130,7 +131,7 @@ class TestFileScanCollector:
         rows = self._scan(fs, _rules_dir(tmp_path))
         assert [r["path"] for r in rows] == [str(good)]
 
-    def test_unreadable_target_dir_is_skipped(self, tmp_path):
+    def test_unreadable_target_dir_is_skipped(self, tmp_path: Path) -> None:
         # Regression: Path.is_dir() re-raises EACCES (it only swallows
         # ENOENT/ENOTDIR), which previously aborted the whole collector on
         # an unreadable dir like /var/root/Applications. The unreadable dir
@@ -157,7 +158,7 @@ class TestFileScanCollector:
             os.chmod(locked_parent, 0o755)  # restore so tmp cleanup works
         assert [r["path"] for r in rows] == [str(match)]
 
-    def test_app_executable_target_labelled(self, tmp_path):
+    def test_app_executable_target_labelled(self, tmp_path: Path) -> None:
         exe = tmp_path / "App.app" / "Contents" / "MacOS" / "App"
         exe.parent.mkdir(parents=True)
         exe.write_text(_MARKER)
@@ -166,7 +167,7 @@ class TestFileScanCollector:
         assert len(rows) == 1
         assert rows[0]["scan_source"] == "app_bundle"
 
-    def test_downloads_only_recent_files_scanned(self, tmp_path):
+    def test_downloads_only_recent_files_scanned(self, tmp_path: Path) -> None:
         home = tmp_path / "home"
         dl = home / "Downloads"
         dl.mkdir(parents=True)
@@ -183,7 +184,7 @@ class TestFileScanCollector:
         assert [r["path"] for r in rows] == [str(recent)]
         assert rows[0]["scan_source"] == "downloads"
 
-    def test_per_cycle_cap_bounds_scan(self, tmp_path, monkeypatch):
+    def test_per_cycle_cap_bounds_scan(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         for i in range(3):
@@ -193,7 +194,7 @@ class TestFileScanCollector:
         rows = self._scan(fs, _rules_dir(tmp_path))
         assert len(rows) == 1  # only one file scanned before the cap
 
-    def test_file_reached_by_two_sources_is_scanned_once(self, tmp_path):
+    def test_file_reached_by_two_sources_is_scanned_once(self, tmp_path: Path) -> None:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         evil = bindir / "evil.bin"
@@ -202,7 +203,7 @@ class TestFileScanCollector:
         rows = self._scan(fs, _rules_dir(tmp_path))
         assert [r["scan_source"] for r in rows] == ["bin_dirs"]
 
-    def test_per_cycle_cap_counts_across_sources(self, tmp_path, monkeypatch):
+    def test_per_cycle_cap_counts_across_sources(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         bindir = tmp_path / "bin"
         bindir.mkdir()
         (bindir / "evil.bin").write_text(_MARKER)
@@ -219,7 +220,7 @@ class TestFileScanCollector:
         rows = list(FileScanCollector.create(_FakeFs(), compiler).collect())
         assert rows == []
 
-    def test_bundled_eicar_rules_compile(self):
+    def test_bundled_eicar_rules_compile(self) -> None:
         # Guards against a broken shipped rule silently disabling scanning.
         rules, stats = YaraRulesetCompiler(
             C.BUNDLED_YARA_RULES_DIR, logging.getLogger("test")
@@ -265,7 +266,7 @@ class TestYaraRulesetCompiler:
         )
         return d
 
-    def test_summary_counts_sources_categories_and_skips(self, tmp_path):
+    def test_summary_counts_sources_categories_and_skips(self, tmp_path: Path) -> None:
         d = self._tree(tmp_path)
         _rules, stats = YaraRulesetCompiler(d, logging.getLogger("test")).compile()
         assert {k: v for k, v in stats.items() if k != "inventory"} == {
@@ -308,7 +309,7 @@ class TestYaraRulesetCompiler:
             },
         ]
 
-    def test_same_file_stem_gets_its_own_namespace(self, tmp_path):
+    def test_same_file_stem_gets_its_own_namespace(self, tmp_path: Path) -> None:
         rules, _stats = YaraRulesetCompiler(
             self._tree(tmp_path), logging.getLogger("test")
         ).compile()
@@ -320,14 +321,14 @@ class TestYaraRulesetCompiler:
             ("gen_a_1", "b1"),
         }
 
-    def test_missing_dir_gives_no_rules_and_an_empty_summary(self, tmp_path):
+    def test_missing_dir_gives_no_rules_and_an_empty_summary(self, tmp_path: Path) -> None:
         rules, stats = YaraRulesetCompiler(
             tmp_path / "absent", logging.getLogger("test")
         ).compile()
         assert rules is None
         assert (stats["files_loaded"], stats["inventory"]) == (0, [])
 
-    def test_only_broken_files_gives_no_rules(self, tmp_path):
+    def test_only_broken_files_gives_no_rules(self, tmp_path: Path) -> None:
         (tmp_path / "bad.yar").write_text("rule { nope")
         rules, stats = YaraRulesetCompiler(
             tmp_path, logging.getLogger("test")
@@ -346,7 +347,7 @@ class TestYaraExternals:
         (d / "ext.yar").write_text(body)
         return d
 
-    def test_filename_external_compiles_and_matches(self, tmp_path):
+    def test_filename_external_compiles_and_matches(self, tmp_path: Path) -> None:
         # Without externals support this rule fails to compile
         # ("undefined identifier"); it must compile AND gate on the name.
         rules = self._rules(tmp_path, 'rule t { condition: filename == "evil.bin" }')
@@ -362,7 +363,7 @@ class TestYaraExternals:
         )
         assert [Path(r["path"]).name for r in rows] == ["evil.bin"]
 
-    def test_filetype_external_gates_on_magic(self, tmp_path):
+    def test_filetype_external_gates_on_magic(self, tmp_path: Path) -> None:
         rules = self._rules(tmp_path, 'rule t { condition: filetype == "EXE" }')
         bindir = tmp_path / "bin"
         bindir.mkdir()
@@ -376,7 +377,7 @@ class TestYaraExternals:
         )
         assert [Path(r["path"]).name for r in rows] == ["real.exe"]
 
-    def test_meta_retained_on_finding(self, tmp_path):
+    def test_meta_retained_on_finding(self, tmp_path: Path) -> None:
         rules = self._rules(
             tmp_path,
             'rule t { meta: author = "Jane Doe" reference = "https://x" '
@@ -396,7 +397,7 @@ class TestYaraExternals:
         assert meta["author"] == "Jane Doe"
         assert meta["reference"] == "https://x"
 
-    def test_crypto_rule_file_does_not_disable_others(self, tmp_path):
+    def test_crypto_rule_file_does_not_disable_others(self, tmp_path: Path) -> None:
         # A hash.* rule file (needs crypto yara) sits beside a plain rule.
         # The plain rule must still compile and match regardless of whether
         # this yara build has crypto (skip) or not (compiles, just no match).
@@ -438,7 +439,7 @@ class TestMatchedStrings:
             ).collect()
         )
 
-    def test_printable_match_rendered_as_text(self, tmp_path):
+    def test_printable_match_rendered_as_text(self, tmp_path: Path) -> None:
         rows = self._scan(
             tmp_path,
             _rules_dir(tmp_path),
@@ -454,7 +455,7 @@ class TestMatchedStrings:
         assert s["truncated"] is False
         assert "hex" not in s
 
-    def test_binary_match_rendered_as_hex(self, tmp_path):
+    def test_binary_match_rendered_as_hex(self, tmp_path: Path) -> None:
         rules = self._rules(
             tmp_path, "rule b { strings: $a = { DE AD BE EF } condition: $a }"
         )
@@ -469,7 +470,7 @@ class TestMatchedStrings:
         assert s["offset"] == 1
         assert "text" not in s
 
-    def test_long_match_is_truncated(self, tmp_path, monkeypatch):
+    def test_long_match_is_truncated(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(C, "YARA_MATCH_STRING_MAX_BYTES", 4)
         marker = "ABCDEFGHIJ"
         rules = self._rules(
@@ -480,7 +481,7 @@ class TestMatchedStrings:
         assert s["text"] == "ABCD"
         assert s["truncated"] is True
 
-    def test_instance_count_is_capped(self, tmp_path, monkeypatch):
+    def test_instance_count_is_capped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # The marker repeats 3×; the cap must bound how many we surface.
         monkeypatch.setattr(C, "YARA_MAX_MATCH_STRINGS", 1)
         rows = self._scan(
@@ -491,7 +492,7 @@ class TestMatchedStrings:
         )
         assert len(json.loads(rows[0]["strings_json"])) == 1
 
-    def test_clean_scan_has_no_strings_rows(self, tmp_path):
+    def test_clean_scan_has_no_strings_rows(self, tmp_path: Path) -> None:
         rows = self._scan(
             tmp_path,
             _rules_dir(tmp_path),
@@ -502,7 +503,7 @@ class TestMatchedStrings:
 
 
 class TestFileType:
-    def test_detects_known_magics(self, tmp_path):
+    def test_detects_known_magics(self, tmp_path: Path) -> None:
         cases = {
             b"MZ\x90\x00": "EXE",
             b"\x7fELF\x02\x01": "ELF",
@@ -514,7 +515,7 @@ class TestFileType:
             f.write_bytes(header + b"\x00\x00\x00\x00")
             assert FileMagic().kind(f) == expected
 
-    def test_unknown_and_unreadable_return_empty(self, tmp_path):
+    def test_unknown_and_unreadable_return_empty(self, tmp_path: Path) -> None:
         text = tmp_path / "plain.txt"
         text.write_text("just text")
         assert FileMagic().kind(text) == ""
@@ -522,11 +523,11 @@ class TestFileType:
 
 
 class TestCryptoHint:
-    def test_imphash_error_gets_actionable_hint(self):
+    def test_imphash_error_gets_actionable_hint(self) -> None:
         hint = CryptoHint().of(yara.Error('invalid field name "imphash"'))
         assert "crypto-enabled yara" in hint and "NOTICE" in hint
 
-    def test_unrelated_error_gets_no_hint(self):
+    def test_unrelated_error_gets_no_hint(self) -> None:
         assert CryptoHint().of(yara.Error("syntax error, unexpected '}'")) == ""
 
 
@@ -541,7 +542,7 @@ class TestLocalHashDenylist:
         f.write_text(body)
         return f
 
-    def test_known_hash_is_malicious(self, tmp_path):
+    def test_known_hash_is_malicious(self, tmp_path: Path) -> None:
         bad = "a" * 64
         enricher = LocalHashDenylistEnricher.from_path(
             self._denylist(tmp_path, bad + "\n")
@@ -552,22 +553,22 @@ class TestLocalHashDenylist:
         assert ev.source == "local_denylist"
         assert ev.confidence == 1.0
 
-    def test_unknown_hash_no_opinion(self, tmp_path):
+    def test_unknown_hash_no_opinion(self, tmp_path: Path) -> None:
         denylist = self._denylist(tmp_path, "a" * 64 + "\n")
         enricher = LocalHashDenylistEnricher.from_path(denylist)
         assert enricher.fetch(Indicator(IndicatorType.SHA256, "b" * 64)) is None
 
-    def test_comments_and_case_are_handled(self, tmp_path):
+    def test_comments_and_case_are_handled(self, tmp_path: Path) -> None:
         # Upper-case entry + trailing comment; indicators arrive lowercased.
         body = "# header\n" + ("F" * 32) + "  # a known-bad md5\n"
         enricher = LocalHashDenylistEnricher.from_path(self._denylist(tmp_path, body))
         assert enricher.fetch(Indicator(IndicatorType.MD5, "f" * 32)) is not None
 
-    def test_missing_file_gives_no_opinion(self, tmp_path):
+    def test_missing_file_gives_no_opinion(self, tmp_path: Path) -> None:
         enricher = LocalHashDenylistEnricher.from_path(tmp_path / "absent.txt")
         assert enricher.fetch(Indicator(IndicatorType.SHA256, "c" * 64)) is None
 
-    def test_registered_keyless_in_registry(self):
+    def test_registered_keyless_in_registry(self) -> None:
         classes = EnricherCatalog.of_sources(logging.getLogger("test")).classes()
         assert LocalHashDenylistEnricher in classes
         # Keyless ⇒ env_token returns the always-on sentinel (never None).
@@ -583,10 +584,10 @@ class TestFileScanExtractor:
     def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
         return IndicatorExtraction.default().extract(collector, row)
 
-    def test_emits_sha256_indicator(self):
+    def test_emits_sha256_indicator(self) -> None:
         inds = self.extract("file_scan", {"sha256": "a" * 64, "path": "/bin/x"})
         assert len(inds) == 1
         assert inds[0].type is IndicatorType.SHA256
 
-    def test_no_sha_no_indicator(self):
+    def test_no_sha_no_indicator(self) -> None:
         assert self.extract("file_scan", {"path": "/bin/x"}) == []

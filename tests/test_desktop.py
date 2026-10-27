@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 
 import avai.desktop as desktop
+import pytest
 
 
 def _imports(src: str) -> set[str]:
@@ -26,7 +27,7 @@ def _imports(src: str) -> set[str]:
     return mods
 
 
-def test_desktop_does_no_subprocess_orchestration():
+def test_desktop_does_no_subprocess_orchestration() -> None:
     src = Path(desktop.__file__).read_text()
     assert "subprocess" not in _imports(src)  # not imported
     assert "subprocess." not in src  # no subprocess.run / .Popen call
@@ -34,8 +35,8 @@ def test_desktop_does_no_subprocess_orchestration():
 
 
 def test_dashboard_opens_control_and_app_mode_without_touching_env(
-    tmp_path, monkeypatch
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from unittest.mock import patch
 
 
@@ -51,7 +52,7 @@ def test_dashboard_opens_control_and_app_mode_without_touching_env(
     assert os.environ.get("AVAI_APP_MODE") is None
 
 
-def test_dashboard_serves_in_process(tmp_path):
+def test_dashboard_serves_in_process(tmp_path: Path) -> None:
     db = str(tmp_path / "avai.db")
     port = desktop.LoopbackPort().free()
     desktop.EmbeddedDashboard(db).start(port)
@@ -65,7 +66,7 @@ def test_dashboard_serves_in_process(tmp_path):
     raise AssertionError("dashboard thread did not serve")
 
 
-def test_build_runner_constructs_without_network(tmp_path):
+def test_build_runner_constructs_without_network(tmp_path: Path) -> None:
     from avai.host_monitor.main import MonitorArgs, MonitorWiring
 
     db = str(tmp_path / "m.db")

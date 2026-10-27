@@ -12,6 +12,7 @@ from sqlalchemy.exc import OperationalError
 from avai.db_migrate import AlembicMigrator
 from avai.host_monitor.models import Base
 from avai.host_monitor.sink import Sink
+from pathlib import Path
 
 _IDX = [
     "ix_collection_runs_started_at",
@@ -51,7 +52,7 @@ def _version(db: str) -> str | None:
         con.close()
 
 
-def test_sink_setup_applies_migrations(tmp_path):
+def test_sink_setup_applies_migrations(tmp_path: Path) -> None:
     db = str(tmp_path / "a.db")
     Sink.create(create_engine(f"sqlite:///{db}")).setup()
     assert set(_IDX) <= _indexes(db)
@@ -59,7 +60,7 @@ def test_sink_setup_applies_migrations(tmp_path):
     assert _version(db) == "0012_log_entries"
 
 
-def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path, monkeypatch):
+def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A pending migration that can't be applied (e.g. a read-only DB owned by
     another user) must abort startup with a clear error rather than silently
     serving on a stale schema and 500ing on the first write later."""
@@ -76,7 +77,7 @@ def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path, monkeypat
         Sink.create(create_engine(f"sqlite:///{db}")).setup()
 
 
-def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
+def test_upgrade_stamps_preexisting_create_all_db(tmp_path: Path) -> None:
     db = str(tmp_path / "b.db")
     eng = create_engine(f"sqlite:///{db}")
     from avai.enrichers.cache import EnrichmentSchema
@@ -97,7 +98,7 @@ def test_upgrade_stamps_preexisting_create_all_db(tmp_path):
     assert _version(db) == "0012_log_entries"
 
 
-def test_downgrade_then_upgrade_roundtrip(tmp_path):
+def test_downgrade_then_upgrade_roundtrip(tmp_path: Path) -> None:
     from alembic import command
 
     db = str(tmp_path / "c.db")
@@ -111,7 +112,7 @@ def test_downgrade_then_upgrade_roundtrip(tmp_path):
     assert set(_IDX) <= _indexes(db)  # recreated
 
 
-def test_control_state_migration_roundtrip(tmp_path):
+def test_control_state_migration_roundtrip(tmp_path: Path) -> None:
     from alembic import command
 
     db = str(tmp_path / "d.db")

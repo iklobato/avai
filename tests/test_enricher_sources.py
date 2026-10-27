@@ -84,7 +84,7 @@ class TestMalwareBazaar:
 
         return MalwareBazaarEnricher.create(http, dict(os.environ))
 
-    def test_hit_returns_malicious_verdict(self, monkeypatch):
+    def test_hit_returns_malicious_verdict(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
         http = _FakeHttp(
             _FakeResp(
@@ -109,7 +109,7 @@ class TestMalwareBazaar:
         assert ev.confidence > 0.9
         assert "AsyncRAT" in ev.summary
 
-    def test_no_results_returns_none(self, monkeypatch):
+    def test_no_results_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
         http = _FakeHttp(_FakeResp(json_body={"query_status": "no_results"}))
         e = self._enricher(http)
@@ -139,7 +139,7 @@ class TestCirclHashlookup:
 
         return CirclHashlookupEnricher.create(http, dict(os.environ))
 
-    def test_high_trust_hit_returns_benign(self):
+    def test_high_trust_hit_returns_benign(self) -> None:
         # Real CIRCL response: trust signal is "hashlookup:trust" (0-100).
         http = _FakeHttp(
             _FakeResp(
@@ -156,12 +156,12 @@ class TestCirclHashlookup:
         assert ev.verdict_hint is VerdictHint.BENIGN
         assert "notepad.exe" in ev.summary
 
-    def test_not_found_returns_none(self):
+    def test_not_found_returns_none(self) -> None:
         http = _FakeHttp(_FakeResp(status=404))
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.SHA1, "a" * 40)) is None
 
-    def test_low_trust_hit_is_not_whitelisted(self):
+    def test_low_trust_hit_is_not_whitelisted(self) -> None:
         # Regression: the source used to emit BENIGN (conf 0.9) for ANY 200
         # response. A low hashlookup:trust score means the hash is known but
         # untrusted — whitelisting it could suppress the judge on a bad
@@ -177,7 +177,7 @@ class TestCirclHashlookup:
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.SHA1, "b" * 40)) is None
 
-    def test_missing_trust_field_is_not_whitelisted(self):
+    def test_missing_trust_field_is_not_whitelisted(self) -> None:
         # No trust field at all -> trust 0 -> no benign whitelist.
         http = _FakeHttp(_FakeResp(json_body={"FileName": "x.exe"}))
         e = self._enricher(http)
@@ -195,7 +195,7 @@ class TestShodanInternetDB:
 
         return ShodanInternetDBEnricher.create(http, dict(os.environ))
 
-    def test_cve_hit_yields_suspicious(self):
+    def test_cve_hit_yields_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -211,7 +211,7 @@ class TestShodanInternetDB:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_honeypot_tag_yields_suspicious(self):
+    def test_honeypot_tag_yields_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -227,7 +227,7 @@ class TestShodanInternetDB:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_clean_host_yields_unknown(self):
+    def test_clean_host_yields_unknown(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -243,7 +243,7 @@ class TestShodanInternetDB:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.UNKNOWN
 
-    def test_404_returns_none(self):
+    def test_404_returns_none(self) -> None:
         http = _FakeHttp(_FakeResp(status=404))
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4")) is None
@@ -260,7 +260,7 @@ class TestIpwhoisGeo:
 
         return IpwhoisGeoEnricher.create(http, dict(os.environ))
 
-    def test_success_returns_geo_details_and_unknown_hint(self):
+    def test_success_returns_geo_details_and_unknown_hint(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -287,7 +287,7 @@ class TestIpwhoisGeo:
         assert ev.details["org"] == "Google LLC"
         assert "Mountain View" in ev.summary and "AS15169" in ev.summary
 
-    def test_unsuccessful_body_returns_none(self):
+    def test_unsuccessful_body_returns_none(self) -> None:
         # bogon / reserved address → ipwho.is answers success=false
         http = _FakeHttp(
             _FakeResp(
@@ -307,7 +307,7 @@ class TestIpwhoisGeo:
             enricher.fetch(Indicator(IndicatorType.IPV4, "8.8.8.8"))
         assert str(excinfo.value) == "ipwhois_geo returned 503"
 
-    def test_ipv6_indicator_supported_and_parsed(self):
+    def test_ipv6_indicator_supported_and_parsed(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -344,7 +344,7 @@ class TestCisaKev:
         # Reset class-level cache so tests don't bleed into each other.
         return CisaKevEnricher.create(http, dict(os.environ))
 
-    def test_known_exploited_cve_returns_malicious(self):
+    def test_known_exploited_cve_returns_malicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -368,7 +368,7 @@ class TestCisaKev:
         assert ev.verdict_hint is VerdictHint.MALICIOUS
         assert "WidgetServer" in ev.summary
 
-    def test_cve_not_in_catalog_returns_none(self):
+    def test_cve_not_in_catalog_returns_none(self) -> None:
         http = _FakeHttp(_FakeResp(json_body={"vulnerabilities": []}))
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.CVE, "CVE-1999-0000")) is None
@@ -385,7 +385,7 @@ class TestOSV:
 
         return OSVEnricher.create(http, dict(os.environ))
 
-    def test_package_with_advisory_returns_suspicious(self):
+    def test_package_with_advisory_returns_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -401,12 +401,12 @@ class TestOSV:
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
         assert "GHSA-1234-aaaa-bbbb" in ev.summary
 
-    def test_clean_package_returns_none(self):
+    def test_clean_package_returns_none(self) -> None:
         http = _FakeHttp(_FakeResp(json_body={"vulns": []}))
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.PACKAGE, "ok@1.0")) is None
 
-    def test_cve_indicator_uses_get_vulns_endpoint(self):
+    def test_cve_indicator_uses_get_vulns_endpoint(self) -> None:
         # CVE lookups must GET /v1/vulns/{id}; POST /v1/query {"id":...}
         # returns HTTP 400 against the real API. The GET returns a single
         # vuln object (not a {"vulns": [...]} envelope).
@@ -418,7 +418,7 @@ class TestOSV:
         assert method == "GET"
         assert url.endswith("/v1/vulns/CVE-2024-1")
 
-    def test_cve_alias_is_surfaced_for_forward_chain(self):
+    def test_cve_alias_is_surfaced_for_forward_chain(self) -> None:
         # Regression: OSV's primary id is often GHSA-/PYSEC-, with the CVE
         # only in aliases. details["vuln_ids"] used to carry the primary id
         # only, so the chain's CVE forward-enrichment (NVD CVSS, CISA KEV)
@@ -454,7 +454,7 @@ class TestOSV:
             ),
         ],
     )
-    def test_package_query_payload(self, value, payload):
+    def test_package_query_payload(self, value, payload) -> None:
         http = _FakeHttp(_FakeResp(json_body={"vulns": []}))
         self._enricher(http).fetch(Indicator(IndicatorType.PACKAGE, value))
         assert http.calls == [
@@ -465,7 +465,7 @@ class TestOSV:
             )
         ]
 
-    def test_package_without_name_is_not_queried(self):
+    def test_package_without_name_is_not_queried(self) -> None:
         http = _FakeHttp(_FakeResp(json_body={"vulns": [{"id": "X"}]}))
         ev = self._enricher(http).fetch(Indicator(IndicatorType.PACKAGE, "@1.0"))
         assert ev is None
@@ -498,7 +498,7 @@ class TestOSV:
             self._enricher(http).fetch(indicator)
         assert str(excinfo.value) == "osv returned 500"
 
-    def test_ids_are_deduped_across_the_first_five_vulns(self):
+    def test_ids_are_deduped_across_the_first_five_vulns(self) -> None:
         vulns = [{"id": f"GHSA-{n}", "aliases": ["CVE-2024-1"]} for n in range(7)]
         http = _FakeHttp(_FakeResp(json_body={"vulns": vulns}))
         ev = self._enricher(http).fetch(Indicator(IndicatorType.PACKAGE, "pkg@1.0"))
@@ -514,7 +514,7 @@ class TestOSV:
 
 
 class TestVirusTotal:
-    def _enricher(self, http, monkeypatch):
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("VT_API_KEY", "fake")
         from avai.enrichers.sources.virustotal import VirusTotalEnricher
 
@@ -534,7 +534,7 @@ class TestVirusTotal:
             }
         }
 
-    def test_many_malicious_engines_yields_malicious(self, monkeypatch):
+    def test_many_malicious_engines_yields_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(json_body=self._vt_body(malicious=30, harmless=20, undetected=15))
         )
@@ -543,7 +543,7 @@ class TestVirusTotal:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
 
-    def test_few_malicious_engines_yields_suspicious(self, monkeypatch):
+    def test_few_malicious_engines_yields_suspicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(json_body=self._vt_body(malicious=2, harmless=50, undetected=20))
         )
@@ -552,7 +552,7 @@ class TestVirusTotal:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_zero_malicious_with_many_engines_yields_benign(self, monkeypatch):
+    def test_zero_malicious_with_many_engines_yields_benign(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body=self._vt_body(
@@ -565,7 +565,7 @@ class TestVirusTotal:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.BENIGN
 
-    def test_404_returns_none(self, monkeypatch):
+    def test_404_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(_FakeResp(status=404))
         e = self._enricher(http, monkeypatch)
         assert e.fetch(Indicator(IndicatorType.SHA256, "a" * 64)) is None
@@ -577,13 +577,13 @@ class TestVirusTotal:
 
 
 class TestAbuseIpDb:
-    def _enricher(self, http, monkeypatch):
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("ABUSEIPDB_API_KEY", "fake")
         from avai.enrichers.sources.abuseipdb import AbuseIpDbEnricher
 
         return AbuseIpDbEnricher.create(http, dict(os.environ))
 
-    def test_high_score_yields_malicious(self, monkeypatch):
+    def test_high_score_yields_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -601,7 +601,7 @@ class TestAbuseIpDb:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
 
-    def test_low_score_yields_unknown(self, monkeypatch):
+    def test_low_score_yields_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -658,7 +658,7 @@ def _keyed_sources():
 
 
 @pytest.mark.parametrize("cls", _keyed_sources(), ids=lambda c: c.name)
-def test_keyed_source_sends_its_env_key(cls, monkeypatch):
+def test_keyed_source_sends_its_env_key(cls, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(cls.requires_token, "k-secret-123")
     http = _RecordingHttp()
     source = cls.create(http, dict(os.environ))

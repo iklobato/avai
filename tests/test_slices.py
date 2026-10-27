@@ -52,7 +52,7 @@ def _row_models() -> set[type[_RowBase]]:
     return found
 
 
-def test_every_row_model_has_exactly_one_slice():
+def test_every_row_model_has_exactly_one_slice() -> None:
     per_model = Counter(s.model for s in Slices.ALL)
 
     assert set(per_model) == _row_models()
@@ -60,13 +60,13 @@ def test_every_row_model_has_exactly_one_slice():
     assert len(SLICE_NAMES) == len(Slices.ALL)
 
 
-def test_every_slice_is_written_by_a_collector_and_only_catalogued_ones():
+def test_every_slice_is_written_by_a_collector_and_only_catalogued_ones() -> None:
     written = {cls.slice for cls in _collector_classes()}
 
     assert written == set(Slices.ALL)
 
 
-def test_streaming_flag_matches_the_collector_kind():
+def test_streaming_flag_matches_the_collector_kind() -> None:
     mismatched = [
         cls.__name__
         for cls in _collector_classes()
@@ -76,7 +76,7 @@ def test_streaming_flag_matches_the_collector_kind():
     assert mismatched == []
 
 
-def test_every_judged_collector_has_a_prompt_hint():
+def test_every_judged_collector_has_a_prompt_hint() -> None:
     hints = Prompts.load(DEFAULT_PROMPTS_PATH).collector_hints
     unhinted = sorted(
         cls.slice.name
@@ -88,5 +88,5 @@ def test_every_judged_collector_has_a_prompt_hint():
     assert set(hints) <= SLICE_NAMES
 
 
-def test_extractor_keys_are_catalogued_slices():
+def test_extractor_keys_are_catalogued_slices() -> None:
     assert IndicatorExtraction.default().collectors <= SLICE_NAMES

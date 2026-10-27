@@ -98,20 +98,20 @@ class FakeRun:
         return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
 
-def _on_path(monkeypatch, *tools):
+def _on_path(monkeypatch: pytest.MonkeyPatch, *tools):
     monkeypatch.setattr(
         shutil, "which", lambda name: f"/usr/bin/{name}" if name in tools else None
     )
 
 
-def _fake_run(monkeypatch, answer) -> FakeRun:
+def _fake_run(monkeypatch: pytest.MonkeyPatch, answer) -> FakeRun:
     run = FakeRun(answer)
     monkeypatch.setattr(subprocess, "run", run)
     return run
 
 
 @pytest.fixture
-def host_root(tmp_path, monkeypatch):
+def host_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A container-style host tree: every translated path lands under it."""
     return tmp_path
 
@@ -150,7 +150,7 @@ class FakeProcesses:
 
 
 class TestProcessCollector:
-    def test_row_per_process_with_uid_and_rss(self, monkeypatch):
+    def test_row_per_process_with_uid_and_rss(self, monkeypatch: pytest.MonkeyPatch) -> None:
         info = {
             "pid": 7,
             "ppid": 1,
@@ -196,7 +196,7 @@ def _conn(status, pid, port=22, raddr=None):
 
 
 class TestListeningPortsCollector:
-    def test_only_listeners_named_once_per_pid(self, monkeypatch):
+    def test_only_listeners_named_once_per_pid(self, monkeypatch: pytest.MonkeyPatch) -> None:
         conns = [
             _conn(psutil.CONN_LISTEN, 10, 22),
             _conn(psutil.CONN_LISTEN, 10, 2222),
@@ -225,7 +225,7 @@ class TestListeningPortsCollector:
 
 
 class TestProcessConnectionResolver:
-    def test_access_denied_gives_an_empty_map(self, monkeypatch):
+    def test_access_denied_gives_an_empty_map(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def denied(kind="inet"):
             raise psutil.AccessDenied()
 
@@ -233,8 +233,8 @@ class TestProcessConnectionResolver:
         assert ProcessConnectionResolver(PsutilConnections()).snapshot() == {}
 
     def test_vanished_process_is_labelled_by_pid_and_first_owner_wins(
-        self, monkeypatch
-    ):
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         peer = SimpleNamespace(ip="8.8.8.8", port=443)
         conns = [
             _conn("ESTABLISHED", 40, raddr=peer),
@@ -252,7 +252,7 @@ class TestProcessConnectionResolver:
 
 
 class TestNetworkInterfacesCollector:
-    def test_joins_addresses_stats_and_counters_by_name(self, monkeypatch):
+    def test_joins_addresses_stats_and_counters_by_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         addr = SimpleNamespace(
             family=SimpleNamespace(name="AF_INET"),
             address="10.0.0.5",
@@ -291,7 +291,7 @@ class TestNetworkInterfacesCollector:
 
 
 class TestMountsCollector:
-    def test_row_per_partition(self, monkeypatch):
+    def test_row_per_partition(self, monkeypatch: pytest.MonkeyPatch) -> None:
         part = SimpleNamespace(
             device="/dev/disk1s1", mountpoint="/", fstype="apfs", opts="rw"
         )
@@ -302,7 +302,7 @@ class TestMountsCollector:
         assert (row["device"], row["mountpoint"]) == ("/dev/disk1s1", "/")
         assert json.loads(row["raw_json"])["maxfile"] is None
 
-    def test_access_denied_yields_nothing(self, monkeypatch):
+    def test_access_denied_yields_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def denied(all=True):
             raise psutil.AccessDenied()
 
@@ -333,12 +333,12 @@ class TestTcpdumpCapture:
             resolver,
         )
 
-    def test_flows_capture_needs_tcpdump(self, monkeypatch):
+    def test_flows_capture_needs_tcpdump(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch)
         with pytest.raises(RuntimeError, match="tcpdump not found"):
             self.flows().capture()
 
-    def test_flows_capture_reads_banner_iface_and_passes_iface_args(self, monkeypatch):
+    def test_flows_capture_reads_banner_iface_and_passes_iface_args(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch, "tcpdump")
         run = _fake_run(
             monkeypatch,
@@ -355,7 +355,7 @@ class TestTcpdumpCapture:
         assert run.calls[0][:7] == ["tcpdump", "-n", "-q", "-l", "-t", "-c", "2000"]
         assert run.calls[0][7:] == ["-k", "I", "tcp", "or", "udp"]
 
-    def test_flows_capture_keeps_partial_output_on_timeout(self, monkeypatch):
+    def test_flows_capture_keeps_partial_output_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch, "tcpdump")
         _fake_run(
             monkeypatch,
@@ -365,7 +365,7 @@ class TestTcpdumpCapture:
         )
         assert self.flows().capture() == ("partial", None, "2026-01-01T00:00:00+00:00")
 
-    def test_dns_capture_filters_port_53_and_keeps_partial_output(self, monkeypatch):
+    def test_dns_capture_filters_port_53_and_keeps_partial_output(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch, "tcpdump")
         run = _fake_run(
             monkeypatch,
@@ -376,7 +376,7 @@ class TestTcpdumpCapture:
         assert self.dns().capture() == ("", "eth0", "2026-01-01T00:00:00+00:00")
         assert run.calls[0][-7:] == ["udp", "port", "53", "or", "tcp", "port", "53"]
 
-    def test_dns_capture_needs_tcpdump(self, monkeypatch):
+    def test_dns_capture_needs_tcpdump(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch)
         with pytest.raises(RuntimeError, match="tcpdump not found"):
             self.dns().capture()
@@ -400,7 +400,7 @@ class _FakeResolver:
 
 
 class TestDnsDoh:
-    def test_connection_to_a_doh_resolver_is_reported_once(self, monkeypatch):
+    def test_connection_to_a_doh_resolver_is_reported_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         c = DnsQueriesCollector(
             _FakeCapture(),
             _FakeResolver(
@@ -423,12 +423,12 @@ class TestDnsDoh:
 # ---- macOS system_profiler collectors -----------------------------------
 
 
-def _profiler(monkeypatch, payload: dict) -> FakeRun:
+def _profiler(monkeypatch: pytest.MonkeyPatch, payload: dict) -> FakeRun:
     return _fake_run(monkeypatch, lambda cmd: (json.dumps(payload), 0, ""))
 
 
 class TestSystemProfilerCollectors:
-    def test_usb_walks_nested_items_inheriting_location(self, monkeypatch):
+    def test_usb_walks_nested_items_inheriting_location(self, monkeypatch: pytest.MonkeyPatch) -> None:
         run = _profiler(
             monkeypatch,
             {
@@ -446,7 +446,7 @@ class TestSystemProfilerCollectors:
         assert (key["name"], key["location_id"]) == ("YubiKey", "0x14")
         assert "_items" not in json.loads(hub["raw_json"])
 
-    def test_bluetooth_flags_connected_and_paired_groups(self, monkeypatch):
+    def test_bluetooth_flags_connected_and_paired_groups(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _profiler(
             monkeypatch,
             {
@@ -471,7 +471,7 @@ class TestSystemProfilerCollectors:
             ("Mouse", 0, 0),
         ]
 
-    def test_wifi_reads_current_network(self, monkeypatch):
+    def test_wifi_reads_current_network(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _profiler(
             monkeypatch,
             {
@@ -496,7 +496,7 @@ class TestSystemProfilerCollectors:
         assert (en0["ssid"], en0["channel"], en0["security"]) == ("home", "36", "wpa3")
         assert (awdl["ssid"], awdl["channel"]) == (None, None)
 
-    def test_mdm_profiles_walk_nested_groups(self, monkeypatch):
+    def test_mdm_profiles_walk_nested_groups(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _profiler(
             monkeypatch,
             {
@@ -521,11 +521,11 @@ class TestSystemProfilerCollectors:
             "System",
         )
 
-    def test_mdm_profiles_command_failure_yields_nothing(self, monkeypatch):
+    def test_mdm_profiles_command_failure_yields_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _fake_run(monkeypatch, lambda cmd: ("", 1, "boom"))
         assert list(MdmProfilesCollector(CommandRunner()).collect()) == []
 
-    def test_kernel_extensions_keep_listed_fields_only(self, monkeypatch):
+    def test_kernel_extensions_keep_listed_fields_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _profiler(
             monkeypatch,
             {
@@ -548,7 +548,7 @@ class TestSystemProfilerCollectors:
         )
         assert "spext_architectures" not in json.loads(row["raw_json"])
 
-    def test_kernel_extensions_non_dict_output_yields_nothing(self, monkeypatch):
+    def test_kernel_extensions_non_dict_output_yields_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _fake_run(monkeypatch, lambda cmd: ("[]", 0, ""))
         assert list(KernelExtensionsCollector(CommandRunner()).collect()) == []
 
@@ -562,7 +562,7 @@ class TestMacSystemIntegrity:
             ("???", None),
         ],
     )
-    def test_gatekeeper_state_from_spctl_text(self, monkeypatch, spctl, expected):
+    def test_gatekeeper_state_from_spctl_text(self, monkeypatch: pytest.MonkeyPatch, spctl, expected) -> None:
         def answer(cmd):
             if cmd[0] == "spctl":
                 return (spctl, 0, "")
@@ -577,7 +577,7 @@ class TestMacSystemIntegrity:
         assert row["filevault_active"] == 1
         assert row["firewall_stealth"] is None
 
-    def test_missing_tools_read_as_unknown(self, monkeypatch):
+    def test_missing_tools_read_as_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _fake_run(monkeypatch, lambda cmd: FileNotFoundError(cmd[0]))
         monkeypatch.setattr(
             HostPaths,
@@ -596,7 +596,7 @@ class TestMacSystemIntegrity:
 
 
 @pytest.fixture
-def home(tmp_path, monkeypatch):
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     return tmp_path
 
@@ -611,7 +611,7 @@ def _plist(path: Path, data: dict) -> Path:
 
 @_posix_only
 class TestMacFileCollectors:
-    def test_user_launch_agent_row(self, home):
+    def test_user_launch_agent_row(self, home) -> None:
         agent = _plist(
             home / "Library" / "LaunchAgents" / "com.evil.plist",
             {
@@ -637,7 +637,7 @@ class TestMacFileCollectors:
         assert json.loads(row["start_calendar_interval_json"]) == {"Hour": 3}
         assert row["sha256"] and len(row["sha256"]) == 64
 
-    def test_quarantine_events_renamed_columns(self, home):
+    def test_quarantine_events_renamed_columns(self, home) -> None:
         db = (
             home
             / "Library"
@@ -666,10 +666,10 @@ class TestMacFileCollectors:
             "https://x/a.dmg",
         )
 
-    def test_quarantine_without_db_yields_nothing(self, home):
+    def test_quarantine_without_db_yields_nothing(self, home) -> None:
         assert list(QuarantineCollector().collect()) == []
 
-    def test_user_application_row(self, home):
+    def test_user_application_row(self, home) -> None:
         _plist(
             home / "Applications" / "Tool.app" / "Contents" / "Info.plist",
             {
@@ -689,7 +689,7 @@ class TestMacFileCollectors:
             "1.2",
         )
 
-    def test_system_extensions_from_db_plist(self, monkeypatch):
+    def test_system_extensions_from_db_plist(self, monkeypatch: pytest.MonkeyPatch) -> None:
         db = {
             "extensions": [
                 {
@@ -711,7 +711,7 @@ class TestMacFileCollectors:
         )
         assert row["categories"] == "com.apple.system_extension.network_extension"
 
-    def test_system_extensions_without_db_yields_nothing(self, monkeypatch):
+    def test_system_extensions_without_db_yields_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(HostPaths, "read_plist", staticmethod(lambda p: None))
         assert list(SystemExtensionsCollector(HostPaths("")).collect()) == []
 
@@ -722,7 +722,7 @@ class _Reader:
 
 
 class TestBrowserExtensionsCollector:
-    def test_reads_each_existing_profile_root_with_its_reader(self, tmp_path):
+    def test_reads_each_existing_profile_root_with_its_reader(self, tmp_path: Path) -> None:
         present = tmp_path / "chrome"
         present.mkdir()
         col = BrowserExtensionsCollector(
@@ -735,7 +735,7 @@ class TestBrowserExtensionsCollector:
 
 
 class TestFileIntegrityCollector:
-    def test_present_and_missing_files(self, tmp_path):
+    def test_present_and_missing_files(self, tmp_path: Path) -> None:
         present = _write(tmp_path / "sudoers", "root ALL=(ALL) ALL\n")
         missing = tmp_path / "gone"
         rows = list(
@@ -789,7 +789,7 @@ class _Accounts:
 
 @_posix_only
 class TestLayoutCollectors:
-    def test_setuid_and_setgid_files_only(self, tmp_path):
+    def test_setuid_and_setgid_files_only(self, tmp_path: Path) -> None:
         suid = _write(tmp_path / "bin" / "passwd", "x")
         suid.chmod(0o4755)
         _write(tmp_path / "bin" / "ls", "x").chmod(0o755)
@@ -797,7 +797,7 @@ class TestLayoutCollectors:
         assert (row["path"], row["setuid"], row["setgid"]) == (str(suid), 1, 0)
         assert json.loads(row["raw_json"])["mode"] == oct(row["mode"])
 
-    def test_authorized_keys_from_both_files(self, tmp_path):
+    def test_authorized_keys_from_both_files(self, tmp_path: Path) -> None:
         ssh = tmp_path / "home" / "alice" / ".ssh"
         _write(ssh / "authorized_keys", "ssh-ed25519 AAAAC3Nza alice@laptop\n")
         _write(ssh / "authorized_keys2", 'from="10.0.0.1" ssh-rsa AAAAB3Nza\n')
@@ -807,14 +807,14 @@ class TestLayoutCollectors:
             ("alice", "ssh-rsa", 'from="10.0.0.1"'),
         ]
 
-    def test_hosts_file_rows_and_missing_file(self, tmp_path):
+    def test_hosts_file_rows_and_missing_file(self, tmp_path: Path) -> None:
         fs = _Fs(tmp_path)
         assert list(HostsFileCollector(fs=fs).collect()) == []
         _write(tmp_path / "hosts", "127.0.0.1 localhost\n6.6.6.6 bank.com\n")
         rows = list(HostsFileCollector(fs=fs).collect())
         assert [r["hostnames"] for r in rows] == ["localhost", "bank.com"]
 
-    def test_sudoers_file_and_drop_ins_then_accounts(self, tmp_path):
+    def test_sudoers_file_and_drop_ins_then_accounts(self, tmp_path: Path) -> None:
         _write(tmp_path / "sudoers", "Defaults env_reset\nroot ALL=(ALL) ALL\n")
         _write(tmp_path / "sudoers.d" / "10-deploy", "deploy ALL=NOPASSWD: ALL\n")
         rows = list(
@@ -832,7 +832,7 @@ class TestLayoutCollectors:
 
 @_posix_only
 class TestLinuxDevices:
-    def test_usb_devices_skip_interfaces_and_empty_hubs(self, host_root):
+    def test_usb_devices_skip_interfaces_and_empty_hubs(self, host_root) -> None:
         devices = host_root / "sys" / "bus" / "usb" / "devices"
         _write(devices / "1-1" / "idVendor", "1050\n")
         _write(devices / "1-1" / "product", "YubiKey\n")
@@ -845,10 +845,10 @@ class TestLinuxDevices:
             "1-1",
         )
 
-    def test_usb_without_sysfs_yields_nothing(self, host_root):
+    def test_usb_without_sysfs_yields_nothing(self, host_root) -> None:
         assert list(LinuxUsbDevicesCollector(HostPaths(str(host_root))).collect()) == []
 
-    def test_bluetooth_paired_devices_from_bluez_info(self, host_root):
+    def test_bluetooth_paired_devices_from_bluez_info(self, host_root) -> None:
         dev = host_root / "var" / "lib" / "bluetooth" / "AA_BB" / "11_22_33"
         _write(dev / "info", "[General]\nName=Keyboard\nClass=0x000540\n")
         (dev.parent / "no_info_dev").mkdir()
@@ -863,7 +863,7 @@ class TestLinuxDevices:
     def _wifi(self, host_root: Path) -> LinuxWifiCollector:
         return LinuxWifiCollector(HostIo(CommandRunner(), HostPaths(str(host_root))))
 
-    def test_wifi_reads_iw_link(self, host_root, monkeypatch):
+    def test_wifi_reads_iw_link(self, host_root, monkeypatch: pytest.MonkeyPatch) -> None:
         net = host_root / "sys" / "class" / "net"
         (net / "wlan0" / "wireless").mkdir(parents=True)
         (net / "eth0").mkdir()
@@ -884,13 +884,13 @@ class TestLinuxDevices:
             "5180",
         )
 
-    def test_wifi_without_iw_still_lists_the_interface(self, host_root, monkeypatch):
+    def test_wifi_without_iw_still_lists_the_interface(self, host_root, monkeypatch: pytest.MonkeyPatch) -> None:
         (host_root / "sys" / "class" / "net" / "wlan0" / "wireless").mkdir(parents=True)
         _on_path(monkeypatch)
         (row,) = self._wifi(host_root).collect()
         assert (row["interface"], row["ssid"], row["raw_json"]) == ("wlan0", None, "{}")
 
-    def test_wifi_not_connected_and_failed_iw(self, host_root, monkeypatch):
+    def test_wifi_not_connected_and_failed_iw(self, host_root, monkeypatch: pytest.MonkeyPatch) -> None:
         (host_root / "sys" / "class" / "net" / "wlan0" / "wireless").mkdir(parents=True)
         _on_path(monkeypatch, "iw")
         _fake_run(monkeypatch, lambda cmd: ("Not connected.\n", 0, ""))
@@ -909,7 +909,7 @@ class TestLinuxInstalledApps:
         "short\tline\n"
     )
 
-    def test_installed_dpkg_packages_and_desktop_entries(self, host_root, monkeypatch):
+    def test_installed_dpkg_packages_and_desktop_entries(self, host_root, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch, "dpkg-query")
         run = _fake_run(monkeypatch, lambda cmd: (self.DPKG, 0, ""))
         (host_root / "var" / "lib" / "dpkg").mkdir(parents=True)
@@ -937,7 +937,7 @@ class TestLinuxInstalledApps:
             str(host_root / "var/lib/dpkg"),
         ]
 
-    def test_dpkg_failure_yields_no_package_rows(self, host_root, monkeypatch):
+    def test_dpkg_failure_yields_no_package_rows(self, host_root, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch, "dpkg-query")
         _fake_run(monkeypatch, lambda cmd: (self.DPKG, 2, ""))
         assert (
@@ -949,7 +949,7 @@ class TestLinuxInstalledApps:
             == []
         )
 
-    def test_dpkg_timeout_yields_no_package_rows(self, host_root, monkeypatch):
+    def test_dpkg_timeout_yields_no_package_rows(self, host_root, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch, "dpkg-query")
         _fake_run(monkeypatch, lambda cmd: subprocess.TimeoutExpired(cmd, 30))
         assert (
@@ -971,7 +971,7 @@ class TestLinuxSystemIntegrity:
         (row,) = col.collect()
         return row, json.loads(row["raw_json"])
 
-    def test_hardened_host(self, host_root, monkeypatch):
+    def test_hardened_host(self, host_root, monkeypatch: pytest.MonkeyPatch) -> None:
         _write(host_root / "sys/fs/selinux/enforce", "1\n")
         _write(host_root / "sys/module/apparmor/parameters/enabled", "Y\n")
         _write(host_root / "etc/ufw/ufw.conf", '# comment\nENABLED="yes"\n')
@@ -997,7 +997,7 @@ class TestLinuxSystemIntegrity:
         assert row["gatekeeper_assessments_enabled"] == 1
         assert row["screen_sharing_enabled"] == 1
 
-    def test_bare_host(self, host_root, monkeypatch):
+    def test_bare_host(self, host_root, monkeypatch: pytest.MonkeyPatch) -> None:
         _write(host_root / "sys/fs/selinux/enforce", "0\n")
         _write(host_root / "etc/ufw/ufw.conf", "ENABLED=no\n")
         _on_path(monkeypatch, "dmsetup")
@@ -1018,7 +1018,7 @@ class TestLinuxSystemIntegrity:
         assert row["gatekeeper_assessments_enabled"] == 0
         assert row["screen_sharing_enabled"] == 0
 
-    def test_vnc_port_listening_counts_as_enabled(self, host_root, monkeypatch):
+    def test_vnc_port_listening_counts_as_enabled(self, host_root, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch)
         _fake_run(monkeypatch, lambda cmd: subprocess.TimeoutExpired(cmd, 5))
         row, raw = self._collect(str(host_root), listening=1, established=1)
@@ -1030,7 +1030,7 @@ class TestLinuxSystemIntegrity:
 
 @_posix_only
 class TestLinuxStreamCommands:
-    def test_auth_events_fall_back_to_the_runtime_journal(self, host_root):
+    def test_auth_events_fall_back_to_the_runtime_journal(self, host_root) -> None:
         (host_root / "run" / "log" / "journal").mkdir(parents=True)
         cmd = LinuxAuthEventsCollector(HostJournal(HostPaths(str(host_root)))).command()
         assert "--priority=info" in cmd
@@ -1038,7 +1038,7 @@ class TestLinuxStreamCommands:
         assert cmd[i + 1] == str(host_root / "run/log/journal")
         assert cmd.count("+") == len(LinuxAuthEventsCollector.MATCH_GROUPS) - 1
 
-    def test_process_exec_reads_the_host_journal(self, host_root):
+    def test_process_exec_reads_the_host_journal(self, host_root) -> None:
         (host_root / "var" / "log" / "journal").mkdir(parents=True)
         cmd = LinuxProcessExecCollector(
             HostJournal(HostPaths(str(host_root)))
@@ -1048,7 +1048,7 @@ class TestLinuxStreamCommands:
 
 
 class TestLogTailJournald:
-    def test_journal_lines_become_rows(self, monkeypatch):
+    def test_journal_lines_become_rows(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _on_path(monkeypatch, "journalctl")
         lines = "\n".join(
             [
@@ -1078,7 +1078,7 @@ class TestLogTailJournald:
         assert rows[0]["level"] == "info"
         assert run.calls[0][:5] == ["journalctl", "-o", "json", "--no-pager", "-n"]
 
-    def test_journal_timeout_is_logged_and_skipped(self, monkeypatch, caplog):
+    def test_journal_timeout_is_logged_and_skipped(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
         _on_path(monkeypatch, "journalctl")
         _fake_run(monkeypatch, lambda cmd: subprocess.TimeoutExpired(cmd, 10))
         journal = JournalReader(
@@ -1087,7 +1087,7 @@ class TestLogTailJournald:
         assert list(journal.rows()) == []
         assert "journalctl read failed" in caplog.text
 
-    def test_tail_drops_the_partial_first_line_of_a_big_file(self, tmp_path):
+    def test_tail_drops_the_partial_first_line_of_a_big_file(self, tmp_path: Path) -> None:
         big = tmp_path / "syslog"
         big.write_text("x" * (TAIL_BYTES + 10) + "\nlast line\n")
         rows = list(LogFileTail(HostPaths("").translate(str(big))).rows())

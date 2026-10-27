@@ -53,27 +53,27 @@ The command completed successfully.
 
 
 class TestLocalGroupParser:
-    def test_extracts_members_between_separator_and_footer(self):
+    def test_extracts_members_between_separator_and_footer(self) -> None:
         members = LocalGroupParser().members(_NET_LOCALGROUP)
         assert members == ["Administrator", "alice", "Domain Admins"]
 
-    def test_empty_or_malformed_is_empty(self):
+    def test_empty_or_malformed_is_empty(self) -> None:
         assert LocalGroupParser().members("") == []
         assert LocalGroupParser().members("no separator here") == []
 
-    def test_privileged_group_members_yields_row(self):
+    def test_privileged_group_members_yields_row(self) -> None:
         runner = _FakeRunner({("net", "localgroup", "Administrators"): _NET_LOCALGROUP})
         rows = list(WindowsPrivilegedAccounts(runner).privileged_group_members())
         assert len(rows) == 1
         assert rows[0]["subject"] == "Administrators"
         assert "alice" in rows[0]["detail"]
 
-    def test_no_uid0_concept(self):
+    def test_no_uid0_concept(self) -> None:
         assert list(WindowsPrivilegedAccounts(_FakeRunner()).uid0_accounts()) == []
 
 
 class TestInstalledAppsParser:
-    def test_array_of_apps(self):
+    def test_array_of_apps(self) -> None:
         data = [
             {
                 "DisplayName": "7-Zip",
@@ -88,18 +88,18 @@ class TestInstalledAppsParser:
         assert rows[0]["path"] == "C:\\Program Files\\7-Zip"
         assert rows[1]["path"] == ""  # missing InstallLocation → empty
 
-    def test_single_object_is_normalised_to_one_row(self):
+    def test_single_object_is_normalised_to_one_row(self) -> None:
         obj = {"DisplayName": "Solo", "PSChildName": "solo"}
         rows = InstalledAppsParser().rows(obj)
         assert len(rows) == 1
         assert rows[0]["bundle_id"] == "solo"
 
-    def test_none_is_empty(self):
+    def test_none_is_empty(self) -> None:
         assert InstalledAppsParser().rows(None) == []
 
 
 class TestLaunchItemsParsers:
-    def test_run_keys(self):
+    def test_run_keys(self) -> None:
         data = [
             {
                 "scope": "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
@@ -113,7 +113,7 @@ class TestLaunchItemsParsers:
         assert rows[0]["program"] == "C:\\OneDrive.exe /background"
         assert rows[0]["run_at_load"] == 1
 
-    def test_schtasks_csv_verbose(self):
+    def test_schtasks_csv_verbose(self) -> None:
         # /v CSV: col 1 = TaskName, col 8 = Task To Run (>=9 columns).
         csv_text = (
             '"\\","\\MyTask","Ready","N/A","2026-01-01","Interactive","SYSTEM",'
@@ -126,24 +126,24 @@ class TestLaunchItemsParsers:
         assert rows[0]["label"] == "MyTask"
         assert rows[0]["program"] == "C:\\evil.exe"
 
-    def test_schtasks_skips_header_and_short_rows(self):
+    def test_schtasks_skips_header_and_short_rows(self) -> None:
         csv_text = (
             'folder,"TaskName","Status",a,b,c,d,e,"Task To Run",x\r\n' "too,short\r\n"
         )
         assert SchtasksParser().rows(csv_text) == []
 
-    def test_empty_inputs(self):
+    def test_empty_inputs(self) -> None:
         assert RunKeysParser().rows(None) == []
         assert SchtasksParser().rows("") == []
 
 
 class TestWindowsHostWiring:
-    def test_factory_resolves_windows(self):
+    def test_factory_resolves_windows(self) -> None:
         assert isinstance(
             HostFactory(logging.getLogger("test")).create("Windows"), WindowsHost
         )
 
-    def test_collector_set_includes_windows_native(self):
+    def test_collector_set_includes_windows_native(self) -> None:
         collectors = WindowsHost.create(logging.getLogger("test")).snapshot_collectors(
             Prompts(system="", user_template="")
         )
@@ -160,7 +160,7 @@ class TestWindowsHostWiring:
         assert "setuid_files" not in names
         assert "quarantine_events" not in names
 
-    def test_streaming_collectors_assembled(self):
+    def test_streaming_collectors_assembled(self) -> None:
         collectors = WindowsHost.create(logging.getLogger("test")).streaming_collectors(
             Prompts(system="", user_template="")
         )
@@ -173,7 +173,7 @@ class TestWindowsHostWiring:
 
 
 class TestSystemIntegrityParser:
-    def test_maps_posture_into_macos_shaped_row(self):
+    def test_maps_posture_into_macos_shaped_row(self) -> None:
         data = {
             "defender": {"RealTimeProtectionEnabled": True, "AntivirusEnabled": True},
             "firewall": [
@@ -192,7 +192,7 @@ class TestSystemIntegrityParser:
         assert row["remote_login_enabled"] == 1  # RDP accepting
         assert row["remote_management_enabled"] == 1  # WinRM running
 
-    def test_all_off_posture(self):
+    def test_all_off_posture(self) -> None:
         data = {
             "defender": {"RealTimeProtectionEnabled": False},
             "firewall": {"Name": "Public", "Enabled": False},
@@ -208,12 +208,12 @@ class TestSystemIntegrityParser:
         assert row["remote_login_enabled"] == 0
         assert row["remote_management_enabled"] == 0
 
-    def test_non_dict_is_none(self):
+    def test_non_dict_is_none(self) -> None:
         assert SecurityPostureParser().row(None) is None
 
 
 class TestUsbDevicesParser:
-    def test_ids_parsed_from_instance(self):
+    def test_ids_parsed_from_instance(self) -> None:
         data = {
             "FriendlyName": "USB Mass Storage Device",
             "InstanceId": "USB\\VID_0781&PID_5583\\0123456789",
@@ -226,19 +226,19 @@ class TestUsbDevicesParser:
         assert rows[0]["product_id"] == "5583"
         assert rows[0]["name"] == "USB Mass Storage Device"
 
-    def test_missing_ids_are_none(self):
+    def test_missing_ids_are_none(self) -> None:
         rows = UsbPnpParser().rows(
             {"FriendlyName": "Hub", "InstanceId": "USB\\ROOT_HUB30\\4&abc"}
         )
         assert rows[0]["vendor_id"] is None
         assert rows[0]["product_id"] is None
 
-    def test_none_is_empty(self):
+    def test_none_is_empty(self) -> None:
         assert UsbPnpParser().rows(None) == []
 
 
 class TestBluetoothParser:
-    def test_address_and_connected(self):
+    def test_address_and_connected(self) -> None:
         data = {
             "FriendlyName": "WH-1000XM4",
             "InstanceId": "BTHENUM\\Dev_AABBCCDDEEFF\\7&x",
@@ -249,7 +249,7 @@ class TestBluetoothParser:
         assert rows[0]["connected"] == 1
         assert rows[0]["paired"] == 1
 
-    def test_disconnected_present_device(self):
+    def test_disconnected_present_device(self) -> None:
         rows = BluetoothPnpParser().rows(
             {"FriendlyName": "Mouse", "InstanceId": "x", "Status": "Unknown"}
         )
@@ -269,7 +269,7 @@ There is 1 interface on the system:
     Channel                : 36
 """
 
-    def test_parses_interface_block(self):
+    def test_parses_interface_block(self) -> None:
         rows = NetshWlanParser().rows(self._NETSH)
         assert len(rows) == 1
         assert rows[0]["interface"] == "Wi-Fi"
@@ -279,15 +279,15 @@ There is 1 interface on the system:
         assert rows[0]["security"] == "WPA2-Personal"
         assert rows[0]["channel"] == "36"
 
-    def test_preamble_without_name_is_skipped(self):
+    def test_preamble_without_name_is_skipped(self) -> None:
         assert NetshWlanParser().rows("There is 0 interfaces\n") == []
 
-    def test_empty_is_empty(self):
+    def test_empty_is_empty(self) -> None:
         assert NetshWlanParser().rows("") == []
 
 
 class TestStreamingParsers:
-    def test_auth_event_to_row(self):
+    def test_auth_event_to_row(self) -> None:
         event = {
             "TimeCreated": "2026-06-16T12:00:00.000000+00:00",
             "Id": 4625,
@@ -304,11 +304,11 @@ class TestStreamingParsers:
         assert row["pid"] == 612
         assert "failed to log on" in row["event_message"]
 
-    def test_auth_event_missing_pid_is_none(self):
+    def test_auth_event_missing_pid_is_none(self) -> None:
         row = WinSecurityAuthParser().parse({"Id": 4624, "ProcessId": None})
         assert row["pid"] is None
 
-    def test_exec_event_to_row_with_hex_pids(self):
+    def test_exec_event_to_row_with_hex_pids(self) -> None:
         event = {
             "TimeCreated": "2026-06-16T12:00:01+00:00",
             "RecordId": 100,
@@ -330,7 +330,7 @@ class TestStreamingParsers:
         assert row["username"] == "alice"
         assert "/c whoami" in row["exe_args_json"]
 
-    def test_exec_event_empty_data(self):
+    def test_exec_event_empty_data(self) -> None:
         row = WinSecurityExecParser().parse({"Data": {}})
         assert row["exe_path"] is None
         assert row["exe_args_json"] is None

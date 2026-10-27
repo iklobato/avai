@@ -6,6 +6,7 @@ import pytest
 
 from avai.host_monitor.runtime import CommandSnapshot, FileSnapshot
 from avai.host_monitor.runtime.row_source import SNAPSHOT_TIMEOUT_S
+from pathlib import Path
 
 
 class _FakeRunner:
@@ -30,13 +31,13 @@ class _UpperParser:
 
 
 class TestCommandSnapshot:
-    def test_runs_command_and_parses(self):
+    def test_runs_command_and_parses(self) -> None:
         runner = _FakeRunner(text="a\n\nb\n")
         rows = list(CommandSnapshot(runner, ["arp", "-an"], _UpperParser()).rows())
         assert rows == [{"line": "A"}, {"line": "B"}]
         assert runner.called_with[0] == ["arp", "-an"]
 
-    def test_missing_binary_raises(self):
+    def test_missing_binary_raises(self) -> None:
         runner = _FakeRunner(exists=False)
         with pytest.raises(RuntimeError) as exc:
             list(CommandSnapshot(runner, ["nope"], _UpperParser()).rows())
@@ -49,12 +50,12 @@ class TestCommandSnapshot:
 
 
 class TestFileSnapshot:
-    def test_reads_and_parses(self, tmp_path):
+    def test_reads_and_parses(self, tmp_path: Path) -> None:
         p = tmp_path / "f"
         p.write_text("one\ntwo\n")
         rows = list(FileSnapshot(p, _UpperParser()).rows())
         assert rows == [{"line": "ONE"}, {"line": "TWO"}]
 
-    def test_missing_file_is_empty_not_error(self, tmp_path):
+    def test_missing_file_is_empty_not_error(self, tmp_path: Path) -> None:
         rows = list(FileSnapshot(tmp_path / "absent", _UpperParser()).rows())
         assert rows == []

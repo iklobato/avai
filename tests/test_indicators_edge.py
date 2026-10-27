@@ -35,7 +35,7 @@ class TestIsPrivateIp:
             "255.255.255.255",  # broadcast / reserved
         ],
     )
-    def test_recognises_non_routable(self, ip):
+    def test_recognises_non_routable(self, ip) -> None:
         assert HostClassifier().is_private_ip(ip)
 
     @pytest.mark.parametrize(
@@ -48,21 +48,21 @@ class TestIsPrivateIp:
             "11.0.0.1",  # outside 10.0.0.0/8
         ],
     )
-    def test_recognises_public(self, ip):
+    def test_recognises_public(self, ip) -> None:
         assert not HostClassifier().is_private_ip(ip)
 
-    def test_returns_false_for_garbage(self):
+    def test_returns_false_for_garbage(self) -> None:
         assert not HostClassifier().is_private_ip("not-an-ip")
         assert not HostClassifier().is_private_ip("")
         assert not HostClassifier().is_private_ip("999.999.999.999")
 
 
 class TestIsIPv4:
-    def test_ipv6_rejected(self):
+    def test_ipv6_rejected(self) -> None:
         assert not HostClassifier().is_ipv4("::1")
         assert not HostClassifier().is_ipv4("2001:db8::1")
 
-    def test_garbage_rejected(self):
+    def test_garbage_rejected(self) -> None:
         assert not HostClassifier().is_ipv4("not.an.ip")
         assert not HostClassifier().is_ipv4("")
 
@@ -77,7 +77,7 @@ class TestIsDomain:
             "co.uk",
         ],
     )
-    def test_accepts_real_domains(self, d):
+    def test_accepts_real_domains(self, d) -> None:
         assert HostClassifier().is_domain(d)
 
     @pytest.mark.parametrize(
@@ -90,7 +90,7 @@ class TestIsDomain:
             "ends-dot.",  # trailing dot
         ],
     )
-    def test_rejects_non_domains(self, d):
+    def test_rejects_non_domains(self, d) -> None:
         # Concrete behaviour: each of these must be rejected. The IPv4
         # case is the load-bearing one (regression for the _is_domain
         # vs _is_ipv4 collision bug).
@@ -106,19 +106,19 @@ class TestExtractIndicatorsEdgeCases:
     def extract(self, collector: str, row: dict[str, object]) -> list[Indicator]:
         return IndicatorExtraction.default().extract(collector, row)
 
-    def test_empty_row_returns_empty_list(self):
+    def test_empty_row_returns_empty_list(self) -> None:
         assert self.extract("processes", {}) == []
 
-    def test_processes_with_nonexistent_exe_returns_empty(self):
+    def test_processes_with_nonexistent_exe_returns_empty(self) -> None:
         assert self.extract("processes", {"exe": "/no/such/path"}) == []
 
-    def test_processes_with_none_exe_returns_empty(self):
+    def test_processes_with_none_exe_returns_empty(self) -> None:
         assert self.extract("processes", {"exe": None}) == []
 
-    def test_processes_with_empty_exe_string_returns_empty(self):
+    def test_processes_with_empty_exe_string_returns_empty(self) -> None:
         assert self.extract("processes", {"exe": ""}) == []
 
-    def test_network_connections_ipv6_is_skipped(self):
+    def test_network_connections_ipv6_is_skipped(self) -> None:
         # avai's IndicatorType.IPV4 is intentional — we don't enrich v6 yet.
         out = self.extract(
             "network_connections",
@@ -128,7 +128,7 @@ class TestExtractIndicatorsEdgeCases:
         )
         assert out == []
 
-    def test_network_connections_malformed_raddr_returns_empty(self):
+    def test_network_connections_malformed_raddr_returns_empty(self) -> None:
         out = self.extract("network_connections", {"raddr": "no-colon"})
         assert out == []
 
@@ -143,11 +143,11 @@ class TestExtractIndicatorsEdgeCases:
             "224.0.0.1:1900",  # multicast (SSDP)
         ],
     )
-    def test_network_connections_private_ip_skipped(self, addr):
+    def test_network_connections_private_ip_skipped(self, addr) -> None:
         out = self.extract("network_connections", {"raddr": addr})
         assert out == []
 
-    def test_listening_ports_public_bind_emits_ip(self):
+    def test_listening_ports_public_bind_emits_ip(self) -> None:
         # 8.8.8.8 = Google DNS, real public address. (TEST-NET blocks
         # like 203.0.113.0/24 are correctly treated as reserved by
         # ipaddress.is_reserved → they'd be filtered.)
@@ -156,11 +156,11 @@ class TestExtractIndicatorsEdgeCases:
         assert out[0].type is IndicatorType.IPV4
         assert out[0].value == "8.8.8.8"
 
-    def test_listening_ports_loopback_bind_skipped(self):
+    def test_listening_ports_loopback_bind_skipped(self) -> None:
         out = self.extract("listening_ports", {"laddr": "127.0.0.1:8000"})
         assert out == []
 
-    def test_quarantine_with_non_http_url_skipped(self):
+    def test_quarantine_with_non_http_url_skipped(self) -> None:
         out = self.extract(
             "quarantine_events",
             {
@@ -169,7 +169,7 @@ class TestExtractIndicatorsEdgeCases:
         )
         assert out == []
 
-    def test_quarantine_with_ip_host_yields_ipv4(self):
+    def test_quarantine_with_ip_host_yields_ipv4(self) -> None:
         # Real public IP — must classify as IPv4 (not domain — see
         # _is_domain fix). Regression: the digit-only "labels" of an
         # IPv4 literal match the domain regex.
@@ -184,7 +184,7 @@ class TestExtractIndicatorsEdgeCases:
         assert "ipv4" in types
         assert "domain" not in types
 
-    def test_browser_extension_malformed_json_returns_empty(self):
+    def test_browser_extension_malformed_json_returns_empty(self) -> None:
         out = self.extract(
             "browser_extensions",
             {
@@ -193,7 +193,7 @@ class TestExtractIndicatorsEdgeCases:
         )
         assert out == []
 
-    def test_browser_extension_empty_array_returns_empty(self):
+    def test_browser_extension_empty_array_returns_empty(self) -> None:
         out = self.extract(
             "browser_extensions",
             {
@@ -202,7 +202,7 @@ class TestExtractIndicatorsEdgeCases:
         )
         assert out == []
 
-    def test_browser_extension_wildcard_all_urls_skipped(self):
+    def test_browser_extension_wildcard_all_urls_skipped(self) -> None:
         # "<all_urls>" isn't a real domain — the extractor should not
         # emit it as one.
         out = self.extract(
@@ -213,16 +213,16 @@ class TestExtractIndicatorsEdgeCases:
         )
         assert out == []
 
-    def test_installed_apps_without_version_still_emits(self):
+    def test_installed_apps_without_version_still_emits(self) -> None:
         out = self.extract("installed_apps", {"name": "openssl"})
         assert len(out) == 1
         assert out[0].value == "openssl"  # no @version suffix
 
-    def test_installed_apps_without_name_yields_nothing(self):
+    def test_installed_apps_without_name_yields_nothing(self) -> None:
         out = self.extract("installed_apps", {"name": ""})
         assert out == []
 
-    def test_system_integrity_requires_both_product_and_cycle(self):
+    def test_system_integrity_requires_both_product_and_cycle(self) -> None:
         # Only os_name → no indicator.
         assert self.extract("system_integrity", {"os_name": "ubuntu"}) == []
         # Only os_version → no indicator.
@@ -233,7 +233,7 @@ class TestExtractIndicatorsEdgeCases:
         assert len(out) == 1
         assert out[0].value == "ubuntu@22.04"
 
-    def test_file_integrity_uses_recorded_sha256_not_path(self):
+    def test_file_integrity_uses_recorded_sha256_not_path(self) -> None:
         digest = "a" * 64
         out = self.extract(
             "file_integrity",
@@ -245,7 +245,7 @@ class TestExtractIndicatorsEdgeCases:
         assert len(out) == 1
         assert out[0].value == digest
 
-    def test_file_integrity_malformed_sha256_skipped(self):
+    def test_file_integrity_malformed_sha256_skipped(self) -> None:
         out = self.extract(
             "file_integrity",
             {
@@ -255,12 +255,12 @@ class TestExtractIndicatorsEdgeCases:
         )
         assert out == []
 
-    def test_unknown_collector_is_silent(self):
+    def test_unknown_collector_is_silent(self) -> None:
         # No exception, no indicators — graceful no-op for collectors
         # that haven't opted in.
         assert self.extract("not_a_collector", {"x": 1}) == []
 
-    def test_dedupes_within_a_single_row(self):
+    def test_dedupes_within_a_single_row(self) -> None:
         # A weird future extractor could emit the same indicator twice;
         # the dispatcher should dedupe at the call site.
         from avai.enrichers import Indicator
@@ -357,7 +357,7 @@ HOST_CASES = [
 
 
 @pytest.mark.parametrize("collector,row,expected", HOST_CASES)
-def test_extractor_classifies_hosts(collector, row, expected):
+def test_extractor_classifies_hosts(collector, row, expected) -> None:
     extraction = IndicatorExtraction.default()
     got = [(i.type, i.value) for i in extraction.extract(collector, row)]
     assert got == expected

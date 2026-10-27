@@ -35,7 +35,7 @@ class _FakeRunner:
 
 
 class TestHostFactory:
-    def test_resolves_each_known_platform(self):
+    def test_resolves_each_known_platform(self) -> None:
         assert isinstance(
             HostFactory(logging.getLogger("test")).create("Darwin"), MacOSHost
         )
@@ -43,19 +43,19 @@ class TestHostFactory:
             HostFactory(logging.getLogger("test")).create("Linux"), LinuxHost
         )
 
-    def test_resolves_windows(self):
+    def test_resolves_windows(self) -> None:
         from avai.host_monitor.hosts.windows import WindowsHost
 
         assert isinstance(
             HostFactory(logging.getLogger("test")).create("Windows"), WindowsHost
         )
 
-    def test_unknown_platform_raises_loudly(self):
+    def test_unknown_platform_raises_loudly(self) -> None:
         with pytest.raises(RuntimeError) as exc:
             HostFactory(logging.getLogger("test")).create("Plan9")
         assert "Plan9" in str(exc.value)
 
-    def test_default_uses_current_platform(self):
+    def test_default_uses_current_platform(self) -> None:
         # Whatever this test host is, it must resolve to *some* Host with
         # the collector-assembly interface — never the silent-macOS default.
         host = HostFactory(logging.getLogger("test")).create()
@@ -64,20 +64,20 @@ class TestHostFactory:
 
 
 class TestFilesystemLayouts:
-    def test_macos_uses_native_paths(self):
+    def test_macos_uses_native_paths(self) -> None:
         fs = MacOSFilesystemLayout()
         assert fs.hosts_file() == Path("/etc/hosts")
         assert fs.sudoers_file() == Path("/etc/sudoers")
         assert fs.tcpdump_interface_args() == ["-k", "I"]
         assert Path("/usr/bin") in fs.privileged_bin_dirs()
 
-    def test_linux_uses_any_interface_and_opt_in_bin_dirs(self):
+    def test_linux_uses_any_interface_and_opt_in_bin_dirs(self) -> None:
         fs = LinuxFilesystemLayout(HostPaths(""))
         assert fs.tcpdump_interface_args() == ["-i", "any"]
         # Linux scans /opt too; macOS does not.
         assert Path("/opt") in fs.privileged_bin_dirs()
 
-    def test_layouts_are_distinct_per_os(self):
+    def test_layouts_are_distinct_per_os(self) -> None:
         assert (
             MacOSFilesystemLayout().tcpdump_interface_args()
             != LinuxFilesystemLayout(HostPaths("")).tcpdump_interface_args()
@@ -85,7 +85,7 @@ class TestFilesystemLayouts:
 
 
 class TestMacOSPrivilegedAccounts:
-    def test_parses_dscl_group_membership(self):
+    def test_parses_dscl_group_membership(self) -> None:
         runner = _FakeRunner(
             {
                 ("dscl", ".", "-read", "/Groups/admin", "GroupMembership"): (
@@ -100,7 +100,7 @@ class TestMacOSPrivilegedAccounts:
         assert rows[0]["detail"] == "alice bob"
         assert rows[0]["source_path"] == "dscl:/Groups"
 
-    def test_parses_dscl_uid0_accounts(self):
+    def test_parses_dscl_uid0_accounts(self) -> None:
         runner = _FakeRunner(
             {
                 ("dscl", ".", "-list", "/Users", "UniqueID"): (
@@ -113,7 +113,7 @@ class TestMacOSPrivilegedAccounts:
 
 
 class TestLinuxPrivilegedAccountsReadFiles:
-    def test_reads_and_parses_group_file(self, tmp_path, monkeypatch):
+    def test_reads_and_parses_group_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         group = tmp_path / "group"
         group.write_text("sudo:x:27:alice\nstaff:x:50:bob\n")
         # Point the reader at our temp file by patching the path translator.
@@ -126,7 +126,7 @@ class TestLinuxPrivilegedAccountsReadFiles:
 
 
 class TestHostWiring:
-    def test_macos_host_injects_capabilities_into_collectors(self):
+    def test_macos_host_injects_capabilities_into_collectors(self) -> None:
         host = MacOSHost.create(logging.getLogger("test"))
         collectors = host.snapshot_collectors(Prompts(system="", user_template=""))
         by_name = {c.name: c for c in collectors}
@@ -137,7 +137,7 @@ class TestHostWiring:
         assert by_name["setuid_files"]._fs is not None
         assert by_name["privilege_config"]._accounts is not None
 
-    def test_linux_host_drops_macos_only_and_wires_capabilities(self):
+    def test_linux_host_drops_macos_only_and_wires_capabilities(self) -> None:
         host = LinuxHost.create(logging.getLogger("test"))
         collectors = host.snapshot_collectors(Prompts(system="", user_template=""))
         names = {c.name for c in collectors}
@@ -146,7 +146,7 @@ class TestHostWiring:
         assert "quarantine_events" not in names
         assert "hosts_file" in names
 
-    def test_streaming_sets_differ_per_os(self):
+    def test_streaming_sets_differ_per_os(self) -> None:
         mac = {
             c.name
             for c in MacOSHost.create(logging.getLogger("test")).streaming_collectors(

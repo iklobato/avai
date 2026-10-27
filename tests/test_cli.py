@@ -15,11 +15,12 @@ import pytest
 
 from avai import __version__
 from avai.cli import AvaiCli
+from pathlib import Path
 
 
 class TestVersionFlag:
     @pytest.mark.parametrize("flag", ["-v", "--version"])
-    def test_prints_version_and_exits_zero(self, flag, capsys):
+    def test_prints_version_and_exits_zero(self, flag, capsys: pytest.CaptureFixture[str]) -> None:
         rc = AvaiCli.main([flag])
         out = capsys.readouterr().out.strip()
         assert rc == 0
@@ -28,7 +29,7 @@ class TestVersionFlag:
 
 class TestHelpFlag:
     @pytest.mark.parametrize("argv", [[], ["-h"], ["--help"], ["help"]])
-    def test_no_args_or_help_shows_usage(self, argv, capsys):
+    def test_no_args_or_help_shows_usage(self, argv, capsys: pytest.CaptureFixture[str]) -> None:
         rc = AvaiCli.main(argv)
         out = capsys.readouterr().out
         assert rc == 0
@@ -38,14 +39,14 @@ class TestHelpFlag:
 
 class TestDispatch:
     @pytest.mark.parametrize("alias", ["monitor", "start", "scan"])
-    def test_monitor_aliases_route_to_host_monitor(self, alias):
+    def test_monitor_aliases_route_to_host_monitor(self, alias) -> None:
         with patch("avai.host_monitor.main.MonitorApp.main", return_value=0) as m:
             rc = AvaiCli.main([alias, "--once"])
         assert rc == 0
         m.assert_called_once_with()
 
     @pytest.mark.parametrize("alias", ["dashboard", "ui", "serve"])
-    def test_dashboard_aliases_route_to_dashboard(self, alias):
+    def test_dashboard_aliases_route_to_dashboard(self, alias) -> None:
         with patch("avai.dashboard.serve.DashboardCli.main", return_value=0) as d:
             rc = AvaiCli.main([alias, "--port", "9000"])
         assert rc == 0
@@ -58,7 +59,7 @@ class TestDispatch:
             ("dashboard", "avai.dashboard.serve.DashboardCli"),
         ],
     )
-    def test_remaining_argv_passed_through(self, cmd, target):
+    def test_remaining_argv_passed_through(self, cmd, target) -> None:
         """sys.argv is rewritten so the called main() sees only its
         own arguments: the original subcommand token is dropped."""
         import sys
@@ -78,7 +79,7 @@ class TestDispatch:
 
 class TestAppCommand:
     @pytest.mark.parametrize("alias", ["app", "gui", "desktop"])
-    def test_app_aliases_route_to_desktop(self, alias):
+    def test_app_aliases_route_to_desktop(self, alias) -> None:
         with patch("avai.desktop.DesktopApp.main", return_value=0) as d:
             rc = AvaiCli.main([alias])
         assert rc == 0
@@ -101,7 +102,7 @@ class TestInstallHostsCommand:
         ):
             return AvaiCli.main(["install-hosts", *argv])
 
-    def test_install_maps_the_default_hostname(self, capsys):
+    def test_install_maps_the_default_hostname(self, capsys: pytest.CaptureFixture[str]) -> None:
         registrar = self._registrar("CREATED")
         rc = self._run([], registrar)
         assert rc == 0
@@ -109,19 +110,19 @@ class TestInstallHostsCommand:
         registrar.remove.assert_not_called()
         assert "mapped avai.local" in capsys.readouterr().out
 
-    def test_remove_with_a_custom_hostname(self, capsys):
+    def test_remove_with_a_custom_hostname(self, capsys: pytest.CaptureFixture[str]) -> None:
         registrar = self._registrar("REMOVED")
         rc = self._run(["--remove", "--hostname", "box.local"], registrar)
         assert rc == 0
         registrar.remove.assert_called_once_with("box.local")
         assert "removed box.local" in capsys.readouterr().out
 
-    def test_unchanged_says_so(self, capsys):
+    def test_unchanged_says_so(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = self._run(["--remove"], self._registrar("UNCHANGED"))
         assert rc == 0
         assert "already absent" in capsys.readouterr().out
 
-    def test_permission_error_prints_the_hint(self, capsys):
+    def test_permission_error_prints_the_hint(self, capsys: pytest.CaptureFixture[str]) -> None:
         from pathlib import Path
 
         from avai.hostsfile import HostsPermissionError
@@ -134,7 +135,7 @@ class TestInstallHostsCommand:
         assert rc == 1
         assert capsys.readouterr().err.strip() == "avai: run with sudo"
 
-    def test_other_hosts_error_is_reported(self, capsys):
+    def test_other_hosts_error_is_reported(self, capsys: pytest.CaptureFixture[str]) -> None:
         from avai.hostsfile import HostsError
 
         with patch(
@@ -147,7 +148,7 @@ class TestInstallHostsCommand:
 
 
 class TestMigrateCommand:
-    def test_migrate_upgrades_the_given_db(self, capsys):
+    def test_migrate_upgrades_the_given_db(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch("avai.db_migrate.AlembicMigrator") as migrator:
             rc = AvaiCli.main(["migrate", "--db", "/tmp/x.db"])
         assert rc == 0
@@ -157,7 +158,7 @@ class TestMigrateCommand:
 
 
 class TestRulesCommand:
-    def _rules_dir(self, tmp_path):
+    def _rules_dir(self, tmp_path: Path):
         d = tmp_path / "rules"
         d.mkdir()
         (d / "r.yar").write_text(
@@ -165,13 +166,13 @@ class TestRulesCommand:
         )
         return d
 
-    def test_rules_reports_count(self, tmp_path, capsys):
+    def test_rules_reports_count(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = AvaiCli.main(["rules", "--rules-dir", str(self._rules_dir(tmp_path))])
         out = capsys.readouterr().out
         assert rc == 0
         assert "1 YARA rule(s) loaded" in out
 
-    def test_rules_list_prints_identifiers(self, tmp_path, capsys):
+    def test_rules_list_prints_identifiers(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         rc = AvaiCli.main(
             ["rules", "--rules-dir", str(self._rules_dir(tmp_path)), "--list"]
         )
@@ -180,7 +181,7 @@ class TestRulesCommand:
         assert "demo_rule" in out
         assert "[DEMO]" in out  # tag rendered
 
-    def test_rules_empty_dir_returns_1(self, tmp_path, capsys):
+    def test_rules_empty_dir_returns_1(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
         empty = tmp_path / "empty"
         empty.mkdir()
         rc = AvaiCli.main(["rules", "--rules-dir", str(empty)])
@@ -189,7 +190,7 @@ class TestRulesCommand:
 
 
 class TestUnknownCommand:
-    def test_unknown_returns_exit_2_and_writes_to_stderr(self, capsys):
+    def test_unknown_returns_exit_2_and_writes_to_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
         rc = AvaiCli.main(["bogus-command"])
         err = capsys.readouterr().err
         assert rc == 2
@@ -201,7 +202,7 @@ class TestDefaultArgs:
     """Bare `avai monitor` / `avai dashboard` must apply the canonical
     defaults (~/.avai/avai.db etc.) with no flags."""
 
-    def test_monitor_defaults(self):
+    def test_monitor_defaults(self) -> None:
         from pathlib import Path
 
         from avai.host_monitor.main import MonitorArgs
@@ -211,7 +212,7 @@ class TestDefaultArgs:
         assert ns.interval == 300
         assert ns.judge_max_per_collector == 25
 
-    def test_dashboard_defaults(self):
+    def test_dashboard_defaults(self) -> None:
         from pathlib import Path
 
         from avai.dashboard.serve import DashboardArgs
@@ -225,7 +226,7 @@ class TestDashboardServer:
     """The dashboard runs on the waitress production server by default
     (no Werkzeug 'development server' warning); --debug uses app.run."""
 
-    def test_default_serves_via_waitress(self):
+    def test_default_serves_via_waitress(self) -> None:
         from avai.dashboard.serve import DashboardServer, ServeOptions
 
         app = MagicMock()
@@ -235,7 +236,7 @@ class TestDashboardServer:
         assert wserve.call_args.args[0] is app
         app.run.assert_not_called()
 
-    def test_debug_uses_dev_server(self):
+    def test_debug_uses_dev_server(self) -> None:
         from avai.dashboard.serve import DashboardServer, ServeOptions
 
         app = MagicMock()

@@ -304,7 +304,7 @@ def _count(sink, model) -> int:
 
 
 class TestSnapshotCycle:
-    def test_rows_are_written_judged_and_marked_seen(self, sink):
+    def test_rows_are_written_judged_and_marked_seen(self, sink: Sink) -> None:
         judge = _ScriptedJudge({"evil": Verdict.SUSPICIOUS})
 
         run_id, ok, failed = _runner(
@@ -322,7 +322,7 @@ class TestSnapshotCycle:
         started = _started_at(sink, run_id)
         assert {j.last_seen_at for j in judged.values()} == {started}
 
-    def test_judge_sees_baseline_and_operator_feedback(self, sink):
+    def test_judge_sees_baseline_and_operator_feedback(self, sink: Sink) -> None:
         with Session(sink.engine) as s:
             s.add(
                 FeedbackRow(
@@ -346,7 +346,7 @@ class TestSnapshotCycle:
         assert entries[0]["baseline"]["times_seen"] == 1
         assert entries[0]["baseline"]["novel"] is False
 
-    def test_judge_sees_threat_intel_evidence(self, sink):
+    def test_judge_sees_threat_intel_evidence(self, sink: Sink) -> None:
         cache = EvidenceCache.on_base(sink.engine, Base)
         chain = EnrichmentChain([_HitEnricher()], cache, logging.getLogger("test"))
         judge = _ScriptedJudge()
@@ -357,7 +357,7 @@ class TestSnapshotCycle:
         assert evidence[0]["src"] == "test_hit"
         assert evidence[0]["value"] == "8.8.8.8"
 
-    def test_second_opinions_rewrite_verdicts_before_they_are_stored(self, sink):
+    def test_second_opinions_rewrite_verdicts_before_they_are_stored(self, sink: Sink) -> None:
         judge = _ScriptedJudge({"evil": Verdict.MALICIOUS, "odd": Verdict.UNKNOWN})
         runner = _runner(
             sink,
@@ -375,7 +375,7 @@ class TestSnapshotCycle:
         assert judged[_proc_hash("odd")].verdict == "benign"
         assert judged[_proc_hash("odd")].reasoning.startswith("[investigated]")
 
-    def test_judging_off_still_marks_known_findings_seen(self, sink):
+    def test_judging_off_still_marks_known_findings_seen(self, sink: Sink) -> None:
         with Session(sink.engine) as s:
             s.add(
                 Judgement(
@@ -397,7 +397,7 @@ class TestSnapshotCycle:
         assert set(judged) == {_proc_hash("evil")}
         assert judged[_proc_hash("evil")].last_seen_at == _started_at(sink, run_id)
 
-    def test_a_failing_collector_is_recorded_and_the_cycle_goes_on(self, sink):
+    def test_a_failing_collector_is_recorded_and_the_cycle_goes_on(self, sink: Sink) -> None:
         run_id, ok, failed = _runner(sink, [_Broken(), _Procs("a")]).run_once()
 
         assert (ok, failed) == (1, 1)
@@ -418,7 +418,7 @@ def _stream_row(process, message):
 
 
 class TestStreamingJudging:
-    def test_new_streamed_rows_are_judged_each_cycle(self, sink):
+    def test_new_streamed_rows_are_judged_each_cycle(self, sink: Sink) -> None:
         sink.write(AuthEventRow, [_stream_row("sshd", "failed password")])
         judge = _ScriptedJudge({"sshd": Verdict.SUSPICIOUS})
 
@@ -429,7 +429,7 @@ class TestStreamingJudging:
         assert entries[0]["baseline"]["times_seen"] == 1
         assert [j.verdict for j in _judgements(sink).values()] == ["suspicious"]
 
-    def test_disabled_streaming_collector_is_not_judged(self, sink):
+    def test_disabled_streaming_collector_is_not_judged(self, sink: Sink) -> None:
         sink.write(AuthEventRow, [_stream_row("sshd", "failed password")])
         _set_control(sink, disabled_collectors="auth_events")
         judge = _ScriptedJudge()
@@ -438,7 +438,7 @@ class TestStreamingJudging:
 
         assert judge.calls == []
 
-    def test_a_failing_streaming_judge_does_not_fail_the_cycle(self, sink):
+    def test_a_failing_streaming_judge_does_not_fail_the_cycle(self, sink: Sink) -> None:
         sink.write(AuthEventRow, [_stream_row("sshd", "failed password")])
 
         class _Exploding(_ScriptedJudge):
@@ -456,7 +456,7 @@ class TestStreamingJudging:
 
 
 class TestEndOfCycleReports:
-    def test_reports_are_written_after_judging(self, sink):
+    def test_reports_are_written_after_judging(self, sink: Sink) -> None:
         narrator, assessor = _Narrator(), _Assessor()
         runner = _runner(
             sink,
@@ -475,13 +475,13 @@ class TestEndOfCycleReports:
         assert assessor.calls[0][1]["hostname"]
         assert _count(sink, YaraCoverageRow) == 1
 
-    def test_risk_score_is_written_without_any_llm(self, sink):
+    def test_risk_score_is_written_without_any_llm(self, sink: Sink) -> None:
         _runner(sink, [_Procs("a")]).run_once()
 
         assert _count(sink, RiskScoreRow) == 1
         assert _count(sink, IncidentNarrativeRow) == 0
 
-    def test_database_is_pruned_to_the_size_cap(self, sink, monkeypatch):
+    def test_database_is_pruned_to_the_size_cap(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         caps = []
 
         def fake_prune(max_bytes):
@@ -499,7 +499,7 @@ class TestEndOfCycleReports:
 
         assert caps == [4096]
 
-    def test_no_cap_means_no_pruning(self, sink, monkeypatch):
+    def test_no_cap_means_no_pruning(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             sink, "prune_to_size", lambda b: pytest.fail("pruned without a cap")
         )
@@ -527,7 +527,7 @@ class TestControlLoopCommands:
             ("nonsense", "unknown command: nonsense"),
         ],
     )
-    def test_command_runs_once_and_is_acknowledged(self, sink, command, result_prefix):
+    def test_command_runs_once_and_is_acknowledged(self, sink: Sink, command, result_prefix) -> None:
         _set_control(sink, command=command, command_nonce=4, command_applied=0)
 
         tripwire = _run_forever_once(sink)
@@ -537,7 +537,7 @@ class TestControlLoopCommands:
         assert control["command_result"].startswith(result_prefix)
         assert tripwire.runs == 1
 
-    def test_a_failing_command_is_acknowledged_with_the_error(self, sink, monkeypatch):
+    def test_a_failing_command_is_acknowledged_with_the_error(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         def boom():
             raise RuntimeError("disk full")
 
@@ -550,7 +550,7 @@ class TestControlLoopCommands:
             "error: RuntimeError: disk full"
         )
 
-    def test_a_failed_cycle_does_not_stop_the_loop(self, sink, monkeypatch):
+    def test_a_failed_cycle_does_not_stop_the_loop(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         tripwire = _Tripwire()
         runner = _runner(sink, [tripwire])
         tripwire.runner = runner
@@ -573,7 +573,7 @@ class TestStreamingWorkers:
         names = (thread.name for thread in threading.enumerate())
         return [name for name in names if name.startswith("stream-")]
 
-    def test_workers_write_streamed_rows_and_stop(self, sink):
+    def test_workers_write_streamed_rows_and_stop(self, sink: Sink) -> None:
         runner = _runner(
             sink,
             streaming=[_AuthStream([_stream_row("sshd", "a"), _stream_row("su", "b")])],
@@ -593,7 +593,7 @@ class TestStreamingWorkers:
         assert _count(sink, AuthEventRow) == 2
         assert self._stream_threads() == []
 
-    def test_no_streaming_collectors_starts_nothing(self, sink):
+    def test_no_streaming_collectors_starts_nothing(self, sink: Sink) -> None:
         runner = _runner(sink)
 
         runner.start_streaming()

@@ -74,13 +74,13 @@ class _FakeHttp:
 
 
 class TestURLhaus:
-    def _enricher(self, http, monkeypatch):
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
         from avai.enrichers.sources.urlhaus import URLhausEnricher
 
         return URLhausEnricher.create(http, dict(os.environ))
 
-    def test_url_hit_returns_malicious(self, monkeypatch):
+    def test_url_hit_returns_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -97,7 +97,7 @@ class TestURLhaus:
         assert ev.verdict_hint is VerdictHint.MALICIOUS
         assert "emotet" in ev.summary
 
-    def test_domain_hit_uses_host_endpoint(self, monkeypatch):
+    def test_domain_hit_uses_host_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -113,12 +113,12 @@ class TestURLhaus:
         assert url.endswith("/host/")
         assert kw["data"]["host"] == "evil.test"
 
-    def test_no_results_returns_none(self, monkeypatch):
+    def test_no_results_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(_FakeResp(json_body={"query_status": "no_results"}))
         e = self._enricher(http, monkeypatch)
         assert e.fetch(Indicator(IndicatorType.URL, "https://ok.test/")) is None
 
-    def test_host_hit_with_urls_is_suspicious(self, monkeypatch):
+    def test_host_hit_with_urls_is_suspicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Regression: the /host/ response has no top-level threat/tags; it
         # carries url_count/firstseen. A host with malware URLs is reported
         # SUSPICIOUS (not a fabricated MALICIOUS with empty fields).
@@ -137,7 +137,7 @@ class TestURLhaus:
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
         assert "3 malware URL" in ev.summary
 
-    def test_host_known_but_zero_urls_returns_none(self, monkeypatch):
+    def test_host_known_but_zero_urls_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # "ok" only means URLhaus knows the host; zero URLs is not actionable.
         http = _FakeHttp(
             _FakeResp(
@@ -157,13 +157,13 @@ class TestURLhaus:
 
 
 class TestThreatFox:
-    def _enricher(self, http, monkeypatch):
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("ABUSE_CH_AUTH_KEY", "fake")
         from avai.enrichers.sources.threatfox import ThreatFoxEnricher
 
         return ThreatFoxEnricher.create(http, dict(os.environ))
 
-    def test_hit_returns_malicious(self, monkeypatch):
+    def test_hit_returns_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -184,7 +184,7 @@ class TestThreatFox:
         assert ev.verdict_hint is VerdictHint.MALICIOUS
         assert "Cobalt Strike" in ev.summary
 
-    def test_empty_data_array_returns_none(self, monkeypatch):
+    def test_empty_data_array_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -209,7 +209,7 @@ class TestFeodoTracker:
         # Reset class-level cache so tests don't bleed.
         return FeodoTrackerEnricher.create(http, dict(os.environ))
 
-    def test_ip_in_feed_returns_malicious(self):
+    def test_ip_in_feed_returns_malicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body=[
@@ -228,7 +228,7 @@ class TestFeodoTracker:
         assert ev.verdict_hint is VerdictHint.MALICIOUS
         assert "Emotet" in ev.summary
 
-    def test_ip_not_in_feed_returns_none(self):
+    def test_ip_not_in_feed_returns_none(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body=[
@@ -239,7 +239,7 @@ class TestFeodoTracker:
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.IPV4, "1.1.1.1")) is None
 
-    def test_feed_is_only_fetched_once_per_ttl(self):
+    def test_feed_is_only_fetched_once_per_ttl(self) -> None:
         # Two consecutive lookups should share the same feed download.
         http = _FakeHttp(
             _FakeResp(
@@ -265,7 +265,7 @@ class TestNvd:
 
         return NvdEnricher.create(http, dict(os.environ))
 
-    def test_high_cvss_yields_malicious(self):
+    def test_high_cvss_yields_malicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -294,7 +294,7 @@ class TestNvd:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
 
-    def test_mid_cvss_yields_suspicious(self):
+    def test_mid_cvss_yields_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -323,12 +323,12 @@ class TestNvd:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_empty_vulnerabilities_returns_none(self):
+    def test_empty_vulnerabilities_returns_none(self) -> None:
         http = _FakeHttp(_FakeResp(json_body={"vulnerabilities": []}))
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.CVE, "CVE-1999-0")) is None
 
-    def test_403_is_surfaced_as_rate_limited(self):
+    def test_403_is_surfaced_as_rate_limited(self) -> None:
         # Regression: NVD returns 403 when the rate window is exceeded;
         # it must become a RateLimitedError so the chain backs off rather
         # than recording a silent no-opinion on every CVE under load.
@@ -341,8 +341,8 @@ class TestNvd:
         "key,headers,rate", [("k-123", {"apiKey": "k-123"}, 1.5), ("", {}, 0.15)]
     )
     def test_optional_key_is_sent_and_buys_the_fast_lane(
-        self, monkeypatch, key, headers, rate
-    ):
+        self, monkeypatch: pytest.MonkeyPatch, key, headers, rate
+    ) -> None:
         monkeypatch.setenv("NVD_API_KEY", key)
         http = _FakeHttp(_FakeResp(json_body={"vulnerabilities": []}))
         rates = []
@@ -358,13 +358,13 @@ class TestNvd:
 
 
 class TestGitHubAdvisory:
-    def _enricher(self, http, monkeypatch):
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("GITHUB_TOKEN", "fake")
         from avai.enrichers.sources.github_advisory import GitHubAdvisoryEnricher
 
         return GitHubAdvisoryEnricher.create(http, dict(os.environ))
 
-    def test_critical_severity_yields_malicious(self, monkeypatch):
+    def test_critical_severity_yields_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body=[
@@ -382,7 +382,7 @@ class TestGitHubAdvisory:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
 
-    def test_high_severity_yields_suspicious(self, monkeypatch):
+    def test_high_severity_yields_suspicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body=[
@@ -399,7 +399,7 @@ class TestGitHubAdvisory:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_empty_advisory_list_returns_none(self, monkeypatch):
+    def test_empty_advisory_list_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(_FakeResp(json_body=[]))
         e = self._enricher(http, monkeypatch)
         assert e.fetch(Indicator(IndicatorType.CVE, "CVE-0")) is None
@@ -411,13 +411,13 @@ class TestGitHubAdvisory:
 
 
 class TestGreyNoise:
-    def _enricher(self, http, monkeypatch):
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("GREYNOISE_API_KEY", "fake")
         from avai.enrichers.sources.greynoise import GreyNoiseEnricher
 
         return GreyNoiseEnricher.create(http, dict(os.environ))
 
-    def test_classification_malicious_returns_malicious(self, monkeypatch):
+    def test_classification_malicious_returns_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -433,7 +433,7 @@ class TestGreyNoise:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.MALICIOUS
 
-    def test_riot_flag_means_benign(self, monkeypatch):
+    def test_riot_flag_means_benign(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # RIOT = "known benign service" (e.g. Google DNS)
         http = _FakeHttp(
             _FakeResp(
@@ -450,7 +450,7 @@ class TestGreyNoise:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.BENIGN
 
-    def test_noise_only_yields_suspicious(self, monkeypatch):
+    def test_noise_only_yields_suspicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -465,12 +465,12 @@ class TestGreyNoise:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_404_returns_none(self, monkeypatch):
+    def test_404_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(_FakeResp(status=404))
         e = self._enricher(http, monkeypatch)
         assert e.fetch(Indicator(IndicatorType.IPV4, "1.2.3.4")) is None
 
-    def test_client_error_raises_not_swallowed(self, monkeypatch):
+    def test_client_error_raises_not_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Regression: 400 (and other non-404 client errors like a bad key)
         # used to be silently treated as no-opinion, masking misconfig.
         http = _FakeHttp(_FakeResp(status=400))
@@ -485,13 +485,13 @@ class TestGreyNoise:
 
 
 class TestSafeBrowsing:
-    def _enricher(self, http, monkeypatch):
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("GOOGLE_SAFE_BROWSING_API_KEY", "fake")
         from avai.enrichers.sources.safe_browsing import SafeBrowsingEnricher
 
         return SafeBrowsingEnricher.create(http, dict(os.environ))
 
-    def test_matches_yields_malicious(self, monkeypatch):
+    def test_matches_yields_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -505,7 +505,7 @@ class TestSafeBrowsing:
         assert ev.verdict_hint is VerdictHint.MALICIOUS
         assert "MALWARE" in ev.summary
 
-    def test_empty_matches_returns_none(self, monkeypatch):
+    def test_empty_matches_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Safe Browsing returns ``{}`` (no `matches` key) for clean URLs.
         http = _FakeHttp(_FakeResp(json_body={}))
         e = self._enricher(http, monkeypatch)
@@ -518,13 +518,13 @@ class TestSafeBrowsing:
 
 
 class TestPhishTank:
-    def _enricher(self, http, monkeypatch):
+    def _enricher(self, http, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("PHISHTANK_API_KEY", "fake")
         from avai.enrichers.sources.phishtank import PhishTankEnricher
 
         return PhishTankEnricher.create(http, dict(os.environ))
 
-    def test_verified_phishing_yields_malicious(self, monkeypatch):
+    def test_verified_phishing_yields_malicious(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -543,7 +543,7 @@ class TestPhishTank:
         assert ev.verdict_hint is VerdictHint.MALICIOUS
         assert "12345" in ev.summary
 
-    def test_509_is_surfaced_as_rate_limited(self, monkeypatch):
+    def test_509_is_surfaced_as_rate_limited(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Regression: PhishTank throttles with HTTP 509 (not 429), so the
         # shared client won't catch it; it must become a RateLimitedError
         # instead of a silent no-opinion that drops phishing hits.
@@ -552,7 +552,7 @@ class TestPhishTank:
         with pytest.raises(RateLimitedError):
             e.fetch(Indicator(IndicatorType.URL, "https://phish.test/"))
 
-    def test_unverified_returns_none(self, monkeypatch):
+    def test_unverified_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # In DB but not verified → don't yet rate as malicious.
         http = _FakeHttp(
             _FakeResp(
@@ -568,7 +568,7 @@ class TestPhishTank:
         e = self._enricher(http, monkeypatch)
         assert e.fetch(Indicator(IndicatorType.URL, "https://x/")) is None
 
-    def test_not_in_database_returns_none(self, monkeypatch):
+    def test_not_in_database_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -595,7 +595,7 @@ class TestEndOfLife:
 
         return EndOfLifeEnricher.create(http, dict(os.environ))
 
-    def test_past_eol_yields_suspicious(self):
+    def test_past_eol_yields_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -610,7 +610,7 @@ class TestEndOfLife:
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
         assert "2017-04-28" in ev.summary
 
-    def test_future_eol_returns_none(self):
+    def test_future_eol_returns_none(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -622,7 +622,7 @@ class TestEndOfLife:
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.OS_VERSION, "ubuntu@24.04")) is None
 
-    def test_bool_false_eol_returns_none(self):
+    def test_bool_false_eol_returns_none(self) -> None:
         # endoflife.date returns `false` (bool) for not-yet-EOL releases.
         http = _FakeHttp(
             _FakeResp(
@@ -635,7 +635,7 @@ class TestEndOfLife:
         e = self._enricher(http)
         assert e.fetch(Indicator(IndicatorType.OS_VERSION, "ubuntu@24.04")) is None
 
-    def test_bool_true_eol_yields_suspicious(self):
+    def test_bool_true_eol_yields_suspicious(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body={
@@ -649,7 +649,7 @@ class TestEndOfLife:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_malformed_value_returns_none(self):
+    def test_malformed_value_returns_none(self) -> None:
         # value missing the @version part — extractor never emits this,
         # but defensive at the source boundary.
         http = _FakeHttp(_FakeResp(json_body={}))
@@ -668,7 +668,7 @@ class TestCrtSh:
 
         return CrtShEnricher.create(http, dict(os.environ))
 
-    def test_empty_entries_yields_suspicious(self):
+    def test_empty_entries_yields_suspicious(self) -> None:
         # A domain with no CT entries is unusual — flagged.
         http = _FakeHttp(_FakeResp(json_body=[]))
         e = self._enricher(http)
@@ -676,7 +676,7 @@ class TestCrtSh:
         assert ev is not None
         assert ev.verdict_hint is VerdictHint.SUSPICIOUS
 
-    def test_existing_entries_yields_unknown_with_metadata(self):
+    def test_existing_entries_yields_unknown_with_metadata(self) -> None:
         http = _FakeHttp(
             _FakeResp(
                 json_body=[
@@ -691,7 +691,7 @@ class TestCrtSh:
         assert ev.verdict_hint is VerdictHint.UNKNOWN
         assert "2020-01-01" in ev.summary
 
-    def test_unparseable_json_returns_none(self):
+    def test_unparseable_json_returns_none(self) -> None:
         bad = _FakeResp(status=200)
         bad._json = None  # .json() will raise
         # Force the source to take the parse-failure path.

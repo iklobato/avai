@@ -72,7 +72,7 @@ def _judge(prompts, client=None):
 
 
 class TestHappyPath:
-    def test_returns_judgments_for_each_index(self, prompts):
+    def test_returns_judgments_for_each_index(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -108,13 +108,13 @@ class TestHappyPath:
         assert by_h["a"].verdict is Verdict.MALICIOUS
         assert by_h["b"].verdict is Verdict.BENIGN
 
-    def test_empty_input_returns_empty_without_calling_llm(self, prompts):
+    def test_empty_input_returns_empty_without_calling_llm(self, prompts: Prompts) -> None:
         client = _FakeClient()
         judge = _judge(prompts, client)
         assert judge.judge("processes", "", []) == []
         assert client.calls == []
 
-    def test_call_cost_attributed_evenly_across_batch(self, prompts):
+    def test_call_cost_attributed_evenly_across_batch(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -146,7 +146,7 @@ class TestHappyPath:
         )
         assert all(j.cost_usd == pytest.approx(0.001) for j in result)
 
-    def test_cost_zero_when_usage_unavailable(self, prompts):
+    def test_cost_zero_when_usage_unavailable(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -165,7 +165,7 @@ class TestHappyPath:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].cost_usd == 0.0
 
-    def test_user_template_is_substituted(self, prompts):
+    def test_user_template_is_substituted(self, prompts: Prompts) -> None:
         client = _FakeClient()
         judge = _judge(prompts, client)
         judge.judge("processes", "be careful", [{"content_hash": "a", "name": "x"}])
@@ -182,12 +182,12 @@ class TestHappyPath:
 
 
 class TestParsingDefensiveness:
-    def test_missing_judgments_key_returns_empty(self, prompts):
+    def test_missing_judgments_key_returns_empty(self, prompts: Prompts) -> None:
         client = _FakeClient(parsed={})  # no 'judgments'
         judge = _judge(prompts, client)
         assert judge.judge("processes", "", [{"content_hash": "a"}]) == []
 
-    def test_judgment_index_out_of_range_is_skipped(self, prompts):
+    def test_judgment_index_out_of_range_is_skipped(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -207,7 +207,7 @@ class TestParsingDefensiveness:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result == []
 
-    def test_judgment_index_negative_is_skipped(self, prompts):
+    def test_judgment_index_negative_is_skipped(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -225,7 +225,7 @@ class TestParsingDefensiveness:
         judge = _judge(prompts, client)
         assert judge.judge("processes", "", [{"content_hash": "a"}]) == []
 
-    def test_judgment_with_non_integer_index_is_skipped(self, prompts):
+    def test_judgment_with_non_integer_index_is_skipped(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -243,7 +243,7 @@ class TestParsingDefensiveness:
         judge = _judge(prompts, client)
         assert judge.judge("processes", "", [{"content_hash": "a"}]) == []
 
-    def test_invalid_verdict_value_falls_back_to_unknown(self, prompts):
+    def test_invalid_verdict_value_falls_back_to_unknown(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -262,7 +262,7 @@ class TestParsingDefensiveness:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].verdict is Verdict.UNKNOWN
 
-    def test_verdict_and_category_are_case_normalized(self, prompts):
+    def test_verdict_and_category_are_case_normalized(self, prompts: Prompts) -> None:
         # Regression: under litellm JSON-mode the enum isn't hard-enforced,
         # so a model returning "Malicious" / " MALICIOUS " used to collapse
         # to UNKNOWN. Values are normalized (strip+lower) before coercion.
@@ -285,7 +285,7 @@ class TestParsingDefensiveness:
         assert result[0].verdict is Verdict.MALICIOUS
         assert result[0].category is ThreatCategory.COMMAND_AND_CONTROL
 
-    def test_invalid_category_value_falls_back_to_none(self, prompts):
+    def test_invalid_category_value_falls_back_to_none(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -304,7 +304,7 @@ class TestParsingDefensiveness:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].category is ThreatCategory.NONE
 
-    def test_non_numeric_confidence_defaults_to_zero(self, prompts):
+    def test_non_numeric_confidence_defaults_to_zero(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -323,7 +323,7 @@ class TestParsingDefensiveness:
         result = judge.judge("processes", "", [{"content_hash": "a"}])
         assert result[0].confidence == 0.0
 
-    def test_confidence_is_clamped_to_zero_one(self, prompts):
+    def test_confidence_is_clamped_to_zero_one(self, prompts: Prompts) -> None:
         client = _FakeClient(
             parsed={
                 "judgments": [
@@ -353,7 +353,7 @@ class TestParsingDefensiveness:
         assert result[0].confidence == 1.0
         assert result[1].confidence == 0.0
 
-    def test_reasoning_is_truncated_to_500_chars(self, prompts):
+    def test_reasoning_is_truncated_to_500_chars(self, prompts: Prompts) -> None:
         long = "x" * 1000
         client = _FakeClient(
             parsed={
@@ -380,7 +380,7 @@ class TestParsingDefensiveness:
 
 
 class TestBatching:
-    def test_splits_into_batches_of_batch_size(self, prompts):
+    def test_splits_into_batches_of_batch_size(self, prompts: Prompts) -> None:
         client = _FakeClient(parsed={"judgments": []})
         judge = LlmJudge.create(
             prompts,
@@ -392,7 +392,7 @@ class TestBatching:
         # 10 items / 3 batch size → 4 calls (3+3+3+1).
         assert len(client.calls) == 4
 
-    def test_caps_entries_to_max_per_collector(self, prompts):
+    def test_caps_entries_to_max_per_collector(self, prompts: Prompts) -> None:
         client = _FakeClient(parsed={"judgments": []})
         judge = LlmJudge.create(
             prompts,
@@ -404,7 +404,7 @@ class TestBatching:
         # All 3 capped entries fit in one batch.
         assert len(client.calls) == 1
 
-    def test_zero_batch_size_does_not_crash_cycle(self, prompts):
+    def test_zero_batch_size_does_not_crash_cycle(self, prompts: Prompts) -> None:
         # Regression: batch_size=0 → range(0,n,0) raised ValueError from
         # the _batches generator, escaping the per-batch try/except and
         # breaking the cycle. __init__ now clamps to >=1.
@@ -419,7 +419,7 @@ class TestBatching:
         judge.judge("processes", "", entries)  # must not raise
         assert len(client.calls) == 3  # one per entry at batch_size 1
 
-    def test_negative_batch_size_still_judges(self, prompts):
+    def test_negative_batch_size_still_judges(self, prompts: Prompts) -> None:
         # Negative used to yield zero batches → silently judged nothing.
         client = _FakeClient(parsed={"judgments": []})
         judge = LlmJudge.create(
@@ -438,7 +438,7 @@ class TestBatching:
 
 
 class TestFailureIsolation:
-    def test_one_failing_batch_does_not_abort_later_batches(self, prompts):
+    def test_one_failing_batch_does_not_abort_later_batches(self, prompts: Prompts) -> None:
         # First call raises, second returns one judgment. The judge
         # must keep going past the first failure.
         results_per_call = [

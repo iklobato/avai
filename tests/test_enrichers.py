@@ -111,11 +111,11 @@ class _FakeEnricher(Enricher):
 
 
 class TestIndicator:
-    def test_sha256_is_lowercased(self):
+    def test_sha256_is_lowercased(self) -> None:
         ind = Indicator(IndicatorType.SHA256, "ABCDEF" + "0" * 58)
         assert ind.value == "abcdef" + "0" * 58
 
-    def test_url_fragment_is_stripped(self):
+    def test_url_fragment_is_stripped(self) -> None:
         ind = Indicator(IndicatorType.URL, "https://e.test/x#hash")
         assert ind.value == "https://e.test/x"
 
@@ -139,7 +139,7 @@ class TestEnrichmentSchema:
 
 
 class TestEvidenceCache:
-    def test_put_then_get_within_ttl_returns_evidence(self, cache):
+    def test_put_then_get_within_ttl_returns_evidence(self, cache) -> None:
         e = _FakeEnricher()
         ind = Indicator(IndicatorType.SHA256, "a" * 64)
         ev = _make_evidence(e.name, ind)
@@ -149,7 +149,7 @@ class TestEvidenceCache:
         assert got.verdict_hint is VerdictHint.MALICIOUS
         assert got.source == e.name
 
-    def test_get_misses_when_expired(self, cache):
+    def test_get_misses_when_expired(self, cache) -> None:
         e = _FakeEnricher()
         e.ttl_hours = 1
         ind = Indicator(IndicatorType.SHA256, "b" * 64)
@@ -164,7 +164,7 @@ class TestEvidenceCache:
         cache.put(ev)
         assert cache.get(e, ind) is None
 
-    def test_put_upserts(self, cache):
+    def test_put_upserts(self, cache) -> None:
         e = _FakeEnricher()
         ind = Indicator(IndicatorType.SHA256, "c" * 64)
         cache.put(_make_evidence(e.name, ind, summary="first"))
@@ -180,7 +180,7 @@ class TestEvidenceCache:
 
 
 class TestEnrichmentChain:
-    def test_skips_unsupported_indicator_type(self, cache):
+    def test_skips_unsupported_indicator_type(self, cache) -> None:
         e = _FakeEnricher(
             name="e1",
             return_value=_make_evidence(
@@ -193,7 +193,7 @@ class TestEnrichmentChain:
         assert out == []
         assert e.calls == []
 
-    def test_returns_evidence_from_supporting_enricher(self, cache):
+    def test_returns_evidence_from_supporting_enricher(self, cache) -> None:
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
         e = _FakeEnricher(name="e1", return_value=_make_evidence("e1", ind))
         chain = EnrichmentChain([e], cache, logging.getLogger("test"))
@@ -201,7 +201,7 @@ class TestEnrichmentChain:
         assert len(out) == 1
         assert out[0].source == "e1"
 
-    def test_second_call_hits_cache(self, cache):
+    def test_second_call_hits_cache(self, cache) -> None:
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
         e = _FakeEnricher(name="e1", return_value=_make_evidence("e1", ind))
         chain = EnrichmentChain([e], cache, logging.getLogger("test"))
@@ -209,7 +209,7 @@ class TestEnrichmentChain:
         chain.enrich(ind)  # should serve from cache
         assert len(e.calls) == 1
 
-    def test_rate_limit_is_swallowed(self, cache):
+    def test_rate_limit_is_swallowed(self, cache) -> None:
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
         e_bad = _FakeEnricher(name="bad", raise_exc=RateLimitedError("over"))
         e_good = _FakeEnricher(name="good", return_value=_make_evidence("good", ind))
@@ -218,7 +218,7 @@ class TestEnrichmentChain:
         # One bad source must not block the good one.
         assert [ev.source for ev in out] == ["good"]
 
-    def test_source_error_is_swallowed(self, cache):
+    def test_source_error_is_swallowed(self, cache) -> None:
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
         e_bad = _FakeEnricher(name="bad", raise_exc=EnricherError("http 500"))
         e_good = _FakeEnricher(name="good", return_value=_make_evidence("good", ind))
@@ -245,7 +245,7 @@ class TestEnrichmentChain:
         with pytest.raises(RuntimeError, match="bug"):
             chain.enrich(ind)
 
-    def test_none_response_is_not_cached(self, cache):
+    def test_none_response_is_not_cached(self, cache) -> None:
         ind = Indicator(IndicatorType.IPV4, "1.2.3.4")
         e = _FakeEnricher(name="e1", return_value=None)
         chain = EnrichmentChain([e], cache, logging.getLogger("test"))
@@ -262,7 +262,7 @@ class TestEnrichmentChain:
 
 
 class TestIndicatorExtraction:
-    def test_quarantine_url_yields_url_and_domain(self):
+    def test_quarantine_url_yields_url_and_domain(self) -> None:
         out = IndicatorExtraction.default().extract(
             "quarantine_events",
             {
@@ -272,7 +272,7 @@ class TestIndicatorExtraction:
         types = sorted(str(i.type) for i in out)
         assert types == ["domain", "url"]
 
-    def test_installed_apps_yields_package(self):
+    def test_installed_apps_yields_package(self) -> None:
         out = IndicatorExtraction.default().extract(
             "installed_apps", {"name": "openssl", "version": "3.0.2"}
         )
@@ -280,7 +280,7 @@ class TestIndicatorExtraction:
         assert out[0].type is IndicatorType.PACKAGE
         assert out[0].value == "openssl@3.0.2"
 
-    def test_network_connections_skips_private_ip(self):
+    def test_network_connections_skips_private_ip(self) -> None:
         out = IndicatorExtraction.default().extract(
             "network_connections",
             {
@@ -289,7 +289,7 @@ class TestIndicatorExtraction:
         )
         assert out == []
 
-    def test_network_connections_emits_public_ip(self):
+    def test_network_connections_emits_public_ip(self) -> None:
         out = IndicatorExtraction.default().extract(
             "network_connections",
             {
@@ -300,7 +300,7 @@ class TestIndicatorExtraction:
         assert out[0].type is IndicatorType.IPV4
         assert out[0].value == "8.8.8.8"
 
-    def test_network_connections_emits_from_raddr_ip_fields(self):
+    def test_network_connections_emits_from_raddr_ip_fields(self) -> None:
         # The real collector emits raddr_ip/raddr_port (not a combined raddr
         # string); enrichment must read those so the remote IP gets intel.
         out = IndicatorExtraction.default().extract(
@@ -311,25 +311,25 @@ class TestIndicatorExtraction:
         assert out[0].type is IndicatorType.IPV4
         assert out[0].value == "1.2.3.4"
 
-    def test_network_connections_private_raddr_ip_skipped(self):
+    def test_network_connections_private_raddr_ip_skipped(self) -> None:
         out = IndicatorExtraction.default().extract(
             "network_connections",
             {"raddr_ip": "10.0.0.5", "raddr_port": 22, "status": "ESTABLISHED"},
         )
         assert out == []
 
-    def test_network_connections_no_remote_yields_nothing(self):
+    def test_network_connections_no_remote_yields_nothing(self) -> None:
         out = IndicatorExtraction.default().extract(
             "network_connections",
             {"raddr_ip": None, "raddr_port": None, "status": "LISTEN"},
         )
         assert out == []
 
-    def test_unknown_collector_yields_nothing(self):
+    def test_unknown_collector_yields_nothing(self) -> None:
         out = IndicatorExtraction.default().extract("not_a_real_collector", {"x": 1})
         assert out == []
 
-    def test_browser_extension_normalises_wildcards(self):
+    def test_browser_extension_normalises_wildcards(self) -> None:
         out = IndicatorExtraction.default().extract(
             "browser_extensions",
             {
@@ -345,7 +345,7 @@ class TestIndicatorExtraction:
 
 
 class TestRegistry:
-    def test_discovers_at_least_the_advertised_sources(self):
+    def test_discovers_at_least_the_advertised_sources(self) -> None:
         catalog = EnricherCatalog.of_sources(logging.getLogger("test"))
         names = {c.name for c in catalog.classes()}
         # The 17 we shipped — assert presence so a missing source
@@ -372,14 +372,14 @@ class TestRegistry:
         missing = expected - names
         assert not missing, f"missing enrichers: {missing}"
 
-    def test_from_env_skips_when_token_missing(self, monkeypatch):
+    def test_from_env_skips_when_token_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Pick any keyed source.
         from avai.enrichers.sources.virustotal import VirusTotalEnricher
 
         http = HttpClient.create(logging.getLogger("test"))
         assert VirusTotalEnricher.create(http, {}) is None
 
-    def test_from_env_skips_when_token_set_to_empty(self, monkeypatch):
+    def test_from_env_skips_when_token_set_to_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # ``docker run -e VT_API_KEY=`` produces an empty string in
         # the container — should be treated as "missing", not "present".
         from avai.enrichers.sources.virustotal import VirusTotalEnricher
@@ -389,7 +389,7 @@ class TestRegistry:
         assert VirusTotalEnricher.env_token(env) is None
         assert VirusTotalEnricher.create(http, env) is None
 
-    def test_keyless_enricher_always_registers(self, monkeypatch):
+    def test_keyless_enricher_always_registers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from avai.enrichers.sources.cisa_kev import CisaKevEnricher
 
         # No env var matters for a keyless source.
@@ -403,7 +403,7 @@ class TestRegistry:
 
 
 class TestForwardChain:
-    def test_discovered_cves_are_forward_chained(self, cache):
+    def test_discovered_cves_are_forward_chained(self, cache) -> None:
         from avai.enrichers import (
             Enricher,
             EnrichmentChain,
@@ -463,7 +463,7 @@ class TestForwardChain:
         srcs = {e.source for e in out}
         assert "osv_like" in srcs and "nvd_like" in srcs
 
-    def test_forward_chain_dedups_filters_and_caps_ids(self, cache):
+    def test_forward_chain_dedups_filters_and_caps_ids(self, cache) -> None:
         from avai.enrichers import (
             Enricher,
             EnrichmentChain,
@@ -516,7 +516,7 @@ class TestForwardChain:
         assert cve.calls == expected
         assert [e.source for e in out] == ["pkg"] + ["cve"] * len(expected)
 
-    def test_cve_indicator_does_not_recurse(self, cache):
+    def test_cve_indicator_does_not_recurse(self, cache) -> None:
         from avai.enrichers import (
             Enricher,
             EnrichmentChain,

@@ -14,5 +14,5 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _disable_telemetry(monkeypatch):
+def _disable_telemetry(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AVAI_TELEMETRY", "0")

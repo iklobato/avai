@@ -17,19 +17,20 @@ from avai.host_monitor.runtime import (
     FrozenClock,
     HostPaths,
 )
+from pathlib import Path
 
 
 class TestCommandRunner:
-    def test_json_parses_stdout(self):
+    def test_json_parses_stdout(self) -> None:
         runner = CommandRunner()
         out = runner.json([sys.executable, "-c", "print('{\"k\": 1}')"])
         assert out == {"k": 1}
 
-    def test_json_empty_stdout_is_none(self):
+    def test_json_empty_stdout_is_none(self) -> None:
         runner = CommandRunner()
         assert runner.json([sys.executable, "-c", ""]) is None
 
-    def test_json_nonzero_exit_raises_with_stderr(self):
+    def test_json_nonzero_exit_raises_with_stderr(self) -> None:
         runner = CommandRunner()
         with pytest.raises(RuntimeError) as exc:
             runner.json(
@@ -42,7 +43,7 @@ class TestCommandRunner:
         assert "rc=3" in str(exc.value)
         assert "boom" in str(exc.value)
 
-    def test_ndjson_yields_per_line_and_skips_blank_and_malformed(self):
+    def test_ndjson_yields_per_line_and_skips_blank_and_malformed(self) -> None:
         runner = CommandRunner()
         script = (
             "print('{\"a\": 1}'); print(''); print('not json'); print('{\"b\": 2}')"
@@ -50,26 +51,26 @@ class TestCommandRunner:
         rows = list(runner.ndjson([sys.executable, "-c", script]))
         assert rows == [{"a": 1}, {"b": 2}]
 
-    def test_exit_code_returns_code(self):
+    def test_exit_code_returns_code(self) -> None:
         runner = CommandRunner()
         assert runner.exit_code([sys.executable, "-c", "import sys; sys.exit(0)"]) == 0
         assert runner.exit_code([sys.executable, "-c", "import sys; sys.exit(7)"]) == 7
 
-    def test_exit_code_missing_binary_is_none(self):
+    def test_exit_code_missing_binary_is_none(self) -> None:
         runner = CommandRunner()
         assert runner.exit_code(["this-binary-does-not-exist-xyz"]) is None
 
-    def test_exists(self):
+    def test_exists(self) -> None:
         runner = CommandRunner()
         assert runner.exists(sys.executable) or runner.exists("python3")
         assert runner.exists("this-binary-does-not-exist-xyz") is False
 
-    def test_capture_returns_both_streams_whatever_the_exit_code(self):
+    def test_capture_returns_both_streams_whatever_the_exit_code(self) -> None:
         script = "import sys; print('out'); sys.stderr.write('err'); sys.exit(4)"
         out = CommandRunner().capture([sys.executable, "-c", script], timeout=10)
         assert out == ("out\n", "err", False)
 
-    def test_capture_keeps_partial_output_on_timeout(self, monkeypatch):
+    def test_capture_keeps_partial_output_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # TimeoutExpired carries bytes even for a text-mode run.
         def run(cmd, **kw):
             raise subprocess.TimeoutExpired(cmd, 1, output=b"early\n", stderr=None)
@@ -78,49 +79,49 @@ class TestCommandRunner:
         out = CommandRunner().capture(["tcpdump"], timeout=1)
         assert out == ("early\n", "", True)
 
-    def test_capture_missing_binary_raises(self):
+    def test_capture_missing_binary_raises(self) -> None:
         with pytest.raises(FileNotFoundError):
             CommandRunner().capture(["this-binary-does-not-exist-xyz"], timeout=1)
 
 
 class TestClock:
-    def test_now_iso_is_utc_second_resolution(self):
+    def test_now_iso_is_utc_second_resolution(self) -> None:
         iso = Clock().now_iso()
         assert iso.endswith("+00:00")
         # second resolution: no fractional component
         assert "." not in iso
 
-    def test_frozen_clock_is_deterministic(self):
+    def test_frozen_clock_is_deterministic(self) -> None:
         clock = FrozenClock("2026-06-03T00:00:00+00:00")
         assert clock.now_iso() == "2026-06-03T00:00:00+00:00"
         assert clock.now_iso() == "2026-06-03T00:00:00+00:00"
 
 
 class TestDigest:
-    def test_sha256_file_roundtrip(self, tmp_path):
+    def test_sha256_file_roundtrip(self, tmp_path: Path) -> None:
         p = tmp_path / "f.bin"
         p.write_bytes(b"hello")
         import hashlib
 
         assert Digest().sha256_file(p) == hashlib.sha256(b"hello").hexdigest()
 
-    def test_sha256_file_missing_is_none(self, tmp_path):
+    def test_sha256_file_missing_is_none(self, tmp_path: Path) -> None:
         assert Digest().sha256_file(tmp_path / "nope") is None
 
-    def test_of_row_is_field_scoped_and_order_independent(self):
+    def test_of_row_is_field_scoped_and_order_independent(self) -> None:
         a = Digest().of_row({"name": "x", "extra": 1}, ("name",))
         b = Digest().of_row({"extra": 999, "name": "x"}, ("name",))
         assert a == b  # only declared field participates
 
-    def test_of_row_distinguishes_values(self):
+    def test_of_row_distinguishes_values(self) -> None:
         assert Digest().of_row({"name": "x"}, ("name",)) != Digest().of_row(
             {"name": "y"}, ("name",)
         )
 
-    def test_of_row_no_fields_is_none(self):
+    def test_of_row_no_fields_is_none(self) -> None:
         assert Digest().of_row({"name": "x"}, ()) is None
 
-    def test_ssh_fingerprint_known_shape(self):
+    def test_ssh_fingerprint_known_shape(self) -> None:
         import base64
         import hashlib
 
@@ -131,12 +132,12 @@ class TestDigest:
         ).decode().rstrip("=")
         assert Digest().ssh_fingerprint(b64) == expected
 
-    def test_ssh_fingerprint_bad_input_is_none(self):
+    def test_ssh_fingerprint_bad_input_is_none(self) -> None:
         assert Digest().ssh_fingerprint("!!!not base64!!!") is None
 
 
 class TestExternalSqliteReader:
-    def test_reflects_table_and_yields_rows(self, tmp_path):
+    def test_reflects_table_and_yields_rows(self, tmp_path: Path) -> None:
         db = tmp_path / "ext.db"
         conn = sqlite3.connect(db)
         conn.execute("CREATE TABLE items (id INTEGER, name TEXT)")
@@ -149,14 +150,14 @@ class TestExternalSqliteReader:
 
 
 class TestHostPaths:
-    def test_read_plist_skips_malformed_xml(self, tmp_path):
+    def test_read_plist_skips_malformed_xml(self, tmp_path: Path) -> None:
         # plistlib raises expat's ExpatError here, which is not a ValueError.
         # A GitHub macOS runner ships a system LaunchAgent like this.
         bad = tmp_path / "bad.plist"
         bad.write_bytes(b"<?xml version=1.0?>\n<plist/>")
         assert HostPaths("").read_plist(bad) is None
 
-    def test_read_plist_reads_a_dict(self, tmp_path):
+    def test_read_plist_reads_a_dict(self, tmp_path: Path) -> None:
         good = tmp_path / "good.plist"
         good.write_bytes(plistlib.dumps({"Label": "com.example"}))
         assert HostPaths("").read_plist(good) == {"Label": "com.example"}

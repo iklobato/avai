@@ -159,7 +159,7 @@ def _evidence_stage(sink, chain):
 
 
 class TestEvidenceStage:
-    def test_attaches_evidence_to_each_unjudged_entry(self, sink, chain):
+    def test_attaches_evidence_to_each_unjudged_entry(self, sink: Sink, chain) -> None:
         stage = _evidence_stage(sink, chain)
         # Two distinct hashes — the chain enriches each via an indicator
         # extracted from `network_connections`. Build rows directly.
@@ -222,7 +222,7 @@ class TestEvidenceStage:
         assert unjudged == [{"content_hash": "x", "raddr": "8.8.8.8:53"}]
         assert batch.indicators_looked_up == 0
 
-    def test_enrichment_turned_off_means_no_evidence_no_lookups(self, sink):
+    def test_enrichment_turned_off_means_no_evidence_no_lookups(self, sink: Sink) -> None:
         source = _AlwaysHitEnricher()
         cache = EvidenceCache.on_base(sink.engine, Base)
         chain = EnrichmentChain([source], cache, logging.getLogger("test"))
@@ -243,7 +243,7 @@ class TestEvidenceStage:
         assert "evidence" not in batch.entries[0]
         assert source.calls == []
 
-    def test_no_indicators_means_no_evidence_field(self, sink, chain):
+    def test_no_indicators_means_no_evidence_field(self, sink: Sink, chain) -> None:
         # "Unknown" collector has no extractor → no indicators → no
         # evidence field added to the entry.
         collector = _StubCollector()
@@ -255,7 +255,7 @@ class TestEvidenceStage:
         assert batch.indicators_looked_up == 0
         assert "evidence" not in unjudged[0]
 
-    def test_entry_without_matching_row_is_skipped_cleanly(self, sink, chain):
+    def test_entry_without_matching_row_is_skipped_cleanly(self, sink: Sink, chain) -> None:
         from avai.host_monitor.models import NetworkConnectionRow
 
         collector = _StubCollector()
@@ -270,7 +270,7 @@ class TestEvidenceStage:
         assert batch.indicators_looked_up == 0
         assert "evidence" not in unjudged[0]
 
-    def test_broken_enricher_does_not_break_cycle(self, sink):
+    def test_broken_enricher_does_not_break_cycle(self, sink: Sink) -> None:
         """A source that raises must not break the per-entry loop."""
 
         class _Broken(Enricher):
@@ -330,7 +330,7 @@ class TestShutdownResponsiveness:
     takes effect during a long LLM-judging cycle instead of running
     every remaining collector first."""
 
-    def test_no_collectors_run_when_shutdown_already_set(self, sink):
+    def test_no_collectors_run_when_shutdown_already_set(self, sink: Sink) -> None:
         _CountingCollector.calls = []
         c1 = _CountingCollector("a")
         c2 = _CountingCollector("b")
@@ -340,7 +340,7 @@ class TestShutdownResponsiveness:
         assert _CountingCollector.calls == []  # loop broke immediately
         assert ok == 0
 
-    def test_stops_after_collector_that_trips_shutdown(self, sink):
+    def test_stops_after_collector_that_trips_shutdown(self, sink: Sink) -> None:
         _CountingCollector.calls = []
         ref = {"r": None}
         c1 = _CountingCollector("a", runner_ref=ref, trip=True)
@@ -395,7 +395,7 @@ class TestProgressHeartbeat:
         assert after["current_interval"] == before["current_interval"]
         assert after["pid"] == before["pid"]
 
-    def test_run_once_refreshes_liveness_at_each_collector(self, sink, monkeypatch):
+    def test_run_once_refreshes_liveness_at_each_collector(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         import avai.host_monitor.control_loop as control_loop_mod
 
         # Zero the throttle so each collector boundary writes; the test scan
@@ -471,13 +471,13 @@ class _ProcStub:
 
 
 class TestHostBaseline:
-    def test_not_established_below_threshold(self, sink):
+    def test_not_established_below_threshold(self, sink: Sink) -> None:
         _add_run(sink, _TS[0])
         _add_run(sink, _TS[1])
         bl = HostBaseline.measure(sink, 3)
         assert bl == HostBaseline(total_runs=2, established=False, cutoff_at=None)
 
-    def test_established_at_threshold_sets_cutoff_to_nth_run(self, sink):
+    def test_established_at_threshold_sets_cutoff_to_nth_run(self, sink: Sink) -> None:
         _add_run(sink, _TS[0])
         _add_run(sink, _TS[1])
         _add_run(sink, _TS[2])
@@ -486,7 +486,7 @@ class TestHostBaseline:
         assert bl.total_runs == 3
         assert bl.cutoff_at == _TS[2]  # started_at of the 3rd completed run
 
-    def test_in_progress_run_not_counted(self, sink):
+    def test_in_progress_run_not_counted(self, sink: Sink) -> None:
         # Two finished + one still running: only the finished ones count,
         # so a min_runs=3 host is still being learned.
         _add_run(sink, _TS[0])
@@ -496,14 +496,14 @@ class TestHostBaseline:
         assert bl.established is False
         assert bl.total_runs == 2
 
-    def test_default_threshold_constant_is_used(self, sink):
+    def test_default_threshold_constant_is_used(self, sink: Sink) -> None:
         # No explicit override → the documented default applies.
         config = RunnerConfig(sink, [], [], NullJudge(), 5)
         assert config.baseline_min_runs == DEFAULT_BASELINE_MIN_RUNS
 
 
 class TestFirstSeenMap:
-    def test_first_seen_and_times_seen(self, sink):
+    def test_first_seen_and_times_seen(self, sink: Sink) -> None:
         # "a" seen in two runs, "b" in one.
         ha = _add_proc(sink, _TS[0], _TS[0], "a")
         _add_proc(sink, _TS[1], _TS[1], "a")
@@ -512,7 +512,7 @@ class TestFirstSeenMap:
         assert m[ha] == (_TS[0], 2)
         assert m[hb] == (_TS[2], 1)
 
-    def test_empty_input_returns_empty(self, sink):
+    def test_empty_input_returns_empty(self, sink: Sink) -> None:
         assert sink.first_seen_map(ProcessRow, []) == {}
 
 
@@ -523,7 +523,7 @@ class TestAnnotateBaseline:
         stage = BaselineStage(StepIO(sink, logging.getLogger("test")))
         return stage.apply(_batch(_ProcStub(), unjudged, baseline=baseline)).entries
 
-    def test_novel_true_for_artifact_first_seen_after_cutoff(self, sink):
+    def test_novel_true_for_artifact_first_seen_after_cutoff(self, sink: Sink) -> None:
         # Establish a baseline of 2 runs; cutoff == 2nd run start (_TS[1]).
         _add_run(sink, _TS[0])
         _add_run(sink, _TS[1])
@@ -544,7 +544,7 @@ class TestAnnotateBaseline:
         assert new["baseline"]["first_seen"] == _TS[2]
         assert new["baseline"]["baseline_established"] is True
 
-    def test_nothing_novel_while_host_still_being_learned(self, sink):
+    def test_nothing_novel_while_host_still_being_learned(self, sink: Sink) -> None:
         # Only 2 completed runs but threshold is 5 → not established.
         _add_run(sink, _TS[0])
         _add_run(sink, _TS[1])
@@ -557,7 +557,7 @@ class TestAnnotateBaseline:
         assert unjudged[0]["baseline"]["baseline_established"] is False
         assert unjudged[0]["baseline"]["novel"] is False
 
-    def test_entry_without_matching_row_gets_no_baseline_key(self, sink):
+    def test_entry_without_matching_row_gets_no_baseline_key(self, sink: Sink) -> None:
         _add_run(sink, _TS[0])
         _add_run(sink, _TS[1])
         bl = HostBaseline.measure(sink, 2)
@@ -565,7 +565,7 @@ class TestAnnotateBaseline:
         unjudged = self._annotate(sink, unjudged, bl)
         assert "baseline" not in unjudged[0]
 
-    def test_intermittent_flagged_for_flapping_artifact(self, sink):
+    def test_intermittent_flagged_for_flapping_artifact(self, sink: Sink) -> None:
         # 5 runs. "steady" appears every run; "flap" only in runs 0 and 2
         # (present in fewer runs than its window → flapping); "fresh" only in
         # the last run (window too short to call intermittent).
@@ -614,7 +614,7 @@ class TestCorrelationStage:
         _add_run(sink, _TS[0])
         _add_run(sink, _TS[1])
 
-    def test_processes_get_full_related_object(self, sink):
+    def test_processes_get_full_related_object(self, sink: Sink) -> None:
         from avai.host_monitor.models import (
             DnsQueryRow,
             ListeningPortRow,
@@ -692,7 +692,7 @@ class TestCorrelationStage:
             "exe": "/tmp/evil",
         }
 
-    def test_launch_items_correlate_via_program_to_process(self, sink):
+    def test_launch_items_correlate_via_program_to_process(self, sink: Sink) -> None:
         # A launch item has no PID; its program is resolved to the live
         # process running it, then that process's behaviour is attached.
         from avai.host_monitor.models import LaunchItemRow, NetworkFlowRow, ProcessRow
@@ -733,7 +733,7 @@ class TestCorrelationStage:
         assert rel["outbound_flows"][0]["dst"] == "9.9.9.9:443"
         assert rel["outbound_flows"][0]["packets"] == 99
 
-    def test_launch_item_without_running_program_gets_no_related(self, sink):
+    def test_launch_item_without_running_program_gets_no_related(self, sink: Sink) -> None:
         from avai.host_monitor.models import LaunchItemRow
 
         self._setup_two_runs(sink)
@@ -749,7 +749,7 @@ class TestCorrelationStage:
         unjudged = _correlate(sink, _LaunchStub(), unjudged, rows, _TS[1])
         assert "related" not in unjudged[0]
 
-    def test_non_process_collector_is_not_correlated(self, sink):
+    def test_non_process_collector_is_not_correlated(self, sink: Sink) -> None:
         from avai.host_monitor.models import ListeningPortRow
 
         self._setup_two_runs(sink)
@@ -774,7 +774,7 @@ class TestCorrelationStage:
         unjudged = _correlate(sink, _PortStub(), unjudged, rows, _TS[1])
         assert "related" not in unjudged[0]
 
-    def test_process_with_no_correlated_rows_gets_no_related(self, sink):
+    def test_process_with_no_correlated_rows_gets_no_related(self, sink: Sink) -> None:
         self._setup_two_runs(sink)
         h = Digest().of_row({"name": "quiet"}, ("name",))
         rows = [{"content_hash": h, "pid": 999, "name": "quiet"}]
@@ -782,7 +782,7 @@ class TestCorrelationStage:
         unjudged = _correlate(sink, _ProcStub(), unjudged, rows, _TS[1])
         assert "related" not in unjudged[0]
 
-    def test_stale_rows_before_prior_run_are_excluded(self, sink):
+    def test_stale_rows_before_prior_run_are_excluded(self, sink: Sink) -> None:
         # A flow from two cycles ago (_TS[0]) must NOT leak in when judging
         # at _TS[2], whose prior run is _TS[1]: the time-bound is the PID's
         # previous-cycle behaviour only, so PID reuse can't pollute it.
@@ -887,7 +887,7 @@ class TestJudgmentContext:
             created_at="2026-01-01T00:00:00Z",
         )
 
-    def test_judgment_context_extracts_baseline_and_related(self):
+    def test_judgment_context_extracts_baseline_and_related(self) -> None:
         unjudged = [
             {
                 "content_hash": "h1",
@@ -902,7 +902,7 @@ class TestJudgmentContext:
         assert ctx["h1"]["baseline"]["novel"] is True
         assert ctx["h1"]["related"]["listening_ports"] == ["0.0.0.0:4444"]
 
-    def test_write_judgments_persists_novel_and_context(self, sink):
+    def test_write_judgments_persists_novel_and_context(self, sink: Sink) -> None:
         import json as _json
 
         from avai.host_monitor.models import Judgement
@@ -921,7 +921,7 @@ class TestJudgmentContext:
         assert parsed["baseline"]["novel"] is True
         assert parsed["related"]["listening_ports"] == ["0.0.0.0:4444"]
 
-    def test_write_judgments_without_context_leaves_columns_null(self, sink):
+    def test_write_judgments_without_context_leaves_columns_null(self, sink: Sink) -> None:
         from avai.host_monitor.models import Judgement
 
         sink.write_judgments([self._judgment("h2")])
@@ -932,7 +932,7 @@ class TestJudgmentContext:
 
 
 class TestActiveFindings:
-    def test_filters_benign_and_resolved(self, sink):
+    def test_filters_benign_and_resolved(self, sink: Sink) -> None:
         _add_judgement(sink, "h_mal", "malicious", last_seen=_TS[1])  # active
         _add_judgement(sink, "h_sus", "suspicious", last_seen=_TS[1])  # active
         _add_judgement(sink, "h_ben", "benign", last_seen=_TS[1])  # benign → out
@@ -943,7 +943,7 @@ class TestActiveFindings:
 
 
 class TestNarrativeStep:
-    def test_no_active_findings_no_narrative(self, sink):
+    def test_no_active_findings_no_narrative(self, sink: Sink) -> None:
         nar = _FakeNarrator()
         NarrativeStep(StepIO(sink, logging.getLogger("test")), nar).report(
             _TS[1], _TS[1]
@@ -951,7 +951,7 @@ class TestNarrativeStep:
         assert nar.calls == []
         assert sink.latest_narrative_finding_hashes() is None
 
-    def test_active_findings_generate_and_store(self, sink):
+    def test_active_findings_generate_and_store(self, sink: Sink) -> None:
         _add_judgement(sink, "h_mal", "malicious", last_seen=_TS[1])
         nar = _FakeNarrator()
         NarrativeStep(StepIO(sink, logging.getLogger("test")), nar).report(
@@ -968,7 +968,7 @@ class TestNarrativeStep:
         assert _json.loads(nrow.timeline_json)[0]["title"] == "binary launched"
         assert _json.loads(nrow.actions_json)[0]["priority"] == "immediate"
 
-    def test_unchanged_findings_are_not_regenerated(self, sink):
+    def test_unchanged_findings_are_not_regenerated(self, sink: Sink) -> None:
         _add_judgement(sink, "h_mal", "malicious", last_seen=_TS[1])
         nar = _FakeNarrator()
         step = NarrativeStep(StepIO(sink, logging.getLogger("test")), nar)
@@ -976,7 +976,7 @@ class TestNarrativeStep:
         step.report("run-1", _TS[1])  # same finding-set
         assert len(nar.calls) == 1  # second call skipped by hash compare
 
-    def test_changed_findings_regenerate(self, sink):
+    def test_changed_findings_regenerate(self, sink: Sink) -> None:
         _add_judgement(sink, "h_mal", "malicious", last_seen=_TS[1])
         nar = _FakeNarrator()
         step = NarrativeStep(StepIO(sink, logging.getLogger("test")), nar)
@@ -1019,7 +1019,7 @@ class TestIncidentNarratorNormalization:
             LlmSession(_FakeClient(), logging.getLogger("test")),
         )
 
-    def test_bad_severity_falls_back_to_low(self):
+    def test_bad_severity_falls_back_to_low(self) -> None:
         nar = self._narrator(
             {
                 "headline": "h",
@@ -1032,11 +1032,11 @@ class TestIncidentNarratorNormalization:
         out = nar.narrate([{"content_hash": "x"}])
         assert out["severity"] == "low"
 
-    def test_missing_headline_returns_none(self):
+    def test_missing_headline_returns_none(self) -> None:
         nar = self._narrator({"severity": "high", "summary": "s", "timeline": []})
         assert nar.narrate([{"content_hash": "x"}]) is None
 
-    def test_returns_none_when_no_summary_and_no_timeline(self):
+    def test_returns_none_when_no_summary_and_no_timeline(self) -> None:
         nar = self._narrator(
             {
                 "headline": "h",
@@ -1048,11 +1048,11 @@ class TestIncidentNarratorNormalization:
         )
         assert nar.narrate([{"content_hash": "x"}]) is None
 
-    def test_empty_findings_returns_none_without_calling_llm(self):
+    def test_empty_findings_returns_none_without_calling_llm(self) -> None:
         nar = self._narrator({"headline": "h", "severity": "low", "summary": "s"})
         assert nar.narrate([]) is None
 
-    def test_findings_are_capped_keeping_most_severe(self):
+    def test_findings_are_capped_keeping_most_severe(self) -> None:
         # Regression: an unbounded findings list could blow the LLM context
         # window and fail the digest every cycle. narrate() caps to
         # MAX_FINDINGS, keeping the most severe/confident.
@@ -1096,7 +1096,7 @@ class TestIncidentNarratorNormalization:
         assert user.count('"content_hash"') == cap  # trimmed to the cap
         assert '"keep"' in user  # the malicious finding survived the trim
 
-    def test_timeline_and_actions_are_normalised(self):
+    def test_timeline_and_actions_are_normalised(self) -> None:
         nar = self._narrator(
             {
                 "headline": "h",
@@ -1139,13 +1139,13 @@ _HARDENED = {
 
 
 class TestComputeRiskScore:
-    def test_hardened_host_scores_100_grade_a(self):
+    def test_hardened_host_scores_100_grade_a(self) -> None:
         from avai.host_monitor.risk import RiskCounts, RiskScorer
 
         r = RiskScorer().score(_HARDENED, RiskCounts(0, 0, 0, 0))
         assert r["score"] == 100 and r["grade"] == "A" and r["drivers"] == []
 
-    def test_disabled_protections_deduct(self):
+    def test_disabled_protections_deduct(self) -> None:
         from avai.host_monitor.risk import RiskCounts, RiskScorer
 
         integ = dict(_HARDENED, filevault_active=0, firewall_global_state=0)
@@ -1155,20 +1155,20 @@ class TestComputeRiskScore:
         assert any("FileVault" in lbl for lbl in labels)
         assert any("Firewall off" in lbl for lbl in labels)
 
-    def test_finding_penalties_are_capped(self):
+    def test_finding_penalties_are_capped(self) -> None:
         from avai.host_monitor.risk import RiskCounts, RiskScorer
 
         # 5 malicious → capped at 40; 5 suspicious → capped at 24 → 100-64=36
         r = RiskScorer().score(None, RiskCounts(5, 5, 0, 0))
         assert r["score"] == 36 and r["grade"] == "F"
 
-    def test_none_integrity_fields_cost_nothing(self):
+    def test_none_integrity_fields_cost_nothing(self) -> None:
         from avai.host_monitor.risk import RiskCounts, RiskScorer
 
         r = RiskScorer().score(None, RiskCounts(0, 0, 0, 0))
         assert r["score"] == 100 and r["grade"] == "A"
 
-    def test_privilege_penalties(self):
+    def test_privilege_penalties(self) -> None:
         from avai.host_monitor.risk import RiskCounts, RiskScorer
 
         r = RiskScorer().score(
@@ -1176,7 +1176,7 @@ class TestComputeRiskScore:
         )  # -10 nopasswd -15 uid0
         assert r["score"] == 75 and r["grade"] == "C"
 
-    def test_every_driver_with_its_points_in_order(self):
+    def test_every_driver_with_its_points_in_order(self) -> None:
         from avai.host_monitor.risk import RiskCounts, RiskScorer
 
         worst = {
@@ -1206,12 +1206,12 @@ class TestComputeRiskScore:
 
 
 class TestRiskExplanation:
-    def test_initial_score(self):
+    def test_initial_score(self) -> None:
         assert "Initial" in RiskExplanation().explain(
             {"score": 90, "drivers": []}, None
         )
 
-    def test_resolved_driver_raises_score(self):
+    def test_resolved_driver_raises_score(self) -> None:
         class _Prev:
             score = 80
             drivers_json = '[{"label":"Firewall off","points":15}]'
@@ -1219,7 +1219,7 @@ class TestRiskExplanation:
         e = RiskExplanation().explain({"score": 95, "drivers": []}, _Prev)
         assert "up 15" in e and "Resolved" in e and "Firewall off" in e
 
-    def test_new_driver_lowers_score(self):
+    def test_new_driver_lowers_score(self) -> None:
         class _Prev:
             score = 100
             drivers_json = "[]"
@@ -1231,7 +1231,7 @@ class TestRiskExplanation:
 
 
 class TestRiskScoreSink:
-    def test_privilege_and_integrity_queries(self, sink):
+    def test_privilege_and_integrity_queries(self, sink: Sink) -> None:
         from avai.host_monitor.models import PrivilegeConfigRow, SystemIntegrityRow
 
         _w(
@@ -1275,7 +1275,7 @@ class TestRiskScoreSink:
         nopasswd, uid0 = sink.privilege_risk_counts("r1")
         assert nopasswd == 1 and uid0 == 1  # 'root' excluded
 
-    def test_write_and_latest_risk(self, sink):
+    def test_write_and_latest_risk(self, sink: Sink) -> None:
         sink.write_risk_score(
             {
                 "created_at": _TS[0],
@@ -1297,7 +1297,7 @@ class TestRiskScoreSink:
 
 
 class TestEstimateCost:
-    def test_haiku_tier_pricing(self):
+    def test_haiku_tier_pricing(self) -> None:
         from avai.host_monitor.judge import ModelPricing
 
         # 1M input @ $1, 1M output @ $5
@@ -1308,7 +1308,7 @@ class TestEstimateCost:
             "claude-haiku-4-5", 0, 1_000_000
         ) == pytest.approx(5.0)
 
-    def test_tier_matched_by_substring(self):
+    def test_tier_matched_by_substring(self) -> None:
         from avai.host_monitor.judge import ModelPricing
 
         assert ModelPricing().estimate(
@@ -1318,7 +1318,7 @@ class TestEstimateCost:
             "anthropic/claude-sonnet-4-6", 0, 1_000_000
         ) == pytest.approx(15.0)
 
-    def test_unknown_model_uses_default_tier(self):
+    def test_unknown_model_uses_default_tier(self) -> None:
         from avai.host_monitor.judge import ModelPricing
 
         assert ModelPricing().estimate("mystery-model", 1_000_000, 0) == pytest.approx(
@@ -1327,7 +1327,7 @@ class TestEstimateCost:
 
 
 class TestJudgmentCostPersistence:
-    def test_cost_usd_persisted(self, sink):
+    def test_cost_usd_persisted(self, sink: Sink) -> None:
         from avai.host_monitor.enums import ThreatCategory, Verdict
         from avai.host_monitor.judge import Judgment
         from avai.host_monitor.models import Judgement
@@ -1368,7 +1368,7 @@ def _set_control(sink, **vals):
 
 
 class TestControlSink:
-    def test_round_trip_and_acks(self, sink):
+    def test_round_trip_and_acks(self, sink: Sink) -> None:
         sink.ensure_control_row(ControlSeed(120, True, False))
         c = sink.read_control()
         assert c["interval_override"] == 120
@@ -1382,7 +1382,7 @@ class TestControlSink:
         assert c["scan_now_applied"] == 7
         assert c["command_applied"] == 3 and c["command_result"] == "ok"
 
-    def test_ensure_is_idempotent(self, sink):
+    def test_ensure_is_idempotent(self, sink: Sink) -> None:
         sink.ensure_control_row(ControlSeed(100, True, True))
         _set_control(sink, paused=1)
         sink.ensure_control_row(ControlSeed(999, False, False))
@@ -1391,7 +1391,7 @@ class TestControlSink:
 
 
 class TestControlSettingsGating:
-    def test_disabled_collector_is_skipped(self, sink):
+    def test_disabled_collector_is_skipped(self, sink: Sink) -> None:
         _CountingCollector.calls = []
         a = _CountingCollector("a")
         b = _CountingCollector("b")
@@ -1399,7 +1399,7 @@ class TestControlSettingsGating:
         _runner(sink, [a, b]).run_once()
         assert _CountingCollector.calls == ["b"]  # "a" skipped
 
-    def test_judge_and_enrich_toggles(self, sink):
+    def test_judge_and_enrich_toggles(self, sink: Sink) -> None:
         settings = _settings(sink, judge_on=False, enrich_on=False)
         _set_control(sink, judge_enabled=0, enrich_enabled=0)
         current = settings.current()
@@ -1422,7 +1422,7 @@ class TestControlSettingsGating:
         assert settings.current().disabled_collectors() == {"b"}
 
     @pytest.mark.parametrize("default", [True, False])
-    def test_settings_default_to_startup_state_when_unset(self, sink, default):
+    def test_settings_default_to_startup_state_when_unset(self, sink: Sink, default) -> None:
         settings = _settings(sink, judge_on=default, enrich_on=not default)
         _set_control(sink, judge_enabled=None, enrich_enabled=None)
         current = settings.current()
@@ -1430,7 +1430,7 @@ class TestControlSettingsGating:
         assert current.judge_on() is default
         assert current.enrich_on() is (not default)
 
-    def test_disabled_collectors_are_read_from_the_csv(self, sink):
+    def test_disabled_collectors_are_read_from_the_csv(self, sink: Sink) -> None:
         settings = _settings(sink)
         _set_control(sink, disabled_collectors=" a, ,b ")
         assert settings.current().disabled_collectors() == {"a", "b"}
@@ -1462,7 +1462,7 @@ def _loop_once(sink, cycle=None, max_db_bytes=0):
 
 
 class TestControlCommands:
-    def test_rejudge_clears_judgements_and_acks(self, sink):
+    def test_rejudge_clears_judgements_and_acks(self, sink: Sink) -> None:
         from avai.host_monitor.models import Judgement
 
         with Session(sink.engine) as s:
@@ -1484,7 +1484,7 @@ class TestControlCommands:
         assert c["command_applied"] == 1
         assert "judgement" in c["command_result"]
 
-    def test_reset_baseline_drops_runs(self, sink):
+    def test_reset_baseline_drops_runs(self, sink: Sink) -> None:
         _add_run(sink, _TS[0])
         _add_run(sink, _TS[1])
         _set_control(sink, command="reset_baseline", command_nonce=1, command_applied=0)
@@ -1492,7 +1492,7 @@ class TestControlCommands:
         assert sink.completed_run_count() == 0
         assert sink.read_control()["command_applied"] == 1
 
-    def test_already_applied_command_is_skipped(self, sink):
+    def test_already_applied_command_is_skipped(self, sink: Sink) -> None:
         _add_run(sink, _TS[0])
         _set_control(sink, command="clear", command_nonce=2, command_applied=2)
         # nonce == applied → no-op: nothing cleared, no result written
@@ -1500,7 +1500,7 @@ class TestControlCommands:
         assert sink.completed_run_count() == 1
         assert sink.read_control()["command_result"] is None
 
-    def test_prune_uses_the_configured_size_cap(self, sink, monkeypatch):
+    def test_prune_uses_the_configured_size_cap(self, sink: Sink, monkeypatch: pytest.MonkeyPatch) -> None:
         caps = []
 
         def fake_prune(max_bytes):
@@ -1516,22 +1516,22 @@ class TestControlCommands:
 
 
 class TestControlLoop:
-    def test_runs_a_cycle_when_not_paused(self, sink):
+    def test_runs_a_cycle_when_not_paused(self, sink: Sink) -> None:
         _set_control(sink, paused=0)
         assert _loop_once(sink) == [1]
         assert sink.read_control()["status"] == "scanning"
 
-    def test_paused_skips_the_cycle(self, sink):
+    def test_paused_skips_the_cycle(self, sink: Sink) -> None:
         _set_control(sink, paused=1)
         assert _loop_once(sink) == []  # paused → never scanned
         assert sink.read_control()["status"] == "paused"
 
-    def test_scan_now_overrides_pause_and_acks(self, sink):
+    def test_scan_now_overrides_pause_and_acks(self, sink: Sink) -> None:
         _set_control(sink, paused=1, scan_now_nonce=1, scan_now_applied=0)
         assert _loop_once(sink) == [1]  # scan-now forced a cycle despite pause
         assert sink.read_control()["scan_now_applied"] == 1
 
-    def test_interval_override_is_reported(self, sink):
+    def test_interval_override_is_reported(self, sink: Sink) -> None:
         _set_control(sink, paused=1, interval_override=42)
         _loop_once(sink)
         assert sink.read_control()["current_interval"] == 42
@@ -1552,7 +1552,7 @@ class TestYaraContextStage:
     def _apply(self, collector, unjudged, rows):
         return YaraContextStage().apply(_batch(collector, unjudged, rows)).entries
 
-    def test_attaches_meta_and_strings_from_row(self):
+    def test_attaches_meta_and_strings_from_row(self) -> None:
         h = "hash-1"
         rows = [
             {
@@ -1570,7 +1570,7 @@ class TestYaraContextStage:
         assert unjudged[0]["rule_meta"]["description"] == "APT42 implant loader"
         assert unjudged[0]["matched_strings"][0]["text"] == "http://evil.example/x"
 
-    def test_other_collectors_are_untouched(self):
+    def test_other_collectors_are_untouched(self) -> None:
         unjudged = [{"content_hash": "h", "name": "x"}]
         meta = json.dumps({"author": "Jane"})
         # _StubCollector.name is "processes", not the file_scan collector.
@@ -1580,7 +1580,7 @@ class TestYaraContextStage:
         assert "rule_meta" not in unjudged[0]
         assert "matched_strings" not in unjudged[0]
 
-    def test_missing_and_malformed_json_is_tolerated(self):
+    def test_missing_and_malformed_json_is_tolerated(self) -> None:
         h = "hash-2"
         # No meta, malformed strings — neither key should be attached, no raise.
         rows = [{"content_hash": h, "strings_json": "{not json"}]
@@ -1589,7 +1589,7 @@ class TestYaraContextStage:
         assert "rule_meta" not in unjudged[0]
         assert "matched_strings" not in unjudged[0]
 
-    def test_entry_without_matching_row_is_skipped(self):
+    def test_entry_without_matching_row_is_skipped(self) -> None:
         unjudged = [{"content_hash": "absent", "rule": "r"}]
         meta = json.dumps({"author": "Jane"})
         unjudged = self._apply(
@@ -1660,19 +1660,19 @@ class TestCoverageStep:
         identity = HostIdentity("demo-host", "Linux", self.DEMO_PID)
         return CoverageStep(io, assessor, identity)
 
-    def test_no_ruleset_no_assessment(self, sink):
+    def test_no_ruleset_no_assessment(self, sink: Sink) -> None:
         a = _FakeAssessor()
         self._step(sink, a).report("run-1", _TS[1])
         assert a.calls == []
         assert sink.latest_yara_coverage_fingerprint() is None
 
-    def test_zero_rules_no_assessment(self, sink):
+    def test_zero_rules_no_assessment(self, sink: Sink) -> None:
         _seed_yara_status(sink, rules_loaded=0)
         a = _FakeAssessor()
         self._step(sink, a).report("run-1", _TS[1])
         assert a.calls == []
 
-    def test_assessment_generated_and_stored(self, sink):
+    def test_assessment_generated_and_stored(self, sink: Sink) -> None:
         _seed_yara_status(sink)
         a = _FakeAssessor()
         self._step(sink, a).report("run-1", _TS[1])
@@ -1687,7 +1687,7 @@ class TestCoverageStep:
         assert json.loads(row.gaps_json)[0]["area"] == "macOS persistence"
         assert row.ruleset_fingerprint  # stored for dedup
 
-    def test_unchanged_ruleset_not_regenerated(self, sink):
+    def test_unchanged_ruleset_not_regenerated(self, sink: Sink) -> None:
         _seed_yara_status(sink)
         a = _FakeAssessor()
         step = self._step(sink, a)
@@ -1695,7 +1695,7 @@ class TestCoverageStep:
         step.report("run-2", _TS[1])
         assert len(a.calls) == 1  # same ruleset fingerprint → skipped
 
-    def test_changed_ruleset_regenerates(self, sink):
+    def test_changed_ruleset_regenerates(self, sink: Sink) -> None:
         _seed_yara_status(sink, rules_loaded=10)
         a = _FakeAssessor()
         step = self._step(sink, a)
@@ -1727,19 +1727,19 @@ class TestYaraCoverageAssessor:
 
     _RULESET = {"rules_loaded": 5, "sources": {"bundled": 5}, "by_category": {"gen": 5}}
 
-    def test_prompt_section_loads(self):
+    def test_prompt_section_loads(self) -> None:
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH
         from avai.host_monitor.prompts import Prompts
 
         p = Prompts.load(DEFAULT_PROMPTS_PATH)
         assert p.coverage_system and "$ruleset" in p.coverage_user_template
 
-    def test_empty_ruleset_returns_none_without_calling_llm(self):
+    def test_empty_ruleset_returns_none_without_calling_llm(self) -> None:
         a = self._assessor({"posture": "thin", "headline": "h", "summary": "s"})
         assert a.assess({}, {"platform": "Darwin"}) is None
         assert a.assess({"rules_loaded": 0}, {}) is None
 
-    def test_bad_posture_falls_back_to_partial(self):
+    def test_bad_posture_falls_back_to_partial(self) -> None:
         a = self._assessor(
             {
                 "posture": "fortified",
@@ -1752,11 +1752,11 @@ class TestYaraCoverageAssessor:
         out = a.assess(self._RULESET, {"platform": "Darwin"})
         assert out["posture"] == "partial"
 
-    def test_missing_headline_returns_none(self):
+    def test_missing_headline_returns_none(self) -> None:
         a = self._assessor({"posture": "thin", "summary": "s", "gaps": []})
         assert a.assess(self._RULESET, {}) is None
 
-    def test_gaps_and_recommendations_normalised(self):
+    def test_gaps_and_recommendations_normalised(self) -> None:
         a = self._assessor(
             {
                 "posture": "thin",
@@ -1841,7 +1841,7 @@ def _stored_verdict(sink):
 
 
 class TestVerifyStage:
-    def test_refuted_malicious_downgraded_to_suspicious(self, sink):
+    def test_refuted_malicious_downgraded_to_suspicious(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         v = _FakeVerifier(refuted=True)
@@ -1856,7 +1856,7 @@ class TestVerifyStage:
         assert "original reason" in out[0].reasoning  # original preserved
         assert v.calls[0]["name"] == "x"  # the skeptic sees the entry's fields
 
-    def test_unrefuted_malicious_is_kept(self, sink):
+    def test_unrefuted_malicious_is_kept(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         v = _FakeVerifier(refuted=False)
@@ -1867,7 +1867,7 @@ class TestVerifyStage:
         assert out[0].verdict == Verdict.MALICIOUS
         assert len(v.calls) == 1
 
-    def test_non_malicious_is_not_verified(self, sink):
+    def test_non_malicious_is_not_verified(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         v = _FakeVerifier(refuted=True)
@@ -1876,7 +1876,7 @@ class TestVerifyStage:
         assert out[0].verdict == Verdict.SUSPICIOUS
         assert v.calls == []  # skeptic only runs on malicious
 
-    def test_checks_are_capped_per_collector(self, sink):
+    def test_checks_are_capped_per_collector(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         v = _FakeVerifier(refuted=True)
@@ -1885,7 +1885,7 @@ class TestVerifyStage:
         assert len(v.calls) == 10
         assert [j.verdict for j in out[10:]] == [Verdict.MALICIOUS] * 2
 
-    def test_without_a_verifier_malicious_is_stored_as_is(self, sink):
+    def test_without_a_verifier_malicious_is_stored_as_is(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         _runner(sink, [_Procs()], judge=_FixedJudge(Verdict.MALICIOUS)).run_once()
@@ -1912,14 +1912,14 @@ class TestMaliciousVerdictVerifier:
             LlmSession(_FakeClient(), logging.getLogger("test")),
         )
 
-    def test_refuted_true_parsed(self):
+    def test_refuted_true_parsed(self) -> None:
         out = self._verifier(
             {"refuted": True, "reasoning": "signed Apple binary"}
         ).verify({"artifact": "x"})
         assert out["refuted"] is True
         assert "signed" in out["reasoning"]
 
-    def test_missing_fields_default_to_not_refuted(self):
+    def test_missing_fields_default_to_not_refuted(self) -> None:
         # Absent/garbled output must not silently downgrade a verdict.
         out = self._verifier({}).verify({"artifact": "x"})
         assert out["refuted"] is False
@@ -1958,7 +1958,7 @@ def _investigate(sink, inv):
 
 
 class TestInvestigateStage:
-    def test_unknown_resolved_replaces_verdict(self, sink):
+    def test_unknown_resolved_replaces_verdict(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         inv = _FakeInvestigator(Verdict.MALICIOUS)
@@ -1970,7 +1970,7 @@ class TestInvestigateStage:
         assert out[0].reasoning.startswith("[investigated]")
         assert len(inv.calls) == 1
 
-    def test_unknown_kept_when_still_unknown(self, sink):
+    def test_unknown_kept_when_still_unknown(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         inv = _FakeInvestigator(Verdict.UNKNOWN)
@@ -1979,7 +1979,7 @@ class TestInvestigateStage:
         assert out[0].verdict == Verdict.UNKNOWN
         assert len(inv.calls) == 1  # investigated, but couldn't commit
 
-    def test_non_unknown_not_investigated(self, sink):
+    def test_non_unknown_not_investigated(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         inv = _FakeInvestigator(Verdict.MALICIOUS)
@@ -1988,7 +1988,7 @@ class TestInvestigateStage:
         assert out[0].verdict == Verdict.SUSPICIOUS
         assert inv.calls == []
 
-    def test_investigations_are_capped_per_collector(self, sink):
+    def test_investigations_are_capped_per_collector(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         inv = _FakeInvestigator(Verdict.MALICIOUS)
@@ -1997,13 +1997,13 @@ class TestInvestigateStage:
         assert len(inv.calls) == 10
         assert [j.verdict for j in out[10:]] == [Verdict.UNKNOWN] * 2
 
-    def test_without_an_investigator_unknown_is_stored_as_is(self, sink):
+    def test_without_an_investigator_unknown_is_stored_as_is(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
 
         _runner(sink, [_Procs()], judge=_FixedJudge(Verdict.UNKNOWN)).run_once()
         assert _stored_verdict(sink) == "unknown"
 
-    def test_finding_carries_full_history_behaviour(self, sink):
+    def test_finding_carries_full_history_behaviour(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
         from avai.host_monitor.models import NetworkFlowRow
 
@@ -2046,7 +2046,7 @@ class TestUnknownFindingInvestigator:
             LlmSession(_FakeClient(), logging.getLogger("test")),
         )
 
-    def test_parses_and_clamps(self):
+    def test_parses_and_clamps(self) -> None:
         from avai.host_monitor.enums import ThreatCategory, Verdict
 
         out = self._inv(
@@ -2062,7 +2062,7 @@ class TestUnknownFindingInvestigator:
         assert out["category"] == ThreatCategory.COMMAND_AND_CONTROL
         assert out["confidence"] == 1.0  # clamped to [0,1]
 
-    def test_bad_verdict_coerces_to_unknown(self):
+    def test_bad_verdict_coerces_to_unknown(self) -> None:
         from avai.host_monitor.enums import Verdict
 
         out = self._inv(
@@ -2101,7 +2101,7 @@ def _add_feedback(sink, h, collector, label, note=None, artifact=None, applied=0
 
 
 class TestFeedback:
-    def test_apply_feedback_flips_to_benign_and_marks_applied(self, sink):
+    def test_apply_feedback_flips_to_benign_and_marks_applied(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
         from avai.host_monitor.models import Judgement
 
@@ -2114,7 +2114,7 @@ class TestFeedback:
         assert "operator" in row.reasoning and "known dev tool" in row.reasoning
         assert sink.apply_feedback() == 0  # already applied → not reprocessed
 
-    def test_apply_feedback_confirmed_to_malicious(self, sink):
+    def test_apply_feedback_confirmed_to_malicious(self, sink: Sink) -> None:
         from avai.host_monitor.enums import Verdict
         from avai.host_monitor.models import Judgement
 
@@ -2125,14 +2125,14 @@ class TestFeedback:
             row = s.get(Judgement, ("h2", "processes"))
         assert row.verdict == str(Verdict.MALICIOUS)
 
-    def test_feedback_examples_scoped_to_collector(self, sink):
+    def test_feedback_examples_scoped_to_collector(self, sink: Sink) -> None:
         _add_feedback(sink, "h1", "processes", "false_positive", artifact="curl")
         ex = sink.feedback_examples("processes")
         assert ex and ex[0]["artifact"] == "curl"
         assert ex[0]["label"] == "false_positive"
         assert sink.feedback_examples("dns_queries") == []
 
-    def test_judge_hints_appends_ground_truth_block(self, sink):
+    def test_judge_hints_appends_ground_truth_block(self, sink: Sink) -> None:
         _add_feedback(
             sink, "h1", "processes", "false_positive", artifact="curl", note="dev tool"
         )
@@ -2140,10 +2140,10 @@ class TestFeedback:
         assert hints.startswith("BASE HINTS")
         assert "curl" in hints and "FALSE POSITIVE" in hints and "dev tool" in hints
 
-    def test_judge_hints_unchanged_without_feedback(self, sink):
+    def test_judge_hints_unchanged_without_feedback(self, sink: Sink) -> None:
         assert _hints_seen_by_judge(sink, "BASE") == "BASE"
 
-    def test_other_collectors_feedback_is_not_used(self, sink):
+    def test_other_collectors_feedback_is_not_used(self, sink: Sink) -> None:
         _add_feedback(sink, "h1", "dns_queries", "confirmed", artifact="evil.example")
         assert _hints_seen_by_judge(sink, "BASE") == "BASE"
 

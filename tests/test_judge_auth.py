@@ -35,7 +35,7 @@ OPENAI = {"OPENAI_API_KEY": "sk-openai"}
         pytest.param({**OAUTH, **ANTHROPIC}, "oauth", id="oauth-wins"),
     ],
 )
-def test_credential_rule(env, expected_client):
+def test_credential_rule(env, expected_client) -> None:
     credentials = LlmCredentials.from_env(env)
 
     with (
@@ -51,14 +51,14 @@ def test_credential_rule(env, expected_client):
     assert client == expected_client
 
 
-def test_oauth_client_is_built_with_the_token():
+def test_oauth_client_is_built_with_the_token() -> None:
     with patch.object(llm, "AnthropicOAuthClient") as oauth:
         LlmCredentials.from_env(OAUTH).client()
 
     oauth.create.assert_called_once_with("oauth-token")
 
 
-def test_token_stays_out_of_the_repr():
+def test_token_stays_out_of_the_repr() -> None:
     assert "oauth-token" not in repr(LlmCredentials.from_env(OAUTH))
 
 
@@ -102,7 +102,7 @@ ALL_OPTIONAL = {"narrator", "coverage", "verifier", "investigator"}
 
 
 class TestLlmStagesBuild:
-    def test_every_stage_shares_one_client(self):
+    def test_every_stage_shares_one_client(self) -> None:
         credentials = _StubCredentials()
 
         stages = _stages(credentials=credentials)
@@ -111,7 +111,7 @@ class TestLlmStagesBuild:
         assert _enabled(stages) == ALL_OPTIONAL
         assert credentials.clients_built == 1
 
-    def test_no_credentials_turns_every_stage_off(self):
+    def test_no_credentials_turns_every_stage_off(self) -> None:
         credentials = _StubCredentials(can_call=False)
 
         stages = _stages(credentials=credentials)
@@ -120,7 +120,7 @@ class TestLlmStagesBuild:
         assert _enabled(stages) == set()
         assert credentials.clients_built == 0
 
-    def test_missing_sdk_turns_every_stage_off(self):
+    def test_missing_sdk_turns_every_stage_off(self) -> None:
         stages = _stages(credentials=_StubCredentials(error=RuntimeError("no sdk")))
 
         assert isinstance(stages.judge, NullJudge)
@@ -134,7 +134,7 @@ class TestLlmStagesBuild:
         assert isinstance(stages.judge, NullJudge)
         assert _enabled(stages) == set()
 
-    def test_no_judge_also_drops_the_narrator_only(self):
+    def test_no_judge_also_drops_the_narrator_only(self) -> None:
         stages = _stages("--no-judge")
 
         assert isinstance(stages.judge, NullJudge)
@@ -149,13 +149,13 @@ class TestLlmStagesBuild:
             ("--no-investigate", "investigator"),
         ],
     )
-    def test_each_flag_turns_off_its_stage(self, flag, stage):
+    def test_each_flag_turns_off_its_stage(self, flag, stage) -> None:
         stages = _stages(flag)
 
         assert isinstance(stages.judge, LlmJudge)
         assert _enabled(stages) == ALL_OPTIONAL - {stage}
 
-    def test_missing_prompt_turns_off_its_stage(self):
+    def test_missing_prompt_turns_off_its_stage(self) -> None:
         prompts = replace(Prompts.load(DEFAULT_PROMPTS_PATH), verifier_system="")
 
         stages = _stages(prompts=prompts)
