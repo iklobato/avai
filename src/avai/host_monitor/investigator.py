@@ -19,9 +19,9 @@ from typing import Any
 
 from .constants import DEFAULT_JUDGE_MODEL
 from .enums import ThreatCategory, Verdict
-from .llm import CompletionRequest, LlmSession, ParsedReply, StructuredCall
+from .llm import CompletionRequest, LlmSession, StructuredCall
+from .llm_replies import JudgmentReply
 from .prompts import Prompts
-from .runtime import Coerce
 
 
 class UnknownFindingInvestigator:
@@ -31,8 +31,6 @@ class UnknownFindingInvestigator:
     TEMPERATURE = 0.0
     MAX_TOKENS = 1024
 
-    REASONING_CHARS = 500
-    REMEDIATION_CHARS = 2000
     REQUIRED = ("verdict", "category", "confidence", "reasoning", "remediation")
 
     @classmethod
@@ -83,16 +81,6 @@ class UnknownFindingInvestigator:
         parsed = self._llm.ask_or_none(
             {"collector": collector, "finding": finding_json}
         )
-        return None if parsed is None else self._judgment(ParsedReply(parsed))
-
-    def _judgment(self, reply: ParsedReply) -> dict[str, Any]:
-        coerce = Coerce()
-        return {
-            "verdict": coerce.enum(reply.keyword("verdict"), Verdict, Verdict.UNKNOWN),
-            "category": coerce.enum(
-                reply.keyword("category"), ThreatCategory, ThreatCategory.NONE
-            ),
-            "confidence": reply.fraction("confidence"),
-            "reasoning": reply.raw_text("reasoning", self.REASONING_CHARS),
-            "remediation": reply.raw_text("remediation", self.REMEDIATION_CHARS),
-        }
+        if parsed is None:
+            return None
+        return JudgmentReply.model_validate(parsed).fields()

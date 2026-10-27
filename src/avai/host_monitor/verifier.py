@@ -14,7 +14,8 @@ import json
 from typing import Any
 
 from .constants import DEFAULT_NARRATIVE_MODEL
-from .llm import CompletionRequest, LlmSession, ParsedReply, StructuredCall
+from .llm import CompletionRequest, LlmSession, StructuredCall
+from .llm_replies import VerifierReply
 from .prompts import Prompts
 
 
@@ -35,8 +36,6 @@ class MaliciousVerdictVerifier:
             },
             "required": ["refuted", "reasoning"],
         }
-
-    REASONING_CHARS = 500
 
     def __init__(self, llm: StructuredCall) -> None:
         self._llm = llm
@@ -69,8 +68,4 @@ class MaliciousVerdictVerifier:
         )
         if parsed is None:
             return None
-        reply = ParsedReply(parsed)
-        return {
-            "refuted": reply.flag("refuted"),
-            "reasoning": reply.text("reasoning", self.REASONING_CHARS),
-        }
+        return VerifierReply.model_validate(parsed).fields()

@@ -14,15 +14,15 @@ from .constants import (
     DEFAULT_JUDGE_MODEL,
 )
 from .enums import ThreatCategory, Verdict
+from .llm_replies import JudgmentReply
 from .llm import (
     CompletionError,
     CompletionRequest,
     LlmSession,
-    ParsedReply,
     StructuredCall,
 )
 from .prompts import Prompts
-from .runtime import Clock, Coerce
+from .runtime import Clock
 
 
 class ModelPricing:
@@ -122,8 +122,6 @@ class LlmJudge(Judge):
     SCHEMA_NAME = "submit_judgments"
     TEMPERATURE = 0.0
     MAX_TOKENS = 4096
-    REASONING_CHARS = 500
-    REMEDIATION_CHARS = 2000
     ERROR_EXCERPT_CHARS = 200
     REQUIRED = ("index", "verdict", "category", "confidence", "reasoning")
 
@@ -234,7 +232,9 @@ class LlmJudge(Judge):
             request.collector, self.model, request.created_at, self._share(batch)
         )
         return [
-            self._judgment(stamp, batch[index]["content_hash"], ParsedReply(item))
+            self._judgment(
+                stamp, batch[index]["content_hash"], JudgmentReply.model_validate(item)
+            )
             for index, item in self._indexed(parsed, len(batch))
         ]
 
@@ -273,19 +273,12 @@ class LlmJudge(Judge):
         ]
 
     def _judgment(
-        self, stamp: JudgmentStamp, content_hash: str, reply: ParsedReply
+        self, stamp: JudgmentStamp, content_hash: str, reply: JudgmentReply
     ) -> Judgment:
-        coerce = Coerce()
         return Judgment(
             content_hash=content_hash,
             collector=stamp.collector,
-            verdict=coerce.enum(reply.keyword("verdict"), Verdict, Verdict.UNKNOWN),
-            category=coerce.enum(
-                reply.keyword("category"), ThreatCategory, ThreatCategory.NONE
-            ),
-            confidence=reply.fraction("confidence"),
-            reasoning=reply.raw_text("reasoning", self.REASONING_CHARS),
-            remediation=reply.raw_text("remediation", self.REMEDIATION_CHARS),
+            **reply.fields(),
             model=stamp.model,
             created_at=stamp.created_at,
             cost_usd=stamp.cost_usd,
