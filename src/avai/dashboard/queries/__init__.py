@@ -1,7 +1,7 @@
 """Read-only DB query layer, one module per dashboard panel. Every panel class
 takes a Session; none touches Flask."""
 
-from .auth_events import AUTH_SUBSYSTEM_OPTIONS, AuthEventsPanel, AuthQuery, AuthSort
+from .auth_events import AuthEventsPanel, AuthQuery, AuthSort
 from .collection import ReportQueries, RowCounts, RunMark, RunQueries, VerdictQueries
 from .dns import DnsLevel, DnsPanel, DnsQuery
 from .exposure import NetworkPanels
@@ -31,7 +31,6 @@ from .resources import DiskOrder, MountTree, ResourceQueries
 from .vulnerabilities import VulnerabilitiesPanel, VulnQuery
 
 __all__ = [
-    "AUTH_SUBSYSTEM_OPTIONS",
     "DEFAULT_PER_PAGE",
     "DISPLAY_FIELDS",
     "PER_PAGE_OPTIONS",

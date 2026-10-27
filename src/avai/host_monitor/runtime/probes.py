@@ -202,7 +202,7 @@ class TriState:
 
 
 # --- capability seams: posture/behaviour of a service, one mechanism each ---
-# These are the OS-specific strategies a SecurityControl composes (DIP). The
+# These are the OS-specific strategies a NetworkServiceControl composes (DIP). The
 # control depends on these tiny interfaces, never on the commands directly;
 # the composition root (host module) injects the right implementation.
 

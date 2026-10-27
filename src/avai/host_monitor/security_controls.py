@@ -1,7 +1,7 @@
 """Security-control detection — the proper-abstraction layer for the
 system-integrity topics.
 
-A :class:`SecurityControl` answers two questions about one topic:
+A :class:`NetworkServiceControl` answers two questions about one topic:
 
 * ``enabled`` — *posture*: is the service configured to be reachable? (the
   thing a security panel must never miss — an exposed SSH that's idle).
@@ -22,8 +22,6 @@ the existing ``system_integrity`` columns and probe convention.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
-
 from .runtime import PortInspector, ProcessInspector, ServiceSupervisor, TriState
 
 
@@ -35,25 +33,6 @@ class IntegrityFinding:
     enabled: int | None
     active: int | None
     source: str
-
-
-class SecurityControl(Protocol):
-    """Detects exactly one security topic. Substitutable across platforms."""
-
-    topic: str
-
-    def inspect(self) -> IntegrityFinding:
-        spec, probes = self._spec, self._probes
-        services, ports = probes.services, probes.ports
-        serving = (services.enabled(spec.unit), ports.listening(spec.port))
-        in_use = (probes.processes.running(spec.process), ports.established(spec.port))
-        signals = TriState()
-        return IntegrityFinding(
-            topic=spec.topic,
-            enabled=signals.any_on(serving),
-            active=signals.any_on(in_use),
-            source="service+port+process",
-        )
 
 
 @dataclass(frozen=True)

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from .constants import (
     STREAM_CRASH_ESCALATE_THRESHOLD,
@@ -79,7 +79,6 @@ class Crashed:
 # --- Restart timing --------------------------------------------------------
 
 
-@runtime_checkable
 class BackoffPolicy(Protocol):
     def delay_for(self, attempt: int) -> float:
         """Seconds to wait before restart ``attempt`` (1-based)."""
@@ -112,7 +111,6 @@ class ExponentialBackoff:
         return min(raw, self._max)
 
 
-@runtime_checkable
 class Sleeper(Protocol):
     def sleep(self, seconds: float) -> None: ...
 

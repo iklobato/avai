@@ -7,8 +7,7 @@ per-enricher failures so one broken source doesn't break the cycle.
 
 The chain is intentionally dumb: it does not aggregate verdicts, does
 not pick a single winner. The judge sees every Evidence entry and
-decides. ``VerdictHint.worst()`` is provided as a helper for callers
-that need a single summary.
+decides.
 """
 
 from __future__ import annotations

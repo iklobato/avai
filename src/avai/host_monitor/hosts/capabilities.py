@@ -9,14 +9,13 @@ faked in tests and carry no platform branches.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Iterable, Protocol
 
 if TYPE_CHECKING:
     from ..collectors import SnapshotCollector, StreamingCollector
     from ..prompts import Prompts
 
 
-@runtime_checkable
 class FilesystemLayout(Protocol):
     """OS-varying account and config file *facts*. The collector owns the
     parsing; this just supplies the paths that differ per OS (Bridge), so a
@@ -54,7 +53,6 @@ class ExecutableLayout(FilesystemLayout, Protocol):
         ...
 
 
-@runtime_checkable
 class PrivilegedAccounts(Protocol):
     """Privilege-granting account state where the whole gather differs per
     OS (directory-service queries vs ``/etc`` parsing)."""
@@ -68,7 +66,6 @@ class PrivilegedAccounts(Protocol):
         ...
 
 
-@runtime_checkable
 class Host(Protocol):
     """The platform object. Resolved once; assembles the collector set for
     this OS, wiring its capability ports into the OS-agnostic collectors."""

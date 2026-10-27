@@ -61,26 +61,6 @@ class VerdictHint(StrEnum):
     BENIGN = "benign"  # e.g. NSRL whitelist hit
     UNKNOWN = "unknown"
 
-    @property
-    def severity_rank(self) -> int:
-        return HINT_SEVERITY_ORDER.index(self)
-
-    @classmethod
-    def worst(cls, hints: list[VerdictHint]) -> VerdictHint:
-        """Aggregate multiple evidence hints to the worst-case verdict: a
-        malicious hit on any source wins over a benign hit on another."""
-        if not hints:
-            return cls.UNKNOWN
-        return max(hints, key=lambda hint: hint.severity_rank)
-
-
-HINT_SEVERITY_ORDER = (
-    VerdictHint.BENIGN,
-    VerdictHint.UNKNOWN,
-    VerdictHint.SUSPICIOUS,
-    VerdictHint.MALICIOUS,
-)
-
 LOWERCASED_TYPES = frozenset(
     {
         IndicatorType.SHA256,

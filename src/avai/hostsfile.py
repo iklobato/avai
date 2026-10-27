@@ -31,7 +31,7 @@ import tempfile
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from avai.errors import AvaiError, UnsupportedPlatformError
 
@@ -83,7 +83,6 @@ class HostsPermissionError(HostsError):
         return f"cannot write {self.path}: {self.hint}"
 
 
-@runtime_checkable
 class Platform(Protocol):
     """OS-varying hosts-file facts the registrar depends on (DIP)."""
 

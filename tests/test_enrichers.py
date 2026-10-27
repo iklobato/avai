@@ -398,28 +398,6 @@ class TestRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class TestWorstHint:
-    def test_malicious_beats_everything(self):
-        assert (
-            VerdictHint.worst(
-                [
-                    VerdictHint.BENIGN,
-                    VerdictHint.SUSPICIOUS,
-                    VerdictHint.MALICIOUS,
-                ]
-            )
-            is VerdictHint.MALICIOUS
-        )
-
-    def test_empty_input_is_unknown(self):
-        assert VerdictHint.worst([]) is VerdictHint.UNKNOWN
-
-
-# ---------------------------------------------------------------------------
 # Forward-chaining: discovered CVE IDs get re-enriched through CVE sources
 # ---------------------------------------------------------------------------
 
