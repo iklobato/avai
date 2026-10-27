@@ -10,9 +10,10 @@ https://ipwho.is/
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict
 
 from avai.enrichers.base import (
     Enricher,
@@ -27,6 +28,43 @@ ONE_WEEK_HOURS = 24 * 7
 INFORMATIONAL_CONFIDENCE = 0.0
 
 
+class GeoConnection(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    asn: int | None = None
+    org: str | None = None
+    isp: str | None = None
+
+
+class GeoReply(BaseModel):
+    """An ipwho.is lookup; ``success`` is false for bogon/reserved IPs."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    success: bool = False
+    country: str | None = None
+    country_code: str | None = None
+    region: str | None = None
+    city: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    connection: GeoConnection | None = None
+
+    def details(self) -> dict[str, Any]:
+        connection = self.connection or GeoConnection()
+        return {
+            "country": self.country or "",
+            "country_code": self.country_code,
+            "region": self.region or "",
+            "city": self.city or "",
+            "latitude": self.latitude,
+            "longitude": self.longitude,
+            "asn": connection.asn,
+            "org": connection.org or connection.isp or "",
+            "isp": connection.isp,
+        }
+
+
 class IpwhoisGeoEnricher(Enricher):
     name = "ipwhois_geo"
     supports_types = frozenset({IndicatorType.IPV4, IndicatorType.IPV6})
@@ -39,15 +77,15 @@ class IpwhoisGeoEnricher(Enricher):
         response = self._http.get(f"{BASE_URL}/{indicator.value}")
         if response.status_code != HTTPStatus.OK:
             return None
-        body = response.json() or {}
+        reply = GeoReply.model_validate(response.json() or {})
         # ipwho.is answers {"success": false, "message": ...} for bogon /
         # reserved / unroutable addresses — treat as "no opinion".
-        if not body.get("success"):
+        if not reply.success:
             return None
-        return self._evidence(indicator, body)
+        return self._evidence(indicator, reply)
 
-    def _evidence(self, indicator: Indicator, body: Mapping[str, Any]) -> Evidence:
-        details = self._details(body)
+    def _evidence(self, indicator: Indicator, reply: GeoReply) -> Evidence:
+        details = reply.details()
         place = (details["city"], details["region"], details["country"])
         where = ", ".join(part for part in place if part)
         asn, org = details["asn"], details["org"]
@@ -60,17 +98,3 @@ class IpwhoisGeoEnricher(Enricher):
             summary=f"Geo: {where or 'unknown'}{network}",
             details=details,
         )
-
-    def _details(self, body: Mapping[str, Any]) -> dict[str, Any]:
-        connection = body.get("connection") or {}
-        return {
-            "country": body.get("country") or "",
-            "country_code": body.get("country_code"),
-            "region": body.get("region") or "",
-            "city": body.get("city") or "",
-            "latitude": body.get("latitude"),
-            "longitude": body.get("longitude"),
-            "asn": connection.get("asn"),
-            "org": connection.get("org") or connection.get("isp") or "",
-            "isp": connection.get("isp"),
-        }

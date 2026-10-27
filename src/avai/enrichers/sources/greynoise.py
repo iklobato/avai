@@ -6,9 +6,10 @@ https://docs.greynoise.io/reference/get_v3-community-ip
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from avai.enrichers.base import (
     Enricher,
@@ -27,6 +28,26 @@ BENIGN_CONFIDENCE = 0.85
 SUSPICIOUS_CONFIDENCE = 0.5
 UNKNOWN_CONFIDENCE = 0.3
 DETAIL_FIELDS = ("classification", "noise", "riot", "name", "last_seen", "link")
+
+
+class NoiseRecord(BaseModel):
+    """A GreyNoise community lookup; other fields are kept as given."""
+
+    model_config = ConfigDict(frozen=True, extra="allow")
+
+    classification: str | None = None
+    noise: bool = False
+    riot: bool = False
+    name: str | None = None
+
+    @field_validator("noise", "riot", mode="before")
+    @classmethod
+    def _truthy(cls, value: Any) -> bool:
+        return bool(value)
+
+    def details(self) -> dict[str, Any]:
+        given = self.model_dump()
+        return {field: given.get(field) for field in DETAIL_FIELDS}
 
 
 class GreyNoiseEnricher(Enricher):
@@ -49,13 +70,12 @@ class GreyNoiseEnricher(Enricher):
             return None
         if response.status_code != HTTPStatus.OK:
             raise EnricherError(f"greynoise returned {response.status_code}")
-        return self._evidence(indicator, response.json())
+        return self._evidence(indicator, NoiseRecord.model_validate(response.json()))
 
-    def _evidence(self, indicator: Indicator, body: Mapping[str, Any]) -> Evidence:
-        classification = body.get("classification") or "unknown"
-        noise = bool(body.get("noise"))
-        riot = bool(body.get("riot"))
-        verdict = self._verdict(body)
+    def _evidence(self, indicator: Indicator, record: NoiseRecord) -> Evidence:
+        classification = record.classification or "unknown"
+        noise, riot = record.noise, record.riot
+        verdict = self._verdict(record)
         return Evidence(
             source=self.name,
             indicator=indicator,
@@ -63,17 +83,17 @@ class GreyNoiseEnricher(Enricher):
             confidence=verdict.confidence,
             summary=(
                 f"GreyNoise: classification={classification} "
-                f"noise={noise} riot={riot} name={body.get('name') or ''}"
+                f"noise={noise} riot={riot} name={record.name or ''}"
             ),
-            details={field: body.get(field) for field in DETAIL_FIELDS},
+            details=record.details(),
         )
 
-    def _verdict(self, body: Mapping[str, Any]) -> Verdict:
-        if body.get("classification") == "malicious":
+    def _verdict(self, record: NoiseRecord) -> Verdict:
+        if record.classification == "malicious":
             return Verdict(VerdictHint.MALICIOUS, MALICIOUS_CONFIDENCE)
         # RIOT = "known benign service" (Google, Microsoft, etc.)
-        if body.get("riot"):
+        if record.riot:
             return Verdict(VerdictHint.BENIGN, BENIGN_CONFIDENCE)
-        if body.get("noise"):
+        if record.noise:
             return Verdict(VerdictHint.SUSPICIOUS, SUSPICIOUS_CONFIDENCE)
         return Verdict(VerdictHint.UNKNOWN, UNKNOWN_CONFIDENCE)

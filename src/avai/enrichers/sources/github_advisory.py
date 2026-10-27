@@ -6,9 +6,10 @@ https://docs.github.com/en/rest/security-advisories/global-advisories
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from http import HTTPStatus
 from typing import Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from avai.enrichers.base import (
     CVSS_CRITICAL,
@@ -38,6 +39,34 @@ DETAIL_FIELDS = (
 )
 
 
+class AdvisoryCvss(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="allow")
+
+    score: float | None = None
+
+
+class Advisory(BaseModel):
+    """One GitHub advisory; fields not read here are kept as given."""
+
+    model_config = ConfigDict(frozen=True, extra="allow")
+
+    severity: str = ""
+    summary: str | None = None
+    cvss: AdvisoryCvss | None = None
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _severity(cls, value: Any) -> str:
+        return (value or "").lower()
+
+    def score(self) -> float | None:
+        return self.cvss.score if self.cvss else None
+
+    def details(self) -> dict[str, Any]:
+        given = self.model_dump()
+        return {field: given.get(field) for field in DETAIL_FIELDS}
+
+
 class GitHubAdvisoryEnricher(Enricher):
     name = "github_advisory"
     supports_types = frozenset({IndicatorType.CVE})
@@ -63,11 +92,10 @@ class GitHubAdvisoryEnricher(Enricher):
         advisories = response.json() or []
         if not advisories:
             return None
-        return self._evidence(indicator, advisories[0])
+        return self._evidence(indicator, Advisory.model_validate(advisories[0]))
 
-    def _evidence(self, indicator: Indicator, advisory: Mapping[str, Any]) -> Evidence:
-        severity = (advisory.get("severity") or "").lower()
-        score = (advisory.get("cvss") or {}).get("score")
+    def _evidence(self, indicator: Indicator, advisory: Advisory) -> Evidence:
+        severity, score = advisory.severity, advisory.score()
         verdict = self._verdict(severity, score)
         return Evidence(
             source=self.name,
@@ -76,9 +104,9 @@ class GitHubAdvisoryEnricher(Enricher):
             confidence=verdict.confidence,
             summary=(
                 f"GH Advisory: severity={severity} score={score} — "
-                f"{advisory.get('summary')!s:.{SUMMARY_WIDTH}}"
+                f"{advisory.summary!s:.{SUMMARY_WIDTH}}"
             ),
-            details={field: advisory.get(field) for field in DETAIL_FIELDS},
+            details=advisory.details(),
         )
 
     def _verdict(self, severity: str, score: float | None) -> Verdict:
