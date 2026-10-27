@@ -253,7 +253,7 @@ class ProcessConnectionResolver:
         """Map remote ``(ip, port)`` → ``(process_name, pid)`` for every
         inet socket that has a remote peer and a resolvable owner."""
         try:
-            conns = self._connections.inet()
+            conns = self._connections.visible()
         except OSError:
             return {}
         owners: dict[tuple[str, int], tuple[str, int]] = {}
@@ -360,7 +360,7 @@ class NetworkConnectionsCollector(SnapshotCollector):
         self._connections = connections
 
     def collect(self) -> Iterator[dict[str, Any]]:
-        for conn in self._connections.inet():
+        for conn in self._connections.visible():
             yield {
                 "pid": conn.pid,
                 "family": conn.family.name,

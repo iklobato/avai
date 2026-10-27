@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from collections.abc import Iterable, Iterator
 from typing import Any, Protocol
 
@@ -13,6 +14,35 @@ from .mounts import HostPart, HostRootfs, HostUsage
 SIGNAL_ON = 1
 SIGNAL_OFF = 0
 ROOTFS_DIR = "rootfs"
+
+
+@dataclass(frozen=True)
+class OwnedSocket:
+    """One entry of a process's own socket table plus that process's pid,
+    read the same way as an entry of the system-wide table."""
+
+    pid: int
+    entry: Any
+
+    @property
+    def family(self) -> Any:
+        return self.entry.family
+
+    @property
+    def type(self) -> Any:
+        return self.entry.type
+
+    @property
+    def laddr(self) -> Any:
+        return self.entry.laddr
+
+    @property
+    def raddr(self) -> Any:
+        return self.entry.raddr
+
+    @property
+    def status(self) -> str:
+        return self.entry.status
 
 
 class PsutilConnections:
@@ -29,9 +59,31 @@ class PsutilConnections:
                 "psutil.net_connections requires root for full visibility"
             ) from exc
 
+    def visible(self) -> list[Any]:
+        """Every INET connection this process can see. Without root (macOS
+        denies the system-wide table) it reads each process's own table
+        instead: the sockets of the processes this user may inspect. A
+        partial view, so only for collectors; a yes/no answer must use
+        :meth:`inet` and know when it cannot tell."""
+        try:
+            return self.inet()
+        except PermissionError:
+            return [
+                socket
+                for process in psutil.process_iter()
+                for socket in self._own_sockets(process)
+            ]
+
     def listening(self) -> list[Any]:
-        """The INET sockets in LISTEN state."""
-        return [conn for conn in self.inet() if conn.status == psutil.CONN_LISTEN]
+        """The visible INET sockets in LISTEN state."""
+        return [conn for conn in self.visible() if conn.status == psutil.CONN_LISTEN]
+
+    def _own_sockets(self, process: psutil.Process) -> list[OwnedSocket]:
+        try:
+            sockets = process.net_connections(kind="inet")
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            return []
+        return [OwnedSocket(process.pid, socket) for socket in sockets]
 
     def process_name(self, pid: int) -> str | None:
         """Name of the process *pid*, or None when it is gone or hidden."""
