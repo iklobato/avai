@@ -20,6 +20,7 @@ from ..queries import (
     DnsPanel,
     DnsQuery,
     FindingFilter,
+    FindingStatus,
     FindingOptions,
     FindingsPanel,
     FindingsQuery,
@@ -461,7 +462,7 @@ class FindingsFragment(View):
 
     def dispatch_request(self) -> str:
         args = RequestArgs()
-        status = args.text("status", "active")
+        status = FindingStatus.parse(args.text("status", FindingStatus.ACTIVE))
         values = [args.text(name) for name in self.FILTER_ARGS]
         query = FindingsQuery(
             FindingFilter(*values, status),
@@ -494,7 +495,7 @@ class FindingsFragment(View):
             "verdict_filter": filters.verdict,
             "collector_filter": filters.collector,
             "category_filter": filters.category,
-            "status_filter": filters.status,
+            "status_filter": filters.status.value,
             "q": filters.search,
             "sort": query.sort,
             "order": query.order,

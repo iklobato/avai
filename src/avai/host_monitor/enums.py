@@ -43,6 +43,16 @@ class ThreatCategory(StrEnum):
     RECONNAISSANCE = "reconnaissance"
 
 
+class MaintenanceCommand(StrEnum):
+    """One-shot commands the dashboard queues and the monitor runs."""
+
+    PRUNE = "prune"
+    CLEAR = "clear"
+    REJUDGE = "rejudge"
+    RENARRATE = "renarrate"
+    RESET_BASELINE = "reset_baseline"
+
+
 class FeedbackLabel(StrEnum):
     """Operator correction on a finding, fed back into judging."""
 

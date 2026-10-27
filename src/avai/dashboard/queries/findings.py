@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import Select, asc, case, desc, func, or_, select
@@ -36,6 +37,20 @@ class FindingOptions:
         return [row[0] for row in self._session.execute(statement).all() if row[0]]
 
 
+class FindingStatus(StrEnum):
+    """Whether a judgment's artifact is still present in the latest run."""
+
+    ACTIVE = "active"
+    RESOLVED = "resolved"
+    ALL = "all"
+
+    @classmethod
+    def parse(cls, text: str) -> FindingStatus:
+        """The status a request asked for; anything unknown shows all, which
+        is what an unknown value already did."""
+        return cls(text) if text in tuple(cls) else cls.ALL
+
+
 @dataclass(frozen=True)
 class FindingFilter:
     """What the findings panel narrows to. ``status`` is ``active`` /
@@ -47,7 +62,7 @@ class FindingFilter:
     collector: str = ""
     category: str = ""
     search: str = ""
-    status: str = "active"
+    status: FindingStatus = FindingStatus.ACTIVE
 
     def apply(self, statement: Select[Any], latest_started: str | None) -> Select[Any]:
         """``statement`` narrowed to these filters. Benign is hidden unless
@@ -82,15 +97,15 @@ class FindingFilter:
         # With no latest run yet, or status "all", there is nothing to narrow.
         if not latest_started:
             return statement
-        if self.status == "active":
-            return statement.where(Judgement.last_seen_at >= latest_started)
-        if self.status == "resolved":
-            gone = or_(
+        conditions = {
+            FindingStatus.ACTIVE: Judgement.last_seen_at >= latest_started,
+            FindingStatus.RESOLVED: or_(
                 Judgement.last_seen_at < latest_started,
                 Judgement.last_seen_at.is_(None),
-            )
-            return statement.where(gone)
-        return statement
+            ),
+        }
+        condition = conditions.get(self.status)
+        return statement if condition is None else statement.where(condition)
 
 
 class FindingSort:
@@ -201,15 +216,14 @@ class FindingsPanel:
         source = artifacts.get((judgment.collector, judgment.content_hash), ({}, ""))
         seen = judgment.last_seen_at
         is_active = bool(latest_started and seen and seen >= latest_started)
-        return FindingItem(judgment, "active" if is_active else "resolved").values(
-            source
-        )
+        status = FindingStatus.ACTIVE if is_active else FindingStatus.RESOLVED
+        return FindingItem(judgment, status).values(source)
 
 
 class FindingItem:
     """One finding as the findings table renders it."""
 
-    def __init__(self, judgment: Judgement, status: str) -> None:
+    def __init__(self, judgment: Judgement, status: FindingStatus) -> None:
         self._judgment = judgment
         self._status = status
 
@@ -225,7 +239,7 @@ class FindingItem:
             "remediation": judgment.remediation or "",
             "created_at": judgment.created_at,
             "last_seen_at": judgment.last_seen_at,
-            "status": self._status,
+            "status": self._status.value,
             "artifact": artifact,
             "source_row": source_row,
             "content_hash": judgment.content_hash,

@@ -5,6 +5,7 @@ secret token (fail closed when unset)."""
 from __future__ import annotations
 
 import hmac
+from enum import StrEnum
 from http import HTTPStatus
 from typing import ClassVar
 
@@ -12,6 +13,7 @@ from flask import Blueprint, abort, render_template, request
 from flask.views import View
 
 from avai.host_monitor import FeedbackLabel
+from avai.host_monitor.enums import MaintenanceCommand
 
 from ..control import (
     ControlReader,
@@ -23,9 +25,6 @@ from ..control import (
 from ..queries import CollectorTables
 from . import ServiceLookup
 
-MAINTENANCE_ACTIONS = frozenset(
-    {"prune", "clear", "rejudge", "renarrate", "reset_baseline"}
-)
 TRUTHY_FORM_VALUES = ("1", "true", "on", "yes")
 
 
@@ -100,15 +99,22 @@ class ScanNowAction(GuardedAction):
         return ControlPanel().render()
 
 
+class CollectorSwitch(StrEnum):
+    ON = "on"
+    OFF = "off"
+
+
 class CollectorAction(GuardedAction):
     def dispatch_request(self, name: str, state: str) -> str:
         TokenGate().check()
-        if CollectorTables().model(name) is None or state not in ("on", "off"):
+        if CollectorTables().model(name) is None or state not in tuple(CollectorSwitch):
             abort(HTTPStatus.BAD_REQUEST)
-        if state == "on":
-            self.store().enable_collector(name)
-        if state == "off":
-            self.store().disable_collector(name)
+        store = self.store()
+        switches = {
+            CollectorSwitch.ON: store.enable_collector,
+            CollectorSwitch.OFF: store.disable_collector,
+        }
+        switches[CollectorSwitch(state)](name)
         return ControlPanel().render()
 
 
@@ -135,9 +141,9 @@ class SettingsAction(GuardedAction):
 class MaintenanceAction(GuardedAction):
     def dispatch_request(self, action: str) -> str:
         TokenGate().check()
-        if action not in MAINTENANCE_ACTIONS:
+        if action not in tuple(MaintenanceCommand):
             abort(HTTPStatus.BAD_REQUEST)
-        self.store().queue_command(action)
+        self.store().queue_command(MaintenanceCommand(action))
         return ControlPanel().render()
 
 
@@ -153,13 +159,14 @@ class FeedbackAction(GuardedAction):
 
     def dispatch_request(self, collector: str, content_hash: str, label: str) -> str:
         TokenGate().check()
-        labels = {known.value for known in FeedbackLabel}
-        if CollectorTables().model(collector) is None or label not in labels:
+        if CollectorTables().model(collector) is None or label not in tuple(
+            FeedbackLabel
+        ):
             abort(HTTPStatus.BAD_REQUEST)
         note = request.form.get("note", "").strip() or None
         artifact = request.form.get("artifact", "").strip() or None
         self.store().record_feedback(
-            Feedback(content_hash, collector, label, note, artifact)
+            Feedback(content_hash, collector, FeedbackLabel(label), note, artifact)
         )
         return self.RECORDED
 

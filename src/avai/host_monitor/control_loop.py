@@ -10,10 +10,10 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Any
 
 from .constants import MONITOR_PROGRESS_HEARTBEAT_S
+from .enums import MaintenanceCommand
 from .failures import HOST_FAILURES
 from .sink import Sink
 
@@ -81,14 +81,6 @@ class ProgressHeartbeat:
             self._sink.touch_heartbeat()
         except HOST_FAILURES:
             self._logger.exception("progress heartbeat write failed")
-
-
-class MaintenanceCommand(StrEnum):
-    PRUNE = "prune"
-    CLEAR = "clear"
-    REJUDGE = "rejudge"
-    RENARRATE = "renarrate"
-    RESET_BASELINE = "reset_baseline"
 
 
 class Maintenance:

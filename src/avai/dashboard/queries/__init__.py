@@ -5,7 +5,13 @@ from .auth_events import AUTH_SUBSYSTEM_OPTIONS, AuthEventsPanel, AuthQuery
 from .collection import ReportQueries, RowCounts, RunMark, RunQueries, VerdictQueries
 from .dns import DnsLevel, DnsPanel, DnsQuery
 from .exposure import NetworkPanels
-from .findings import FindingFilter, FindingOptions, FindingsPanel, FindingsQuery
+from .findings import (
+    FindingFilter,
+    FindingOptions,
+    FindingsPanel,
+    FindingsQuery,
+    FindingStatus,
+)
 from .flows import FlowQuery, FlowsPanel
 from .logs import LOG_LEVELS, LogAggregateQuery, LogFilter, LogQuery, LogsPanel
 from .panel_reads import (
@@ -41,6 +47,7 @@ __all__ = [
     "FindingOptions",
     "FindingsPanel",
     "FindingsQuery",
+    "FindingStatus",
     "FlowQuery",
     "FlowsPanel",
     "IntegrityPosture",

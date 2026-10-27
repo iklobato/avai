@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from avai.dashboard.app import DashboardApp
 from avai.dashboard.config import DashboardConfig
 from avai.dashboard.db import DashboardEngines
+from avai.dashboard.queries import FindingStatus
 from avai.dashboard.queries import IntegrityPosture, LogFilter, Page, RunQueries
 from avai.dashboard.serve import DashboardSchema
 from avai.host_monitor.models import SystemIntegrityRow
@@ -142,6 +143,25 @@ def make_client(db_path):
 @pytest.fixture
 def client(make_client):
     return make_client()
+
+
+class TestFindingStatusParse:
+    @pytest.mark.parametrize(
+        ("text", "status"),
+        [
+            ("active", FindingStatus.ACTIVE),
+            ("resolved", FindingStatus.RESOLVED),
+            ("all", FindingStatus.ALL),
+        ],
+    )
+    def test_known_values_map_to_their_status(
+        self, text: str, status: FindingStatus
+    ) -> None:
+        assert FindingStatus.parse(text) is status
+
+    @pytest.mark.parametrize("text", ["bogus", "", "ACTIVE"])
+    def test_unknown_values_show_every_finding(self, text: str) -> None:
+        assert FindingStatus.parse(text) is FindingStatus.ALL
 
 
 class TestDashboardConfigFromEnv:

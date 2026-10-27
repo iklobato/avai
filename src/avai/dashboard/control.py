@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from avai.host_monitor import ControlState, FeedbackRow
 from avai.host_monitor.constants import MONITOR_LIVENESS_WINDOW_S
+from avai.host_monitor.enums import FeedbackLabel, MaintenanceCommand
 
 # The control_state table holds one row with this id.
 CONTROL_ROW_ID = 1
@@ -51,14 +52,14 @@ class Feedback:
 
     content_hash: str
     collector: str
-    label: str
+    label: FeedbackLabel
     note: str | None
     artifact: str | None
 
     def fields(self, created_at: str) -> dict[str, Any]:
         """The columns a re-submitted correction overwrites."""
         return {
-            "label": self.label,
+            "label": self.label.value,
             "note": self.note,
             "artifact": self.artifact,
             "created_at": created_at,
@@ -94,10 +95,10 @@ class ControlStore:
     def disable_collector(self, name: str) -> None:
         self._edit_disabled(name, set.add)
 
-    def queue_command(self, command: str) -> None:
+    def queue_command(self, command: MaintenanceCommand) -> None:
         """Queue a one-shot maintenance command; the monitor runs + acks it."""
         self._update(
-            {"command": command, "command_nonce": ControlState.command_nonce + 1}
+            {"command": command.value, "command_nonce": ControlState.command_nonce + 1}
         )
 
     def record_feedback(self, feedback: Feedback) -> None:
