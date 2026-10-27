@@ -67,15 +67,6 @@ class WindowsFilesystemLayout:
 
     SHARED_PROFILES = frozenset({"Public", "Default", "All Users"})
 
-    def privileged_bin_dirs(self) -> list[Path]:
-        # No setuid concept on Windows; SetuidFilesCollector is composed
-        # out, so this is never called.
-        return []
-
-    def app_executables(self) -> list[Path]:
-        # No macOS-style app bundles; FileScanCollector isn't wired here.
-        return []
-
     def home_dirs(self) -> list[Path]:
         users = Path("C:/Users")
         try:
@@ -97,11 +88,6 @@ class WindowsFilesystemLayout:
 
     def sudoers_dir(self) -> Path:
         return NONEXISTENT_PATH
-
-    def tcpdump_interface_args(self) -> list[str]:
-        # tcpdump isn't a default Windows tool; the flow/DNS collectors are
-        # composed out, so this is unused.
-        return []
 
 
 class WindowsPrivilegedAccounts:

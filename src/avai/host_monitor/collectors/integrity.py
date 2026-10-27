@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..hosts.capabilities import FilesystemLayout
+    from ..hosts.capabilities import ExecutableLayout
 
 from ..enums import SelinuxMode
 from ..slices import Slices
@@ -341,7 +341,7 @@ class SetuidFilesCollector(SnapshotCollector):
     slice = Slices.SETUID_FILES
     judge_fields = ("path", "uid", "setuid", "setgid")
 
-    def __init__(self, fs: FilesystemLayout, judge_hints: str = "") -> None:
+    def __init__(self, fs: ExecutableLayout, judge_hints: str = "") -> None:
         super().__init__(judge_hints=judge_hints)
         self._fs = fs
 

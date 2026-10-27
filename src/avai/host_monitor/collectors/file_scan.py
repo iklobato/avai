@@ -21,7 +21,7 @@ from ..slices import Slices
 from .base import SnapshotCollector
 
 if TYPE_CHECKING:
-    from ..hosts.capabilities import FilesystemLayout
+    from ..hosts.capabilities import ExecutableLayout
 
 
 class CryptoHint:
@@ -302,7 +302,7 @@ class ScanTargets:
 
     SECONDS_PER_DAY = 86400
 
-    def __init__(self, fs: FilesystemLayout, clock: Clock) -> None:
+    def __init__(self, fs: ExecutableLayout, clock: Clock) -> None:
         self._fs = fs
         self._clock = clock
 
@@ -426,7 +426,7 @@ class FileScanCollector(SnapshotCollector):
     @classmethod
     def create(
         cls,
-        fs: FilesystemLayout,
+        fs: ExecutableLayout,
         compiler: YaraRulesetCompiler,
         judge_hints: str = "",
     ) -> FileScanCollector:

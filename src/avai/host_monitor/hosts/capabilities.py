@@ -18,19 +18,9 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class FilesystemLayout(Protocol):
-    """OS-varying filesystem *facts*. The collector owns the parsing; this
-    just supplies the paths/args that differ per OS (Bridge), so a single
-    shared parser runs everywhere."""
-
-    def privileged_bin_dirs(self) -> list[Path]:
-        """Directories to scan for setuid/setgid binaries."""
-        ...
-
-    def app_executables(self) -> list[Path]:
-        """Individual application main executables to file-scan (macOS app
-        bundles' ``Contents/MacOS/*``); ``[]`` where the OS has no such
-        concept. Files, not directories — the scanner does not walk them."""
-        ...
+    """OS-varying account and config file *facts*. The collector owns the
+    parsing; this just supplies the paths that differ per OS (Bridge), so a
+    single shared parser runs everywhere."""
 
     def home_dirs(self) -> list[Path]:
         """Per-user home directories (for ``~/.ssh/authorized_keys`` etc.)."""
@@ -48,9 +38,19 @@ class FilesystemLayout(Protocol):
         """Path to the sudoers drop-in directory."""
         ...
 
-    def tcpdump_interface_args(self) -> list[str]:
-        """tcpdump flags that make each line carry its interface name
-        (Linux ``-i any`` vs macOS ``-k I``)."""
+
+class ExecutableLayout(FilesystemLayout, Protocol):
+    """Where the executables worth file-scanning live. Only the Unix hosts
+    have it: Windows composes the setuid and file-scan collectors out."""
+
+    def privileged_bin_dirs(self) -> list[Path]:
+        """Directories to scan for setuid/setgid binaries."""
+        ...
+
+    def app_executables(self) -> list[Path]:
+        """Individual application main executables to file-scan (macOS app
+        bundles' ``Contents/MacOS/*``); ``[]`` where the OS has no such
+        concept. Files, not directories: the scanner does not walk them."""
         ...
 
 
