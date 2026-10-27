@@ -7,7 +7,8 @@ from typing import Any
 
 from .constants import DEFAULT_NARRATIVE_MODEL
 from .enums import ActionPriority, IncidentSeverity, Verdict
-from .llm import CompletionRequest, LlmSession, ParsedReply, StructuredCall
+from .llm import CompletionRequest, LlmSession, StructuredCall
+from .llm_replies import NarrativeReply
 from .prompts import Prompts
 
 
@@ -69,17 +70,6 @@ class IncidentNarrator:
             "required": ["title"],
         }
 
-    HEADLINE_CHARS = 200
-    SUMMARY_CHARS = 2000
-    TIME_CHARS = 40
-    TITLE_CHARS = 200
-    CATEGORY_CHARS = 40
-    EVENT_DETAIL_CHARS = 500
-    COMMAND_CHARS = 1000
-    ACTION_DETAIL_CHARS = 600
-    MAX_TIMELINE = 30
-    MAX_ACTIONS = 15
-
     def __init__(self, llm: StructuredCall) -> None:
         self._llm = llm
 
@@ -115,7 +105,9 @@ class IncidentNarrator:
                 "findings": json.dumps(kept, ensure_ascii=False),
             }
         )
-        return None if parsed is None else self._digest(ParsedReply(parsed))
+        if parsed is None:
+            return None
+        return NarrativeReply.model_validate(parsed).digest()
 
     def _cap(self, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Trim to MAX_FINDINGS, keeping the most severe/confident, then
@@ -133,39 +125,3 @@ class IncidentNarrator:
     def _severity_key(self, finding: dict[str, Any]) -> tuple[int, float]:
         rank = self._VERDICT_RANK.get(str(finding.get("verdict")), 0)
         return rank, finding.get("confidence") or 0.0
-
-    def _digest(self, reply: ParsedReply) -> dict[str, Any] | None:
-        headline = reply.text("headline", self.HEADLINE_CHARS)
-        summary = reply.text("summary", self.SUMMARY_CHARS)
-        timeline = self._timeline(reply)
-        if not headline or not (summary or timeline):
-            return None
-        return {
-            "headline": headline,
-            "severity": reply.choice("severity", IncidentSeverity.LOW),
-            "summary": summary,
-            "timeline": timeline,
-            "actions": self._actions(reply),
-        }
-
-    def _timeline(self, reply: ParsedReply) -> list[dict[str, str]]:
-        return [
-            {
-                "time": event.text("time", self.TIME_CHARS),
-                "title": event.text("title", self.TITLE_CHARS),
-                "category": event.text("category", self.CATEGORY_CHARS).lower(),
-                "detail": event.text("detail", self.EVENT_DETAIL_CHARS),
-            }
-            for event in reply.entries("timeline", "title")
-        ][: self.MAX_TIMELINE]
-
-    def _actions(self, reply: ParsedReply) -> list[dict[str, str]]:
-        return [
-            {
-                "priority": action.choice("priority", ActionPriority.MEDIUM),
-                "title": action.text("title", self.TITLE_CHARS),
-                "command": action.text("command", self.COMMAND_CHARS),
-                "detail": action.text("detail", self.ACTION_DETAIL_CHARS),
-            }
-            for action in reply.entries("actions", "title")
-        ][: self.MAX_ACTIONS]

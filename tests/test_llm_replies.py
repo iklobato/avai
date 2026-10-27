@@ -6,7 +6,12 @@ from __future__ import annotations
 import pytest
 
 from avai.host_monitor.enums import ThreatCategory, Verdict
-from avai.host_monitor.llm_replies import JudgmentReply, VerifierReply
+from avai.host_monitor.llm_replies import (
+    CoverageReply,
+    JudgmentReply,
+    NarrativeReply,
+    VerifierReply,
+)
 
 
 class TestJudgmentReply:
@@ -81,3 +86,69 @@ class TestVerifierReply:
             "refuted": False,
             "reasoning": "",
         }
+
+
+class TestNarrativeReply:
+    def test_unlabelled_and_non_object_entries_are_dropped(self) -> None:
+        timeline = [{"title": " "}, "junk", {"title": "Ran", "category": "EXEC"}]
+        reply = NarrativeReply.model_validate(
+            {
+                "headline": "Beacon",
+                "summary": "x",
+                "timeline": timeline,
+                "actions": "no",
+            }
+        )
+
+        assert [event.model_dump() for event in reply.timeline] == [
+            {"time": "", "title": "Ran", "category": "exec", "detail": ""}
+        ]
+        assert reply.actions == []
+
+    def test_entries_are_capped(self) -> None:
+        count = NarrativeReply.MAX_TIMELINE + 1
+        events = [{"title": f"e{index}"} for index in range(count)]
+
+        reply = NarrativeReply.model_validate({"headline": "h", "timeline": events})
+
+        assert len(reply.timeline) == NarrativeReply.MAX_TIMELINE
+
+    def test_unknown_severity_and_priority_fall_back(self) -> None:
+        reply = NarrativeReply.model_validate(
+            {
+                "headline": "h",
+                "summary": "s",
+                "severity": "apocalyptic",
+                "actions": [{"title": "Kill it", "priority": "whenever"}],
+            }
+        )
+
+        digest = reply.digest()
+        assert digest is not None
+        assert digest["severity"] == "low"
+        assert digest["actions"][0]["priority"] == "medium"
+
+    def test_no_headline_means_no_digest(self) -> None:
+        assert NarrativeReply.model_validate({"summary": "s"}).digest() is None
+
+
+class TestCoverageReply:
+    def test_gaps_keep_only_labelled_areas(self) -> None:
+        reply = CoverageReply.model_validate(
+            {
+                "headline": "h",
+                "posture": "THIN",
+                "gaps": [{"area": "macOS", "detail": "d"}, {"detail": "no area"}],
+            }
+        )
+
+        assert reply.assessment() == {
+            "posture": "thin",
+            "headline": "h",
+            "summary": "",
+            "gaps": [{"area": "macOS", "detail": "d"}],
+            "recommendations": [],
+        }
+
+    def test_headline_without_summary_or_gaps_is_dropped(self) -> None:
+        assert CoverageReply.model_validate({"headline": "h"}).assessment() is None

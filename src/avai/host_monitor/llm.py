@@ -9,7 +9,6 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from enum import StrEnum
 from string import Template
 from typing import Any
 
@@ -229,47 +228,6 @@ class LlmCredentials:
         if self.oauth_token:
             return AnthropicOAuthClient.create(self.oauth_token)
         return LitellmClient.create()
-
-
-class ParsedReply:
-    """Reads a model's structured reply defensively: any field may be
-    missing, empty, or of the wrong type."""
-
-    def __init__(self, fields: Mapping[str, Any]) -> None:
-        self._fields = fields
-
-    def text(self, key: str, limit: int) -> str:
-        return str(self._fields.get(key) or "").strip()[:limit]
-
-    def raw_text(self, key: str, limit: int) -> str:
-        """The field as text, cut to ``limit`` but not stripped."""
-        return str(self._fields.get(key) or "")[:limit]
-
-    def keyword(self, key: str) -> str:
-        return str(self._fields.get(key) or "").strip().lower()
-
-    def choice(self, key: str, fallback: StrEnum) -> str:
-        """The reply's value when it is a member of ``fallback``'s enum,
-        else ``fallback``'s value."""
-        value = self.keyword(key)
-        return value if value in tuple(type(fallback)) else fallback.value
-
-    def flag(self, key: str) -> bool:
-        return bool(self._fields.get(key))
-
-    def fraction(self, key: str) -> float:
-        """A number clamped to ``[0, 1]``; 0.0 when absent or not numeric."""
-        try:
-            value = float(self._fields.get(key) or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-        return max(0.0, min(1.0, value))
-
-    def entries(self, key: str, label_key: str) -> list[ParsedReply]:
-        """The objects of an array field whose ``label_key`` is non-empty."""
-        items = self._fields.get(key) or []
-        replies = [ParsedReply(item) for item in items if isinstance(item, dict)]
-        return [reply for reply in replies if reply.text(label_key, 1)]
 
 
 @dataclass(frozen=True)

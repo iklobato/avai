@@ -14,7 +14,8 @@ from typing import Any
 
 from .constants import DEFAULT_NARRATIVE_MODEL
 from .enums import CoveragePosture
-from .llm import CompletionRequest, LlmSession, ParsedReply, StructuredCall
+from .llm import CompletionRequest, LlmSession, StructuredCall
+from .llm_replies import CoverageReply
 from .prompts import Prompts
 
 
@@ -55,12 +56,6 @@ class YaraCoverageAssessor:
             "required": ["posture", "headline", "summary", "gaps", "recommendations"],
         }
 
-    HEADLINE_CHARS = 200
-    SUMMARY_CHARS = 2000
-    LABEL_CHARS = 100
-    DETAIL_CHARS = 300
-    MAX_ITEMS = 12
-
     def __init__(self, llm: StructuredCall) -> None:
         self._llm = llm
 
@@ -96,31 +91,6 @@ class YaraCoverageAssessor:
                 "host": json.dumps(host, ensure_ascii=False),
             }
         )
-        return None if parsed is None else self._assessment(ParsedReply(parsed))
-
-    def _assessment(self, reply: ParsedReply) -> dict[str, Any] | None:
-        headline = reply.text("headline", self.HEADLINE_CHARS)
-        summary = reply.text("summary", self.SUMMARY_CHARS)
-        gaps = self._items(reply, "gaps", "area")
-        if not headline or not (summary or gaps):
+        if parsed is None:
             return None
-        return {
-            "posture": reply.choice("posture", CoveragePosture.PARTIAL),
-            "headline": headline,
-            "summary": summary,
-            "gaps": gaps,
-            "recommendations": self._items(reply, "recommendations", "action"),
-        }
-
-    def _items(
-        self, reply: ParsedReply, key: str, label_key: str
-    ) -> list[dict[str, str]]:
-        """Keep the gaps/recommendations entries whose label field (``area``
-        or ``action``) is non-empty, trimmed."""
-        return [
-            {
-                label_key: entry.text(label_key, self.LABEL_CHARS),
-                "detail": entry.text("detail", self.DETAIL_CHARS),
-            }
-            for entry in reply.entries(key, label_key)
-        ][: self.MAX_ITEMS]
+        return CoverageReply.model_validate(parsed).assessment()
