@@ -1,0 +1,23 @@
+<div class="panel-head">
+  <span class="panel-title">Changed since last check</span>
+  {% if changes.since %}<span class="mono muted nw" title="{{ changes.since | datetime_fmt }} to {{ changes.until | datetime_fmt }}">since {{ changes.since[5:16] | replace("T", " ") }}</span>{% endif %}
+</div>
+{% for item in changes['items'] %}
+  <div style="display:grid;grid-template-columns:minmax(0,1fr) 96px 76px;gap:8px;align-items:center" class="mono">
+    <span class="nw">{{ item.name }}</span>
+    <span class="muted nw" style="text-align:right">{% if item.before is not none %}{{ item.before }} → {% endif %}{{ item.after }}</span>
+    {% if item.delta %}
+      <span class="nw" style="text-align:center;border-radius:3px;background:#3a2a10;color:var(--orange-text)">{{ '%+d' | format(item.delta) }}</span>
+    {% else %}
+      <span class="muted nw" style="text-align:center">no change</span>
+    {% endif %}
+  </div>
+{% else %}
+  <span class="empty">Needs two rounds of checks to compare.</span>
+{% endfor %}
+<div class="panel-note">
+  {% if novel %}
+    <span class="nw"><span style="color:var(--orange);font-weight:600">Never seen before:</span> {{ novel | join(', ') }}</span>
+  {% endif %}
+  <span class="muted nw">Counts only: how many items each check saw.</span>
+</div>

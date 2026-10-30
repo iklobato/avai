@@ -1,0 +1,63 @@
+{# Setup and privacy. v1 shows only what the database already knows; the
+   switches and buttons that need new backend work are not drawn yet
+   (see docs/DASHBOARD_REDESIGN_PLAN.md, sections 4.2 and 4.4). #}
+{% set state = monitor.label() %}
+{% set offline = state == 'offline' %}
+{% set needs = (1 if offline else 0) + (1 if refused else 0) %}
+<div class="panel-head">
+  <h2 id="setup-h" class="panel-title" style="margin:0;font-size:14px">Setup and privacy</h2>
+  <span class="sub nw">{% if needs %}{{ needs }} {{ 'things need' if needs > 1 else 'thing needs' }} your attention{% else %}All set{% endif %}</span>
+  <button type="button" class="btn btn-small" data-toggle-setup style="margin-left:auto">Hide</button>
+</div>
+<div class="grid24">
+  <div class="card span-4">
+    <div class="panel-head" style="justify-content:flex-start"><span class="dot {{ 'dot-warn' if offline else 'dot-ok' }}"></span><span class="panel-title nw">Monitor</span></div>
+    <span class="nw {{ 'state-warn' if offline else 'state-ok' }}">{{ 'Stopped' if offline else ('Paused' if state == 'paused' else 'Running') }}</span>
+    <span class="desc">{% if offline %}Nothing is being checked right now. Open the avai app to start it.{% else %}Checks this computer every {{ monitor.interval_minutes() or 5 }} minutes.{% endif %}</span>
+    {% if not offline and (control_enabled or control_open) %}
+    <div class="controls">
+      {% if state == 'paused' %}
+        <button type="button" class="btn btn-primary" hx-post="/control/resume" hx-swap="none" hx-on::after-request="htmx.trigger(document.body, 'avai:setup')">Resume</button>
+      {% else %}
+        <button type="button" class="btn" hx-post="/control/pause" hx-swap="none" hx-on::after-request="htmx.trigger(document.body, 'avai:setup')">Pause</button>
+      {% endif %}
+      <button type="button" class="btn" hx-post="/control/scan-now" hx-swap="none">Check now</button>
+    </div>
+    {% endif %}
+  </div>
+  <div class="card span-4">
+    <div class="panel-head" style="justify-content:flex-start"><span class="dot {{ 'dot-ok' if judge.model else 'dot-warn' }}"></span><span class="panel-title nw">AI review</span></div>
+    <span class="nw {{ 'state-ok' if judge.model else 'state-warn' }}">{{ ('On · ' ~ judge.model) if judge.model else 'Nothing judged yet' }}</span>
+    <span class="desc">An AI reads what avai finds and says if it is dangerous.</span>
+  </div>
+  <div class="card span-4">
+    <div class="panel-head" style="justify-content:flex-start"><span class="dot dot-ok"></span><span class="panel-title nw">Double-check</span></div>
+    <span class="nw state-ok">Set when avai starts</span>
+    <span class="desc">A second AI re-checks malicious findings before you see them.</span>
+  </div>
+  <div class="card span-4">
+    <div class="panel-head" style="justify-content:flex-start"><span class="dot {{ 'dot-warn' if refused else 'dot-ok' }}"></span><span class="panel-title nw">Full access</span></div>
+    <span class="nw {{ 'state-warn' if refused else 'state-ok' }}">{{ 'Not given' if refused else 'Given' }}</span>
+    <span class="desc">{% if refused %}Without it avai cannot see every network connection or program start.{% else %}avai can see everything it needs.{% endif %}</span>
+  </div>
+  <div class="card span-4">
+    <div class="panel-head" style="justify-content:flex-start"><span class="dot dot-ok"></span><span class="panel-title nw">Online lookups</span></div>
+    <span class="nw state-ok">{{ sources | length }} databases answered</span>
+    <span class="desc">avai asks security databases about addresses and apps.</span>
+  </div>
+  <div class="card span-4">
+    <div class="panel-head" style="justify-content:flex-start"><span class="dot dot-ok"></span><span class="panel-title nw">Alerts</span></div>
+    <span class="nw state-ok">Pop-up and sound</span>
+    <span class="desc">You hear about each new problem right away.</span>
+    <div class="controls">
+      <button type="button" class="switch" role="switch" aria-checked="true" aria-label="Alerts" data-switch="alerts"></button>
+      <span class="sub" data-switch-label="alerts">On</span>
+    </div>
+  </div>
+</div>
+<div class="card">
+  <span class="panel-title">What leaves this computer</span>
+  <div class="privacy-row"><span class="panel-title nw">The AI service</span><span class="sub">Short facts about what avai found: program names, web addresses, file names. {{ judge.judged }} so far.</span><span class="muted nw">cost so far: ${{ '%.4f' | format(judge.cost) }}</span></div>
+  <div class="privacy-row"><span class="panel-title nw">Security databases</span><span class="sub">Web addresses and app versions it looks up. Never your files.</span><span class="muted nw">{{ sources | length }} databases</span></div>
+  <div class="privacy-row"><span class="panel-title nw">avai error reports</span><span class="sub">Error messages when avai itself breaks, so it can be fixed. On unless you turned them off when installing.</span><span class="muted nw">on by default</span></div>
+</div>

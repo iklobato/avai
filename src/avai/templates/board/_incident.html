@@ -1,0 +1,24 @@
+<div class="panel-head">
+  <span class="panel-title">Incident summary</span>
+  {% if narrative %}<span class="pill pill-{{ 'malicious' if narrative.severity in ['critical', 'high'] else 'suspicious' }}">{{ narrative.severity | upper }}</span>{% endif %}
+</div>
+{% if narrative %}
+  <div class="nw" style="font-size:14px;font-weight:600" title="{{ narrative.headline }}">{{ narrative.headline }}</div>
+  {% if narrative.summary %}<p class="sub" style="margin:0;line-height:1.5">{{ narrative.summary }}</p>{% endif %}
+  {% for action in actions %}
+    <div style="display:flex;flex-direction:column;gap:4px;padding-top:6px;border-top:1px solid var(--line-soft)">
+      <span class="nw" style="color:var(--orange-text);font-weight:600">{{ action.title or action.get('action', '') }}</span>
+      {% if action.command %}
+        <details>
+          <summary>Show command</summary>
+          <div style="display:flex;gap:6px;margin-top:4px">
+            <code class="cmd" style="flex:1;min-width:0">{{ action.command }}</code>
+            <button type="button" class="btn btn-small" data-copy="{{ action.command }}">Copy</button>
+          </div>
+        </details>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% else %}
+  <p class="empty">No incident. avai writes a summary here when findings look like one attack.</p>
+{% endif %}

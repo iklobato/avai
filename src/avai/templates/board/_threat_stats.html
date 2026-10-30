@@ -1,0 +1,37 @@
+{% for verdict in ['malicious', 'suspicious', 'unknown', 'benign'] %}
+{% set found = counts.get(verdict, 0) %}
+<div class="stat span-3 {{ ('stat-' ~ verdict) if found else 'stat-unknown' }}" title="findings still present on this computer">
+  <span class="panel-title">{{ verdict | capitalize }}</span>
+  <span class="big">{{ found }}</span>
+</div>
+{% endfor %}
+<div class="panel tile span-3">
+  <span class="panel-title">Posture score</span>
+  {% if risk %}
+    {% set share = [[risk.score, 0] | max, 100] | min %}
+    <svg role="img" aria-label="posture {{ risk.score }} of 100, grade {{ risk.grade }}" viewBox="0 0 120 64" style="flex:1;min-height:0">
+      <path d="M14 58 A46 46 0 0 1 106 58" fill="none" stroke="#232a33" stroke-width="10"></path>
+      <path d="M14 58 A46 46 0 0 1 106 58" fill="none" stroke="#49c287" stroke-width="10" stroke-dasharray="{{ '%.1f' | format(share * 1.445) }} 200"></path>
+      <text x="60" y="52" text-anchor="middle" fill="#d8dee6" font-size="20" font-family="ui-monospace, monospace" font-weight="600">{{ risk.grade }} {{ risk.score }}</text>
+    </svg>
+  {% else %}
+    <span class="empty">No score yet.</span>
+  {% endif %}
+</div>
+<div class="panel tile span-5">
+  <span class="panel-title">Vulnerabilities · {{ vulns.total }}</span>
+  {% for row in vulns.rows %}
+    <button type="button" class="btn btn-small" style="display:flex;justify-content:space-between;align-items:center;gap:8px;min-height:24px"
+            hx-get="/board/inspect-vuln?software={{ row.software | urlencode }}" hx-target="#inspect" hx-swap="innerHTML">
+      <span class="nw">{{ row.software | replace('@', ' ') }}</span>
+      <span class="mono count-red">{{ 'EOL' if row.eol else (row.cvss if row.cvss is not none else row.severity) }}</span>
+    </button>
+  {% else %}
+    <span class="empty">No known security holes in installed software.</span>
+  {% endfor %}
+</div>
+<div class="panel tile span-4">
+  <span class="panel-title">AI review cost</span>
+  <span class="value">${{ '%.4f' | format(judge.cost) }}</span>
+  <span class="muted nw">{{ judge.judged }} judged{% if judge.model %} · {{ judge.model }}{% endif %}</span>
+</div>

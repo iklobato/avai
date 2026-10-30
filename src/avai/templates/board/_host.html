@@ -1,0 +1,54 @@
+{% set row = resources.row if resources else none %}
+<div class="panel span-10" style="height:220px">
+  <div class="panel-head"><span class="panel-title">CPU %</span><span class="mono" style="color:var(--blue)">{{ '%.0f' | format(row.cpu_percent or 0) if row else '-' }}%</span></div>
+  {% if cpu_points %}
+    <svg role="img" aria-label="CPU percent over the last {{ trend.cpu | length }} checks" viewBox="0 0 600 160" preserveAspectRatio="none" style="flex:1;min-height:0;width:100%">
+      <line x1="0" y1="40" x2="600" y2="40" stroke="#232a33"></line><line x1="0" y1="80" x2="600" y2="80" stroke="#232a33"></line><line x1="0" y1="120" x2="600" y2="120" stroke="#232a33"></line>
+      <polygon points="0,160 {{ cpu_points }} 600,160" fill="#5b9cf6" fill-opacity="0.15"></polygon>
+      <polyline points="{{ cpu_points }}" fill="none" stroke="#5b9cf6" stroke-width="2"></polyline>
+    </svg>
+    <div class="mono muted" style="display:flex;justify-content:space-between;font-size:10px"><span>{{ trend.labels[0] | datetime_fmt }}</span><span>{{ trend.labels[-1] | datetime_fmt }}</span></div>
+  {% else %}
+    <span class="empty">No measurements yet.</span>
+  {% endif %}
+</div>
+<div class="panel span-4" style="height:220px">
+  <span class="panel-title">Memory</span>
+  {% if row %}
+    {% set mem = [[row.mem_percent or 0, 0] | max, 100] | min %}
+    <svg role="img" aria-label="memory {{ '%.0f' | format(mem) }} percent" viewBox="0 0 120 90" style="flex:1;min-height:0">
+      <path d="M16 78 A44 44 0 0 1 104 78" fill="none" stroke="#232a33" stroke-width="12"></path>
+      <path d="M16 78 A44 44 0 0 1 104 78" fill="none" stroke="#a68af0" stroke-width="12" stroke-dasharray="{{ '%.1f' | format(mem * 1.382) }} 200"></path>
+      <text x="60" y="72" text-anchor="middle" fill="#d8dee6" font-size="22" font-family="ui-monospace, monospace" font-weight="600">{{ '%.0f' | format(mem) }}%</text>
+    </svg>
+    <span class="muted" style="text-align:center">swap {{ '%.0f' | format(row.swap_percent or 0) }}%</span>
+  {% else %}<span class="empty">-</span>{% endif %}
+</div>
+<div class="panel span-4" style="height:220px">
+  <span class="panel-title">Load (1 min)</span>
+  <span class="value" style="color:var(--orange)">{{ '%.2f' | format(row.load_1 or 0) if row else '-' }}</span>
+  {% if load_points %}<svg aria-hidden="true" viewBox="0 0 120 50" preserveAspectRatio="none" style="flex:1;min-height:0;width:100%"><polyline points="{{ load_points }}" fill="none" stroke="#f2a33c" stroke-width="1.6"></polyline></svg>{% endif %}
+  {% if row %}<span class="muted nw">{{ row.cpu_count_logical or '?' }} cores{% if row.uptime_seconds %} · up {{ (row.uptime_seconds // 86400) | int }} d {{ ((row.uptime_seconds % 86400) // 3600) | int }} h{% endif %}</span>{% endif %}
+</div>
+<div class="panel span-6" style="height:220px">
+  <span class="panel-title">CPU per core</span>
+  {% if resources and resources.per_core %}
+    <div class="cores">
+      {% for value in resources.per_core %}
+        <div title="core {{ loop.index0 }}: {{ '%.0f' | format(value) }}%" style="background: {{ '#b42324' if value >= 90 else ('#8f5509' if value >= 60 else '#1d6b46') }}">{{ '%.0f' | format(value) }}</div>
+      {% endfor %}
+    </div>
+  {% else %}<span class="empty">-</span>{% endif %}
+</div>
+<div class="panel span-24">
+  <span class="panel-title">Disk used</span>
+  {% for disk in disks %}
+    <div style="display:grid;grid-template-columns:340px minmax(0,1fr) 120px;gap:10px;align-items:center">
+      <span class="mono nw" title="{{ disk.mountpoint }}">{{ disk.mountpoint }}</span>
+      <div class="bar-track" style="height:14px"><div class="bar-fill" style="width:{{ disk.percent or 0 }}%;background:{{ '#f05d5e' if (disk.percent or 0) >= 90 else ('#f2a33c' if (disk.percent or 0) >= 50 else '#49c287') }}"></div></div>
+      <span class="mono nw" style="text-align:right">{{ '%.0f' | format(disk.percent or 0) }}% of {{ disk.total | human_bytes }}</span>
+    </div>
+  {% else %}
+    <span class="empty">No disks measured yet.</span>
+  {% endfor %}
+</div>

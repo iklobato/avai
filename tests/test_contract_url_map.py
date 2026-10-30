@@ -12,7 +12,32 @@ IGNORED_METHODS = frozenset({"HEAD", "OPTIONS"})
 
 EXPECTED_RULES = frozenset(
     {
-        ("/", "fragments.index", ("GET",)),
+        ("/", "board.board_index", ("GET",)),
+        ("/classic", "fragments.index", ("GET",)),
+        ("/board/alerts", "board.board_alerts", ("GET",)),
+        ("/board/changes", "board.board_changes", ("GET",)),
+        ("/board/collection", "board.board_collection", ("GET",)),
+        ("/board/exec-feed", "board.board_exec_feed", ("GET",)),
+        (
+            "/board/feedback/<collector>/<content_hash>/<label>",
+            "board.board_feedback",
+            ("POST",),
+        ),
+        ("/board/findings", "board.board_findings", ("GET",)),
+        ("/board/host", "board.board_host", ("GET",)),
+        ("/board/incident", "board.board_incident", ("GET",)),
+        (
+            "/board/inspect/<collector>/<content_hash>",
+            "board.board_inspect",
+            ("GET",),
+        ),
+        ("/board/inspect-vuln", "board.board_inspect_vuln", ("GET",)),
+        ("/board/network", "board.board_network", ("GET",)),
+        ("/board/ports", "board.board_ports", ("GET",)),
+        ("/board/rates", "board.board_rates", ("GET",)),
+        ("/board/setup", "board.board_setup", ("GET",)),
+        ("/board/threat-stats", "board.board_threat_stats", ("GET",)),
+        ("/board/topbar", "board.board_topbar", ("GET",)),
         ("/api/chart/resources", "api.api_chart_resources", ("GET",)),
         ("/api/chart/verdicts", "api.api_chart_verdicts", ("GET",)),
         ("/api/notifications/new", "api.api_notifications_new", ("GET",)),

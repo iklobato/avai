@@ -1,0 +1,17 @@
+<div class="panel-head"><span class="panel-title">Open network ports</span>{% if ports %}<span class="muted nw">{{ ports.total }} open</span>{% endif %}</div>
+{% if ports and ports.rows %}
+  <table class="tbl mono" style="font-size:11px">
+    <thead><tr><th scope="col">program</th><th scope="col">who can reach it</th><th scope="col" style="text-align:right">port</th></tr></thead>
+    <tbody>
+    {% for row in ports.rows %}
+      <tr>
+        <td class="nw" style="max-width:160px">{{ row.process }}</td>
+        <td style="color: {{ '#f2a33c' if row.exposed else '#aeb7c3' }}">{{ 'other computers' if row.exposed else 'this computer only' }}</td>
+        <td style="text-align:right">{{ row.port }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <p class="empty">No open ports seen in the last check.</p>
+{% endif %}

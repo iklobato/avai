@@ -1,0 +1,64 @@
+{% set is_finding = item.kind == 'finding' %}
+<div class="panel-head">
+  <span class="panel-title">Inspect</span>
+  {% if is_finding %}
+    <span class="pill pill-{{ item.verdict }}">{{ item.verdict }}</span>
+  {% else %}
+    <span class="pill pill-{{ 'eol' if item.eol else item.severity }}">{{ 'end of life' if item.eol else 'vulnerability' }}</span>
+  {% endif %}
+</div>
+<div class="nw" style="font-size:14px;font-weight:600" title="{{ item.title if is_finding else item.software }}">{{ item.title if is_finding else item.software | replace('@', ' ') }}</div>
+<div class="mono muted nw" style="font-size:11px">
+  {% if is_finding %}{{ item.area }} · seen {{ item.seen | datetime_fmt }}{% if item.novel %} · new{% endif %}{% if item.artifact %} · {{ item.artifact }}{% endif %}
+  {% else %}{% for cve in item.cves %}{{ cve.id }}{% if cve.cvss %} ({{ cve.cvss }}){% endif %}{% if cve.kev %} · used in attacks{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% if item.eol %}no more security updates{% endif %}{% endif %}
+</div>
+<span class="muted" style="margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.06em">What to do</span>
+{% if is_finding %}
+  {% if item.fix %}
+    <details>
+      <summary>Show the fix</summary>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <code class="cmd" style="flex:1;min-width:0">{{ item.fix }}</code>
+        <button type="button" class="btn btn-small" data-copy="{{ item.fix }}">Copy</button>
+      </div>
+    </details>
+  {% else %}
+    <span class="sub">The AI did not suggest a fix for this one.</span>
+  {% endif %}
+{% else %}
+  <span class="sub">{{ 'Upgrade to a newer version of the system.' if item.eol else 'Install the latest system and app updates.' }}</span>
+{% endif %}
+<span class="muted" style="margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.06em">Online lookups · {{ item.evidence | length if item.evidence else 'nothing known' }}</span>
+{% for hit in item.evidence %}
+  <div style="display:grid;grid-template-columns:110px 80px 32px minmax(0,1fr);gap:8px;align-items:center;padding:4px 0;border-top:1px solid var(--line-soft)">
+    <span class="mono nw" style="font-size:11px">{{ hit.source }}</span>
+    <span class="pill pill-{{ hit.hint }}">{{ hit.hint }}</span>
+    <span class="mono muted" style="font-size:11px">{{ '%.2f' | format(hit.confidence) }}</span>
+    <span class="sub nw" title="{{ hit.summary }}">{{ hit.summary }}</span>
+  </div>
+{% else %}
+  <p class="sub" style="margin:0">No security database knows this one.{% if is_finding %} avai's AI decided on its own.{% endif %}</p>
+{% endfor %}
+
+{# "How avai decided" lives in its own panel; replace it in the same swap. #}
+<div id="decided" class="panel span-24" hx-swap-oob="true">
+  <div class="panel-head"><span class="panel-title">How avai decided</span><span class="muted nw">{{ item.area if is_finding else item.software }}</span></div>
+  <ol class="steps">
+  {% if is_finding %}
+    {% for step in item.steps %}
+      <li>
+        <span class="step-n {{ 'last' if loop.last else '' }}">{{ loop.index }}</span>
+        <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
+          <div style="display:flex;gap:10px;align-items:baseline;min-width:0"><span class="panel-title nw">{{ step.title }}</span><span class="nw" style="font-weight:600;color:var(--link)">{{ step.outcome }}</span></div>
+          <span class="sub" style="line-height:1.45">{{ step.detail }}</span>
+        </div>
+      </li>
+    {% endfor %}
+  {% else %}
+    <li><span class="step-n">1</span><div><span class="panel-title">Found</span> <span class="sub">avai checked the version of software installed on this computer.</span></div></li>
+    <li><span class="step-n">2</span><div><span class="panel-title">Online lookups</span> <span class="sub">{{ item.evidence | length }} public security database answers list this version as unsafe.</span></div></li>
+    <li><span class="step-n">3</span><div><span class="panel-title">AI review</span> <span class="sub">Not needed: known security holes come from public lists, not from a guess.</span></div></li>
+    <li><span class="step-n last">4</span><div><span class="panel-title">Your answer</span> <span class="sub">Update it. avai checks the version again on its next round.</span></div></li>
+  {% endif %}
+  </ol>
+</div>

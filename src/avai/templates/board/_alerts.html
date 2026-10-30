@@ -1,0 +1,16 @@
+<div class="panel-head">
+  <span class="panel-title">New since your last visit</span>
+  <button type="button" class="btn btn-small" data-mark-seen="{{ now }}">Mark all seen</button>
+</div>
+{% for alert in alerts %}
+  <div class="list-row" style="grid-template-columns: 80px minmax(0, 1fr) 72px">
+    <span class="pill pill-{{ alert.verdict }}">{{ alert.verdict }}</span>
+    <span class="nw" title="{{ alert.reasoning }}">{{ alert.artifact or alert.collector }}</span>
+    <span class="mono muted nw">{{ alert.created_at | relative_time }}</span>
+  </div>
+{% else %}
+  <div class="empty" style="border-top:1px solid var(--line-soft)">Nothing new since you last looked.</div>
+{% endfor %}
+{% if total > alerts | length %}
+  <div class="list-row muted">and {{ total - alerts | length }} more</div>
+{% endif %}

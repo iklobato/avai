@@ -15,6 +15,7 @@ from .filters import TemplateFilters
 from .queries.auth_events import AuthCaches
 from .routes import DashboardServices
 from .routes.api import ApiRoutes
+from .routes.board_panels import BoardRoutes
 from .routes.control import ControlRoutes
 from .routes.fragments import FragmentRoutes
 
@@ -66,6 +67,7 @@ class DashboardApp:
         services = self._services()
         TemplateFilters(services.clock).register(app)
         routes = (
+            BoardRoutes(services),
             FragmentRoutes(services),
             ApiRoutes(services),
             ControlRoutes(services),

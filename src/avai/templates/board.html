@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>avai</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='board.css') }}">
+  <script src="{{ url_for('static', filename='vendor/htmx.min.js') }}"></script>
+</head>
+<body>
+  {# The top bar polls with the "seen" cursor so the bell counts only what
+     is new since the person last looked. #}
+  <div id="topbar"
+       hx-get="/board/topbar"
+       hx-trigger="load, every 5s, avai:seen from:body"
+       hx-vals='js:{since: window.avaiSeen ? window.avaiSeen() : ""}'
+       hx-swap="innerHTML">
+    <header class="topbar"><span class="brand">avai</span><span class="muted">loading...</span></header>
+  </div>
+
+  <section id="setup" class="setup" aria-labelledby="setup-h"
+           hx-get="/board/setup" hx-trigger="load, every 60s, avai:setup from:body" hx-swap="innerHTML">
+    <h2 id="setup-h" class="panel-title">Setup and privacy</h2>
+  </section>
+
+  <main class="board-main">
+    <section class="row" data-row="threats" aria-labelledby="row-threats">
+      <button type="button" class="row-head" id="row-threats" aria-expanded="true">
+        <span class="chev" aria-hidden="true"></span>Threats<span class="hint">what avai found and what to do</span>
+      </button>
+      <div class="grid24">
+        <div class="contents" hx-get="/board/threat-stats" hx-trigger="load, every 30s" hx-swap="innerHTML"></div>
+        <div class="panel panel-flush span-7" id="alerts"
+             hx-get="/board/alerts" hx-trigger="load, every 15s, avai:seen from:body"
+             hx-vals='js:{since: window.avaiSeen ? window.avaiSeen() : ""}' hx-swap="innerHTML"></div>
+        <div class="panel span-7" hx-get="/board/changes" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+        <div class="panel span-10" hx-get="/board/incident" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+        <div class="panel panel-flush span-14" id="findings"
+             hx-get="/board/findings" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+        <div class="panel panel-focus span-10" id="inspect">
+          <span class="panel-title">Inspect</span>
+          <p class="empty">Click a finding or a vulnerability to see why avai flagged it.</p>
+        </div>
+        <div class="panel span-24" id="decided">
+          <span class="panel-title">How avai decided</span>
+          <p class="empty">Pick something to inspect first.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="row" data-row="host" aria-labelledby="row-host">
+      <button type="button" class="row-head" id="row-host" aria-expanded="true">
+        <span class="chev" aria-hidden="true"></span>Host<span class="hint">CPU, memory, load, disk</span>
+      </button>
+      <div class="grid24" hx-get="/board/host" hx-trigger="load, every 30s" hx-swap="innerHTML"></div>
+    </section>
+
+    <section class="row" data-row="activity" aria-labelledby="row-activity">
+      <button type="button" class="row-head" id="row-activity" aria-expanded="true">
+        <span class="chev" aria-hidden="true"></span>Activity<span class="hint">program starts, logins, open ports</span>
+      </button>
+      <div class="grid24">
+        <div class="contents" hx-get="/board/rates" hx-trigger="load, every 15s" hx-swap="innerHTML"></div>
+        <div class="panel panel-flush span-15" hx-get="/board/exec-feed" hx-trigger="load, every 5s" hx-swap="innerHTML"></div>
+        <div class="panel panel-flush span-9" hx-get="/board/ports" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+      </div>
+    </section>
+
+    <section class="row" data-row="network" aria-labelledby="row-network">
+      <button type="button" class="row-head" id="row-network" aria-expanded="true">
+        <span class="chev" aria-hidden="true"></span>Network and settings<span class="hint">traffic, web addresses, Mac security</span>
+      </button>
+      <div class="grid24" hx-get="/board/network" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+    </section>
+
+    <section class="row" data-row="collection" aria-labelledby="row-collection">
+      <button type="button" class="row-head" id="row-collection" aria-expanded="true">
+        <span class="chev" aria-hidden="true"></span>Collection health<span class="hint">how each round of checks went</span>
+      </button>
+      <div class="grid24" hx-get="/board/collection" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+    </section>
+    <p class="muted">Looking for the previous dashboard? It is at <a href="/classic">/classic</a>.</p>
+  </main>
+  <script src="{{ url_for('static', filename='board.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+<div class="panel-head">
+  <span class="panel-title">Program starts (newest first)</span>
+  <span class="muted nw">updates every 5 s</span>
+</div>
+{% for row in rows %}
+  <div class="log-row">
+    <span class="muted">{{ row.time }}</span>
+    <span style="color: {{ '#f2a33c' if row.unsigned else '#5b9cf6' }}">{{ 'unsigned' if row.unsigned else 'signed' }}</span>
+    <span class="nw" title="{{ row.exe_path }}{% if row.signing_id %} · {{ row.signing_id }}{% endif %}">{{ row.exe_path }}</span>
+  </div>
+{% else %}
+  <p class="empty">No program starts recorded.{% if refused %} avai needs Full access to see them.{% endif %}</p>
+{% endfor %}
