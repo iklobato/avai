@@ -231,7 +231,7 @@ Linux and Windows hosts, a PyInstaller build, and sending to Sentry.
 ## 9. Open work and next steps
 
 Not done, and worth a separate decision:
-   - **Dashboard redesign (Panels board).** Plan with the full endpoint map: `docs/DASHBOARD_REDESIGN_PLAN.md` (2026-10-30). Step 1 (the board on existing data, at `/`; old page at `/classic`) is on branch `feat/panels-board`, not merged. Next needs two migrations (verifier result, monitor capabilities) before the Setup panel and "Double-check" are complete.
+   - **Dashboard redesign (Panels board).** Plan with the full endpoint map: `docs/DASHBOARD_REDESIGN_PLAN.md` (2026-10-30). Step 1 (the board on existing data, at `/`; old page at `/classic`) is PR https://github.com/iklobato/avai/pull/44. Step 2 (migration 0013: skeptic outcome, plain fix sentence, second-pass switches, the monitor's capabilities snapshot) is on branch `feat/panels-board-phase2`, stacked on it. Neither is merged. Earlier note: step 2 needed two migrations (verifier result, monitor capabilities) before the Setup panel and "Double-check" are complete.
    - **avai logs its own noise.** Found in the 2026-10-27 run, 79 min, 31 cycles:
      - Every cycle, `kernel_extensions` runs `system_profiler -json SPExtensionsDataType`.
      - That makes macOS `securityd` log exactly 4048 `MacOS error: -67062` lines (process `/usr/sbin/system_profiler`, category `security_exception`). Each run of the child is a new pid.
