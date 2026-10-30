@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from avai.enrichers.cache import EnrichmentSchema
 from avai.enrichers.indicators import IndicatorExtraction
 from avai.host_monitor import Base, FeedbackLabel, FeedbackRow, Judgement
-from avai.host_monitor.enums import Verdict
+from avai.host_monitor.enums import Verdict, VerifyOutcome
 
 from .panel_reads import FindingSource, SchemaProbe
 
@@ -152,6 +152,10 @@ class DecisionTrail:
         return self._step("Online lookups", f"{len(evidence)} records", detail)
 
     def _double_check(self, judgement: Judgement) -> dict[str, str]:
+        stored = SkepticWords().of(judgement.verify_outcome)
+        if stored is not None:
+            return self._step("Double-check", *stored)
+        # Rows judged before verify_outcome existed: read the reasoning marks.
         reasoning = judgement.reasoning or ""
         if reasoning.startswith(VERIFIER_PREFIX):
             detail = "A second AI argued it is less serious, so it was lowered to suspicious."
@@ -175,6 +179,28 @@ class DecisionTrail:
 
     def _step(self, title: str, outcome: str, detail: str) -> dict[str, str]:
         return {"title": title, "outcome": outcome, "detail": detail}
+
+
+class SkepticWords:
+    """The stored skeptic answer as (outcome, detail) in plain words."""
+
+    OUTCOMES = {
+        VerifyOutcome.AGREED.value: (
+            "agreed",
+            "A second AI tried to prove it harmless and could not.",
+        ),
+        VerifyOutcome.REFUTED.value: (
+            "lowered",
+            "A second AI argued it is less serious, so it was lowered to suspicious.",
+        ),
+        VerifyOutcome.FAILED.value: (
+            "could not check",
+            "The second AI did not answer this time, so the first verdict stands.",
+        ),
+    }
+
+    def of(self, outcome: str | None) -> tuple[str, str] | None:
+        return self.OUTCOMES.get(outcome or "")
 
 
 class AnswerWords:
@@ -241,6 +267,7 @@ class FindingDetail:
             "seen": judgement.created_at,
             "novel": bool(judgement.novel),
             "fix": judgement.remediation or "",
+            "plain_fix": judgement.remediation_plain or "",
             "model": judgement.model,
             "evidence": self.given.evidence,
             "answer": self.given.answer,

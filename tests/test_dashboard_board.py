@@ -3,6 +3,7 @@ built from seeded rows show what the database really holds."""
 
 from __future__ import annotations
 
+import json
 from http import HTTPStatus
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from avai.host_monitor import (
     Base,
     CollectionRun,
     CollectorErrorRow,
+    ControlState,
     DnsQueryRow,
     FeedbackRow,
     Judgement,
@@ -36,6 +38,7 @@ from avai.host_monitor import (
 )
 
 TOKEN = "board-test-token"
+PLAIN_FIX = "Remove the item that starts this program when you log in."
 OLD_RUN = "2026-06-29T23:18:56+00:00"
 NEW_RUN = "2026-06-30T00:35:10+00:00"
 LOOKBACK_MIN = 5
@@ -158,6 +161,36 @@ class Rows:
             )
             for index in range(count)
         ]
+
+    def caps_without_ai(self) -> dict[str, object]:
+        """A monitor started with no AI key and no second passes."""
+        return {
+            **self._caps(),
+            "judge_model": None,
+            "verify": False,
+            "investigate": False,
+        }
+
+    def caps_with_passes(self) -> dict[str, object]:
+        """A monitor started with the judge and both second passes."""
+        return {
+            **self._caps(),
+            "judge_model": "claude-haiku-4-5",
+            "verify": True,
+            "investigate": True,
+        }
+
+    def _caps(self) -> dict[str, object]:
+        missing = [{"name": "virustotal", "key": "VT_API_KEY"}]
+        return {
+            "sources_on": ["osv"],
+            "sources_missing_key": missing,
+            "as_root": False,
+            "telemetry_on": False,
+        }
+
+    def control(self, capabilities: dict[str, object]) -> ControlState:
+        return ControlState(id=1, capabilities_json=json.dumps(capabilities))
 
     def refusal(self, run_id: str, collector: str) -> CollectorErrorRow:
         return CollectorErrorRow(
@@ -359,3 +392,36 @@ class TestCollectionPanel:
         page = board.client().get("/board/collection").data
         assert b"not finished" in page
         assert b"0 ok" not in page
+
+
+class TestPhase2Inspect:
+    def test_a_stored_agreement_and_the_plain_fix_are_shown(
+        self, board: BoardDb
+    ) -> None:
+        board.runs()
+        fields = {"verify_outcome": "agreed", "remediation_plain": PLAIN_FIX}
+        board.add([Rows().judgement("processes", "p1", fields)])
+        page = board.client().get("/board/inspect/processes/p1").data.decode()
+        assert "agreed" in page
+        assert PLAIN_FIX in page
+
+
+class TestPhase2Setup:
+    def test_the_monitor_snapshot_drives_the_cards(self, board: BoardDb) -> None:
+        board.add([Rows().control(Rows().caps_without_ai())])
+        page = board.client(control_token=TOKEN).get("/board/setup").data.decode()
+        assert "nothing gets judged" in page
+        assert "Off since avai started" in page
+        assert "virustotal" in page
+        assert 'role="switch" aria-checked="true" aria-label="Double-check"' not in page
+
+    def test_the_double_check_switch_saves_off(self, board: BoardDb) -> None:
+        board.add([Rows().control(Rows().caps_with_passes())])
+        client = board.client(control_token=TOKEN)
+        assert 'aria-label="Double-check"' in client.get("/board/setup").data.decode()
+        form = {"verify": "off", "investigate": "off"}
+        client.post("/control/settings", data=form, headers={"X-Avai-Token": TOKEN})
+        with Session(board.engine()) as session:
+            row = session.get(ControlState, 1)
+            assert (row.verify_enabled, row.investigate_enabled) == (0, 0)
+        assert "Off" in client.get("/board/setup").data.decode()

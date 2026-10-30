@@ -37,12 +37,16 @@ class SettingsChange:
     interval: int | None = None
     judge: bool | None = None
     enrich: bool | None = None
+    verify: bool | None = None
+    investigate: bool | None = None
 
     def values(self) -> dict[str, int]:
         candidates = (
             ("interval_override", self.interval),
             ("judge_enabled", self.judge),
             ("enrich_enabled", self.enrich),
+            ("verify_enabled", self.verify),
+            ("investigate_enabled", self.investigate),
         )
         return {column: int(value) for column, value in candidates if value is not None}
 

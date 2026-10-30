@@ -25,25 +25,46 @@
     </div>
     {% endif %}
   </div>
+  {% set ai_model = caps.judge_model if caps else judge.model %}
+  {% set ai_off = (caps and not caps.judge_model) or control_state.get('judge_enabled') == 0 %}
   <div class="card span-4">
-    <div class="panel-head" style="justify-content:flex-start"><span class="dot {{ 'dot-ok' if judge.model else 'dot-warn' }}"></span><span class="panel-title nw">AI review</span></div>
-    <span class="nw {{ 'state-ok' if judge.model else 'state-warn' }}">{{ ('On · ' ~ judge.model) if judge.model else 'Nothing judged yet' }}</span>
-    <span class="desc">An AI reads what avai finds and says if it is dangerous.</span>
+    <div class="panel-head" style="justify-content:flex-start"><span class="dot {{ 'dot-warn' if ai_off or not ai_model else 'dot-ok' }}"></span><span class="panel-title nw">AI review</span></div>
+    <span class="nw {{ 'state-warn' if ai_off or not ai_model else 'state-ok' }}">{% if ai_off %}Off{% elif ai_model %}On · {{ ai_model }}{% else %}Nothing judged yet{% endif %}</span>
+    <span class="desc">{% if ai_off %}avai still collects, but nothing gets judged. It needs an AI key, and the AI turned on.{% else %}An AI reads what avai finds and says if it is dangerous.{% endif %}</span>
   </div>
   <div class="card span-4">
-    <div class="panel-head" style="justify-content:flex-start"><span class="dot dot-ok"></span><span class="panel-title nw">Double-check</span></div>
-    <span class="nw state-ok">Set when avai starts</span>
-    <span class="desc">A second AI re-checks malicious findings before you see them.</span>
+    {% set pass_on = second_pass.on() %}
+    <div class="panel-head" style="justify-content:flex-start"><span class="dot {{ 'dot-ok' if pass_on or not second_pass.known() else 'dot-warn' }}"></span><span class="panel-title nw">Double-check</span></div>
+    {% if not second_pass.known() %}
+      <span class="nw state-ok">Set when avai starts</span>
+    {% elif second_pass.built() %}
+      <span class="nw {{ 'state-ok' if pass_on else 'state-warn' }}">{{ 'On' if pass_on else 'Off' }}</span>
+    {% else %}
+      <span class="nw state-warn">Off since avai started</span>
+    {% endif %}
+    <span class="desc">A second AI re-checks malicious findings before you see them.{% if second_pass.known() and not second_pass.built() %} Restart avai to turn it on.{% endif %}</span>
+    {% if second_pass.built() and (control_enabled or control_open) %}
+    <div class="controls">
+      {% set next_value = 'off' if pass_on else 'on' %}
+      <button type="button" class="switch" role="switch" aria-checked="{{ 'true' if pass_on else 'false' }}" aria-label="Double-check"
+              hx-post="/control/settings" hx-vals='{"verify": "{{ next_value }}", "investigate": "{{ next_value }}"}'
+              hx-swap="none" hx-on::after-request="htmx.trigger(document.body, 'avai:setup')"></button>
+      <span class="sub">{{ 'On' if pass_on else 'Off' }}</span>
+    </div>
+    {% endif %}
   </div>
+  {% set no_access = refused and not caps.as_root %}
   <div class="card span-4">
-    <div class="panel-head" style="justify-content:flex-start"><span class="dot {{ 'dot-warn' if refused else 'dot-ok' }}"></span><span class="panel-title nw">Full access</span></div>
-    <span class="nw {{ 'state-warn' if refused else 'state-ok' }}">{{ 'Not given' if refused else 'Given' }}</span>
-    <span class="desc">{% if refused %}Without it avai cannot see every network connection or program start.{% else %}avai can see everything it needs.{% endif %}</span>
+    <div class="panel-head" style="justify-content:flex-start"><span class="dot {{ 'dot-warn' if no_access else 'dot-ok' }}"></span><span class="panel-title nw">Full access</span></div>
+    <span class="nw {{ 'state-warn' if no_access else 'state-ok' }}">{{ 'Not given' if no_access else 'Given' }}</span>
+    <span class="desc">{% if no_access %}Without it avai cannot see every network connection or program start.{% else %}avai can see everything it needs.{% endif %}</span>
   </div>
+  {% set lookups_on = caps.sources_on | length if caps else sources | length %}
+  {% set lookups_missing = caps.sources_missing_key if caps else [] %}
   <div class="card span-4">
     <div class="panel-head" style="justify-content:flex-start"><span class="dot dot-ok"></span><span class="panel-title nw">Online lookups</span></div>
-    <span class="nw state-ok">{{ sources | length }} databases answered</span>
-    <span class="desc">avai asks security databases about addresses and apps.</span>
+    <span class="nw state-ok">{{ lookups_on }} on{% if lookups_missing %} · {{ lookups_missing | length }} more need a free key{% endif %}</span>
+    <span class="desc" title="{{ lookups_missing | map(attribute='name') | join(', ') }}">{% if lookups_missing %}More sources turn on with a free key: {{ lookups_missing | map(attribute='name') | join(', ') }}.{% else %}avai asks security databases about addresses and apps.{% endif %}</span>
   </div>
   <div class="card span-4">
     <div class="panel-head" style="justify-content:flex-start"><span class="dot dot-ok"></span><span class="panel-title nw">Alerts</span></div>
@@ -59,5 +80,5 @@
   <span class="panel-title">What leaves this computer</span>
   <div class="privacy-row"><span class="panel-title nw">The AI service</span><span class="sub">Short facts about what avai found: program names, web addresses, file names. {{ judge.judged }} so far.</span><span class="muted nw">cost so far: ${{ '%.4f' | format(judge.cost) }}</span></div>
   <div class="privacy-row"><span class="panel-title nw">Security databases</span><span class="sub">Web addresses and app versions it looks up. Never your files.</span><span class="muted nw">{{ sources | length }} databases</span></div>
-  <div class="privacy-row"><span class="panel-title nw">avai error reports</span><span class="sub">Error messages when avai itself breaks, so it can be fixed. On unless you turned them off when installing.</span><span class="muted nw">on by default</span></div>
+  <div class="privacy-row"><span class="panel-title nw">avai error reports</span><span class="sub">Error messages when avai itself breaks, so it can be fixed.</span><span class="muted nw">{% if caps %}{{ 'on' if caps.telemetry_on else 'off' }}{% else %}on by default{% endif %}</span></div>
 </div>

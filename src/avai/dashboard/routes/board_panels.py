@@ -20,11 +20,18 @@ from ..queries import (
     PortsPanel,
     ResourceQueries,
     RunQueries,
+    StoredJson,
     YaraPanels,
 )
 from ..queries.board_activity import ActivityStreams, ExecFeed
 from ..queries.board_host import HostTrend, SvgBox
-from ..queries.board_status import AccessCheck, JudgeTotals, LookupSources
+from ..control import ControlReader
+from ..queries.board_status import (
+    AccessCheck,
+    JudgeTotals,
+    LookupSources,
+    SecondPassSwitch,
+)
 from . import DashboardServices
 from .board import (
     AlertsFragment,
@@ -62,8 +69,13 @@ class SetupFragment(BoardView):
     TEMPLATE = "board/_setup.html"
 
     def context(self, session: Session) -> dict[str, Any]:
+        state = ControlReader().read(session) or {}
+        caps = StoredJson().as_dict(state.get("capabilities_json"))
         return {
             "monitor": self.monitor(session),
+            "caps": caps,
+            "control_state": state,
+            "second_pass": SecondPassSwitch(caps, state),
             "judge": JudgeTotals(session).fields(),
             "refused": AccessCheck(session).refused(),
             "sources": LookupSources(session).names(),
