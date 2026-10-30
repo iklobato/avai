@@ -286,10 +286,31 @@ class TestStreamRate:
             auth = ActivityStreams().auth_rate(session, RATE_MINUTES)
             execs = ActivityStreams().exec_rate(session, RATE_MINUTES)
         auth_bars = [(minute["clock"], minute["count"]) for minute in auth["bars"]]
-        exec_bars = [(minute["clock"], minute["count"]) for minute in execs["bars"]]
-        assert auth_bars == [("21:48", 1), ("21:49", LOGINS_LAST_MINUTE)]
+        busy = [(clock, count) for clock, count in auth_bars if count]
+        assert busy == [("21:48", 1), ("21:49", LOGINS_LAST_MINUTE)]
         assert auth["first"] == "2026-06-29 21:30"
-        assert exec_bars == [("16:19", 1)]
+        assert [minute["count"] for minute in execs["bars"]][-1] == 1
+
+    def test_quiet_minutes_get_an_empty_bar_so_gaps_stay_visible(
+        self, board: BoardDb
+    ) -> None:
+        # Regression: only minutes with events got a bar, so 23:07 and 23:26
+        # were drawn side by side as if they were one minute apart.
+        rows = Rows()
+        board.add(
+            [
+                rows.login("2026-10-29 23:07:01.0-0300"),
+                rows.login("2026-10-29 23:26:30.0-0300"),
+            ]
+        )
+        with Session(board.engine()) as session:
+            bars = ActivityStreams().auth_rate(session, RATE_MINUTES)["bars"]
+        assert len(bars) == RATE_MINUTES
+        assert [minute["clock"] for minute in bars if minute["count"]] == [
+            "23:07",
+            "23:26",
+        ]
+        assert bars[0]["clock"] == "23:07"
 
     def test_the_window_crosses_midnight(self) -> None:
         moved = MinuteStamp("2026-06-30 00:05").minus(MINUTES_BACK)
@@ -327,3 +348,14 @@ class TestAccessCheck:
         with Session(board.engine()) as session:
             assert AccessCheck(session).refused() == ["listening_ports"]
         assert b"Not given" in board.client().get("/board/setup").data
+
+
+class TestCollectionPanel:
+    def test_a_round_still_running_is_not_shown_as_zero_ok(
+        self, board: BoardDb
+    ) -> None:
+        # Regression: a round with no finished_at read "0 ok", like a failure.
+        board.runs()
+        page = board.client().get("/board/collection").data
+        assert b"not finished" in page
+        assert b"0 ok" not in page

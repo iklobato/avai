@@ -40,6 +40,10 @@ class MinuteStamp:
         moved = datetime.strptime(self.text, pattern) - timedelta(minutes=minutes)
         return MinuteStamp(moved.strftime(pattern))
 
+    def window(self, minutes: int) -> list[MinuteStamp]:
+        """The ``minutes`` minutes ending at this one, oldest first."""
+        return [self.minus(back) for back in reversed(range(minutes))]
+
     def clock(self) -> str:
         return self.text[CLOCK_START:MINUTE_PREFIX_CHARS]
 
@@ -63,28 +67,29 @@ class StreamRate:
         if not newest:
             return empty
         last = MinuteStamp(newest[:MINUTE_PREFIX_CHARS])
-        return self._bars(last.minus(minutes - 1), last)
+        return self._bars(last.window(minutes))
 
-    def _bars(self, first: MinuteStamp, last: MinuteStamp) -> dict[str, Any]:
+    def _bars(self, window: list[MinuteStamp]) -> dict[str, Any]:
+        counts = self._counts(window[0])
+        # Every minute gets a bar, quiet ones too, so a gap reads as a gap.
+        series = [(stamp, counts.get(stamp.text, 0)) for stamp in window]
+        peak = max(counts.values(), default=0)
+        return {
+            "bars": [BarHeight(peak).of(stamp, events) for stamp, events in series],
+            "peak": peak,
+            "first": window[0].text,
+            "last": window[-1].text,
+            "total": sum(counts.values()),
+        }
+
+    def _counts(self, first: MinuteStamp) -> dict[str, int]:
         minute = func.substr(self._model.event_timestamp, 1, MINUTE_PREFIX_CHARS)
         statement = (
             select(minute.label("minute"), func.count().label("events"))
             .where(self._model.event_timestamp >= first.text)
             .group_by("minute")
-            .order_by("minute")
         )
-        counts = [
-            (MinuteStamp(prefix), events)
-            for prefix, events in self._session.execute(statement)
-        ]
-        peak = max((events for _, events in counts), default=0)
-        return {
-            "bars": [BarHeight(peak).of(stamp, events) for stamp, events in counts],
-            "peak": peak,
-            "first": first.text,
-            "last": last.text,
-            "total": sum(events for _, events in counts),
-        }
+        return {prefix: events for prefix, events in self._session.execute(statement)}
 
 
 @dataclass(frozen=True)
@@ -93,11 +98,8 @@ class BarHeight:
 
     def of(self, stamp: MinuteStamp, count: int) -> dict[str, Any]:
         share = count / self.peak * PERCENT if self.peak else 0
-        return {
-            "clock": stamp.clock(),
-            "count": count,
-            "height": max(MIN_BAR_PERCENT, round(share)),
-        }
+        height = max(MIN_BAR_PERCENT, round(share)) if count else 0
+        return {"clock": stamp.clock(), "count": count, "height": height}
 
 
 class ExecFeed:
@@ -111,9 +113,7 @@ class ExecFeed:
             return []
         statement = (
             select(ProcessExecRow)
-            .order_by(
-                desc(ProcessExecRow.event_timestamp), desc(ProcessExecRow.id)
-            )
+            .order_by(desc(ProcessExecRow.event_timestamp), desc(ProcessExecRow.id))
             .limit(limit)
         )
         rows = self._session.execute(statement).scalars()
