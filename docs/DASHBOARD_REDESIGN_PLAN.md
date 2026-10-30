@@ -1,6 +1,12 @@
 # Dashboard redesign plan: the Panels board
 
-Status: step 1 built on branch `feat/panels-board` (2026-10-30, not merged). Steps 2 to 4 not started.
+Status (2026-10-30, nothing merged yet): step 1 on branch `feat/panels-board` (PR https://github.com/iklobato/avai/pull/44); step 2 on branch `feat/panels-board-phase2`, stacked on it. Steps 3 and 4 not started.
+
+How step 2 was built:
+- Migration `0013_board_phase2` adds `judgements.remediation_plain`, `judgements.verify_outcome`, `control_state.verify_enabled`, `control_state.investigate_enabled`, `control_state.capabilities_json`.
+- `remediation_plain` is optional in the judge's reply (decision 2026-10-30): a model that skips it still answers, and Inspect falls back to `remediation`.
+- The Double-check switch only turns off what the monitor built at start (decision 2026-10-30); if it started without the second passes, the card says to restart.
+- Telemetry stays an env var read at start: the Setup panel shows it, it has no switch yet.
 
 How step 1 differs from the map below:
 - Board fragments live under `/board/*` (`routes/board.py`, `routes/board_panels.py`), not in `/fragments/*`.

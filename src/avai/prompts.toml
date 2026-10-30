@@ -33,6 +33,11 @@ For each input entry, return a judgment with fields:
                  if relevant include a quick verification step. Avoid
                  generic advice ("review your settings"); be specific.
                  <=400 chars.
+  remediation_plain — optional. The same fix as ONE short sentence a
+                 person who does not code can follow: everyday words, no
+                 commands, no paths, no jargon (e.g. "Remove the item that
+                 starts this program when you log in."). "" for benign.
+                 <=160 chars.
 
 Verdicts:
   benign      = expected on a developer machine.
@@ -262,6 +267,8 @@ Return a judgment with fields:
   confidence  — float in [0, 1]
   reasoning   — one sentence, <=200 chars, citing the evidence that decided it
   remediation — concrete steps for non-benign; empty string "" for benign.
+  remediation_plain — optional; the same fix as one short sentence in
+                everyday words, no commands or paths; "" for benign.
 Apply the same evidence rules as the first pass: high-trust malicious intel
 forces malicious; CIRCL/NSRL/RIOT good is a strong benign signal; novel +
 intermittent + adverse behaviour leans malicious.

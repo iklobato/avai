@@ -14,9 +14,10 @@
 </div>
 <span class="muted" style="margin-top:4px;font-size:11px;text-transform:uppercase;letter-spacing:.06em">What to do</span>
 {% if is_finding %}
+  {% if item.plain_fix %}<span style="line-height:1.45">{{ item.plain_fix }}</span>{% endif %}
   {% if item.fix %}
     <details>
-      <summary>Show the fix</summary>
+      <summary>{{ 'Show the command' if item.plain_fix else 'Show the fix' }}</summary>
       <div style="display:flex;gap:6px;margin-top:4px">
         <code class="cmd" style="flex:1;min-width:0">{{ item.fix }}</code>
         <button type="button" class="btn btn-small" data-copy="{{ item.fix }}">Copy</button>

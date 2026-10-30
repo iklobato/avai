@@ -36,7 +36,18 @@ class TestJudgmentReply:
             "confidence": self.CONFIDENCE,
             "reasoning": "  plist runs curl|bash  ",
             "remediation": "unload it",
+            # Optional field the model left out: a verdict still comes back.
+            "remediation_plain": "",
         }
+
+    def test_the_plain_fix_is_kept_in_one_line(self) -> None:
+        reply = JudgmentReply.model_validate(
+            {
+                "verdict": "malicious",
+                "remediation_plain": "  Remove the item\nthat starts it.  ",
+            }
+        )
+        assert reply.remediation_plain == "Remove the item that starts it."
 
     def test_missing_fields_get_the_safe_defaults(self) -> None:
         assert JudgmentReply.model_validate({}).fields() == {
@@ -45,6 +56,7 @@ class TestJudgmentReply:
             "confidence": 0.0,
             "reasoning": "",
             "remediation": "",
+            "remediation_plain": "",
         }
 
     @pytest.mark.parametrize(

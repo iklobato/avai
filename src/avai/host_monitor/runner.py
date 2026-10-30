@@ -7,7 +7,6 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-
 from avai.enrichers import EnrichmentChain, IndicatorExtraction
 
 from .collectors import SnapshotCollector, StreamingCollector
@@ -21,7 +20,6 @@ from .control_loop import (
     ProgressHeartbeat,
 )
 from .coverage import YaraCoverageAssessor
-from .failures import HOST_FAILURES
 from .cycle_steps import (
     CoverageStep,
     CycleStep,
@@ -29,7 +27,7 @@ from .cycle_steps import (
     RiskScoreStep,
     YaraStatusStep,
 )
-from .step_io import StepIO
+from .failures import HOST_FAILURES
 from .finding_stages import (
     BaselineStage,
     BatchOrigin,
@@ -51,6 +49,7 @@ from .judge import Judge, NullJudge
 from .narrator import IncidentNarrator
 from .runtime import Clock, Digest, HostIdentity
 from .sink import Sink
+from .step_io import StepIO
 from .streaming import StreamChannel, StreamingSupervisor, SupervisionPolicy
 from .verifier import MaliciousVerdictVerifier
 
@@ -398,6 +397,8 @@ class Runner:
         defaults = ControlDefaults(
             judge=not isinstance(config.judge, NullJudge),
             enrich=config.enrichment_chain is not None,
+            verify=config.verifier is not None,
+            investigate=config.investigator is not None,
         )
         settings = ControlSettings(sink, defaults)
         heartbeat = ProgressHeartbeat(sink, config.logger, config.clock)

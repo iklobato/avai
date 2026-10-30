@@ -129,6 +129,8 @@ class SettingsAction(GuardedAction):
             interval=self._number("interval"),
             judge=self._flag("judge"),
             enrich=self._flag("enrich"),
+            verify=self._flag("verify"),
+            investigate=self._flag("investigate"),
         )
         self.store().set_settings(change)
         return ControlPanel(self._services).render()

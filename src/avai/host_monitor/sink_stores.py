@@ -509,6 +509,8 @@ class JudgmentRow:
             "confidence": judgment.confidence,
             "reasoning": judgment.reasoning,
             "remediation": judgment.remediation,
+            "remediation_plain": judgment.remediation_plain or None,
+            "verify_outcome": judgment.verify_outcome,
             "model": judgment.model,
             "created_at": judgment.created_at,
             "novel": self._novel(signals.get("baseline") or {}),

@@ -30,6 +30,10 @@ class ReplyValues:
         """Stripped text cut to ``limit``; missing or empty becomes ""."""
         return str(value or "").strip()[:limit]
 
+    def one_line(self, value: object, limit: int) -> str:
+        """Text with every run of whitespace (newlines too) as one space."""
+        return " ".join(str(value or "").split())[:limit]
+
     def raw_text(self, value: object, limit: int) -> str:
         """Text cut to ``limit`` but not stripped."""
         return str(value or "")[:limit]
@@ -88,12 +92,15 @@ class JudgmentReply(BaseModel):
     model_config = ConfigDict(frozen=True)
     REASONING_CHARS: ClassVar[int] = 500
     REMEDIATION_CHARS: ClassVar[int] = 2000
+    PLAIN_CHARS: ClassVar[int] = 300
 
     verdict: Verdict = Verdict.UNKNOWN
     category: ThreatCategory = ThreatCategory.NONE
     confidence: float = 0.0
     reasoning: str = ""
     remediation: str = ""
+    # Optional in the reply: a model that leaves it out still gives a verdict.
+    remediation_plain: str = ""
 
     @field_validator("verdict", mode="before")
     @classmethod
@@ -121,6 +128,11 @@ class JudgmentReply(BaseModel):
     def _remediation(cls, value: object) -> str:
         return ReplyValues().raw_text(value, cls.REMEDIATION_CHARS)
 
+    @field_validator("remediation_plain", mode="before")
+    @classmethod
+    def _remediation_plain(cls, value: object) -> str:
+        return ReplyValues().one_line(value, cls.PLAIN_CHARS)
+
     def fields(self) -> dict[str, Any]:
         return {
             "verdict": self.verdict,
@@ -128,6 +140,7 @@ class JudgmentReply(BaseModel):
             "confidence": self.confidence,
             "reasoning": self.reasoning,
             "remediation": self.remediation,
+            "remediation_plain": self.remediation_plain,
         }
 
 

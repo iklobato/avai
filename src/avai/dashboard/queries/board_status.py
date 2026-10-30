@@ -130,6 +130,26 @@ class MonitorState:
         return round(seconds / SECONDS_PER_MINUTE) if seconds else None
 
 
+@dataclass(frozen=True)
+class SecondPassSwitch:
+    """The Double-check switch: the skeptic and the investigator. ``caps`` is
+    the monitor's capabilities snapshot ({} from a monitor that predates it);
+    ``state`` is the control row."""
+
+    caps: dict[str, Any]
+    state: dict[str, Any]
+
+    def known(self) -> bool:
+        return bool(self.caps)
+
+    def built(self) -> bool:
+        return bool(self.caps.get("verify") or self.caps.get("investigate"))
+
+    def on(self) -> bool:
+        # An unset column means "on": the monitor runs what it built.
+        return self.built() and self.state.get("verify_enabled") != 0
+
+
 class AccessCheck:
     """Collectors the OS refused in the latest run: the sign the monitor
     runs without full access."""
