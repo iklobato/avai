@@ -1,0 +1,45 @@
+<div class="panel span-12">
+  <span class="panel-title">Rounds of checks: ok vs failed</span>
+  {% for run in runs %}
+    {% set total = (run.collectors_ok or 0) + (run.collectors_failed or 0) %}
+    <div class="mono" style="display:grid;grid-template-columns:84px minmax(0,1fr) 112px;gap:10px;align-items:center;font-size:11px">
+      <span class="muted nw" title="{{ run.started_at | datetime_fmt }}">{{ run.started_at[5:16] | replace("T", " ") }}</span>
+      <div class="bar-track" style="display:flex;height:14px">
+        {% if total %}
+          <div style="width:{{ (run.collectors_ok / total * 100) | round | int }}%;background:#49c287"></div>
+          <div style="width:{{ (run.collectors_failed / total * 100) | round | int }}%;background:#f05d5e"></div>
+        {% endif %}
+      </div>
+      {% if run.finished_at %}
+        <span class="nw" style="text-align:right">{{ run.collectors_ok }} ok{% if run.collectors_failed %} · {{ run.collectors_failed }} failed{% endif %}</span>
+      {% else %}
+        <span class="muted nw" style="text-align:right" title="still running, or stopped before it ended">not finished</span>
+      {% endif %}
+    </div>
+  {% else %}
+    <p class="empty">No rounds yet.</p>
+  {% endfor %}
+</div>
+<div class="panel span-7">
+  <span class="panel-title">Items seen in the last round</span>
+  {% set peak = (row_counts | map(attribute='rows') | max) if row_counts else 0 %}
+  {% for entry in row_counts %}
+    <div class="mono" style="display:grid;grid-template-columns:130px minmax(0,1fr) 44px;gap:8px;align-items:center;font-size:11px">
+      <span class="nw">{{ entry.name }}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:{{ (entry.rows / peak * 100) | round | int if peak else 0 }}%;background:#5b9cf6"></div></div>
+      <span style="text-align:right">{{ entry.rows }}</span>
+    </div>
+  {% else %}
+    <p class="empty">Nothing collected yet.</p>
+  {% endfor %}
+</div>
+<div class="panel span-5">
+  <span class="panel-title">File scan rules</span>
+  {% if yara %}
+    <div style="display:flex;flex-direction:column"><span class="value" style="font-size:28px">{{ '{:,}'.format(yara.rules_loaded or 0) }}</span><span class="muted nw">rules from {{ yara.files_loaded }} files</span></div>
+    {% if yara.files_skipped %}<div style="display:flex;flex-direction:column"><span class="value" style="font-size:22px;color:var(--orange)">{{ yara.files_skipped }}</span><span class="muted nw">files skipped</span></div>{% endif %}
+  {% else %}
+    <p class="empty">The file scanner has not run yet.</p>
+  {% endif %}
+  {% if refused %}<div style="display:flex;flex-direction:column"><span class="value" style="font-size:22px;color:var(--red)">{{ refused | length }}</span><span class="muted nw" title="{{ refused | join(', ') }}">checks blocked: no full access</span></div>{% endif %}
+</div>

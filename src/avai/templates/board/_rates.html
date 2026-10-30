@@ -1,0 +1,13 @@
+{% for title, rate, color in [('Program starts per minute', exec_rate, '#5b9cf6'), ('Logins and permission checks per minute', auth_rate, '#a68af0')] %}
+<div class="panel span-12" style="height:190px">
+  <div class="panel-head"><span class="panel-title">{{ title }}</span>{% if rate.peak %}<span class="mono muted nw">peak {{ '{:,}'.format(rate.peak) }}/min</span>{% endif %}</div>
+  {% if rate.bars %}
+    <div class="bars">
+      {% for bar in rate.bars %}<div title="{{ bar.clock }}: {{ bar.count }}" style="height:{{ bar.height }}%;background:{{ color }}"></div>{% endfor %}
+    </div>
+    <div class="mono muted" style="display:flex;justify-content:space-between;font-size:10px"><span>{{ rate.first }}</span><span>{{ rate.last }}</span></div>
+  {% else %}
+    <span class="empty">Nothing recorded yet.</span>
+  {% endif %}
+</div>
+{% endfor %}

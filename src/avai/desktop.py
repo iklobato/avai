@@ -24,6 +24,7 @@ import waitress
 from flask import Flask
 
 from avai.dashboard import DashboardApp, DashboardConfig, DashboardSchema
+from avai.dashboard.serve import DashboardServer
 from avai.host_monitor.constants import DEFAULT_DB_PATH, LOGGER_NAME
 from avai.host_monitor.main import MonitorArgs, MonitorWiring
 from avai.host_monitor.runner import Runner
@@ -74,7 +75,13 @@ class EmbeddedDashboard:
         thread = threading.Thread(
             target=waitress.serve,
             args=(self._app(),),
-            kwargs={"host": LOOPBACK_HOST, "port": port},
+            # Same thread count as `avai dashboard`: the page fires many panel
+            # requests at once, and waitress's default 4 queues them.
+            kwargs={
+                "host": LOOPBACK_HOST,
+                "port": port,
+                "threads": DashboardServer.THREADS,
+            },
             daemon=True,
             name="avai-dashboard",
         )

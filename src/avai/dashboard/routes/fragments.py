@@ -11,26 +11,25 @@ from avai.host_monitor.enums import Verdict
 
 from ..control import ControlReader, MonitorLiveness
 from ..queries import (
-    SortOrder,
-    LogDimension,
-    FindingSortKey,
-    AuthSort,
     DEFAULT_PER_PAGE,
     PER_PAGE_OPTIONS,
     AuthEventsPanel,
     AuthQuery,
+    AuthSort,
     DiskOrder,
     DnsPanel,
     DnsQuery,
     FindingFilter,
-    FindingStatus,
     FindingOptions,
+    FindingSortKey,
     FindingsPanel,
     FindingsQuery,
+    FindingStatus,
     FlowQuery,
     FlowsPanel,
     IntegrityPosture,
     LogAggregateQuery,
+    LogDimension,
     LogFilter,
     LogQuery,
     LogsPanel,
@@ -47,6 +46,7 @@ from ..queries import (
     RowFilter,
     RunMark,
     RunQueries,
+    SortOrder,
     StoredJson,
     VerdictQueries,
     VulnerabilitiesPanel,
@@ -529,7 +529,8 @@ class FragmentRoutes:
     """The ``fragments`` blueprint: (path, endpoint, view) per panel."""
 
     ROUTES = (
-        ("/", "index", IndexView),
+        # The panels board owns "/"; the previous page stays reachable here.
+        ("/classic", "index", IndexView),
         ("/fragments/triage", "fragment_triage", TriageFragment),
         ("/fragments/header-meta", "fragment_header_meta", HeaderMetaFragment),
         ("/fragments/overview", "fragment_overview", OverviewFragment),

@@ -1,0 +1,45 @@
+<div class="panel span-9">
+  <span class="panel-title">Where this computer sends data</span>
+  {% set peak = (flows.rows | map(attribute='bytes') | max) if flows and flows.rows else 0 %}
+  {% for row in (flows.rows if flows else []) %}
+    <div style="display:flex;flex-direction:column;gap:3px">
+      <div class="mono" style="display:flex;justify-content:space-between;gap:8px;font-size:11px"><span class="nw">{{ row.hostname or row.dst_ip }}</span><span>{{ row.bytes | human_bytes }}</span></div>
+      <div class="bar-track"><div class="bar-fill" style="width:{{ (row.bytes / peak * 100) | round | int if peak else 0 }}%;background:{{ '#f05d5e' if row.verdict == 'malicious' else '#49c287' }}"></div></div>
+      <span class="muted nw">{{ row.process }}{% if row.geo and row.geo.country %} · {{ row.geo.country }}{% endif %}</span>
+    </div>
+  {% else %}
+    <p class="empty">No traffic seen in the last check.</p>
+  {% endfor %}
+</div>
+<div class="panel panel-flush span-7">
+  <div class="panel-head"><span class="panel-title">Web addresses looked up</span>{% if dns %}<span class="muted nw">{{ dns.summary.domains }} names</span>{% endif %}</div>
+  {% if dns and dns.rows %}
+    <table class="tbl mono" style="font-size:11px">
+      <thead><tr><th scope="col">name</th><th scope="col">type</th><th scope="col" style="text-align:right">times</th></tr></thead>
+      <tbody>
+      {% for row in dns.rows %}
+        <tr style="color: {{ '#f05d5e' if row.verdict == 'malicious' else ('#f2a33c' if row.verdict == 'suspicious' else 'inherit') }}">
+          <td class="nw" style="max-width:220px">{{ row.qname }}</td><td>{{ row.qtype }}</td><td style="text-align:right">{{ row.count }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">No lookups seen in the last check.</p>
+  {% endif %}
+</div>
+<div class="panel span-8">
+  <span class="panel-title">Mac security settings</span>
+  {% if sysint and sysint.rows %}
+    <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px">
+      {% for label, enabled, active in sysint.rows %}
+        {# Remote-access services are good when OFF; protections are good when ON. #}
+        {% set remote = label.startswith('SSH') or label.startswith('Screen') or label.startswith('Remote') %}
+        {% set good = (not enabled) if remote else enabled %}
+        <div class="check {{ 'check-good' if good else 'check-bad' }}"><span class="nw">{{ label }}</span><span class="mono" style="font-weight:600">{{ 'ON' if enabled else 'OFF' }}</span></div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty">Not checked yet.</p>
+  {% endif %}
+</div>

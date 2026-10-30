@@ -1,0 +1,43 @@
+<div class="panel-head">
+  <span class="panel-title">Findings</span>
+  <span class="muted nw">click a finding to see why · your answer teaches avai</span>
+</div>
+{% if found['items'] %}
+<div class="scroll-x">
+  <table class="tbl" style="min-width:640px">
+    <thead><tr><th scope="col">verdict</th><th scope="col">finding</th><th scope="col" style="text-align:right">sure</th><th scope="col">your answer</th></tr></thead>
+    <tbody>
+    {% for item in found['items'] %}
+      {% set answer = answers.get((item.collector, item.content_hash)) %}
+      <tr>
+        <td><span class="pill pill-{{ item.verdict }}">{{ item.verdict }}</span></td>
+        <td>
+          <button type="button" class="finding-btn" data-pick
+                  hx-get="/board/inspect/{{ item.collector | urlencode }}/{{ item.content_hash | urlencode }}"
+                  hx-target="#inspect" hx-swap="innerHTML">
+            <span style="white-space:nowrap">{{ item.reasoning or item.artifact }}</span>
+            <span class="mono muted" style="font-size:11px">{{ labels.of(item.collector) }}{% if item.novel %} · new{% endif %}</span>
+          </button>
+        </td>
+        <td class="mono" style="text-align:right">{{ '%.2f' | format(item.confidence) }}</td>
+        <td style="white-space:nowrap">
+          {% if answer %}
+            {% include "board/_answer.html" %}
+          {% elif control_enabled or control_open %}
+            <div style="display:flex;gap:4px">
+              <button type="button" class="btn btn-small btn-danger" hx-post="/board/feedback/{{ item.collector | urlencode }}/{{ item.content_hash | urlencode }}/confirmed" hx-target="closest td" hx-swap="innerHTML">Real problem</button>
+              <button type="button" class="btn btn-small" hx-post="/board/feedback/{{ item.collector | urlencode }}/{{ item.content_hash | urlencode }}/false_positive" hx-target="closest td" hx-swap="innerHTML">This is normal</button>
+            </div>
+          {% else %}
+            <span class="muted">answers are off on this dashboard</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if found.total > found['items'] | length %}<div class="list-row muted">{{ found.total - found['items'] | length }} more on the <a href="/classic">full findings list</a></div>{% endif %}
+{% else %}
+  <p class="empty">Nothing to look at. avai found nothing dangerous on this computer right now.</p>
+{% endif %}
