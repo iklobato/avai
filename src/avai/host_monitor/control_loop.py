@@ -24,6 +24,11 @@ class ControlDefaults:
 
     judge: bool
     enrich: bool
+    # Whether the skeptic / investigator stages were built at start. The
+    # control row can only switch off what exists; a stage that was not
+    # built never runs, whatever this says.
+    verify: bool = True
+    investigate: bool = True
 
 
 @dataclass(frozen=True)
@@ -47,6 +52,14 @@ class CycleSettings:
     def enrich_on(self) -> bool:
         value = self.row.get("enrich_enabled")
         return self.defaults.enrich if value is None else bool(value)
+
+    def verify_on(self) -> bool:
+        value = self.row.get("verify_enabled")
+        return self.defaults.verify and (value is None or bool(value))
+
+    def investigate_on(self) -> bool:
+        value = self.row.get("investigate_enabled")
+        return self.defaults.investigate and (value is None or bool(value))
 
 
 class ControlSettings:

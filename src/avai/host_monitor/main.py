@@ -23,6 +23,12 @@ from avai.enrichers import (
 )
 from avai.enrichers.http import HttpClient
 
+from .capabilities import (
+    CapabilitiesProbe,
+    MonitorCapabilities,
+    SourceCoverage,
+    StageFlags,
+)
 from .collectors import SnapshotCollector, StreamingCollector
 from .constants import (
     DEFAULT_BASELINE_MIN_RUNS,
@@ -396,7 +402,19 @@ class MonitorWiring:
         # Seed the control row with this run's settings (no-op if it exists).
         seed = ControlSeed(args.interval, not args.no_judge, not args.no_enrich)
         sink.ensure_control_row(seed)
+        sink.write_capabilities(self._capabilities(llm, runner).to_json())
         return runner
+
+    def _capabilities(self, llm: LlmStages, runner: Runner) -> MonitorCapabilities:
+        is_null = isinstance(llm.judge, NullJudge)
+        stages = StageFlags(
+            judge_model=None if is_null else self._args.judge_model,
+            verify=llm.verifier is not None,
+            investigate=llm.investigator is not None,
+        )
+        catalog = EnricherCatalog.of_sources(logging.getLogger("avai.enrichers"))
+        probe = CapabilitiesProbe(SourceCoverage(catalog), os.environ)
+        return probe.probe(stages, runner.config.enrichment_chain)
 
     def _config(self, sink: Sink, prompts: Prompts, llm: LlmStages) -> RunnerConfig:
         args = self._args

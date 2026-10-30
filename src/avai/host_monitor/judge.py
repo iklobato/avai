@@ -13,15 +13,15 @@ from .constants import (
     DEFAULT_JUDGE_MAX_PER_COLLECTOR,
     DEFAULT_JUDGE_MODEL,
 )
-from .enums import ThreatCategory, Verdict
-from .llm_replies import JudgmentReply
+from .enums import ThreatCategory, Verdict, VerifyOutcome
 from .llm import (
     CompletionError,
     CompletionRequest,
     LlmSession,
-    TokenUsage,
     StructuredCall,
+    TokenUsage,
 )
+from .llm_replies import JudgmentReply
 from .prompts import Prompts
 from .runtime import Clock
 
@@ -64,6 +64,10 @@ class Judgment:
     # Estimated USD cost attributed to this entry (its share of the batch's
     # LLM call). 0.0 when usage/cost is unavailable (e.g. NullJudge, mocks).
     cost_usd: float = 0.0
+    # The fix in plain words; "" when the model left the optional field out.
+    remediation_plain: str = ""
+    # Set by the verify stage on malicious verdicts; None when no check ran.
+    verify_outcome: VerifyOutcome | None = None
 
 
 class Judge(ABC):
@@ -175,6 +179,7 @@ class LlmJudge(Judge):
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "reasoning": {"type": "string"},
                 "remediation": {"type": "string"},
+                "remediation_plain": {"type": "string"},
             },
             "required": [*cls.REQUIRED, "remediation"],
         }

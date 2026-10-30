@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.exc import OperationalError
+from alembic import command
 
 from avai.db_migrate import AlembicMigrator
 from avai.host_monitor.models import Base
@@ -57,7 +58,7 @@ def test_sink_setup_applies_migrations(tmp_path: Path) -> None:
     Sink.create(create_engine(f"sqlite:///{db}")).setup()
     assert set(_IDX) <= _indexes(db)
     assert "control_state" in _tables(db)
-    assert _version(db) == "0012_log_entries"
+    assert _version(db) == "0013_board_phase2"
 
 
 def test_sink_setup_fails_loudly_when_migration_cannot_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,7 +96,7 @@ def test_upgrade_stamps_preexisting_create_all_db(tmp_path: Path) -> None:
 
     AlembicMigrator(f"sqlite:///{db}").upgrade_to_head()  # stamp, then indexes
     assert set(_IDX) <= _indexes(db)
-    assert _version(db) == "0012_log_entries"
+    assert _version(db) == "0013_board_phase2"
 
 
 def test_downgrade_then_upgrade_roundtrip(tmp_path: Path) -> None:
@@ -128,7 +129,7 @@ def test_control_state_migration_roundtrip(tmp_path: Path) -> None:
 
     command.upgrade(AlembicMigrator(f"sqlite:///{db}").config(), "head")
     assert "control_state" in _tables(db)
-    assert _version(db) == "0012_log_entries"
+    assert _version(db) == "0013_board_phase2"
 
     command.downgrade(AlembicMigrator(f"sqlite:///{db}").config(), "0002_perf_indexes")
     assert "control_state" not in _tables(db)
@@ -142,3 +143,32 @@ def test_config_keeps_a_percent_encoded_url_verbatim() -> None:
     alembic_config = AlembicMigrator(url).config()
 
     assert alembic_config.get_main_option("sqlalchemy.url") == url
+
+
+class TestBoardPhase2Columns:
+    """0013 adds the board's columns to a DB written by an older monitor."""
+
+    NEW_COLUMNS = {
+        "judgements": {"remediation_plain", "verify_outcome"},
+        "control_state": {"verify_enabled", "investigate_enabled", "capabilities_json"},
+    }
+
+    def columns(self, db: str, table: str) -> set[str]:
+        con = sqlite3.connect(db)
+        try:
+            return {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+        finally:
+            con.close()
+
+    def test_an_old_db_gains_the_columns_and_loses_them_on_downgrade(
+        self, tmp_path: Path
+    ) -> None:
+        db = str(tmp_path / "old.db")
+        Sink.create(create_engine(f"sqlite:///{db}")).setup()
+        config = AlembicMigrator(f"sqlite:///{db}").config()
+        command.downgrade(config, "0012_log_entries")
+        for table, names in self.NEW_COLUMNS.items():
+            assert not names & self.columns(db, table)
+        command.upgrade(config, "head")
+        for table, names in self.NEW_COLUMNS.items():
+            assert names <= self.columns(db, table)

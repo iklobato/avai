@@ -116,6 +116,14 @@ class BehaviorKind(StrEnum):
     EXEC = "exec"
 
 
+class VerifyOutcome(StrEnum):
+    """What the skeptic second pass decided about a malicious verdict."""
+
+    AGREED = "agreed"
+    REFUTED = "refuted"
+    FAILED = "failed"
+
+
 class FeedbackLabel(StrEnum):
     """Operator correction on a finding, fed back into judging."""
 

@@ -16,7 +16,7 @@ from avai.enrichers import EnrichmentChain, Indicator, IndicatorExtraction
 
 from .collectors import Collector
 from .control_loop import CycleSettings, ProgressHeartbeat
-from .enums import BehaviorKind, FeedbackLabel, Verdict
+from .enums import BehaviorKind, FeedbackLabel, Verdict, VerifyOutcome
 from .failures import HOST_FAILURES
 from .investigator import UnknownFindingInvestigator
 from .judge import Judge, Judgment
@@ -577,6 +577,8 @@ class VerifyStage:
         self._logger = logger
 
     def apply(self, batch: FindingBatch) -> FindingBatch:
+        if not batch.origin.settings.verify_on():
+            return batch
         malicious = [
             index
             for index, judgment in enumerate(batch.judgments)
@@ -595,9 +597,13 @@ class VerifyStage:
     ) -> Judgment:
         entry = entries.get(judgment.content_hash, {})
         verdict = self._verifier.verify(self._finding(collector, judgment, entry))
-        if not (verdict and verdict["refuted"]):
-            return judgment
-        reason = verdict["reasoning"]
+        if verdict is None:
+            return replace(judgment, verify_outcome=VerifyOutcome.FAILED)
+        if not verdict["refuted"]:
+            return replace(judgment, verify_outcome=VerifyOutcome.AGREED)
+        return self._downgraded(collector, judgment, verdict["reasoning"])
+
+    def _downgraded(self, collector: str, judgment: Judgment, reason: str) -> Judgment:
         self._logger.info(
             "verifier downgraded collector=%s reason=%s",
             collector,
@@ -605,7 +611,10 @@ class VerifyStage:
         )
         note = f"[verifier downgraded malicious→suspicious] {reason} · original: {judgment.reasoning}"
         return replace(
-            judgment, verdict=Verdict.SUSPICIOUS, reasoning=note[:REASONING_CHARS]
+            judgment,
+            verdict=Verdict.SUSPICIOUS,
+            reasoning=note[:REASONING_CHARS],
+            verify_outcome=VerifyOutcome.REFUTED,
         )
 
     def _finding(
@@ -683,6 +692,8 @@ class InvestigateStage:
         self._behavior = behavior
 
     def apply(self, batch: FindingBatch) -> FindingBatch:
+        if not batch.origin.settings.investigate_on():
+            return batch
         unknown = [
             index
             for index, judgment in enumerate(batch.judgments)
@@ -717,4 +728,5 @@ class InvestigateStage:
             confidence=fresh["confidence"],
             reasoning=f"[investigated] {fresh['reasoning']}"[:REASONING_CHARS],
             remediation=fresh["remediation"],
+            remediation_plain=fresh.get("remediation_plain", ""),
         )

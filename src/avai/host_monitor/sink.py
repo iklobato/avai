@@ -220,6 +220,10 @@ class Sink:
     def write_heartbeat(self, *, pid: int, status: str, current_interval: int) -> None:
         self._stores.control.write_heartbeat(pid, status, current_interval)
 
+    def write_capabilities(self, capabilities_json: str) -> None:
+        """What this monitor runs with (see capabilities.MonitorCapabilities)."""
+        self._stores.control.set_values({"capabilities_json": capabilities_json})
+
     def touch_heartbeat(self) -> None:
         """Refresh only ``last_seen_at``, so a long scan keeps proving
         liveness without claiming a status change."""

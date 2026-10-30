@@ -1892,6 +1892,51 @@ class TestVerifyStage:
         assert _stored_verdict(sink) == "malicious"
 
 
+class _SilentVerifier:
+    """A skeptic whose LLM call failed: it returns no answer."""
+
+    def verify(self, finding: dict) -> None:
+        return None
+
+
+class TestVerifyOutcome:
+    """The skeptic's answer is stored on the finding, so the board can say
+    'agreed' instead of guessing."""
+
+    def stage(self, verifier: object) -> VerifyStage:
+        return VerifyStage(verifier, logging.getLogger("test"))
+
+    def test_each_answer_is_recorded(self) -> None:
+        from avai.host_monitor.enums import Verdict, VerifyOutcome
+
+        entries = [{"content_hash": "h1"}]
+        judgment = [_mk_judgment("h1", Verdict.MALICIOUS)]
+        agreed = _revise(self.stage(_FakeVerifier(refuted=False)), judgment, entries)
+        refuted = _revise(self.stage(_FakeVerifier(refuted=True)), judgment, entries)
+        failed = _revise(self.stage(_SilentVerifier()), judgment, entries)
+        assert agreed[0].verify_outcome == VerifyOutcome.AGREED
+        assert refuted[0].verify_outcome == VerifyOutcome.REFUTED
+        assert failed[0].verify_outcome == VerifyOutcome.FAILED
+
+    def test_the_switch_turns_the_skeptic_off(self) -> None:
+        from avai.host_monitor.enums import Verdict
+
+        verifier = _FakeVerifier(refuted=True)
+        defaults = ControlDefaults(judge=True, enrich=True)
+        off = CycleSettings({"verify_enabled": 0}, defaults)
+        batch = _batch(_ProcStub(), [{"content_hash": "h1"}])
+        batch = replace(batch, judgments=[_mk_judgment("h1", Verdict.MALICIOUS)])
+        batch = replace(batch, origin=replace(batch.origin, settings=off))
+        out = self.stage(verifier).apply(batch).judgments
+        assert out[0].verdict == Verdict.MALICIOUS
+        assert verifier.calls == []
+
+    def test_a_stage_not_built_at_start_stays_off(self) -> None:
+        built_without = ControlDefaults(judge=True, enrich=True, verify=False)
+        switched_on = CycleSettings({"verify_enabled": 1}, built_without)
+        assert switched_on.verify_on() is False
+
+
 class TestMaliciousVerdictVerifier:
     def _verifier(self, payload):
         from avai.host_monitor.constants import DEFAULT_PROMPTS_PATH

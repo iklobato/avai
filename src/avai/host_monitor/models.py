@@ -43,6 +43,12 @@ class Judgement(Base):
     confidence: Mapped[Optional[float]]
     reasoning: Mapped[Optional[str]]
     remediation: Mapped[Optional[str]]
+    # The same fix as one plain sentence for people who do not code. Optional
+    # in the judge's reply, so NULL when the model left it out.
+    remediation_plain: Mapped[Optional[str]]
+    # What the skeptic second pass said about a malicious verdict
+    # (VerifyOutcome). NULL when no check ran.
+    verify_outcome: Mapped[Optional[str]]
     model: Mapped[str]
     # Indexed: overview judged/cost sums, /api/notifications/new and the
     # verdict chart all filter judgements by created_at.
@@ -192,7 +198,15 @@ class ControlState(Base):
     interval_override: Mapped[Optional[int]]  # None => use the CLI --interval
     judge_enabled: Mapped[Optional[int]]  # None => CLI default
     enrich_enabled: Mapped[Optional[int]]  # None => CLI default
+    # The skeptic and investigator second passes. None => on when the monitor
+    # built the stage; they can only switch off what was built at start.
+    verify_enabled: Mapped[Optional[int]]
+    investigate_enabled: Mapped[Optional[int]]
     disabled_collectors: Mapped[Optional[str]]  # CSV of collector .name values
+    # What the monitor runs with, written at every start (MonitorCapabilities
+    # as JSON): models, which second passes and sources exist, root, telemetry.
+    # Names of missing API keys only, never values.
+    capabilities_json: Mapped[Optional[str]]
 
     # One-shot triggers (nonce/applied pairs).
     scan_now_nonce: Mapped[int] = mapped_column(default=0)
