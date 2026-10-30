@@ -4,8 +4,9 @@ Runner."""
 
 from __future__ import annotations
 
-import ast
 import logging
+
+import ast
 import os
 import threading
 import time
@@ -13,9 +14,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-import pytest
-
 import avai.desktop as desktop
+import pytest
 
 
 def _imports(src: str) -> set[str]:
@@ -39,6 +39,7 @@ def test_dashboard_opens_control_and_app_mode_without_touching_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from unittest.mock import patch
+
 
     monkeypatch.delenv("AVAI_CONTROL_OPEN", raising=False)
     monkeypatch.delenv("AVAI_APP_MODE", raising=False)
